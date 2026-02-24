@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PLGO Options — ETH Pricer</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>⟠ PLGO Options — ETH Pricer</h1>
+  <div id="spot-banner">ETH Spot: <span id="eth-spot">—</span></div>
+</header>
+
+<main>
+  <!-- ============================================================ -->
+  <!-- LEFT PANEL: Controls                                         -->
+  <!-- ============================================================ -->
+  <aside id="controls">
+
+    <!-- Strategy Templates -->
+    <section class="card">
+      <h2>Strategy Templates</h2>
+      <div class="btn-grid">
+        <button class="btn-template" data-strategy="long_call">Long Call</button>
+        <button class="btn-template" data-strategy="long_put">Long Put</button>
+        <button class="btn-template" data-strategy="bull_call_spread">Bull Call Spread</button>
+        <button class="btn-template" data-strategy="bear_put_spread">Bear Put Spread</button>
+        <button class="btn-template" data-strategy="straddle">Straddle</button>
+        <button class="btn-template" data-strategy="strangle">Strangle</button>
+        <button class="btn-template" data-strategy="iron_condor">Iron Condor</button>
+      </div>
+    </section>
+
+    <!-- Expiry picker -->
+    <section class="card">
+      <h2>Expiry</h2>
+      <select id="expiry-select">
+        <option value="">Loading…</option>
+      </select>
+      <button id="btn-load-chain" class="btn-primary" disabled>Load Option Chain</button>
+    </section>
+
+    <!-- Legs table -->
+    <section class="card">
+      <h2>Strategy Legs</h2>
+      <table id="legs-table">
+        <colgroup>
+          <col class="col-side">
+          <col class="col-type">
+          <col class="col-strike">
+          <col class="col-premium">
+          <col class="col-qty">
+          <col class="col-remove">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Side</th>
+            <th>Type</th>
+            <th>Strike</th>
+            <th>Premium</th>
+            <th>Qty</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="legs-body">
+          <!-- rows added dynamically -->
+        </tbody>
+      </table>
+      <button id="btn-add-leg" class="btn-secondary">+ Add Leg</button>
+    </section>
+
+    <!-- Spot range -->
+    <section class="card">
+      <h2>Spot Range</h2>
+      <div class="form-row">
+        <label>Min <input type="number" id="spot-min" value="1000"></label>
+        <label>Max <input type="number" id="spot-max" value="6000"></label>
+      </div>
+    </section>
+
+    <!-- Action buttons -->
+    <div class="btn-stack">
+      <button id="btn-compute" class="btn-primary btn-large">Payoff at Expiry (manual premiums)</button>
+      <button id="btn-replicate" class="btn-primary btn-large btn-deribit">
+        Price via Deribit Vol Surface
+      </button>
+    </div>
+
+    <!-- Replication result: per-leg details -->
+    <section class="card" id="repl-results-section" style="display:none">
+      <h2>Deribit Replication Pricing</h2>
+      <div id="repl-summary" class="result-box">—</div>
+      <table id="repl-table">
+        <thead>
+          <tr>
+            <th>Side</th>
+            <th>Type</th>
+            <th>Strike</th>
+            <th>IV %</th>
+            <th>BS Prem (ETH)</th>
+            <th>BS Prem (USD)</th>
+          </tr>
+        </thead>
+        <tbody id="repl-body"></tbody>
+      </table>
+      <button id="btn-apply-repl" class="btn-secondary">Apply premiums to legs</button>
+    </section>
+
+  </aside>
+
+  <!-- ============================================================ -->
+  <!-- RIGHT PANEL: Charts + Chain                                  -->
+  <!-- ============================================================ -->
+  <div id="content">
+    <div id="payoff-chart" class="chart-container"></div>
+    <div id="smile-chart" class="chart-container" style="display:none"></div>
+
+    <!-- Option chain table -->
+    <section class="card" id="chain-section" style="display:none">
+      <h2>Option Chain — <span id="chain-expiry"></span></h2>
+      <div class="chain-wrapper">
+        <table id="chain-table">
+          <thead>
+            <tr>
+              <th>Instrument</th>
+              <th>Type</th>
+              <th>Strike</th>
+              <th>Mark</th>
+              <th>IV %</th>
+              <th>Δ</th>
+              <th>Γ</th>
+              <th>Θ</th>
+              <th>ν</th>
+              <th>Bid</th>
+              <th>Ask</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="chain-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+</main>
+
+<footer>
+  <p>Market data from <a href="https://www.deribit.com" target="_blank">Deribit</a> public API · Prices in ETH</p>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
