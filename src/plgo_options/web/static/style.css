@@ -345,3 +345,105 @@ footer {
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* ── Tab bar ───────────────────────────────────────────────── */
+#tab-bar {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: .6rem 1.2rem;
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color .15s, border-color .15s;
+}
+
+.tab-btn:hover { color: var(--text); }
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Risk summary grid ─────────────────────────────────────── */
+.risk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: .75rem;
+}
+
+.risk-metric {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .6rem .8rem;
+  text-align: center;
+}
+
+.risk-label {
+  display: block;
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  margin-bottom: .25rem;
+}
+
+.risk-value {
+  display: block;
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--green);
+}
+
+/* ── Positions table ───────────────────────────────────────── */
+#positions-table,
+#trades-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#positions-table th,
+#trades-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .4rem .5rem;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+
+#positions-table th:first-child,
+#positions-table td:first-child,
+#trades-table th:first-child,
+#trades-table td:first-child { text-align: left; }
+
+#positions-table td,
+#trades-table td {
+  text-align: right;
+  padding: .35rem .5rem;
+  border-bottom: 1px solid #21262d;
+}
+
+#positions-table tr:hover,
+#trades-table tr:hover { background: #1c2333; }
+
+.qty-long  { color: var(--green); }
+.qty-short { color: var(--red); }
+.qty-flat  { color: var(--muted); }

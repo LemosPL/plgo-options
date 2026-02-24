@@ -10,6 +10,8 @@ from pathlib import Path
 
 from plgo_options.web.routes import market, pricing, strategies
 
+from plgo_options.web.routes import positions
+
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
@@ -26,6 +28,7 @@ def create_app() -> FastAPI:
     app.include_router(market.router, prefix="/api/market", tags=["market"])
     app.include_router(pricing.router, prefix="/api/pricing", tags=["pricing"])
     app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
+    app.include_router(positions.router, prefix="/api/positions", tags=["positions"])
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():

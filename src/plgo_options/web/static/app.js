@@ -11,15 +11,13 @@ const $expSel     = document.getElementById("expiry-select");
 const $btnLoad    = document.getElementById("btn-load-chain");
 const $legsBody   = document.getElementById("legs-body");
 const $btnAdd     = document.getElementById("btn-add-leg");
-const $btnCompute  = document.getElementById("btn-compute");
-const $btnRepl     = document.getElementById("btn-replicate");
-const $spotMin     = document.getElementById("spot-min");
+const $btnCompute = document.getElementById("btn-compute");
+const $btnRepl    = document.getElementById("btn-replicate");
+const $spotMin    = document.getElementById("spot-min");
 const $spotMax    = document.getElementById("spot-max");
 const $chainSec   = document.getElementById("chain-section");
 const $chainExp   = document.getElementById("chain-expiry");
 const $chainBody  = document.getElementById("chain-body");
-const $btnBs      = document.getElementById("btn-bs");
-const $bsResult   = document.getElementById("bs-result");
 
 // ─── API helpers ────────────────────────────────────────────
 async function api(method, path, body) {
@@ -40,7 +38,6 @@ async function init() {
     const data = await get("/api/market/spot");
     ethSpot = data.eth_spot;
     $spot.textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    // Set sensible spot range defaults
     $spotMin.value = Math.round(ethSpot * 0.4);
     $spotMax.value = Math.round(ethSpot * 2.0);
   } catch (e) {
@@ -131,7 +128,6 @@ async function computePayoff() {
       },
     ];
 
-    // Add strike markers
     const uniqueStrikes = [...new Set(legs.map(l => parseFloat(l.strike)))];
     for (const k of uniqueStrikes) {
       traces.push({
@@ -145,7 +141,6 @@ async function computePayoff() {
       });
     }
 
-    // Add spot marker
     if (ethSpot) {
       traces.push({
         x: [ethSpot, ethSpot],
@@ -202,7 +197,6 @@ function renderLegs() {
     $legsBody.appendChild(tr);
   });
 
-  // Bind change events
   $legsBody.querySelectorAll("select, input").forEach(el => {
     el.addEventListener("change", () => {
       const idx = parseInt(el.dataset.i);
@@ -252,7 +246,6 @@ function applyTemplate(name) {
   }
   renderLegs();
 
-  // Highlight active template
   document.querySelectorAll(".btn-template").forEach(b => b.classList.remove("active"));
   const active = document.querySelector(`.btn-template[data-strategy="${name}"]`);
   if (active) active.classList.add("active");
@@ -269,7 +262,6 @@ async function loadChain() {
   try {
     optionChain = await get(`/api/market/options?expiry=${expiry}`);
 
-    // Sort by strike then type
     optionChain.sort((a, b) => {
       const sa = parseFloat(a.instrument_name.split("-")[2]);
       const sb = parseFloat(b.instrument_name.split("-")[2]);
@@ -283,7 +275,7 @@ async function loadChain() {
     for (const opt of optionChain) {
       const parts = opt.instrument_name.split("-");
       const strike = parts[2];
-      const optType = parts[3]; // C or P
+      const optType = parts[3];
       const isCall = optType === "C";
 
       const tr = document.createElement("tr");
@@ -305,7 +297,6 @@ async function loadChain() {
       $chainBody.appendChild(tr);
     }
 
-    // Bind chain "Add" buttons
     $chainBody.querySelectorAll(".btn-add-chain").forEach(btn => {
       btn.addEventListener("click", () => addFromChain(btn.dataset.name));
     });
@@ -327,160 +318,10 @@ function addFromChain(instrumentName) {
   const parts = instrumentName.split("-");
   const strike = parts[2];
   const type = parts[3];
-  // Use mark_price as premium (in ETH), convert to USD for payoff
   const premiumEth = opt.mark_price || 0;
   const premiumUsd = ethSpot ? (premiumEth * ethSpot).toFixed(2) : premiumEth.toFixed(4);
 
   addLeg("buy", type, strike, premiumUsd, "1");
-}
-
-// ─── BS Pricer ──────────────────────────────────────────────
-async function priceBS() {
-  if (!ethSpot) {
-    $bsResult.textContent = "Spot not loaded";
-    return;
-  }
-  try {
-    const data = await post("/api/pricing/bs", {
-      spot: ethSpot,
-      strike: parseFloat(document.getElementById("bs-strike").value),
-      time_to_expiry: parseFloat(document.getElementById("bs-tte").value),
-      risk_free_rate: parseFloat(document.getElementById("bs-rate").value),
-      volatility: parseFloat(document.getElementById("bs-vol").value),
-      option_type: document.getElementById("bs-type").value,
-    });
-    $bsResult.textContent = `$${data.price.toFixed(4)}`;
-  } catch (e) {
-    $bsResult.textContent = "Error";
-    console.error("BS pricing failed:", e);
-  }
-}
-
-// ─── BS Strategy Pricing ────────────────────────────────────
-let lastBsPremiums = [];  // store premiums from last BS pricing
-
-async function priceStrategyBS() {
-  if (legs.length === 0) {
-    alert("Add at least one leg to the strategy.");
-    return;
-  }
-
-  // Validate
-  for (const l of legs) {
-    const s = parseFloat(l.strike);
-    if (isNaN(s) || s <= 0) {
-      alert("Each leg must have a valid strike price.");
-      return;
-    }
-  }
-
-  if (!ethSpot) {
-    alert("ETH spot price not loaded yet.");
-    return;
-  }
-
-  $btnBsStrat.classList.add("loading");
-
-  const apiLegs = legs.map(l => ({
-    strike:   parseFloat(l.strike),
-    type:     l.type,
-    premium:  0,  // BS will compute fair premium
-    quantity: parseFloat(l.quantity),
-    is_long:  l.side === "buy",
-  }));
-
-  try {
-    const data = await post("/api/pricing/strategy-bs", {
-      spot:            ethSpot,
-      risk_free_rate:  parseFloat(document.getElementById("bs-rate").value),
-      volatility:      parseFloat(document.getElementById("bs-vol").value),
-      time_to_expiry:  parseFloat(document.getElementById("bs-tte").value),
-      spot_min:        parseFloat($spotMin.value),
-      spot_max:        parseFloat($spotMax.value),
-      legs:            apiLegs,
-      num_points:      500,
-    });
-
-    lastBsPremiums = data.premiums;
-
-    // -- Show premiums table --
-    const $body = document.getElementById("bs-premiums-body");
-    $body.innerHTML = "";
-    legs.forEach((leg, i) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${leg.side === "buy" ? "Buy" : "Sell"}</td>
-        <td style="color:${leg.type === 'C' ? 'var(--green)' : 'var(--red)'}">${leg.type === "C" ? "Call" : "Put"}</td>
-        <td>${leg.strike}</td>
-        <td>$${data.premiums[i].toFixed(2)}</td>
-      `;
-      $body.appendChild(tr);
-    });
-    document.getElementById("bs-premiums-section").style.display = "block";
-
-    // -- Plot both curves --
-    const traces = [
-      {
-        x: data.spots,
-        y: data.pnl_expiry,
-        type: "scatter",
-        mode: "lines",
-        name: "P&L at Expiry",
-        line: { color: "#58a6ff", width: 2.5 },
-      },
-      {
-        x: data.spots,
-        y: data.pnl_now,
-        type: "scatter",
-        mode: "lines",
-        name: `P&L Now (T=${document.getElementById("bs-tte").value}y, σ=${document.getElementById("bs-vol").value})`,
-        line: { color: "#d29922", width: 2, dash: "dash" },
-      },
-    ];
-
-    // Zero line is already in the layout via zerolinecolor
-
-    // Strike markers
-    const uniqueStrikes = [...new Set(legs.map(l => parseFloat(l.strike)))];
-    const allPnl = [...data.pnl_expiry, ...data.pnl_now];
-    const yMin = Math.min(...allPnl);
-    const yMax = Math.max(...allPnl);
-    for (const k of uniqueStrikes) {
-      traces.push({
-        x: [k, k], y: [yMin, yMax],
-        type: "scatter", mode: "lines",
-        name: `K=${k}`,
-        line: { color: "#8b949e", width: 1, dash: "dot" },
-        showlegend: false,
-      });
-    }
-
-    // Spot marker
-    if (ethSpot) {
-      traces.push({
-        x: [ethSpot, ethSpot], y: [yMin, yMax],
-        type: "scatter", mode: "lines",
-        name: `Spot $${ethSpot.toFixed(0)}`,
-        line: { color: "#3fb950", width: 1.5, dash: "dash" },
-      });
-    }
-
-    Plotly.react("payoff-chart", traces, chartLayout(), { responsive: true });
-  } catch (e) {
-    console.error("BS strategy pricing failed:", e);
-    alert("Failed to price strategy — check console.");
-  } finally {
-    $btnBsStrat.classList.remove("loading");
-  }
-}
-
-function applyBsPremiums() {
-  if (lastBsPremiums.length !== legs.length) return;
-  for (let i = 0; i < legs.length; i++) {
-    legs[i].premium = lastBsPremiums[i].toFixed(2);
-  }
-  renderLegs();
-  document.getElementById("bs-premiums-section").style.display = "none";
 }
 
 // ─── Deribit Replication Pricing ────────────────────────────
@@ -526,7 +367,7 @@ async function replicateStrategy() {
 
     lastReplPremiums = data.legs.map(l => l.bs_premium_usd);
 
-    // -- Summary --
+    // Summary
     const $summary = document.getElementById("repl-summary");
     $summary.innerHTML =
       `Expiry: <strong>${data.expiry}</strong> &nbsp;|&nbsp; ` +
@@ -535,7 +376,7 @@ async function replicateStrategy() {
       `Net cost: <strong>$${data.total_cost_usd.toLocaleString()}</strong> ` +
       `(${data.total_cost_eth.toFixed(4)} ETH)`;
 
-    // -- Per-leg table --
+    // Per-leg table
     const $body = document.getElementById("repl-body");
     $body.innerHTML = "";
     for (const d of data.legs) {
@@ -554,7 +395,7 @@ async function replicateStrategy() {
     }
     document.getElementById("repl-results-section").style.display = "block";
 
-    // -- Payoff chart (two curves) --
+    // Payoff chart
     const allPnl = [...data.pnl_expiry, ...data.pnl_now];
     const yMin = Math.min(...allPnl);
     const yMax = Math.max(...allPnl);
@@ -574,7 +415,6 @@ async function replicateStrategy() {
       },
     ];
 
-    // Strike markers
     const uniqueStrikes = [...new Set(data.legs.map(l => l.strike))];
     for (const k of uniqueStrikes) {
       traces.push({
@@ -585,7 +425,6 @@ async function replicateStrategy() {
       });
     }
 
-    // Spot marker
     traces.push({
       x: [data.eth_spot, data.eth_spot], y: [yMin, yMax],
       type: "scatter", mode: "lines",
@@ -595,7 +434,7 @@ async function replicateStrategy() {
 
     Plotly.react("payoff-chart", traces, chartLayout(), { responsive: true });
 
-    // -- Vol smile chart --
+    // Vol smile chart
     drawSmileChart(data.smile, data.legs);
 
   } catch (e) {
@@ -612,14 +451,12 @@ function drawSmileChart(smile, pricedLegs) {
   $el.style.display = "block";
 
   const traces = [
-    // Interpolated smile curve
     {
       x: smile.smile_strikes, y: smile.smile_ivs,
       type: "scatter", mode: "lines",
       name: "Vol Smile (interpolated)",
       line: { color: "#58a6ff", width: 2 },
     },
-    // Observed market points
     {
       x: smile.observed_strikes, y: smile.observed_ivs,
       type: "scatter", mode: "markers",
@@ -628,7 +465,6 @@ function drawSmileChart(smile, pricedLegs) {
     },
   ];
 
-  // Mark strategy leg strikes on the smile
   for (const leg of pricedLegs) {
     traces.push({
       x: [leg.strike], y: [leg.iv_pct],
@@ -650,16 +486,8 @@ function drawSmileChart(smile, pricedLegs) {
     title: { text: "Deribit Implied Volatility Smile", font: { color: "#e6edf3", size: 16 } },
     paper_bgcolor: "#161b22",
     plot_bgcolor: "#0d1117",
-    xaxis: {
-      title: "Strike (USD)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
-    },
-    yaxis: {
-      title: "Implied Volatility (%)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
-    },
+    xaxis: { title: "Strike (USD)", color: "#8b949e", gridcolor: "#21262d" },
+    yaxis: { title: "Implied Volatility (%)", color: "#8b949e", gridcolor: "#21262d" },
     margin: { t: 50, r: 30, b: 50, l: 60 },
     showlegend: true,
     legend: { font: { color: "#8b949e" } },
@@ -675,6 +503,188 @@ function applyReplPremiums() {
   }
   renderLegs();
   document.getElementById("repl-results-section").style.display = "none";
+}
+
+// ─── Event binding ──────────────────────────────────────────
+$btnAdd.addEventListener("click", () => addLeg());
+$btnCompute.addEventListener("click", computePayoff);
+$btnRepl.addEventListener("click", replicateStrategy);
+document.getElementById("btn-apply-repl").addEventListener("click", applyReplPremiums);
+$btnLoad.addEventListener("click", loadChain);
+
+document.querySelectorAll(".btn-template").forEach(btn => {
+  btn.addEventListener("click", () => applyTemplate(btn.dataset.strategy));
+});
+
+[$spotMin, $spotMax].forEach(el => {
+  el.addEventListener("keydown", e => { if (e.key === "Enter") computePayoff(); });
+});
+
+// ─── Tab switching ──────────────────────────────────────────
+const $controls = document.getElementById("controls");
+
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    // Deactivate all
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
+
+    // Activate selected
+    btn.classList.add("active");
+    const pane = document.getElementById(`tab-${btn.dataset.tab}`);
+    pane.classList.add("active");
+
+    // Show left-panel controls only on the Pricing tab
+    $controls.style.display = btn.dataset.tab === "pricing" ? "" : "none";
+
+    // Lazy-load positions on first visit
+    if (btn.dataset.tab === "positions" && !positionsLoaded) {
+      loadPositions();
+    }
+  });
+});
+
+// ─── Positions / Risk ───────────────────────────────────────
+let positionsLoaded = false;
+
+async function loadPositions() {
+  try {
+    const [trades, summary] = await Promise.all([
+      get("/api/positions/trades"),
+      get("/api/positions/summary"),
+    ]);
+
+    const t = summary.totals;
+
+    // Totals banner
+    document.getElementById("tot-positions").textContent = t.positions_count;
+    document.getElementById("tot-trades").textContent    = t.trades_count;
+    document.getElementById("tot-long").textContent      = t.long_count;
+    document.getElementById("tot-short").textContent     = t.short_count;
+    document.getElementById("tot-net-qty").textContent   = t.total_net_qty.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    document.getElementById("tot-premium").textContent   = `$${t.total_premium_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    document.getElementById("tot-notional").textContent  = `$${t.total_notional_mm.toFixed(2)}mm`;
+
+    // Positions table
+    const $posBody = document.getElementById("positions-body");
+    $posBody.innerHTML = "";
+
+    for (const p of summary.positions) {
+      const sideClass = p.side === "Long" ? "qty-long" : p.side === "Short" ? "qty-short" : "qty-flat";
+      const typeColor = (p.option_type || "").toUpperCase().includes("CALL") ? "var(--green)" : "var(--red)";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td style="text-align:left" class="${sideClass}"><strong>${p.side}</strong></td>
+        <td style="text-align:left; color:${typeColor}">${p.option_type}</td>
+        <td>${p.strike.toLocaleString()}</td>
+        <td>${p.expiry}</td>
+        <td>${p.days_remaining.toFixed(0)}</td>
+        <td>${(p.pct_otm * 100).toFixed(1)}%</td>
+        <td class="${sideClass}" style="font-family:monospace">${p.net_qty.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+        <td style="font-family:monospace">$${p.avg_premium_per_contract.toFixed(2)}</td>
+        <td style="font-family:monospace">$${p.total_premium_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+        <td style="font-family:monospace">$${p.total_notional_mm.toFixed(2)}mm</td>
+        <td>${p.trade_count}</td>
+        <td style="text-align:left; font-size:.7rem">${p.counterparties.join(", ")}</td>
+      `;
+      $posBody.appendChild(tr);
+    }
+
+    // Exposure chart
+    drawExposureChart(summary.positions);
+
+    // Raw trades table
+    document.getElementById("trades-count").textContent = `(${trades.length} trades)`;
+    if (trades.length > 0) {
+      const displayCols = [
+        "Counterparty", "Initial Trade Date", "Buy / Sell / Unwind",
+        "Option Type", "Option Expiry Date", "Days Remaining to Expiry",
+        "Strike", "Ref. Spot Price", "% OTM", "ETH Options",
+        "$ Notional (mm)", "Premium per Contract", "Premium USD",
+      ];
+      const keys = displayCols.filter(k => k in trades[0]);
+
+      const $thead = document.getElementById("trades-thead");
+      $thead.innerHTML = "<tr>" + keys.map(k => `<th>${k}</th>`).join("") + "</tr>";
+
+      const $tbody = document.getElementById("trades-body");
+      $tbody.innerHTML = "";
+      for (const row of trades) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = keys.map(k => {
+          let v = row[k];
+          if (v == null) return "<td>—</td>";
+          if (typeof v === "number") {
+            if (Math.abs(v) >= 1000) v = v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+            else v = v.toFixed(4);
+          }
+          return `<td>${v}</td>`;
+        }).join("");
+        $tbody.appendChild(tr);
+      }
+    }
+
+    positionsLoaded = true;
+  } catch (e) {
+    console.error("Failed to load positions:", e);
+    alert("Failed to load positions — check console.\n" + e.message);
+  }
+}
+
+function drawExposureChart(positions) {
+  const calls = positions.filter(p => (p.option_type || "").toUpperCase().includes("CALL"));
+  const puts  = positions.filter(p => (p.option_type || "").toUpperCase().includes("PUT"));
+
+  const traces = [];
+
+  if (calls.length) {
+    traces.push({
+      x: calls.map(p => `${p.strike}`),
+      y: calls.map(p => p.net_qty),
+      type: "bar",
+      name: "Calls",
+      marker: { color: "#3fb950" },
+      text: calls.map(p => p.expiry),
+      hovertemplate: "Strike %{x}<br>Qty: %{y}<br>Expiry: %{text}<extra>Call</extra>",
+    });
+  }
+
+  if (puts.length) {
+    traces.push({
+      x: puts.map(p => `${p.strike}`),
+      y: puts.map(p => p.net_qty),
+      type: "bar",
+      name: "Puts",
+      marker: { color: "#f85149" },
+      text: puts.map(p => p.expiry),
+      hovertemplate: "Strike %{x}<br>Qty: %{y}<br>Expiry: %{text}<extra>Put</extra>",
+    });
+  }
+
+  const layout = {
+    title: { text: "Net Exposure by Strike", font: { color: "#e6edf3", size: 16 } },
+    paper_bgcolor: "#161b22",
+    plot_bgcolor: "#0d1117",
+    barmode: "group",
+    xaxis: {
+      title: "Strike (USD)",
+      color: "#8b949e",
+      gridcolor: "#21262d",
+      type: "category",
+    },
+    yaxis: {
+      title: "Net Quantity (ETH Options)",
+      color: "#8b949e",
+      gridcolor: "#21262d",
+      zerolinecolor: "#f85149",
+      zerolinewidth: 2,
+    },
+    margin: { t: 50, r: 30, b: 60, l: 60 },
+    showlegend: true,
+    legend: { font: { color: "#8b949e" } },
+  };
+
+  Plotly.newPlot("exposure-chart", traces, layout, { responsive: true });
 }
 
 // ─── Event binding ──────────────────────────────────────────

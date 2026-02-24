@@ -115,34 +115,128 @@
   <!-- RIGHT PANEL: Charts + Chain                                  -->
   <!-- ============================================================ -->
   <div id="content">
-    <div id="payoff-chart" class="chart-container"></div>
-    <div id="smile-chart" class="chart-container" style="display:none"></div>
 
-    <!-- Option chain table -->
-    <section class="card" id="chain-section" style="display:none">
-      <h2>Option Chain — <span id="chain-expiry"></span></h2>
-      <div class="chain-wrapper">
-        <table id="chain-table">
-          <thead>
-            <tr>
-              <th>Instrument</th>
-              <th>Type</th>
-              <th>Strike</th>
-              <th>Mark</th>
-              <th>IV %</th>
-              <th>Δ</th>
-              <th>Γ</th>
-              <th>Θ</th>
-              <th>ν</th>
-              <th>Bid</th>
-              <th>Ask</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="chain-body"></tbody>
-        </table>
-      </div>
-    </section>
+    <!-- Tab bar -->
+    <nav id="tab-bar">
+      <button class="tab-btn active" data-tab="pricing">Pricing</button>
+      <button class="tab-btn" data-tab="positions">Positions / Risk</button>
+    </nav>
+
+    <!-- ── Pricing tab (existing content) ── -->
+    <div id="tab-pricing" class="tab-pane active">
+      <div id="payoff-chart" class="chart-container"></div>
+      <div id="smile-chart" class="chart-container" style="display:none"></div>
+
+      <!-- Option chain table -->
+      <section class="card" id="chain-section" style="display:none">
+        <h2>Option Chain — <span id="chain-expiry"></span></h2>
+        <div class="chain-wrapper">
+          <table id="chain-table">
+            <thead>
+              <tr>
+                <th>Instrument</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Mark</th>
+                <th>IV %</th>
+                <th>Δ</th>
+                <th>Γ</th>
+                <th>Θ</th>
+                <th>ν</th>
+                <th>Bid</th>
+                <th>Ask</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="chain-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── Positions / Risk tab ── -->
+    <div id="tab-positions" class="tab-pane">
+
+      <!-- Portfolio totals banner -->
+      <section class="card" id="portfolio-totals">
+        <h2>Portfolio Summary</h2>
+        <div class="risk-grid">
+          <div class="risk-metric">
+            <span class="risk-label">Positions</span>
+            <span class="risk-value" id="tot-positions">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Trades</span>
+            <span class="risk-value" id="tot-trades">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Long</span>
+            <span class="risk-value qty-long" id="tot-long">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Short</span>
+            <span class="risk-value qty-short" id="tot-short">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Net Qty (ETH)</span>
+            <span class="risk-value" id="tot-net-qty">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Total Premium (USD)</span>
+            <span class="risk-value" id="tot-premium">—</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Total Notional ($mm)</span>
+            <span class="risk-value" id="tot-notional">—</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Positions table -->
+      <section class="card">
+        <h2>Net Positions</h2>
+        <div class="chain-wrapper">
+          <table id="positions-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Side</th>
+                <th style="text-align:left">Type</th>
+                <th>Strike</th>
+                <th>Expiry</th>
+                <th>Days Left</th>
+                <th>% OTM</th>
+                <th>Net Qty</th>
+                <th>Avg Prem/Contract</th>
+                <th>Total Prem (USD)</th>
+                <th>Notional ($mm)</th>
+                <th># Trades</th>
+                <th style="text-align:left">Counterparties</th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Exposure chart placeholder -->
+      <div id="exposure-chart" class="chart-container"></div>
+
+      <!-- Raw trades table -->
+      <section class="card">
+        <h2>Raw Trades <small id="trades-count"></small></h2>
+        <div class="chain-wrapper" style="max-height:350px">
+          <table id="trades-table">
+            <thead id="trades-thead"></thead>
+            <tbody id="trades-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <button id="btn-refresh-positions" class="btn-primary" style="margin-top:.5rem">
+        ↻ Refresh from Excel
+      </button>
+    </div>
+
   </div>
 
 </main>
