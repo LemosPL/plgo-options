@@ -447,3 +447,34 @@ footer {
 .qty-long  { color: var(--green); }
 .qty-short { color: var(--red); }
 .qty-flat  { color: var(--muted); }
+
+/* ── Rolls table ───────────────────────────────────────────── */
+#rolls-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#rolls-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .4rem .5rem;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+#rolls-table th:first-child,
+#rolls-table td:first-child { text-align: left; }
+
+#rolls-table td {
+  text-align: right;
+  padding: .35rem .5rem;
+  border-bottom: 1px solid #21262d;
+  white-space: nowrap;
+}
+
+#rolls-table tr:hover { background: #1c2333; }

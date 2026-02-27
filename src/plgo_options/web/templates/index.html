@@ -120,6 +120,7 @@
     <nav id="tab-bar">
       <button class="tab-btn active" data-tab="pricing">Pricing</button>
       <button class="tab-btn" data-tab="positions">Positions / Risk</button>
+      <button class="tab-btn" data-tab="rolls">Roll Pricing</button>
     </nav>
 
     <!-- ── Pricing tab (existing content) ── -->
@@ -192,6 +193,20 @@
         </div>
       </section>
 
+      <!-- Raw trades table -->
+      <section class="card">
+        <h2>Raw Trades <small id="trades-count"></small></h2>
+        <div class="chain-wrapper" style="max-height:350px">
+          <table id="trades-table">
+            <thead id="trades-thead"></thead>
+            <tbody id="trades-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Exposure chart placeholder -->
+      <div id="exposure-chart" class="chart-container"></div>
+
       <!-- Positions table -->
       <section class="card">
         <h2>Net Positions</h2>
@@ -218,28 +233,45 @@
         </div>
       </section>
 
-      <!-- Exposure chart placeholder -->
-      <div id="exposure-chart" class="chart-container"></div>
-
-      <!-- Raw trades table -->
-      <section class="card">
-        <h2>Raw Trades <small id="trades-count"></small></h2>
-        <div class="chain-wrapper" style="max-height:350px">
-          <table id="trades-table">
-            <thead id="trades-thead"></thead>
-            <tbody id="trades-body"></tbody>
-          </table>
-        </div>
-      </section>
-
       <button id="btn-refresh-positions" class="btn-primary" style="margin-top:.5rem">
         ↻ Refresh from Excel
       </button>
     </div>
 
-  </div>
+    <!-- ── Roll Pricing tab ── -->
+    <div id="tab-rolls" class="tab-pane">
 
-</main>
+      <!-- Sheet selector -->
+      <section class="card">
+        <h2>Calendar Rolls</h2>
+        <div class="form-row" style="align-items:end; margin-bottom:.75rem">
+          <label style="flex:2">
+            Sheet
+            <select id="roll-sheet-select">
+              <option value="">Loading…</option>
+            </select>
+          </label>
+          <button id="btn-load-rolls" class="btn-primary" style="flex:1">Load</button>
+        </div>
+      </section>
+
+      <!-- Roll data table -->
+      <section class="card" id="rolls-table-section" style="display:none">
+        <h2>Roll Data — <span id="roll-sheet-name"></span> <small id="roll-row-count"></small></h2>
+        <div class="chain-wrapper" style="max-height:500px">
+          <table id="rolls-table">
+            <thead id="rolls-thead"></thead>
+            <tbody id="rolls-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <button id="btn-refresh-rolls" class="btn-primary" style="margin-top:.5rem">
+        ↻ Refresh from Excel
+      </button>
+    </div>
+
+  </div>
 
 <footer>
   <p>Market data from <a href="https://www.deribit.com" target="_blank">Deribit</a> public API · Prices in ETH</p>

@@ -161,3 +161,55 @@ def aggregate_positions(trades: list[dict]) -> list[dict]:
     # Sort by expiry then strike
     result.sort(key=lambda p: (p["expiry"], p["strike"]))
     return result
+
+
+def read_calendar_rolls(file_path: Path | None = None) -> dict:
+    """Read calendar rolls from 'Calendar rolls.xlsx'.
+
+    Auto-detects sheet names and header rows (first row with data in each sheet).
+    Returns a dict: { sheet_name: [row_dict, ...], ... }
+    """
+    fp = file_path or (
+        Path(__file__).resolve().parents[3]
+        / "data"
+        / "Calendar rolls.xlsx"
+    )
+
+    wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+    result: dict[str, list[dict]] = {}
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows_iter = ws.iter_rows(values_only=True)
+
+        # Find the first non-empty row as the header
+        headers: list[str] | None = None
+        for row in rows_iter:
+            if row and any(cell is not None for cell in row):
+                headers = [
+                    str(h).strip() if h is not None else f"col_{i}"
+                    for i, h in enumerate(row)
+                ]
+                break
+
+        if headers is None:
+            result[sheet_name] = []
+            continue
+
+        records: list[dict] = []
+        for row in rows_iter:
+            if all(cell is None for cell in row):
+                continue
+            record = dict(zip(headers, row))
+            # Normalise dates → ISO strings
+            for k, v in record.items():
+                if isinstance(v, datetime):
+                    record[k] = v.isoformat()
+                elif isinstance(v, date):
+                    record[k] = v.isoformat()
+            records.append(record)
+
+        result[sheet_name] = records
+
+    wb.close()
+    return result

@@ -521,8 +521,6 @@ document.querySelectorAll(".btn-template").forEach(btn => {
 });
 
 // ─── Tab switching ──────────────────────────────────────────
-const $controls = document.getElementById("controls");
-
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     // Deactivate all
@@ -534,14 +532,96 @@ document.querySelectorAll(".tab-btn").forEach(btn => {
     const pane = document.getElementById(`tab-${btn.dataset.tab}`);
     pane.classList.add("active");
 
-    // Show left-panel controls only on the Pricing tab
-    $controls.style.display = btn.dataset.tab === "pricing" ? "" : "none";
-
     // Lazy-load positions on first visit
     if (btn.dataset.tab === "positions" && !positionsLoaded) {
       loadPositions();
     }
+
+    // Lazy-load roll sheet names on first visit
+    if (btn.dataset.tab === "rolls" && !rollSheetsLoaded) {
+      loadRollSheets().then(loadRollData);
+    }
   });
+});
+
+// ─── Positions / Risk ───────────────────────────────────────
+let rollSheetsLoaded = false;
+
+async function loadRollSheets() {
+  try {
+    const data = await get("/api/rolls/sheets");
+    const $sel = document.getElementById("roll-sheet-select");
+    $sel.innerHTML = "";
+    for (const name of data.sheets) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      $sel.appendChild(opt);
+    }
+    rollSheetsLoaded = true;
+  } catch (e) {
+    console.error("Failed to load roll sheets:", e);
+  }
+}
+
+async function loadRollData() {
+  const sheet = document.getElementById("roll-sheet-select").value;
+  if (!sheet) return;
+
+  try {
+    const data = await get(`/api/rolls/data?sheet=${encodeURIComponent(sheet)}`);
+    const rows = data.rows;
+
+    document.getElementById("roll-sheet-name").textContent = sheet;
+    document.getElementById("roll-row-count").textContent = `(${rows.length} rows)`;
+
+    if (rows.length === 0) {
+      document.getElementById("rolls-thead").innerHTML = "";
+      document.getElementById("rolls-body").innerHTML = "<tr><td>No data</td></tr>";
+      document.getElementById("rolls-table-section").style.display = "block";
+      return;
+    }
+
+    const keys = Object.keys(rows[0]);
+
+    // Header
+    const $thead = document.getElementById("rolls-thead");
+    $thead.innerHTML = "<tr>" + keys.map(k => `<th>${k}</th>`).join("") + "</tr>";
+
+    // Body
+    const $tbody = document.getElementById("rolls-body");
+    $tbody.innerHTML = "";
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = keys.map(k => {
+        let v = row[k];
+        if (v == null) return "<td>—</td>";
+        if (typeof v === "number") {
+          // Percentages (small decimals) → show as %
+          if (Math.abs(v) < 1 && Math.abs(v) > 0) {
+            return `<td>${(v * 100).toFixed(2)}%</td>`;
+          }
+          if (Math.abs(v) >= 1000) {
+            return `<td>${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>`;
+          }
+          return `<td>${v.toFixed(4)}</td>`;
+        }
+        return `<td>${v}</td>`;
+      }).join("");
+      $tbody.appendChild(tr);
+    }
+
+    document.getElementById("rolls-table-section").style.display = "block";
+  } catch (e) {
+    console.error("Failed to load roll data:", e);
+    alert("Failed to load roll data — check console.\n" + e.message);
+  }
+}
+
+document.getElementById("btn-load-rolls").addEventListener("click", loadRollData);
+document.getElementById("btn-refresh-rolls").addEventListener("click", () => {
+  rollSheetsLoaded = false;
+  loadRollSheets().then(loadRollData);
 });
 
 // ─── Positions / Risk ───────────────────────────────────────
