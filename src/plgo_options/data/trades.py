@@ -26,15 +26,16 @@ TRADE_COLUMNS = [
     "Premium USD",
 ]
 
-_DEFAULT_PATH = (
-    Path.home() / "Downloads" / "ETH - Dashboard Risk+PnL Improvement Proposal (9).xlsx"
-)
-
-# Legacy location as fallback
-_FALLBACK_PATH = (
+# Primary: bundled data/ directory (works in Docker and local)
+_PROJECT_DATA_PATH = (
     Path(__file__).resolve().parents[3]
     / "data"
     / "ETH - Dashboard Risk+PnL Improvement Proposal.xlsx"
+)
+
+# Fallback: user's Downloads folder (local dev)
+_DOWNLOADS_PATH = (
+    Path.home() / "Downloads" / "ETH - Dashboard Risk+PnL Improvement Proposal (9).xlsx"
 )
 
 
@@ -54,14 +55,21 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
     Each dict is keyed by the exact column headers found in the sheet.
     Dates are normalised to ISO-8601 strings for JSON serialisation.
     """
-    fp = file_path or _DEFAULT_PATH
+    fp = file_path
+    if fp is None:
+        # Try bundled data/ first, then Downloads
+        if _PROJECT_DATA_PATH.exists():
+            fp = _PROJECT_DATA_PATH
+        else:
+            fp = _DOWNLOADS_PATH
 
-    # Try default path first; fall back to Downloads copy if locked or missing
     try:
         wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
     except (FileNotFoundError, PermissionError, OSError):
-        if _FALLBACK_PATH.exists():
-            fp = _FALLBACK_PATH
+        # Last resort: try the other path
+        alt = _PROJECT_DATA_PATH if fp != _PROJECT_DATA_PATH else _DOWNLOADS_PATH
+        if alt.exists():
+            fp = alt
             wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
         else:
             raise
