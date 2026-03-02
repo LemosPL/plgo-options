@@ -49,17 +49,17 @@ main {
   display: flex;
   gap: 1.5rem;
   padding: 1.5rem 2rem;
-  max-width: 1600px;
+  max-width: 1800px;
   margin: 0 auto;
   min-height: calc(100vh - 120px);
 }
 
 #controls {
-  width: 340px;
+  width: 440px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: .75rem;
 }
 
 #content {
@@ -125,6 +125,9 @@ main {
 
 .btn-deribit {
   background: linear-gradient(135deg, #1a7f37, #3fb950);
+  font-size: 1rem;
+  padding: .75rem;
+  letter-spacing: .02em;
 }
 
 /* ── Replication results table ─────────────────────────────── */
@@ -153,6 +156,10 @@ main {
   gap: .4rem;
 }
 
+.btn-grid-3 {
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
 .btn-template {
   background: var(--bg);
   color: var(--text);
@@ -171,10 +178,16 @@ select, input[type="number"] {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: .35rem .5rem;
-  font-size: .85rem;
+  border-radius: 6px;
+  padding: .5rem .6rem;
+  font-size: .9rem;
   width: 100%;
+}
+
+select:focus, input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(88,166,255,0.15);
 }
 
 select { margin-bottom: .5rem; }
@@ -200,12 +213,11 @@ select { margin-bottom: .5rem; }
   table-layout: fixed;
 }
 
-#legs-table col.col-side    { width: 60px; }
-#legs-table col.col-type    { width: 55px; }
-#legs-table col.col-strike  { width: 70px; }
-#legs-table col.col-premium { width: 70px; }
-#legs-table col.col-qty     { width: 45px; }
-#legs-table col.col-remove  { width: 28px; }
+#legs-table col.col-expiry    { width: 90px; }
+#legs-table col.col-side-type { width: 150px; }
+#legs-table col.col-strike    { width: 75px; }
+#legs-table col.col-qty       { width: 70px; }
+#legs-table col.col-remove    { width: 28px; }
 
 #legs-table th {
   text-align: left;
@@ -222,9 +234,15 @@ select { margin-bottom: .5rem; }
 #legs-table select,
 #legs-table input {
   width: 100%;
-  font-size: .78rem;
-  padding: .25rem .3rem;
+  font-size: .82rem;
+  padding: .35rem .4rem;
 }
+
+.side-type-cell {
+  display: flex;
+  gap: 3px;
+}
+.side-type-cell select { width: 48%; }
 
 .btn-remove {
   background: transparent;
@@ -262,7 +280,7 @@ select { margin-bottom: .5rem; }
 /* ── Chain table ───────────────────────────────────────────── */
 .chain-wrapper {
   max-height: 400px;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 #chain-table {
@@ -318,23 +336,13 @@ select { margin-bottom: .5rem; }
 /* ── Result box ────────────────────────────────────────────── */
 .result-box {
   margin-top: .5rem;
-  padding: .5rem;
+  padding: .6rem .8rem;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: .9rem;
-  color: var(--green);
-  text-align: center;
-}
-
-/* ── Footer ────────────────────────────────────────────────── */
-footer {
-  text-align: center;
-  padding: 1rem;
-  color: var(--muted);
-  font-size: .8rem;
-  border-top: 1px solid var(--border);
+  font-size: .85rem;
+  color: var(--text);
 }
 
 /* ── Loading spinner ───────────────────────────────────────── */
@@ -448,14 +456,14 @@ footer {
 .qty-short { color: var(--red); }
 .qty-flat  { color: var(--muted); }
 
-/* ── Rolls table ───────────────────────────────────────────── */
-#rolls-table {
+/* ── MTM Matrix table ─────────────────────────────────────── */
+#mtm-matrix-table {
   width: 100%;
   border-collapse: collapse;
   font-size: .78rem;
 }
 
-#rolls-table th {
+#mtm-matrix-table th {
   position: sticky;
   top: 0;
   background: var(--surface);
@@ -467,14 +475,320 @@ footer {
   white-space: nowrap;
 }
 
-#rolls-table th:first-child,
-#rolls-table td:first-child { text-align: left; }
+#mtm-matrix-table th:first-child,
+#mtm-matrix-table td:first-child { text-align: left; }
 
-#rolls-table td {
+#mtm-matrix-table td {
+  text-align: right;
+  padding: .35rem .5rem;
+  border-bottom: 1px solid #21262d;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: .72rem;
+  white-space: nowrap;
+}
+
+#mtm-matrix-table tr:hover { background: #1c2333; }
+
+#mtm-matrix-table tfoot td {
+  font-weight: 700;
+  border-top: 2px solid var(--border);
+}
+
+.mtm-pos { color: var(--green); }
+.mtm-neg { color: var(--red); }
+.mtm-tag {
+  font-size: .6rem;
+  padding: .1rem .3rem;
+  border-radius: 3px;
+  margin-left: .3rem;
+}
+.mtm-tag-open     { background: rgba(88,166,255,.15); color: var(--accent); }
+.mtm-tag-realised { background: rgba(210,153,34,.15); color: var(--orange); }
+
+/* ── Portfolio full-width layout ──────────────────────────── */
+main.portfolio-active #controls { display: none; }
+main.portfolio-active #content  { flex: 1; }
+
+#tab-portfolio > * + * { margin-top: 1.25rem; }
+
+/* ── Portfolio filter toolbar ─────────────────────────────── */
+.pf-toolbar {
+  display: flex;
+  gap: .5rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.pf-filter-label {
+  font-size: .75rem;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+}
+.pf-filter-label select {
+  width: auto;
+  min-width: 100px;
+  margin-bottom: 0;
+}
+.pf-toolbar-spacer { flex: 1; }
+
+/* ── Portfolio positions table ────────────────────────────── */
+#pf-positions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#pf-positions-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .4rem .5rem;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+#pf-positions-table th:first-child,
+#pf-positions-table td:first-child {
+  text-align: center;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+#pf-positions-table th:first-child {
+  z-index: 3;  /* above sticky top AND sticky left */
+}
+
+#pf-positions-table td {
   text-align: right;
   padding: .35rem .5rem;
   border-bottom: 1px solid #21262d;
   white-space: nowrap;
 }
 
-#rolls-table tr:hover { background: #1c2333; }
+#pf-positions-table tr:hover { background: #1c2333; }
+
+/* Sortable headers */
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: var(--accent); }
+.sort-asc::after  { content: " \25B2"; font-size: .55rem; }
+.sort-desc::after { content: " \25BC"; font-size: .55rem; }
+.sort-secondary::after { content: " \25CF"; font-size: .4rem; color: var(--muted); }
+
+/* Row states */
+.pf-row-excluded { opacity: 0.35; }
+.pf-row-rolled  { background: rgba(88,166,255,0.06) !important; }
+
+/* Keep sticky checkbox column background in sync with row state */
+#pf-positions-table tr:hover > td:first-child { background: #1c2333; }
+#pf-positions-table tr.pf-row-rolled > td:first-child { background: rgba(88,166,255,0.06); }
+
+/* Roll DTE input */
+.roll-dte-input {
+  width: 55px;
+  font-size: .75rem;
+  padding: .2rem .3rem;
+  text-align: center;
+}
+
+/* Checkbox styling */
+#pf-positions-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* ── Portfolio MTM grid table ─────────────────────────────── */
+#pf-mtm-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#pf-mtm-grid th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .5rem .6rem;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+#pf-mtm-grid th:first-child { text-align: left; }
+
+#pf-mtm-grid td {
+  text-align: right;
+  padding: .4rem .6rem;
+  border-bottom: 1px solid #21262d;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: .75rem;
+  white-space: nowrap;
+}
+
+#pf-mtm-grid td:first-child {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#pf-mtm-grid tr:hover { background: #1c2333; }
+#pf-mtm-grid tr.pf-mtm-spot-row { background: rgba(63,185,80,0.1); }
+
+/* ── Roll Analysis tab ───────────────────────────────────── */
+#tab-roll > * + * { margin-top: 1.25rem; }
+
+#roll-trades-table,
+#roll-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#roll-trades-table th,
+#roll-results-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .4rem .5rem;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+#roll-trades-table th:nth-child(1),
+#roll-trades-table td:nth-child(1) {
+  text-align: center;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+
+#roll-trades-table th:nth-child(2),
+#roll-trades-table td:nth-child(2) {
+  text-align: center;
+  position: sticky;
+  left: 32px;
+  z-index: 2;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+#roll-trades-table th:nth-child(1),
+#roll-trades-table th:nth-child(2) { z-index: 3; }
+
+#roll-trades-table td,
+#roll-results-table td {
+  text-align: right;
+  padding: .35rem .5rem;
+  border-bottom: 1px solid #21262d;
+  white-space: nowrap;
+}
+
+#roll-trades-table tr:hover,
+#roll-results-table tr:hover { background: #1c2333; }
+
+#roll-trades-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+#roll-trades-table .roll-include { accent-color: var(--green); }
+
+.roll-col-label {
+  font-size: .6rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.roll-dte-override {
+  width: 55px;
+  font-size: .75rem;
+  padding: .2rem .3rem;
+  text-align: center;
+}
+
+#roll-results-table tfoot td {
+  font-weight: 700;
+  border-top: 2px solid var(--border);
+  padding: .5rem .5rem;
+}
+
+.roll-row-selected { background: rgba(88,166,255,0.06) !important; }
+.roll-row-selected td:nth-child(1),
+.roll-row-selected td:nth-child(2) { background: rgba(88,166,255,0.06); }
+#roll-trades-table tr:hover > td:nth-child(1),
+#roll-trades-table tr:hover > td:nth-child(2) { background: #1c2333; }
+#roll-trades-table tr.pf-row-excluded > td:nth-child(1),
+#roll-trades-table tr.pf-row-excluded > td:nth-child(2) { background: var(--surface); }
+
+/* ── Roll MTM grid ───────────────────────────────────────── */
+#roll-mtm-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+#roll-mtm-grid th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: right;
+  padding: .5rem .6rem;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+#roll-mtm-grid th:first-child { text-align: left; }
+
+#roll-mtm-grid td {
+  text-align: right;
+  padding: .4rem .6rem;
+  border-bottom: 1px solid #21262d;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: .75rem;
+  white-space: nowrap;
+}
+
+#roll-mtm-grid td:first-child {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#roll-mtm-grid tr:hover { background: #1c2333; }
+#roll-mtm-grid tr.roll-mtm-spot-row { background: rgba(63,185,80,0.1); }
+
+/* Dual-column Base/Rolled sub-headers */
+#roll-mtm-grid thead tr:nth-child(2) th { top: 30px; }
+.roll-mtm-base-hdr { color: #484f58; font-size: .68rem; }
+.roll-mtm-rolled-hdr { color: var(--accent); font-size: .68rem; }
+.roll-mtm-base-cell { color: #484f58 !important; }
+.roll-mtm-rolled-cell.mtm-pos { color: var(--green); }
+.roll-mtm-rolled-cell.mtm-neg { color: var(--red); }
+
+/* Separator between horizon groups */
+#roll-mtm-grid th[colspan] {
+  text-align: center;
+  border-left: 1px solid var(--border);
+}
+#roll-mtm-grid th[colspan]:first-of-type { border-left: none; }
+#roll-mtm-grid .roll-mtm-rolled-cell { border-right: 1px solid #21262d; }

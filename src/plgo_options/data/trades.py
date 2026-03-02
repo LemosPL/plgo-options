@@ -27,6 +27,11 @@ TRADE_COLUMNS = [
 ]
 
 _DEFAULT_PATH = (
+    Path.home() / "Downloads" / "ETH - Dashboard Risk+PnL Improvement Proposal (9).xlsx"
+)
+
+# Legacy location as fallback
+_FALLBACK_PATH = (
     Path(__file__).resolve().parents[3]
     / "data"
     / "ETH - Dashboard Risk+PnL Improvement Proposal.xlsx"
@@ -51,7 +56,16 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
     """
     fp = file_path or _DEFAULT_PATH
 
-    wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+    # Try default path first; fall back to Downloads copy if locked or missing
+    try:
+        wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+    except (FileNotFoundError, PermissionError, OSError):
+        if _FALLBACK_PATH.exists():
+            fp = _FALLBACK_PATH
+            wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+        else:
+            raise
+
     ws = wb["Trades"]
     rows = ws.iter_rows(values_only=True)
 

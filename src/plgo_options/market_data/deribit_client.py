@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -76,6 +77,29 @@ class DeribitClient:
             vega=greeks.get("vega"),
             rho=greeks.get("rho"),
         )
+
+    async def get_option_tickers_batch(
+        self,
+        instrument_names: list[str],
+        concurrency: int = 10,
+    ) -> dict[str, OptionTicker | None]:
+        """Fetch tickers for multiple instruments concurrently.
+
+        Returns a dict mapping instrument_name → OptionTicker (or None if
+        the instrument is expired / errored).
+        """
+        sem = asyncio.Semaphore(concurrency)
+        results: dict[str, OptionTicker | None] = {}
+
+        async def _fetch_one(name: str) -> None:
+            async with sem:
+                try:
+                    results[name] = await self.get_option_ticker(name)
+                except Exception:
+                    results[name] = None
+
+        await asyncio.gather(*[_fetch_one(n) for n in instrument_names])
+        return results
 
     async def get_all_option_tickers(
         self,

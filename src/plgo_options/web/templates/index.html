@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PLGO Options — ETH Pricer</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -20,27 +21,21 @@
   <!-- ============================================================ -->
   <aside id="controls">
 
-    <!-- Strategy Templates -->
+    <!-- Expiry + Templates combined -->
     <section class="card">
-      <h2>Strategy Templates</h2>
-      <div class="btn-grid">
+      <h2>Expiry &amp; Strategy</h2>
+      <select id="expiry-select" style="margin-bottom:.75rem">
+        <option value="">Loading…</option>
+      </select>
+      <div class="btn-grid btn-grid-3">
         <button class="btn-template" data-strategy="long_call">Long Call</button>
         <button class="btn-template" data-strategy="long_put">Long Put</button>
-        <button class="btn-template" data-strategy="bull_call_spread">Bull Call Spread</button>
-        <button class="btn-template" data-strategy="bear_put_spread">Bear Put Spread</button>
+        <button class="btn-template" data-strategy="bull_call_spread">Bull Spread</button>
+        <button class="btn-template" data-strategy="bear_put_spread">Bear Spread</button>
         <button class="btn-template" data-strategy="straddle">Straddle</button>
         <button class="btn-template" data-strategy="strangle">Strangle</button>
         <button class="btn-template" data-strategy="iron_condor">Iron Condor</button>
       </div>
-    </section>
-
-    <!-- Expiry picker -->
-    <section class="card">
-      <h2>Expiry</h2>
-      <select id="expiry-select">
-        <option value="">Loading…</option>
-      </select>
-      <button id="btn-load-chain" class="btn-primary" disabled>Load Option Chain</button>
     </section>
 
     <!-- Legs table -->
@@ -48,57 +43,53 @@
       <h2>Strategy Legs</h2>
       <table id="legs-table">
         <colgroup>
-          <col class="col-side">
-          <col class="col-type">
+          <col class="col-expiry">
+          <col class="col-side-type">
           <col class="col-strike">
-          <col class="col-premium">
           <col class="col-qty">
           <col class="col-remove">
         </colgroup>
         <thead>
           <tr>
-            <th>Side</th>
-            <th>Type</th>
+            <th>Expiry</th>
+            <th>Side / Type</th>
             <th>Strike</th>
-            <th>Premium</th>
             <th>Qty</th>
             <th></th>
           </tr>
         </thead>
-        <tbody id="legs-body">
-          <!-- rows added dynamically -->
-        </tbody>
+        <tbody id="legs-body"></tbody>
       </table>
       <button id="btn-add-leg" class="btn-secondary">+ Add Leg</button>
     </section>
 
-    <!-- Spot range -->
+    <!-- Spot range + actions -->
     <section class="card">
       <h2>Spot Range</h2>
-      <div class="form-row">
+      <div class="form-row" style="margin-bottom:.75rem">
         <label>Min <input type="number" id="spot-min" value="1000"></label>
         <label>Max <input type="number" id="spot-max" value="6000"></label>
       </div>
+      <div class="btn-stack">
+        <button id="btn-replicate" class="btn-primary btn-large btn-deribit">
+          Price via Vol Surface
+        </button>
+        <button id="btn-compute" class="btn-secondary">Payoff at Expiry (manual premiums)</button>
+      </div>
     </section>
-
-    <!-- Action buttons -->
-    <div class="btn-stack">
-      <button id="btn-compute" class="btn-primary btn-large">Payoff at Expiry (manual premiums)</button>
-      <button id="btn-replicate" class="btn-primary btn-large btn-deribit">
-        Price via Deribit Vol Surface
-      </button>
-    </div>
 
     <!-- Replication result: per-leg details -->
     <section class="card" id="repl-results-section" style="display:none">
-      <h2>Deribit Replication Pricing</h2>
+      <h2>Pricing Results</h2>
       <div id="repl-summary" class="result-box">—</div>
       <table id="repl-table">
         <thead>
           <tr>
+            <th>Expiry</th>
             <th>Side</th>
             <th>Type</th>
             <th>Strike</th>
+            <th>DTE</th>
             <th>IV %</th>
             <th>BS Prem (ETH)</th>
             <th>BS Prem (USD)</th>
@@ -108,6 +99,9 @@
       </table>
       <button id="btn-apply-repl" class="btn-secondary">Apply premiums to legs</button>
     </section>
+
+    <!-- Option Chain button -->
+    <button id="btn-load-chain" class="btn-secondary" disabled style="width:100%">Load Option Chain</button>
 
   </aside>
 
@@ -120,7 +114,8 @@
     <nav id="tab-bar">
       <button class="tab-btn active" data-tab="pricing">Pricing</button>
       <button class="tab-btn" data-tab="positions">Positions / Risk</button>
-      <button class="tab-btn" data-tab="rolls">Roll Pricing</button>
+      <button class="tab-btn" data-tab="portfolio">Portfolio P&L</button>
+      <button class="tab-btn" data-tab="roll">Roll Analysis</button>
     </nav>
 
     <!-- ── Pricing tab (existing content) ── -->
@@ -238,44 +233,288 @@
       </button>
     </div>
 
-    <!-- ── Roll Pricing tab ── -->
-    <div id="tab-rolls" class="tab-pane">
+    <!-- ── Portfolio P&L tab ── -->
+    <div id="tab-portfolio" class="tab-pane">
 
-      <!-- Sheet selector -->
-      <section class="card">
-        <h2>Calendar Rolls</h2>
-        <div class="form-row" style="align-items:end; margin-bottom:.75rem">
-          <label style="flex:2">
-            Sheet
-            <select id="roll-sheet-select">
-              <option value="">Loading…</option>
-            </select>
-          </label>
-          <button id="btn-load-rolls" class="btn-primary" style="flex:1">Load</button>
+      <!-- Summary banner -->
+      <section class="card" id="portfolio-summary">
+        <h2>Portfolio MTM Summary</h2>
+        <div class="risk-grid">
+          <div class="risk-metric">
+            <span class="risk-label">ETH Spot</span>
+            <span class="risk-value" id="pf-spot">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Trades</span>
+            <span class="risk-value" id="pf-count">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Selected</span>
+            <span class="risk-value" id="pf-selected-count">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Entry Premium</span>
+            <span class="risk-value" id="pf-entry-prem">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Portfolio MTM</span>
+            <span class="risk-value" id="pf-remaining-prem">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Baseline MTM</span>
+            <span class="risk-value" id="pf-baseline-mtm">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Scenario MTM</span>
+            <span class="risk-value" id="pf-scenario-mtm">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Scenario vs Baseline</span>
+            <span class="risk-value" id="pf-delta-mtm">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">&Delta;</span>
+            <span class="risk-value" id="pf-total-delta">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">&Gamma;</span>
+            <span class="risk-value" id="pf-total-gamma">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">&Theta;</span>
+            <span class="risk-value" id="pf-total-theta">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">&nu;</span>
+            <span class="risk-value" id="pf-total-vega">--</span>
+          </div>
         </div>
       </section>
 
-      <!-- Roll data table -->
-      <section class="card" id="rolls-table-section" style="display:none">
-        <h2>Roll Data — <span id="roll-sheet-name"></span> <small id="roll-row-count"></small></h2>
+      <!-- Payoff profile chart -->
+      <div id="portfolio-payoff-chart" class="chart-container" style="min-height:650px"></div>
+
+      <!-- Filter toolbar + actions -->
+      <section class="card">
+        <div class="pf-toolbar">
+          <label class="pf-filter-label">Expiry
+            <select id="pf-filter-expiry"><option value="">All</option></select>
+          </label>
+          <label class="pf-filter-label">Type
+            <select id="pf-filter-type">
+              <option value="">All</option>
+              <option value="C">Call</option>
+              <option value="P">Put</option>
+            </select>
+          </label>
+          <label class="pf-filter-label">Side
+            <select id="pf-filter-side">
+              <option value="">All</option>
+              <option value="Long">Long</option>
+              <option value="Short">Short</option>
+            </select>
+          </label>
+          <div class="pf-toolbar-spacer"></div>
+          <button id="btn-pf-expiring-10d" class="btn-secondary" style="width:auto;margin:0">Expiring &lt;10d</button>
+          <button id="btn-pf-add-trade" class="btn-secondary" style="width:auto;margin:0">+ Add Trade</button>
+          <button id="btn-pf-remove-selected" class="btn-secondary" style="width:auto;margin:0">Remove Selected</button>
+          <button id="btn-pf-select-all" class="btn-secondary" style="width:auto;margin:0">Select All</button>
+          <button id="btn-pf-deselect-all" class="btn-secondary" style="width:auto;margin:0">Deselect All</button>
+          <button id="btn-pf-export-xlsx" class="btn-primary" style="width:auto">Export Excel</button>
+          <button id="btn-refresh-portfolio" class="btn-primary" style="width:auto">Refresh</button>
+        </div>
+      </section>
+
+      <!-- Trades table with checkboxes -->
+      <section class="card">
+        <h2>Trades <small id="pf-table-count"></small></h2>
         <div class="chain-wrapper" style="max-height:500px">
-          <table id="rolls-table">
-            <thead id="rolls-thead"></thead>
-            <tbody id="rolls-body"></tbody>
+          <table id="pf-positions-table">
+            <thead>
+              <tr>
+                <th style="width:32px"><input type="checkbox" id="pf-check-all" checked></th>
+                <th class="sortable" data-col="counterparty" style="text-align:left">Counterparty</th>
+                <th class="sortable" data-col="trade_id">ID</th>
+                <th class="sortable" data-col="trade_date">Trade Date</th>
+                <th class="sortable" data-col="side_raw" style="text-align:left">Buy/Sell</th>
+                <th class="sortable" data-col="option_type" style="text-align:left">Type</th>
+                <th class="sortable" data-col="instrument" style="text-align:left">Instrument</th>
+                <th class="sortable" data-col="expiry">Expiry</th>
+                <th class="sortable" data-col="days_remaining">DTE</th>
+                <th class="sortable" data-col="strike">Strike</th>
+                <th class="sortable" data-col="pct_otm_live" title="Live % OTM vs current spot">% OTM</th>
+                <th class="sortable" data-col="qty">ETH Qty</th>
+                <th class="sortable" data-col="premium_per">Entry Prem</th>
+                <th class="sortable" data-col="premium_usd">Entry USD</th>
+                <th class="sortable" data-col="iv_pct" title="Deribit implied vol">IV%</th>
+                <th class="sortable" data-col="delta" title="Delta">&Delta;</th>
+                <th class="sortable" data-col="gamma" title="Gamma">&Gamma;</th>
+                <th class="sortable" data-col="theta" title="Theta">&Theta;</th>
+                <th class="sortable" data-col="vega" title="Vega">&nu;</th>
+                <th class="sortable" data-col="current_mtm" title="Mark-to-market value (qty × mark)">MTM</th>
+                <th style="width:40px;text-align:center">Roll</th>
+                <th style="width:65px">New DTE</th>
+                <th title="Current Deribit mark price per contract (USD)">Cur Mark</th>
+                <th title="BS-modeled mark at new DTE using current IV">New Mark</th>
+                <th title="Implied vol used for new mark calculation">IV Used</th>
+                <th class="sortable" data-col="roll_cost" title="Cost to roll: net_qty × (cur_mark − new_mark)">Roll Cost</th>
+              </tr>
+            </thead>
+            <tbody id="pf-positions-body"></tbody>
           </table>
         </div>
       </section>
 
-      <button id="btn-refresh-rolls" class="btn-primary" style="margin-top:.5rem">
-        ↻ Refresh from Excel
-      </button>
+      <!-- Portfolio MTM Matrix: Spot (rows) × Time Horizon (columns) -->
+      <section class="card">
+        <h2>Portfolio MTM Matrix — Spot Price vs Time Horizon</h2>
+        <div class="chain-wrapper">
+          <table id="pf-mtm-grid">
+            <thead id="pf-mtm-grid-thead"></thead>
+            <tbody id="pf-mtm-grid-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ── Roll Analysis tab ── -->
+    <div id="tab-roll" class="tab-pane">
+
+
+      <!-- Roll controls toolbar -->
+      <section class="card">
+        <div class="pf-toolbar">
+          <label class="pf-filter-label">Expiry
+            <select id="roll-filter-expiry"><option value="">All</option></select>
+          </label>
+          <label class="pf-filter-label">Type
+            <select id="roll-filter-type">
+              <option value="">All</option>
+              <option value="C">Call</option>
+              <option value="P">Put</option>
+            </select>
+          </label>
+          <label class="pf-filter-label">Side
+            <select id="roll-filter-side">
+              <option value="">All</option>
+              <option value="Long">Long</option>
+              <option value="Short">Short</option>
+            </select>
+          </label>
+          <label class="pf-filter-label">Target Expiry
+            <select id="roll-target-expiry" style="width:auto;min-width:120px;margin-bottom:0">
+              <option value="">Loading…</option>
+            </select>
+          </label>
+          <div class="pf-toolbar-spacer"></div>
+          <button id="btn-roll-expiring-10d" class="btn-secondary" style="width:auto;margin:0">Expiring &lt;10d</button>
+          <button id="btn-roll-select-all" class="btn-secondary" style="width:auto;margin:0">Select All</button>
+          <button id="btn-roll-deselect-all" class="btn-secondary" style="width:auto;margin:0">Deselect All</button>
+          <button id="btn-roll-compute" class="btn-primary" style="width:auto">Compute Roll</button>
+          <button id="btn-roll-export-xlsx" class="btn-primary" style="width:auto">Export Excel</button>
+          <button id="btn-roll-refresh" class="btn-primary" style="width:auto">Refresh</button>
+        </div>
+      </section>
+
+      <!-- Trades selection table -->
+      <section class="card">
+        <h2>Select Legs to Roll <small id="roll-table-count"></small></h2>
+        <div class="chain-wrapper" style="max-height:400px">
+          <table id="roll-trades-table">
+            <thead>
+              <tr>
+                <th style="width:40px" title="Include in portfolio view"><span class="roll-col-label">Incl</span><br><input type="checkbox" id="roll-include-all" checked></th>
+                <th style="width:40px" title="Select for rolling"><span class="roll-col-label">Roll</span><br><input type="checkbox" id="roll-check-all"></th>
+                <th class="sortable" data-col="instrument" style="text-align:left">Instrument</th>
+                <th class="sortable" data-col="side_raw" style="text-align:left">Side</th>
+                <th class="sortable" data-col="option_type" style="text-align:left">Type</th>
+                <th class="sortable" data-col="strike">Strike</th>
+                <th class="sortable" data-col="expiry">Expiry</th>
+                <th class="sortable" data-col="days_remaining">DTE</th>
+                <th class="sortable" data-col="net_qty">Net Qty</th>
+                <th class="sortable" data-col="mark_price_usd">Cur Mark</th>
+                <th class="sortable" data-col="iv_pct">IV%</th>
+                <th class="sortable" data-col="current_mtm">MTM</th>
+                <th style="width:120px">New Expiry</th>
+                <th style="width:75px">New Strike</th>
+                <th style="width:65px">New Qty</th>
+                <th>New Mark</th>
+                <th>IV Used</th>
+                <th>Roll Cost</th>
+              </tr>
+            </thead>
+            <tbody id="roll-trades-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Roll results -->
+      <section class="card" id="roll-results-section" style="display:none">
+        <h2>Roll Results</h2>
+
+        <div class="risk-grid" style="margin-bottom:1rem">
+          <div class="risk-metric">
+            <span class="risk-label">Legs Selected</span>
+            <span class="risk-value" id="roll-legs-count">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Target DTE</span>
+            <span class="risk-value" id="roll-target-dte-display">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Total Close Value</span>
+            <span class="risk-value" id="roll-total-close">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Total Open Value</span>
+            <span class="risk-value" id="roll-total-open">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Net Roll Cost</span>
+            <span class="risk-value" id="roll-net-cost">--</span>
+          </div>
+          <div class="risk-metric">
+            <span class="risk-label">Direction</span>
+            <span class="risk-value" id="roll-direction">--</span>
+          </div>
+        </div>
+
+        <div class="chain-wrapper" style="max-height:400px">
+          <table id="roll-results-table">
+            <thead id="roll-results-thead">
+            </thead>
+            <tbody id="roll-results-body"></tbody>
+            <tfoot id="roll-results-foot"></tfoot>
+          </table>
+        </div>
+      </section>
+
+      <!-- Roll payoff chart -->
+      <div id="roll-chart-controls" class="card" style="display:none;padding:.6rem 1rem">
+        <label style="font-size:.8rem;color:var(--muted);cursor:pointer;margin-right:1.5rem">
+          <input type="checkbox" id="roll-show-baseline" checked style="accent-color:#484f58;margin-right:.3rem">Baseline
+        </label>
+        <label style="font-size:.8rem;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="roll-show-scenario" checked style="accent-color:var(--accent);margin-right:.3rem">Scenario
+        </label>
+      </div>
+      <div id="roll-payoff-chart" class="chart-container" style="display:none;min-height:650px"></div>
+
+      <!-- Roll MTM Matrix -->
+      <section class="card" id="roll-mtm-section" style="display:none">
+        <h2>Portfolio MTM Matrix — Baseline vs Rolled</h2>
+        <div class="chain-wrapper">
+          <table id="roll-mtm-grid">
+            <thead id="roll-mtm-grid-thead"></thead>
+            <tbody id="roll-mtm-grid-body"></tbody>
+          </table>
+        </div>
+      </section>
+
     </div>
 
   </div>
-
-<footer>
-  <p>Market data from <a href="https://www.deribit.com" target="_blank">Deribit</a> public API · Prices in ETH</p>
-</footer>
 
 <script src="/static/app.js"></script>
 </body>
