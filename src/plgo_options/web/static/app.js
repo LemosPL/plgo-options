@@ -4842,3 +4842,274 @@ document.getElementById("btn-sb-export-xlsx").addEventListener("click", () => {
 
 // ─── Go! ────────────────────────────────────────────────────
 init();
+
+/* ================================================================
+   OPTIMIZER V2 TAB
+   ================================================================ */
+
+let optv2Data = null;
+
+document.getElementById("btn-load-optv2").addEventListener("click", async () => {
+  const $btn = document.getElementById("btn-load-optv2");
+  $btn.classList.add("loading");
+  $btn.textContent = "Loading…";
+
+  try {
+    optv2Data = await get("/api/portfolio/pnl");
+    optv2RenderAll();
+    document.getElementById("btn-run-optv2").disabled = false;
+  } catch (e) {
+    console.error("Optimizer v2: failed to load portfolio:", e);
+    alert("Failed to load portfolio data — check console.\n" + e.message);
+  } finally {
+    $btn.classList.remove("loading");
+    $btn.textContent = "Load Risk Profile";
+  }
+});
+
+const OPTV2_HORIZONS = [0, 16, 30, 60, 90];
+
+function optv2RenderAll() {
+  if (!optv2Data) return;
+
+  document.getElementById("optv2-greeks-section").style.display = "";
+  document.getElementById("optv2-payoff-section").style.display = "";
+  document.getElementById("optv2-matrix-section").style.display = "";
+
+  optv2RenderGreeks();
+  optv2RenderPayoff();
+  optv2RenderMatrix();
+}
+
+/* ── Greeks summary ─────────────────────────────────────────── */
+function optv2RenderGreeks() {
+  const t = optv2Data.totals;
+  document.getElementById("optv2-total-delta").textContent  = optv2Fmt(t.portfolio_delta, 2);
+  document.getElementById("optv2-total-gamma").textContent  = optv2Fmt(t.portfolio_gamma, 4);
+  document.getElementById("optv2-total-theta").textContent  = optv2Fmt(t.portfolio_theta, 2);
+  document.getElementById("optv2-total-vega").textContent   = optv2Fmt(t.portfolio_vega, 2);
+  document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt(t.current_total_mtm, 2);
+  document.getElementById("optv2-eth-spot").textContent     = "$" + optv2Fmt(optv2Data.eth_spot, 2);
+}
+
+/* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
+function optv2RenderPayoff() {
+  const spots = optv2Data.spot_ladder;
+  const positions = optv2Data.positions;
+  const S0 = optv2Data.eth_spot;
+
+  // Compute log-moneyness: ln(K / S0)
+  const logM = spots.map(s => Math.log(s / S0));
+
+  // Only show ticks at valid data points: drop any generated in extrapolation regions
+  const visibleIdx = [];
+  for (let i = 0; i < spots.length; i++) {
+    let hasData = false;
+    for (const h of OPTV2_HORIZONS) {
+      if (positions[0].payoff_by_horizon[h] && positions[0].payoff_by_horizon[h][i] != null) {
+        hasData = true; break;
+      }
+    }
+    if (hasData) visibleIdx.push(i);
+  }
+
+  // Build strike tick labels — spacing proportional to abs(log-moneyness)
+  // Near ATM (small |lm|) → dense ticks;  in wings (large |lm|) → sparse ticks
+  const tickVals = [];
+  const tickTexts = [];
+  const MIN_LM_GAP = 0.018;   // minimum log-moneyness gap between consecutive ticks
+  const LM_GAP_SCALE = 0.12;  // how fast gaps grow with distance from ATM
+
+  let lastTickLM = -Infinity;
+  for (const i of visibleIdx) {
+    const lm = logM[i];
+    const absLM = Math.abs(lm);
+
+    // Required gap grows linearly with distance from ATM:
+    //   gap(lm) = MIN_LM_GAP + LM_GAP_SCALE * |lm|
+    // This means at ATM (|lm|≈0) we get a tick every ~0.018 in lm-space (~1.8%)
+    // and at |lm|=0.5 we need a gap of ~0.078 (~8%) between ticks
+    const requiredGap = MIN_LM_GAP + LM_GAP_SCALE * absLM;
+
+    if (lm - lastTickLM >= requiredGap) {
+      // Snap to a "round" strike for clean labels
+      const s = spots[i];
+      const roundTo = absLM < 0.08 ? 100 : absLM < 0.20 ? 200 : 500;
+      if (s % roundTo === 0) {
+        tickVals.push(lm);
+        tickTexts.push("$" + s.toLocaleString());
+        lastTickLM = lm;
+      }
+    }
+  }
+
+  const horizonColors = {
+    0:  "#4fc3f7",  // cyan — Now
+    16: "#ba68c8",  // purple
+    30: "#ffb74d",  // orange
+    60: "#81c784",  // green
+    90: "#e57373",  // red
+  };
+
+  const traces = [];
+
+  // For each horizon, aggregate payoff across all positions
+  for (const h of OPTV2_HORIZONS) {
+    const hKey = String(h);
+    const totalPayoff = new Array(spots.length).fill(0);
+    let hasData = false;
+
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon[hKey];
+      if (curve) {
+        hasData = true;
+        for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i];
+      }
+    });
+
+    if (!hasData) continue;
+
+    traces.push({
+      x: logM,
+      y: totalPayoff,
+      mode: "lines",
+      name: h === 0 ? "Now (0d)" : `T+${h}d`,
+      line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 },
+    });
+  }
+
+  // Zero line
+  traces.push({
+    x: [logM[0], logM[logM.length - 1]],
+    y: [0, 0],
+    mode: "lines",
+    name: "Break-even",
+    line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 },
+    showlegend: false,
+  });
+
+  // Current spot marker (log-moneyness = 0 by definition)
+  const spotPayoff0 = (() => {
+    const totalPayoff = new Array(spots.length).fill(0);
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon["0"];
+      if (curve) for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i];
+    });
+    return totalPayoff[optv2NearestIdx(spots, S0)];
+  })();
+
+  traces.push({
+    x: [0],
+    y: [spotPayoff0],
+    mode: "markers",
+    name: `Current Spot ($${S0.toLocaleString()})`,
+    marker: { color: "#ffca28", size: 10, symbol: "diamond" },
+  });
+
+  const layout = {
+    title: { text: "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
+    xaxis: {
+      title: "Log-Moneyness  ln(K / Spot)",
+      tickvals: tickVals,
+      ticktext: tickTexts,
+      tickangle: -45,
+      color: "#8b949e",
+      gridcolor: "#21262d",
+      zerolinecolor: "#ffca28",
+      zerolinewidth: 1.5,
+    },
+    yaxis: {
+      title: "MTM (USD)",
+      tickformat: ",.0f",
+      zeroline: true,
+      zerolinecolor: "#f85149",
+      zerolinewidth: 1,
+      color: "#8b949e",
+      gridcolor: "#21262d",
+    },
+    paper_bgcolor: "#161b22",
+    plot_bgcolor: "#0d1117",
+    font: { color: "#e0e0e0" },
+    legend: {
+      font: { color: "#8b949e", size: 11 },
+      orientation: "h",
+      y: -0.22,
+    },
+    margin: { t: 50, b: 80, l: 80, r: 30 },
+  };
+
+  Plotly.newPlot("optv2-payoff-chart", traces, layout, { responsive: true });
+}
+
+/* ── Scenario matrix: spot (rows) × horizon (columns) ──────── */
+function optv2RenderMatrix() {
+  const spots    = optv2Data.spot_ladder;
+  const positions = optv2Data.positions;
+  const ethSpot  = optv2Data.eth_spot;
+  const step     = spots.length > 1 ? spots[1] - spots[0] : 100;
+
+  // Header
+  const $thead = document.getElementById("optv2-matrix-thead");
+  $thead.innerHTML = "";
+  const headRow = document.createElement("tr");
+  headRow.innerHTML = "<th>ETH Spot</th>";
+  OPTV2_HORIZONS.forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h === 0 ? "Now" : `${h}d`;
+    headRow.appendChild(th);
+  });
+  $thead.appendChild(headRow);
+
+  // Body
+  const $tbody = document.getElementById("optv2-matrix-tbody");
+  $tbody.innerHTML = "";
+
+  spots.forEach((s, si) => {
+    // Only show rows at $500 increments
+    if (s % 500 !== 0) return;
+
+    const tr = document.createElement("tr");
+    if (Math.abs(s - ethSpot) < step / 2) tr.classList.add("row-highlight");
+
+    const tdSpot = document.createElement("td");
+    tdSpot.textContent = "$" + s.toLocaleString();
+    tdSpot.style.fontWeight = "600";
+    tr.appendChild(tdSpot);
+
+    OPTV2_HORIZONS.forEach(h => {
+      const hKey = String(h);
+      let cellVal = 0;
+      positions.forEach(p => {
+        const curve = p.payoff_by_horizon[hKey];
+        if (curve && curve[si] !== undefined) cellVal += curve[si];
+      });
+
+      const td = document.createElement("td");
+      td.textContent = Math.round(cellVal).toLocaleString();
+      td.style.textAlign = "right";
+      if (cellVal > 0)  td.style.color = "#66bb6a";
+      if (cellVal < 0)  td.style.color = "#ef5350";
+      tr.appendChild(td);
+    });
+
+    $tbody.appendChild(tr);
+  });
+}
+
+/* ── Helpers (namespaced to avoid collisions) ───────────────── */
+function optv2Fmt(v, decimals) {
+  if (v == null || isNaN(v)) return "—";
+  return Number(v).toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
+
+function optv2NearestIdx(arr, val) {
+  let best = 0, bestDist = Math.abs(arr[0] - val);
+  for (let i = 1; i < arr.length; i++) {
+    const d = Math.abs(arr[i] - val);
+    if (d < bestDist) { best = i; bestDist = d; }
+  }
+  return best;
+}

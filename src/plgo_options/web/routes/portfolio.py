@@ -26,7 +26,7 @@ SPOT_LADDER = list(range(500, 7100, 100))
 MATRIX_HORIZONS = [30, 45, 60, 90, 120, 150, 180, 270, 360]
 
 # Payoff chart horizons (days forward)
-CHART_HORIZONS = [30, 60, 90, 150, 365]
+CHART_HORIZONS = [0, 16, 30, 60, 90]
 
 DEFAULT_IV = 0.80  # 80% fallback
 
