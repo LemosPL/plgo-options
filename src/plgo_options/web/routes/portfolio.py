@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException
 import numpy as np
 from scipy.stats import norm
 
-from plgo_options.data.trades import read_eth_trades
+from plgo_options.data.database import get_db
+from plgo_options.data.trade_repository import list_trades
 from plgo_options.pricing.options import bs_price
 from plgo_options.pricing.vol_surface import VolSmile
 from plgo_options.market_data.deribit_client import DeribitClient
@@ -160,9 +161,31 @@ def _match_expiry(pos_expiry: str, deribit_map: dict[str, date]) -> str | None:
 @router.get("/pnl")
 async def portfolio_pnl():
     """Return per-trade MTM across spot ladder and time horizons."""
-    # 1. Read raw trades
+    # 1. Read trades from database
     try:
-        trades = read_eth_trades()
+        db = await get_db()
+        db_trades = await list_trades(db, include_expired=True, include_deleted=False)
+        # Map DB fields to legacy column names the enrichment loop expects
+        trades = []
+        for t in db_trades:
+            trades.append({
+                "Counterparty": t["counterparty"],
+                "ID": t["id"],
+                "Initial Trade Date": t["trade_date"],
+                "Buy / Sell / Unwind": t["side"],
+                "Option Type": t["option_type"],
+                "Trade_ID": t.get("trade_id", ""),
+                "Option Expiry Date": t["expiry"],
+                "Days Remaining to Expiry": 0,  # computed live
+                "Strike": t["strike"],
+                "Ref. Spot Price": t["ref_spot"],
+                "% OTM": t["pct_otm"],
+                "ETH Options": t["qty"],
+                "$ Notional (mm)": t["notional_mm"],
+                "Premium per Contract": t["premium_per"],
+                "Premium USD": t["premium_usd"],
+                "_db_status": t["status"],
+            })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read trades: {e}")
 
@@ -354,7 +377,7 @@ async def portfolio_pnl():
         expiry_display = expiry_raw.split("T")[0] if "T" in expiry_raw else expiry_raw
 
         enriched.append({
-            "id": idx,
+            "id": t.get("ID", idx),
             "counterparty": counterparty,
             "trade_id": trade_id,
             "trade_date": trade_date,
@@ -385,6 +408,7 @@ async def portfolio_pnl():
             "notional_live": notional_live,
             "mtm_by_horizon": mtm_horizon,
             "payoff_by_horizon": trade_payoff,
+            "db_status": t.get("_db_status", "active"),
         })
 
     if not enriched:

@@ -124,6 +124,9 @@ async function init() {
 
   renderLegs();
   drawEmptyChart();
+
+  // Load trade management on startup (it's the default page)
+  tmLoad();
 }
 
 // ─── Payoff chart ───────────────────────────────────────────
@@ -666,49 +669,523 @@ document.querySelectorAll(".btn-template").forEach(btn => {
   el.addEventListener("keydown", e => { if (e.key === "Enter") computePayoff(); });
 });
 
-// ─── Tab switching ──────────────────────────────────────────
-document.querySelectorAll(".tab-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    // Deactivate all
-    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-    document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("active"));
+// ─── Sidebar page switching ─────────────────────────────────
+document.querySelectorAll(".nav-item").forEach(item => {
+  item.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item").forEach(i => i.classList.remove("active"));
+    document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+    item.classList.add("active");
+    const page = document.getElementById(`page-${item.dataset.page}`);
+    if (page) page.classList.add("active");
 
-    // Activate selected
-    btn.classList.add("active");
-    const pane = document.getElementById(`tab-${btn.dataset.tab}`);
-    pane.classList.add("active");
+    const pg = item.dataset.page;
 
-    // Full-width layout for portfolio and positions tabs
-    const $main = document.querySelector("main");
-    const fullWidthTabs = ["portfolio", "positions", "roll", "optimizer", "structurer"];
-    if (fullWidthTabs.includes(btn.dataset.tab)) {
-      $main.classList.add("portfolio-active");
-    } else {
-      $main.classList.remove("portfolio-active");
-    }
-
-    // Lazy-load positions on first visit
-    if (btn.dataset.tab === "positions" && !positionsLoaded) {
-      loadPositions();
-    }
-
-    // Lazy-load portfolio on first visit
-    if (btn.dataset.tab === "portfolio" && !portfolioLoaded) {
-      loadPortfolio();
-    }
-
-    // Lazy-load roll analysis on first visit
-    if (btn.dataset.tab === "roll" && !rollLoaded) {
-      rollInit();
-    }
-    // Lazy-load optimizer on first visit
-    if (btn.dataset.tab === "optimizer" && !optLoaded) {
-      optInit();
-    }
-    if (btn.dataset.tab === "structurer" && !sbLoaded) {
-      sbInit();
-    }
+    // Lazy-load pages
+    if (pg === "trades" && !tmLoaded) tmLoad();
+    if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
+    if (pg === "roll" && !rollLoaded) rollInit();
+    if (pg === "structurer" && !sbLoaded) sbInit();
   });
+});
+
+// ─── Sub-tab switching (Roll & Optimizer page) ──────────────
+document.querySelectorAll(".sub-tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const parent = btn.closest(".page");
+    parent.querySelectorAll(".sub-tab-btn").forEach(b => b.classList.remove("active"));
+    parent.querySelectorAll(".sub-tab-pane").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    const pane = document.getElementById(`subtab-${btn.dataset.subtab}`);
+    if (pane) pane.classList.add("active");
+
+    // Lazy-load optimizer
+    if (btn.dataset.subtab === "optimizer" && !optLoaded) optInit();
+  });
+});
+
+// ─── Theme toggle ───────────────────────────────────────────
+(function initTheme() {
+  const saved = localStorage.getItem("plgo-theme");
+  if (saved) document.documentElement.dataset.theme = saved;
+  updateThemeIcons();
+})();
+
+document.getElementById("btn-theme-toggle").addEventListener("click", () => {
+  const current = document.documentElement.dataset.theme;
+  const next = current === "light" ? "dark" : "light";
+  if (next === "dark") {
+    delete document.documentElement.dataset.theme;
+  } else {
+    document.documentElement.dataset.theme = next;
+  }
+  localStorage.setItem("plgo-theme", next);
+  updateThemeIcons();
+});
+
+function updateThemeIcons() {
+  const isLight = document.documentElement.dataset.theme === "light";
+  document.getElementById("icon-moon").style.display = isLight ? "none" : "block";
+  document.getElementById("icon-sun").style.display = isLight ? "block" : "none";
+}
+
+// ─── Trade Management ───────────────────────────────────────
+let tmTrades = [];
+let tmEnriched = [];
+let tmLoaded = false;
+let tmShowExpired = false;
+let tmSortCol = "expiry";
+let tmSortAsc = true;
+
+async function tmLoad() {
+  const tmBody = document.getElementById("tm-body");
+  tmBody.innerHTML = '<tr><td colspan="21" style="text-align:center;padding:2rem;color:var(--muted)">Loading trades...</td></tr>';
+
+  try {
+    // Fetch trades from DB
+    const includeExp = document.getElementById("tm-show-expired").checked;
+    const data = await get(`/api/trades/?include_expired=${includeExp}`);
+    tmTrades = data.trades || [];
+
+    // Fetch enriched data from portfolio endpoint for live Greeks/MTM
+    let enriched = [];
+    try {
+      const pfData = await get("/api/portfolio/pnl");
+      enriched = pfData.positions || [];
+      ethSpot = pfData.eth_spot;
+      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    } catch (e) {
+      console.warn("Could not fetch enriched data:", e);
+    }
+
+    // Merge DB trades with enriched data
+    tmEnriched = tmTrades.map(t => {
+      // Find matching enriched position by DB id
+      const match = enriched.find(e => e.id === t.id);
+      if (match) {
+        return { ...t, ...match, db_id: t.id, db_status: t.status };
+      }
+      // No enrichment — fill defaults
+      return {
+        ...t,
+        db_id: t.id,
+        db_status: t.status,
+        days_remaining: 0,
+        pct_otm_live: 0,
+        iv_pct: 0,
+        delta: null, gamma: null, theta: null, vega: null,
+        mark_price_usd: 0,
+        current_mtm: 0,
+      };
+    });
+
+    tmLoaded = true;
+    tmRender();
+  } catch (e) {
+    tmBody.innerHTML = `<tr><td colspan="21" style="text-align:center;padding:2rem;color:var(--red)">Error: ${e.message}</td></tr>`;
+  }
+}
+
+function tmRender() {
+  tmRenderTable();
+  tmRenderSummary();
+  tmRenderInsights();
+  tmUpdateBadge();
+}
+
+function tmRenderSummary() {
+  const active = tmEnriched.filter(t => t.db_status === "active");
+  const totalNotional = active.reduce((s, t) => s + (t.notional_mm || 0), 0);
+  const totalMtm = active.reduce((s, t) => s + (t.current_mtm || 0), 0);
+  const totalDelta = active.reduce((s, t) => s + ((t.delta || 0) * (t.net_qty || 0)), 0);
+  const totalGamma = active.reduce((s, t) => s + ((t.gamma || 0) * (t.net_qty || 0)), 0);
+  const totalTheta = active.reduce((s, t) => s + ((t.theta || 0) * (t.net_qty || 0)), 0);
+  const totalVega = active.reduce((s, t) => s + ((t.vega || 0) * (t.net_qty || 0)), 0);
+
+  document.getElementById("tm-count").textContent = active.length;
+
+  // Format notional: convert from raw to $mm with commas
+  const notionalRaw = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0) * (t.qty || 0) * (ethSpot || 0), 0);
+  const notionalMm = totalNotional;
+  const $notional = document.getElementById("tm-notional");
+  if (Math.abs(notionalMm) >= 1) {
+    $notional.textContent = `$${notionalMm.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
+  } else {
+    // Show in full USD if less than 1mm
+    const fullUsd = active.reduce((s, t) => s + Math.abs((t.notional_mm || 0) * 1e6), 0);
+    $notional.textContent = `$${fullUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
+
+  const $mtm = document.getElementById("tm-mtm");
+  $mtm.textContent = `$${totalMtm.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  $mtm.style.color = totalMtm >= 0 ? "var(--green)" : "var(--red)";
+
+  const $delta = document.getElementById("tm-delta");
+  $delta.textContent = totalDelta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $delta.style.color = totalDelta >= 0 ? "var(--green)" : "var(--red)";
+
+  const $gamma = document.getElementById("tm-gamma");
+  $gamma.textContent = totalGamma.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+
+  const $theta = document.getElementById("tm-theta");
+  $theta.textContent = totalTheta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $theta.style.color = totalTheta >= 0 ? "var(--green)" : "var(--red)";
+
+  const $vega = document.getElementById("tm-vega");
+  $vega.textContent = totalVega.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function tmRenderTable() {
+  const tbody = document.getElementById("tm-body");
+  let rows = [...tmEnriched];
+
+  // Filters
+  const fExpiry = document.getElementById("tm-filter-expiry").value;
+  const fType = document.getElementById("tm-filter-type").value;
+  const fSide = document.getElementById("tm-filter-side").value;
+  const fSearch = document.getElementById("tm-search").value.toLowerCase().trim();
+
+  if (fExpiry) rows = rows.filter(r => r.expiry === fExpiry);
+  if (fType) rows = rows.filter(r => r.option_type === fType);
+  if (fSide) rows = rows.filter(r => r.side === fSide);
+  if (fSearch) rows = rows.filter(r =>
+    (r.counterparty || "").toLowerCase().includes(fSearch) ||
+    (r.instrument || "").toLowerCase().includes(fSearch) ||
+    (r.trade_id || "").toLowerCase().includes(fSearch)
+  );
+
+  // Sort
+  rows.sort((a, b) => {
+    let va = a[tmSortCol], vb = b[tmSortCol];
+    if (va == null) va = "";
+    if (vb == null) vb = "";
+    if (typeof va === "number" && typeof vb === "number") return tmSortAsc ? va - vb : vb - va;
+    return tmSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+  });
+
+  // Populate expiry filter
+  const expiries = [...new Set(tmEnriched.map(t => t.expiry))].sort();
+  const expSel = document.getElementById("tm-filter-expiry");
+  const curExp = expSel.value;
+  expSel.innerHTML = '<option value="">All</option>';
+  expiries.forEach(e => {
+    const o = document.createElement("option");
+    o.value = e; o.textContent = e;
+    if (e === curExp) o.selected = true;
+    expSel.appendChild(o);
+  });
+
+  document.getElementById("tm-table-count").textContent = `(${rows.length})`;
+
+  const fmt = (v, d = 2) => v != null && v !== "" ? Number(v).toFixed(d) : "--";
+  const fmtK = (v) => v != null && v !== "" ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }) : "--";
+  const fmtMoney = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const fmtMm = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm` : "--";
+
+  tbody.innerHTML = rows.map(t => {
+    const isExpired = t.db_status === "expired";
+    const rowClass = isExpired ? "tm-row-expired" : "";
+    const statusClass = t.db_status === "active" ? "status-active" : t.db_status === "expired" ? "status-expired" : "status-deleted";
+    const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
+    const sideColor = (t.side || "").toLowerCase().includes("buy") || (t.side || "").toLowerCase().includes("long") ? "qty-long" : "qty-short";
+
+    return `<tr class="${rowClass}">
+      <td><span class="status-dot ${statusClass}"></span></td>
+      <td style="text-align:left">${t.counterparty || ""}</td>
+      <td>${t.trade_date || ""}</td>
+      <td style="text-align:left" class="${sideColor}">${t.side || ""}</td>
+      <td style="text-align:left">${t.option_type || ""}</td>
+      <td style="text-align:left">${t.instrument || ""}</td>
+      <td>${t.expiry || ""}</td>
+      <td>${t.days_remaining || 0}</td>
+      <td>${fmtK(t.strike)}</td>
+      <td>${fmt(t.pct_otm_live, 1)}%</td>
+      <td>${fmtK(t.qty)}</td>
+      <td>${fmtMm(t.notional_mm)}</td>
+      <td>${fmtMoney(t.premium_usd)}</td>
+      <td>${fmt(t.iv_pct, 1)}</td>
+      <td>${fmt(t.delta, 4)}</td>
+      <td>${fmt(t.gamma, 6)}</td>
+      <td>${fmt(t.theta, 4)}</td>
+      <td>${fmt(t.vega, 4)}</td>
+      <td>${fmtMoney(t.mark_price_usd)}</td>
+      <td class="${mtmColor}">${fmtMoney(t.current_mtm)}</td>
+      <td>
+        <div class="tm-actions">
+          <button class="tm-action-btn" onclick="tmEditTrade(${t.db_id})" title="Edit">&#9998;</button>
+          ${t.db_status === "active" ? `<button class="tm-action-btn btn-expire" onclick="tmExpireTrade(${t.db_id})" title="Expire">&#9201;</button>` : ""}
+          <button class="tm-action-btn btn-delete" onclick="tmDeleteTrade(${t.db_id})" title="Delete">&#10005;</button>
+          <button class="tm-action-btn" onclick="tmShowHistory(${t.db_id})" title="History">&#128336;</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+function tmRenderInsights() {
+  const container = document.getElementById("tm-insights");
+  const active = tmEnriched.filter(t => t.db_status === "active");
+  const insights = [];
+
+  // Upcoming expiries
+  const expiringSoon = active.filter(t => t.days_remaining > 0 && t.days_remaining <= 7);
+  const expiringMed = active.filter(t => t.days_remaining > 7 && t.days_remaining <= 14);
+  if (expiringSoon.length > 0) {
+    insights.push({
+      type: "danger",
+      title: "Expiring within 7 days",
+      body: expiringSoon.map(t => `${t.instrument} (${t.days_remaining}d)`).join(", ")
+    });
+  }
+  if (expiringMed.length > 0) {
+    insights.push({
+      type: "warning",
+      title: "Expiring within 14 days",
+      body: expiringMed.map(t => `${t.instrument} (${t.days_remaining}d)`).join(", ")
+    });
+  }
+
+  // Concentrated positions
+  const totalNotional = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0), 0);
+  if (totalNotional > 0) {
+    const concentrated = active.filter(t => Math.abs(t.notional_mm || 0) / totalNotional > 0.25);
+    if (concentrated.length > 0) {
+      insights.push({
+        type: "warning",
+        title: "Concentrated positions (>25% of notional)",
+        body: concentrated.map(t => `${t.instrument}: $${(t.notional_mm || 0).toFixed(2)}mm (${(Math.abs(t.notional_mm || 0) / totalNotional * 100).toFixed(0)}%)`).join(", ")
+      });
+    }
+  }
+
+  // Large unrealized P&L
+  const largePnl = active.filter(t => t.premium_usd && Math.abs(t.current_mtm || 0) > 0.5 * Math.abs(t.premium_usd));
+  if (largePnl.length > 0) {
+    insights.push({
+      type: "info",
+      title: "Large unrealized P&L (>50% of premium)",
+      body: largePnl.map(t => `${t.instrument}: MTM $${(t.current_mtm || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} vs premium $${(t.premium_usd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`).join("; ")
+    });
+  }
+
+  // High IV
+  const highIv = active.filter(t => (t.iv_pct || 0) > 100);
+  if (highIv.length > 0) {
+    insights.push({
+      type: "info",
+      title: "High IV trades (>100%)",
+      body: highIv.map(t => `${t.instrument}: ${(t.iv_pct || 0).toFixed(1)}%`).join(", ")
+    });
+  }
+
+  if (insights.length === 0) {
+    insights.push({ type: "info", title: "No alerts", body: "All positions within normal parameters." });
+  }
+
+  container.innerHTML = insights.map(i => `
+    <div class="insight-card insight-${i.type}">
+      <div class="insight-title">${i.title}</div>
+      <div class="insight-body">${i.body}</div>
+    </div>
+  `).join("");
+}
+
+function tmUpdateBadge() {
+  const badge = document.getElementById("nav-badge-trades");
+  const active = tmEnriched.filter(t => t.db_status === "active");
+  badge.textContent = active.length || "";
+}
+
+// Sort handler for TM table
+document.getElementById("tm-table").addEventListener("click", e => {
+  const th = e.target.closest("th.sortable");
+  if (!th) return;
+  const col = th.dataset.col;
+  if (tmSortCol === col) {
+    tmSortAsc = !tmSortAsc;
+  } else {
+    tmSortCol = col;
+    tmSortAsc = true;
+  }
+  // Update sort indicators
+  document.querySelectorAll("#tm-table th.sortable").forEach(h => {
+    h.classList.remove("sort-asc", "sort-desc");
+  });
+  th.classList.add(tmSortAsc ? "sort-asc" : "sort-desc");
+  tmRenderTable();
+});
+
+// Filter handlers
+["tm-filter-expiry", "tm-filter-type", "tm-filter-side"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => tmRenderTable());
+});
+document.getElementById("tm-search").addEventListener("input", () => tmRenderTable());
+document.getElementById("tm-show-expired").addEventListener("change", () => tmLoad());
+document.getElementById("btn-tm-refresh").addEventListener("click", () => tmLoad());
+
+// ─── Trade CRUD ─────────────────────────────────────────────
+document.getElementById("btn-tm-new").addEventListener("click", () => tmOpenModal());
+document.getElementById("btn-modal-cancel").addEventListener("click", () => tmCloseModal());
+
+function tmOpenModal(trade = null) {
+  const modal = document.getElementById("modal-trade");
+  const title = document.getElementById("modal-trade-title");
+  const form = document.getElementById("trade-form");
+
+  if (trade) {
+    title.textContent = `Edit Trade #${trade.id}`;
+    document.getElementById("tf-id").value = trade.id;
+    document.getElementById("tf-counterparty").value = trade.counterparty || "";
+    document.getElementById("tf-trade-date").value = trade.trade_date || "";
+    document.getElementById("tf-side").value = trade.side || "Buy";
+    document.getElementById("tf-option-type").value = trade.option_type || "Call";
+    document.getElementById("tf-expiry").value = trade.expiry || "";
+    document.getElementById("tf-strike").value = trade.strike || "";
+    document.getElementById("tf-qty").value = trade.qty || "";
+    document.getElementById("tf-ref-spot").value = trade.ref_spot || "";
+    document.getElementById("tf-premium-per").value = trade.premium_per || "";
+    document.getElementById("tf-premium-usd").value = trade.premium_usd || "";
+    document.getElementById("tf-notional").value = trade.notional_mm || "";
+    document.getElementById("tf-pct-otm").value = trade.pct_otm || "";
+  } else {
+    title.textContent = "New Trade";
+    form.reset();
+    document.getElementById("tf-id").value = "";
+    document.getElementById("tf-trade-date").value = new Date().toISOString().split("T")[0];
+  }
+
+  modal.style.display = "flex";
+}
+
+function tmCloseModal() {
+  document.getElementById("modal-trade").style.display = "none";
+}
+
+document.getElementById("trade-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("tf-id").value;
+  const data = {
+    counterparty: document.getElementById("tf-counterparty").value,
+    trade_date: document.getElementById("tf-trade-date").value,
+    side: document.getElementById("tf-side").value,
+    option_type: document.getElementById("tf-option-type").value,
+    expiry: document.getElementById("tf-expiry").value,
+    strike: parseFloat(document.getElementById("tf-strike").value) || 0,
+    qty: parseFloat(document.getElementById("tf-qty").value) || 0,
+    ref_spot: parseFloat(document.getElementById("tf-ref-spot").value) || 0,
+    premium_per: parseFloat(document.getElementById("tf-premium-per").value) || 0,
+    premium_usd: parseFloat(document.getElementById("tf-premium-usd").value) || 0,
+    notional_mm: parseFloat(document.getElementById("tf-notional").value) || 0,
+    pct_otm: parseFloat(document.getElementById("tf-pct-otm").value) || 0,
+  };
+
+  try {
+    if (id) {
+      await api("PUT", `/api/trades/${id}`, data);
+    } else {
+      await post("/api/trades/", data);
+    }
+    tmCloseModal();
+    tmLoad();
+  } catch (err) {
+    alert("Failed to save trade: " + err.message);
+  }
+});
+
+async function tmEditTrade(id) {
+  const trade = tmTrades.find(t => t.id === id);
+  if (trade) tmOpenModal(trade);
+}
+
+async function tmExpireTrade(id) {
+  if (!confirm("Mark this trade as expired?")) return;
+  try {
+    await post(`/api/trades/${id}/expire`);
+    tmLoad();
+  } catch (err) {
+    alert("Failed to expire trade: " + err.message);
+  }
+}
+
+async function tmDeleteTrade(id) {
+  if (!confirm("Delete this trade? (soft delete)")) return;
+  try {
+    await api("DELETE", `/api/trades/${id}`);
+    tmLoad();
+  } catch (err) {
+    alert("Failed to delete trade: " + err.message);
+  }
+}
+
+async function tmShowHistory(id) {
+  const modal = document.getElementById("modal-history");
+  document.getElementById("history-trade-id").textContent = `#${id}`;
+  const tbody = document.getElementById("history-body");
+  tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:var(--muted)">Loading...</td></tr>';
+  modal.style.display = "flex";
+
+  try {
+    const data = await get(`/api/trades/${id}/history`);
+    const history = data.history || [];
+    if (history.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted)">No history found</td></tr>';
+      return;
+    }
+    tbody.innerHTML = history.map(h => {
+      const cls = `history-${h.action}`;
+      return `<tr>
+        <td style="text-align:left">${h.timestamp || ""}</td>
+        <td style="text-align:left" class="${cls}">${h.action}</td>
+        <td style="text-align:left">${h.field_changed || "--"}</td>
+        <td style="text-align:left">${h.old_value || "--"}</td>
+        <td style="text-align:left">${h.new_value || "--"}</td>
+        <td style="text-align:left">${h.changed_by || ""}</td>
+      </tr>`;
+    }).join("");
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--red)">${err.message}</td></tr>`;
+  }
+}
+
+document.getElementById("btn-history-close").addEventListener("click", () => {
+  document.getElementById("modal-history").style.display = "none";
+});
+
+// Close modals on overlay click
+["modal-trade", "modal-history"].forEach(id => {
+  document.getElementById(id).addEventListener("click", e => {
+    if (e.target === e.currentTarget) e.currentTarget.style.display = "none";
+  });
+});
+
+// Export trades to Excel
+document.getElementById("btn-tm-export").addEventListener("click", () => {
+  if (!tmEnriched.length) return;
+  const ws = XLSX.utils.json_to_sheet(tmEnriched.map(t => ({
+    ID: t.db_id,
+    Status: t.db_status,
+    Counterparty: t.counterparty,
+    "Trade Date": t.trade_date,
+    Side: t.side,
+    Type: t.option_type,
+    Instrument: t.instrument,
+    Expiry: t.expiry,
+    DTE: t.days_remaining,
+    Strike: t.strike,
+    "% OTM": t.pct_otm_live,
+    Qty: t.qty,
+    "Notional ($mm)": t.notional_mm,
+    "Premium USD": t.premium_usd,
+    "IV%": t.iv_pct,
+    Delta: t.delta,
+    Gamma: t.gamma,
+    Theta: t.theta,
+    Vega: t.vega,
+    "Mark Price": t.mark_price_usd,
+    MTM: t.current_mtm,
+  })));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Trades");
+  XLSX.writeFile(wb, `PLGO_Trades_${new Date().toISOString().split("T")[0]}.xlsx`);
 });
 
 // ─── Positions / Risk ───────────────────────────────────────
@@ -3189,6 +3666,7 @@ let sbLegs = [];
 let sbLegsPriced = [];
 let sbStructureCurves = null;
 let sbOriginalPositionIds = null;  // snapshot before adding structures
+let sbRemovedPositions = [];       // positions removed via Remove button (kept for baseline)
 
 // ── Init & populate ──────────────────────────────────────
 
@@ -3231,11 +3709,13 @@ function sbPopulate() {
   sbLastResults = null;
   sbStructureCurves = null;
   sbLegsPriced = [];
+  sbRemovedPositions = [];
   sbOriginalPositionIds = new Set(pfData.positions.map(p => p.id));
   sbRenderTable();
   sbRenderLegs();
   sbDrawStructureChart();
   sbDrawChart(null);
+  sbRenderMtmGrid(null);
   sbLoaded = true;
 }
 
@@ -3337,9 +3817,18 @@ function sbRenderTable() {
         `<option value="P" ${pos.opt === "P" ? "selected" : ""}>Put</option></select></td>` +
       `<td style="font-family:monospace" class="roll-new-mark">$${fmtNum(newMark, 2)}</td>` +
       `<td class="roll-iv-used">${rollIvPct.toFixed(1)}%</td>` +
-      `<td class="${costCls} roll-cost" style="font-family:monospace;font-weight:600">${costLabel} $${Math.abs(costRounded).toLocaleString()}</td>`;
+      `<td class="${costCls} roll-cost" style="font-family:monospace;font-weight:600">${costLabel} $${Math.abs(costRounded).toLocaleString()}</td>` +
+      `<td><button class="btn-remove-pos" data-id="${pos.id}" title="Remove trade" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.85rem;padding:.2rem .4rem;opacity:.6">&times;</button></td>`;
     $tbody.appendChild(tr);
   }
+
+  // Wire remove buttons
+  $tbody.querySelectorAll(".btn-remove-pos").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = parseInt(btn.dataset.id);
+      sbRemovePosition(id);
+    });
+  });
 
   // Wire include checkboxes
   $tbody.querySelectorAll(".roll-include").forEach(cb => {
@@ -3397,6 +3886,21 @@ function sbInlineUpdate(row) {
   costCell.className = `${cr >= 0 ? "mtm-pos" : "mtm-neg"} roll-cost`;
   costCell.style.fontFamily = "monospace";
   costCell.style.fontWeight = "600";
+}
+
+// ── Remove position ──────────────────────────────────────
+
+function sbRemovePosition(id) {
+  const idx = pfData.positions.findIndex(p => p.id === id);
+  if (idx === -1) return;
+  const pos = pfData.positions[idx];
+  sbRemovedPositions.push(pos);
+  pfData.positions.splice(idx, 1);
+  sbIncluded.delete(id);
+  sbSelected.delete(id);
+  pfSelected.delete(id);
+  sbRenderTable();
+  sbRefreshVisuals();
 }
 
 // ── Roll computation ─────────────────────────────────────
@@ -3674,7 +4178,7 @@ function sbPriceStructure() {
     const bsPremUsd = bsPremEth;  // bsPrice already returns USD value per contract
     const dir = leg.side === "buy" ? 1 : -1;
     const legCost = dir * leg.qty * bsPremUsd;
-    if (legCost < 0) totalPay += Math.abs(legCost); else totalReceive += legCost;
+    if (legCost > 0) totalPay += legCost; else totalReceive += Math.abs(legCost);
 
     sbLegsPriced.push({
       ...leg, dte, ivPct, sigma, bsPremEth: bsPremEth / spot, bsPremUsd, dir,
@@ -3700,6 +4204,7 @@ function sbPriceStructure() {
       `<td style="text-align:left;color:${lp.side === "buy" ? "var(--green)" : "var(--red)"}">${lp.side}</td>` +
       `<td>${lp.type === "C" ? "Call" : "Put"}</td>` +
       `<td style="font-family:monospace">${lp.strike.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${lp.qty.toLocaleString()}</td>` +
       `<td>${lp.dte}d</td>` +
       `<td>${lp.ivPct.toFixed(1)}%</td>` +
       `<td style="font-family:monospace">${lp.bsPremEth.toFixed(4)}</td>` +
@@ -3717,9 +4222,8 @@ function sbPriceStructure() {
   // Show Add to Portfolio button
   document.getElementById("btn-sb-add-to-portfolio").style.display = "block";
 
-  // Draw standalone structure chart + update portfolio chart preview
+  // Draw standalone structure chart only — net payoff & matrix update on "Add to Portfolio"
   sbDrawStructureChart();
-  sbDrawChart(sbLastResults);
 }
 
 // ── Compute structure curve ──────────────────────────────
@@ -3923,11 +4427,8 @@ function sbDrawStructureChart() {
 
 function sbDrawChart(results) {
   const $chart = document.getElementById("sb-payoff-chart");
-  $chart.style.display = "block";
   const $controls = document.getElementById("sb-chart-controls");
-
-  const showBaseline = document.getElementById("sb-show-baseline").checked;
-  const showScenario = document.getElementById("sb-show-scenario").checked;
+  $chart.style.display = "block";
 
   const spots = pfData.spot_ladder;
   const horizons = pfData.chart_horizons;
@@ -3936,61 +4437,47 @@ function sbDrawChart(results) {
   const rollMap = hasRolls ? rollBuildRollMap(results) : new Map();
   const allPositions = pfData.positions;
   const includedPositions = allPositions.filter(p => sbIncluded.has(p.id));
-  const hasExclusion = sbIncluded.size !== allPositions.length;
-  const hasStructure = sbStructureCurves && Object.keys(sbStructureCurves).length > 0;
-  // Detect positions added via "Add to Portfolio" (not in original snapshot)
+  const hasExclusion = allPositions.some(p => !sbIncluded.has(p.id)) || sbRemovedPositions.length > 0;
   const hasNewPositions = sbOriginalPositionIds && allPositions.some(p => !sbOriginalPositionIds.has(p.id));
-  const hasScenarioChange = hasRolls || hasExclusion || hasStructure || hasNewPositions;
+  const hasScenarioChange = hasRolls || hasExclusion || hasNewPositions;
 
+  // Show toggle controls only when there's a scenario to compare
   $controls.style.display = hasScenarioChange ? "block" : "none";
+  const showBaseline = hasScenarioChange ? document.getElementById("sb-show-baseline").checked : true;
+  const showScenario = hasScenarioChange ? document.getElementById("sb-show-scenario").checked : false;
 
-  // Baseline positions = original portfolio (before any structures were added)
-  const baselinePositions = hasNewPositions
-    ? allPositions.filter(p => sbOriginalPositionIds.has(p.id))
-    : allPositions;
+  // Baseline = original portfolio (including positions that were removed)
+  const baselinePositions = [...allPositions, ...sbRemovedPositions]
+    .filter(p => sbOriginalPositionIds.has(p.id));
 
-  const scenColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
+  const baseColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
+  const scenColors = ["#ff7b72", "#e3b341", "#f0d060", "#56d364", "#79c0ff", "#d2a8ff"];
   const traces = [];
 
-  // Scenario curve = included positions with rolls + structure curves (if priced but not yet added)
-  function scenarioCurve(h) {
-    const curve = rollSumCurve(spots, includedPositions, h, rollMap);
-    if (hasStructure) {
-      const structCurve = sbStructureCurves[h] || new Array(spots.length).fill(0);
-      return curve.map((v, j) => v + structCurve[j]);
-    }
-    return curve;
-  }
-
-  // Baseline = original portfolio as-is (dotted gray when scenario, solid colored when alone)
+  // Baseline portfolio payoff curves (always shown when no scenario, toggled otherwise)
   if (!hasScenarioChange || showBaseline) {
     horizons.forEach((h, i) => {
-      const curve = rollBaselineCurve(spots, baselinePositions, h);
-      const label = h === 0 ? "Baseline: Expiry" : `Baseline: T+${h}d`;
-      const onlyBaseline = hasScenarioChange && !showScenario;
+      const baseCurve = rollBaselineCurve(spots, baselinePositions, h);
+      const label = h === 0 ? "Expiry" : `T+${h}d`;
       traces.push({
-        x: spots, y: curve, type: "scatter", mode: "lines",
-        name: label,
-        line: {
-          color: (hasScenarioChange && !onlyBaseline) ? "#484f58" : scenColors[i % scenColors.length],
-          width: (hasScenarioChange && !onlyBaseline) ? 1.5 : 2.5,
-          dash: (hasScenarioChange && !onlyBaseline) ? "dot" : "solid",
-        },
-        legendgroup: "baseline",
+        x: spots, y: baseCurve, type: "scatter", mode: "lines",
+        name: hasScenarioChange ? `Base ${label}` : label,
+        line: { color: baseColors[i % baseColors.length], width: 2.5 },
+        legendgroup: `h${h}`,
       });
     });
   }
 
-  // Scenario = all included positions (incl. new) + rolls + structure curves (solid colored)
+  // Overlay scenario curves when toggled on
   if (hasScenarioChange && showScenario) {
     horizons.forEach((h, i) => {
-      const curve = scenarioCurve(h);
-      const label = h === 0 ? "Scenario: Expiry" : `Scenario: T+${h}d`;
+      const scenCurve = rollSumCurve(spots, includedPositions, h, rollMap);
+      const label = h === 0 ? "Expiry" : `T+${h}d`;
       traces.push({
-        x: spots, y: curve, type: "scatter", mode: "lines",
-        name: label,
-        line: { color: scenColors[i % scenColors.length], width: 2.5 },
-        legendgroup: "scenario",
+        x: spots, y: scenCurve, type: "scatter", mode: "lines",
+        name: `Scenario ${label}`,
+        line: { color: scenColors[i % scenColors.length], width: 2.5, dash: "dash" },
+        legendgroup: `h${h}`,
       });
     });
   }
@@ -4005,20 +4492,21 @@ function sbDrawChart(results) {
     });
   }
 
-  let titleText = "Portfolio Payoff — All Positions";
-  if (hasNewPositions && hasRolls) titleText = "Portfolio Payoff — Before (dotted) vs Rolled + New Trades (solid)";
-  else if (hasNewPositions) titleText = "Portfolio Payoff — Before (dotted) vs With New Trades (solid)";
-  else if (hasStructure && hasRolls) titleText = "Portfolio Payoff — Baseline (dotted) vs Rolled + New Structure (solid)";
-  else if (hasStructure) titleText = "Portfolio Payoff — Baseline (dotted) vs With New Structure (solid)";
-  else if (hasRolls && hasExclusion) titleText = "Portfolio Payoff — Baseline (dotted) vs Scenario (solid)";
-  else if (hasRolls) titleText = "Portfolio Payoff — Baseline (dotted) vs Rolled (solid)";
-  else if (hasExclusion) titleText = "Portfolio Payoff — Baseline (dotted) vs Selected (solid)";
+  // Dynamic title
+  let titleText = "Portfolio Payoff Profile";
+  if (hasScenarioChange) {
+    const parts = [];
+    if (hasNewPositions) parts.push("New Trades");
+    if (hasRolls) parts.push("Rolls");
+    if (hasExclusion) parts.push("Removals");
+    titleText += ` — Base vs Scenario (${parts.join(" + ")})`;
+  }
 
   Plotly.react("sb-payoff-chart", traces, {
     title: { text: titleText, font: { color: "#e6edf3", size: 16 } },
     paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
     xaxis: { title: "ETH Spot Price (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d", dtick: 500 },
-    yaxis: { title: "Portfolio P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
+    yaxis: { title: "P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 250, b: 50, l: 80 },
     showlegend: true,
     legend: { font: { color: "#8b949e", size: 10 }, orientation: "v", x: 1.02, y: 1,
@@ -4037,22 +4525,24 @@ function sbRenderMtmGrid(results) {
   const allPositions = pfData.positions;
   const includedPositions = allPositions.filter(p => sbIncluded.has(p.id));
   const hasRolls = results && results.length > 0;
-  const hasExclusion = sbIncluded.size !== allPositions.length;
-  const hasStructure = sbStructureCurves && Object.keys(sbStructureCurves).length > 0;
+  const hasExclusion = allPositions.some(p => !sbIncluded.has(p.id)) || sbRemovedPositions.length > 0;
   const hasNewPositions = sbOriginalPositionIds && allPositions.some(p => !sbOriginalPositionIds.has(p.id));
-  const hasScenarioChange = hasRolls || hasExclusion || hasStructure || hasNewPositions;
+  const hasScenarioChange = hasRolls || hasExclusion || hasNewPositions;
   const rollMap = hasRolls ? rollBuildRollMap(results) : new Map();
 
-  // Baseline uses original positions only when new trades exist
-  const baselinePositions = hasNewPositions
-    ? allPositions.filter(p => sbOriginalPositionIds.has(p.id))
-    : allPositions;
+  // Baseline = original portfolio including removed positions
+  const baselinePositions = [...allPositions, ...sbRemovedPositions]
+    .filter(p => sbOriginalPositionIds.has(p.id));
+
+  // Update section title based on whether there's a scenario
+  const $title = $section.querySelector("h2");
+  $title.innerHTML = hasScenarioChange
+    ? "Portfolio MTM Matrix &mdash; Base vs Scenario"
+    : "Portfolio MTM Matrix";
 
   const scenLabel = hasNewPositions
     ? (hasRolls ? "Rolled+New" : "With New")
-    : hasStructure
-      ? (hasRolls ? "Rolled+Struct" : "With Struct")
-      : (hasRolls ? "Rolled" : "Selected");
+    : (hasRolls ? "Rolled" : "Selected");
 
   // Header (same pattern as Roll tab: Base | Scenario)
   const thead = document.getElementById("sb-mtm-grid-thead");
@@ -4082,18 +4572,12 @@ function sbRenderMtmGrid(results) {
     if (diff < closestDiff) { closestDiff = diff; closestSpot = ds.spot; }
   }
 
-  // Pre-compute curves: baseline = original portfolio, scenario = included + rolls + structure
+  // Pre-compute curves: baseline = original portfolio, scenario = included + rolls
   const baseCurves = {}, scenCurves = {};
   for (const h of horizons) {
     baseCurves[h] = rollBaselineCurve(spots, baselinePositions, h);
     if (hasScenarioChange) {
-      const rolled = rollSumCurve(spots, includedPositions, h, rollMap);
-      if (hasStructure) {
-        const struct = sbStructureCurves[h] || new Array(spots.length).fill(0);
-        scenCurves[h] = rolled.map((v, i) => v + struct[i]);
-      } else {
-        scenCurves[h] = rolled;
-      }
+      scenCurves[h] = rollSumCurve(spots, includedPositions, h, rollMap);
     }
   }
 
@@ -4130,6 +4614,25 @@ function sbRefreshVisuals() {
 // ── Event wiring ─────────────────────────────────────────
 
 document.getElementById("btn-sb-compute").addEventListener("click", sbComputeRoll);
+
+document.getElementById("btn-sb-delete-selected").addEventListener("click", () => {
+  if (!pfData) return;
+  const ids = [...sbSelected];
+  if (ids.length === 0) { alert("Select at least one trade to delete."); return; }
+  if (!confirm(`Delete ${ids.length} selected trade${ids.length !== 1 ? "s" : ""} from portfolio?`)) return;
+  for (const id of ids) {
+    const idx = pfData.positions.findIndex(p => p.id === id);
+    if (idx !== -1) {
+      sbRemovedPositions.push(pfData.positions[idx]);
+      pfData.positions.splice(idx, 1);
+    }
+    sbIncluded.delete(id);
+    sbSelected.delete(id);
+    pfSelected.delete(id);
+  }
+  sbRenderTable();
+  sbRefreshVisuals();
+});
 
 document.getElementById("btn-sb-select-all").addEventListener("click", () => {
   sbGetFilteredPositions().forEach(p => sbSelected.add(p.id));
