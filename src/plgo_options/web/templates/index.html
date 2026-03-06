@@ -43,6 +43,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3a5 5 0 11-4.546 2.914.5.5 0 00-.908-.418A6 6 0 108 2V3z"/><path d="M8 4.466V.534a.25.25 0 00-.41-.192L5.23 2.308a.25.25 0 000 .384l2.36 1.966A.25.25 0 008 4.466z"/></svg>
       Roll &amp; Optimizer
     </li>
+    <li class="nav-item" data-page="optv2">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 01.5.5V6h4.5a.5.5 0 010 1H8.5v4.5a.5.5 0 01-1 0V7H3a.5.5 0 010-1h4.5V1.5A.5.5 0 018 1z"/><path d="M2 14.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z"/></svg>
+      Optimizer v2
+    </li>
   </ul>
   <div class="sidebar-bottom">
     <button id="btn-theme-toggle" class="theme-toggle" title="Toggle light/dark theme">
@@ -924,6 +928,143 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Optimizer v2                                          -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-optv2" class="page">
+    <section class="card">
+      <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem">
+        <button id="btn-load-optv2" class="btn-primary" style="width:auto">Load Risk Profile</button>
+        <label class="pf-filter-label">λ Overall
+          <input type="number" id="optv2-risk-aversion" value="1.0" step="0.1" min="0" style="width:5rem">
+        </label>
+        <label class="pf-filter-label">λ Delta
+          <input type="number" id="optv2-lambda-delta" value="1.0" step="0.1" min="0" style="width:5rem">
+        </label>
+        <label class="pf-filter-label">λ Vega
+          <input type="number" id="optv2-lambda-vega" value="100" step="10" min="0" style="width:5rem">
+        </label>
+        <label class="pf-filter-label">Txn Cost (%)
+          <input type="number" id="optv2-txn-cost" value="5" step="0.5" min="0" style="width:5rem">
+        </label>
+        <label class="pf-filter-label">Max Collateral ($)
+          <input type="number" id="optv2-max-collateral" value="4000000" step="100000" min="0" style="width:8rem">
+        </label>
+        <label class="pf-filter-label">Target Expiry
+          <select id="optv2-target-expiry" style="width:8rem">
+            <option value="">Loading…</option>
+          </select>
+        </label>
+        <button id="btn-run-optv2" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
+      </div>
+    </section>
+
+    <!-- Greeks summary -->
+    <section class="card" id="optv2-greeks-section" style="display:none">
+      <h2>Portfolio Greeks <span id="optv2-eth-spot" style="float:right;font-size:.85rem;opacity:.7"></span></h2>
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:1rem;text-align:center">
+        <div><div class="greek-label">Delta</div><div class="greek-value" id="optv2-total-delta">--</div></div>
+        <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv2-total-gamma">--</div></div>
+        <div><div class="greek-label">Theta</div><div class="greek-value" id="optv2-total-theta">--</div></div>
+        <div><div class="greek-label">Vega</div><div class="greek-value" id="optv2-total-vega">--</div></div>
+        <div><div class="greek-label">MTM</div><div class="greek-value" id="optv2-total-mtm">--</div></div>
+      </div>
+    </section>
+
+    <!-- Payoff chart -->
+    <section class="card" id="optv2-payoff-section" style="display:none">
+      <h2>Scenario Payoff</h2>
+      <div id="optv2-payoff-chart" style="width:100%;height:450px"></div>
+    </section>
+
+    <!-- P&L Matrix (Before + After side-by-side) -->
+    <section class="card" id="optv2-matrix-section" style="display:none">
+      <div id="optv2-matrix-grid" style="display:grid;grid-template-columns:1fr;gap:1.5rem">
+        <div>
+          <h2>P&amp;L Matrix</h2>
+          <div class="chain-wrapper" style="max-height:500px">
+            <table class="pf-table">
+              <thead id="optv2-matrix-thead"></thead>
+              <tbody id="optv2-matrix-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="optv2-matrix-after-panel" style="display:none">
+          <h2>P&amp;L Matrix — After</h2>
+          <div class="chain-wrapper" style="max-height:500px">
+            <table class="pf-table">
+              <thead id="optv2-matrix-after-main-thead"></thead>
+              <tbody id="optv2-matrix-after-main-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Optimization Results -->
+    <section class="card" id="optv2-result-section" style="display:none">
+      <h2>Optimization Result
+        <span id="optv2-result-status" style="float:right;font-size:.85rem;opacity:.7"></span>
+      </h2>
+
+      <!-- Before / After comparison -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
+        <div>
+          <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">Before</h3>
+          <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
+            <div><div class="greek-label">Delta</div><div class="greek-value" id="optv2-before-delta">--</div></div>
+            <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv2-before-gamma">--</div></div>
+            <div><div class="greek-label">Theta</div><div class="greek-value" id="optv2-before-theta">--</div></div>
+            <div><div class="greek-label">Vega</div><div class="greek-value" id="optv2-before-vega">--</div></div>
+            <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="optv2-before-risk">--</div></div>
+          </div>
+        </div>
+        <div>
+          <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">After</h3>
+          <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
+            <div><div class="greek-label">Delta</div><div class="greek-value" id="optv2-after-delta">--</div></div>
+            <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv2-after-gamma">--</div></div>
+            <div><div class="greek-label">Theta</div><div class="greek-value" id="optv2-after-theta">--</div></div>
+            <div><div class="greek-label">Vega</div><div class="greek-value" id="optv2-after-vega">--</div></div>
+            <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="optv2-after-risk">--</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Summary stats -->
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+        <div><div class="greek-label">Trade Cost</div><div class="greek-value" id="optv2-trade-cost">--</div></div>
+        <div><div class="greek-label">Risk Reduction</div><div class="greek-value" id="optv2-risk-reduction">--</div></div>
+        <div><div class="greek-label">Utility Gain</div><div class="greek-value" id="optv2-utility-gain">--</div></div>
+        <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv2-candidates">--</div></div>
+      </div>
+
+      <!-- Proposed trades table -->
+      <h3 style="margin:0 0 .5rem;font-size:.95rem">Proposed Trades</h3>
+      <div class="chain-wrapper" style="max-height:400px">
+        <table class="pf-table">
+          <thead>
+            <tr>
+              <th>Instrument</th>
+              <th>Side</th>
+              <th>Qty</th>
+              <th>Strike</th>
+              <th>Type</th>
+              <th>DTE</th>
+              <th>IV %</th>
+              <th>Price ($)</th>
+              <th>Notional ($)</th>
+              <th>Δ Contrib</th>
+              <th>Γ Contrib</th>
+              <th>Vega Contrib</th>
+            </tr>
+          </thead>
+          <tbody id="optv2-trades-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
 </div><!-- end #app-content -->
 
 <!-- ============================================================ -->
@@ -1055,5 +1196,6 @@
 </div>
 
 <script src="/static/app.js"></script>
+1
 </body>
 </html>

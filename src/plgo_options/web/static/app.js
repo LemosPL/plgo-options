@@ -5316,7 +5316,29 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
   try {
     optv2Data = await get("/api/portfolio/pnl");
+    optv2OptResult = null;  // reset so chart shows all horizons
+    // Hide the "After" matrix panel
+    document.getElementById("optv2-matrix-after-panel").style.display = "none";
+    document.getElementById("optv2-matrix-grid").style.gridTemplateColumns = "1fr";
     optv2RenderAll();
+
+    // Populate expiry dropdown from vol surface
+    const $expiry = document.getElementById("optv2-target-expiry");
+    $expiry.innerHTML = "";
+    if (optv2Data.vol_surface) {
+      const smiles = optv2Data.vol_surface
+        .filter(s => s.dte > 0)
+        .sort((a, b) => a.dte - b.dte);
+      smiles.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s.expiry_code;
+        opt.textContent = `${s.expiry_code} (${s.dte}d)`;
+        $expiry.appendChild(opt);
+      });
+      // Default to second expiry if available (skip the nearest about-to-expire)
+      if (smiles.length > 1) $expiry.value = smiles[1].expiry_code;
+    }
+
     document.getElementById("btn-run-optv2").disabled = false;
   } catch (e) {
     console.error("Optimizer v2: failed to load portfolio:", e);
@@ -5351,6 +5373,8 @@ function optv2RenderGreeks() {
   document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt(t.current_total_mtm, 2);
   document.getElementById("optv2-eth-spot").textContent     = "$" + optv2Fmt(optv2Data.eth_spot, 2);
 }
+
+let optv2OptResult = null;  // stores latest optimization result
 
 /* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
 function optv2RenderPayoff() {
@@ -5403,39 +5427,59 @@ function optv2RenderPayoff() {
     }
   }
 
-  const horizonColors = {
-    0:  "#4fc3f7",  // cyan — Now
-    16: "#ba68c8",  // purple
-    30: "#ffb74d",  // orange
-    60: "#81c784",  // green
-    90: "#e57373",  // red
-  };
-
   const traces = [];
 
-  // For each horizon, aggregate payoff across all positions
-  for (const h of OPTV2_HORIZONS) {
-    const hKey = String(h);
-    const totalPayoff = new Array(spots.length).fill(0);
-    let hasData = false;
+  // If we have optimization results, show only 90d Before vs After
+  if (optv2OptResult && optv2OptResult.status === "ok") {
+    // Before (90d)
+    const beforeCurve = optv2OptResult.before.payoff_by_horizon["90"];
+    if (beforeCurve) {
+      traces.push({
+        x: logM, y: beforeCurve, mode: "lines",
+        name: "Before (T+90d)",
+        line: { color: "#e57373", width: 2, dash: "dash" },
+      });
+    }
+    // After (90d)
+    const afterCurve = optv2OptResult.after.payoff_by_horizon["90"];
+    if (afterCurve) {
+      traces.push({
+        x: logM, y: afterCurve, mode: "lines",
+        name: "After (T+90d)",
+        line: { color: "#4fc3f7", width: 3 },
+      });
+    }
+  } else {
+    // Default: show all horizons
+    const horizonColors = {
+      0:  "#4fc3f7",  // cyan — Now
+      16: "#ba68c8",  // purple
+      30: "#ffb74d",  // orange
+      60: "#81c784",  // green
+      90: "#e57373",  // red
+    };
 
-    positions.forEach(p => {
-      const curve = p.payoff_by_horizon[hKey];
-      if (curve) {
-        hasData = true;
-        for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i];
-      }
-    });
+    for (const h of OPTV2_HORIZONS) {
+      const hKey = String(h);
+      const totalPayoff = new Array(spots.length).fill(0);
+      let hasData = false;
 
-    if (!hasData) continue;
+      positions.forEach(p => {
+        const curve = p.payoff_by_horizon[hKey];
+        if (curve) {
+          hasData = true;
+          for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i];
+        }
+      });
 
-    traces.push({
-      x: logM,
-      y: totalPayoff,
-      mode: "lines",
-      name: h === 0 ? "Now (0d)" : `T+${h}d`,
-      line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 },
-    });
+      if (!hasData) continue;
+
+      traces.push({
+        x: logM, y: totalPayoff, mode: "lines",
+        name: h === 0 ? "Now (0d)" : `T+${h}d`,
+        line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 },
+      });
+    }
   }
 
   // Zero line
@@ -5467,7 +5511,7 @@ function optv2RenderPayoff() {
   });
 
   const layout = {
-    title: { text: "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
+    title: { text: optv2OptResult ? "Payoff Profile — Before vs After (T+90d)" : "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
     xaxis: {
       title: "Log-Moneyness  ln(K / Spot)",
       tickvals: tickVals,
@@ -5572,4 +5616,171 @@ function optv2NearestIdx(arr, val) {
     if (d < bestDist) { best = i; bestDist = d; }
   }
   return best;
+}
+
+/* ── Run Optimizer ──────────────────────────────────────────── */
+document.getElementById("btn-run-optv2").addEventListener("click", async () => {
+  const $btn = document.getElementById("btn-run-optv2");
+  $btn.classList.add("loading");
+  $btn.textContent = "Running…";
+  $btn.disabled = true;
+
+  try {
+    const params = {
+      risk_aversion: parseFloat(document.getElementById("optv2-risk-aversion").value) || 1.0,
+      lambda_delta: parseFloat(document.getElementById("optv2-lambda-delta").value) || 1.0,
+      lambda_vega: parseFloat(document.getElementById("optv2-lambda-vega").value) || 100.0,
+      txn_cost_pct: parseFloat(document.getElementById("optv2-txn-cost").value) || 5.0,
+      max_collateral: parseFloat(document.getElementById("optv2-max-collateral").value) || 4000000,
+      target_expiry: document.getElementById("optv2-target-expiry").value || null,
+    };
+    const res = await fetch("/api/optimization/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const data = await res.json();
+    console.log("Optimizer v2 result:", data);
+    optv2RenderResult(data);
+  } catch (e) {
+    console.error("Optimizer v2: run failed:", e);
+    alert("Optimizer failed — check console.\n" + e.message);
+  } finally {
+    $btn.classList.remove("loading");
+    $btn.textContent = "Run Optimizer";
+    $btn.disabled = false;
+  }
+});
+
+/* ── Render optimization results ───────────────────────────── */
+function optv2RenderResult(data) {
+  const $section = document.getElementById("optv2-result-section");
+
+  if (data.status !== "ok") {
+    $section.style.display = "none";
+    alert(data.message || "Optimization returned no results.");
+    return;
+  }
+
+  $section.style.display = "";
+
+  // Store result and re-render main payoff chart with before/after overlay
+  optv2OptResult = data;
+  optv2RenderPayoff();
+
+  // Status badge
+  document.getElementById("optv2-result-status").textContent =
+    data.optimizer_converged ? "Converged" : "Did not converge";
+
+  // Before
+  const b = data.before;
+  document.getElementById("optv2-before-delta").textContent = optv2Fmt(b.delta, 2);
+  document.getElementById("optv2-before-gamma").textContent = optv2Fmt(b.gamma, 4);
+  document.getElementById("optv2-before-theta").textContent = optv2Fmt(b.theta, 2);
+  document.getElementById("optv2-before-vega").textContent  = optv2Fmt(b.vega, 2);
+  document.getElementById("optv2-before-risk").textContent  = "$" + optv2Fmt(b.daily_risk, 2);
+
+  // After
+  const a = data.after;
+  document.getElementById("optv2-after-delta").textContent = optv2Fmt(a.delta, 2);
+  document.getElementById("optv2-after-gamma").textContent = optv2Fmt(a.gamma, 4);
+  document.getElementById("optv2-after-theta").textContent = optv2Fmt(a.theta, 2);
+  document.getElementById("optv2-after-vega").textContent  = optv2Fmt(a.vega, 2);
+  document.getElementById("optv2-after-risk").textContent  = "$" + optv2Fmt(a.daily_risk, 2);
+
+  // Summary stats
+  document.getElementById("optv2-trade-cost").textContent     = "$" + optv2Fmt(data.total_trade_cost, 2);
+  document.getElementById("optv2-risk-reduction").textContent  = "$" + optv2Fmt(b.daily_risk - a.daily_risk, 2);
+  document.getElementById("optv2-utility-gain").textContent    = optv2Fmt(data.utility_improvement, 2);
+  document.getElementById("optv2-candidates").textContent      = data.candidates_evaluated;
+
+  // Show "After" matrix next to the main P&L Matrix
+  const $afterPanel = document.getElementById("optv2-matrix-after-panel");
+  const $matrixGrid = document.getElementById("optv2-matrix-grid");
+  $afterPanel.style.display = "";
+  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+  optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+
+  // Trades table
+  const $tbody = document.getElementById("optv2-trades-tbody");
+  $tbody.innerHTML = "";
+
+  if (data.trades.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="12" style="text-align:center;opacity:.6">No trades proposed — portfolio is already optimal given cost constraints.</td>';
+    $tbody.appendChild(tr);
+    return;
+  }
+
+  data.trades.forEach(t => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = [
+      `<td>${t.instrument}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`,
+      `<td>${t.strike.toLocaleString()}</td>`,
+      `<td>${t.opt === "C" ? "Call" : "Put"}</td>`,
+      `<td>${t.dte}</td>`,
+      `<td>${optv2Fmt(t.iv_pct, 1)}</td>`,
+      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 2)}</td>`,
+      `<td>${optv2Fmt(t.delta_contribution, 4)}</td>`,
+      `<td>${optv2Fmt(t.gamma_contribution, 6)}</td>`,
+      `<td>${optv2Fmt(t.vega_contribution, 4)}</td>`,
+    ].join("");
+    $tbody.appendChild(tr);
+  });
+}
+
+/* ── Before/After payoff comparison charts ──────────────────── */
+/* ── Before/After P&L matrix ───────────────────────────────── */
+function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
+  const spots = data.spot_ladder;
+  const ethSpot = data.eth_spot;
+  const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
+  const payoff = data[side].payoff_by_horizon;
+  const step = spots.length > 1 ? spots[1] - spots[0] : 100;
+
+  const $thead = document.getElementById(theadId);
+  $thead.innerHTML = "";
+  const headRow = document.createElement("tr");
+  headRow.innerHTML = "<th>ETH Spot</th>";
+  horizons.forEach(h => {
+    const th = document.createElement("th");
+    th.textContent = h === 0 ? "Now" : `${h}d`;
+    headRow.appendChild(th);
+  });
+  $thead.appendChild(headRow);
+
+  const $tbody = document.getElementById(tbodyId);
+  $tbody.innerHTML = "";
+
+  spots.forEach((s, si) => {
+    if (s % 500 !== 0) return;
+
+    const tr = document.createElement("tr");
+    if (Math.abs(s - ethSpot) < step / 2) tr.classList.add("row-highlight");
+
+    const tdSpot = document.createElement("td");
+    tdSpot.textContent = "$" + s.toLocaleString();
+    tdSpot.style.fontWeight = "600";
+    tr.appendChild(tdSpot);
+
+    horizons.forEach(h => {
+      const curve = payoff[String(h)];
+      const cellVal = (curve && curve[si] !== undefined) ? curve[si] : 0;
+      const td = document.createElement("td");
+      td.textContent = Math.round(cellVal).toLocaleString();
+      td.style.textAlign = "right";
+      if (cellVal > 0) td.style.color = "#66bb6a";
+      if (cellVal < 0) td.style.color = "#ef5350";
+      tr.appendChild(td);
+    });
+
+    $tbody.appendChild(tr);
+  });
 }

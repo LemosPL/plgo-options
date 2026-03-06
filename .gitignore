@@ -10,3 +10,4 @@ build/
 data/plgo_options.db
 data/plgo_options.db-shm
 data/plgo_options.db-wal
+data/optimization_snapshots/*.json
