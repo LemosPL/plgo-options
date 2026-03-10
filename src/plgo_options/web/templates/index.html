@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PLGO Options — ETH Trading</title>
+  <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <link rel="stylesheet" href="/static/style.css">
@@ -15,7 +15,11 @@
 <!-- ============================================================ -->
 <nav id="sidebar">
   <div class="sidebar-brand">PLGO Options</div>
-  <div class="sidebar-spot">ETH <span id="eth-spot">--</span></div>
+  <div class="sidebar-asset-switcher">
+    <button class="asset-btn active" data-asset="ETH">ETH</button>
+    <button class="asset-btn" data-asset="FIL">FIL</button>
+  </div>
+  <div class="sidebar-spot"><span id="asset-label">ETH</span> <span id="eth-spot">--</span></div>
   <ul class="sidebar-nav">
     <li class="nav-item active" data-page="trades">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 2.5A1.5 1.5 0 012.5 1h11A1.5 1.5 0 0115 2.5v11a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 13.5v-11zM2.5 2a.5.5 0 00-.5.5v11a.5.5 0 00.5.5h11a.5.5 0 00.5-.5v-11a.5.5 0 00-.5-.5h-11z"/><path d="M4 5.5a.5.5 0 01.5-.5h7a.5.5 0 010 1h-7a.5.5 0 01-.5-.5zm0 3a.5.5 0 01.5-.5h7a.5.5 0 010 1h-7a.5.5 0 01-.5-.5zm0 3a.5.5 0 01.5-.5h4a.5.5 0 010 1h-4a.5.5 0 01-.5-.5z"/></svg>
@@ -26,6 +30,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 11H2v3h2v-3zm5-4H7v7h2V7zm5-5h-2v12h2V2zm-2-1a1 1 0 00-1 1v12a1 1 0 001 1h2a1 1 0 001-1V2a1 1 0 00-1-1h-2zM6 7a1 1 0 011-1h2a1 1 0 011 1v7a1 1 0 01-1 1H7a1 1 0 01-1-1V7zM1 11a1 1 0 011-1h2a1 1 0 011 1v3a1 1 0 01-1 1H2a1 1 0 01-1-1v-3z"/></svg>
       Portfolio P&amp;L
       <span class="nav-badge" id="nav-badge-portfolio"></span>
+    </li>
+    <li class="nav-item" data-page="pricing">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 16A8 8 0 108 0a8 8 0 000 16zm.25-11.25v1.5a.75.75 0 01-1.5 0v-1.5a.75.75 0 011.5 0zm0 4v3.5a.75.75 0 01-1.5 0v-3.5a.75.75 0 011.5 0z"/></svg>
+      Pricing
     </li>
     <li class="nav-item" data-page="structurer">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 2a.5.5 0 01.47.33L10 11.44l1.47-4.4A.5.5 0 0112 6.67h3.5a.5.5 0 010 1h-3.15l-1.82 5.46a.5.5 0 01-.94.02L6 4.01 4.53 8.4a.5.5 0 01-.47.27H.5a.5.5 0 010-1h3.15l1.82-5.46A.5.5 0 016 2z"/></svg>
@@ -114,6 +122,8 @@
         </label>
         <div class="pf-toolbar-spacer"></div>
         <button id="btn-tm-new" class="btn-primary" style="width:auto">+ New Trade</button>
+        <button id="btn-tm-bulk-expire" class="btn-secondary tm-bulk-btn" style="width:auto;display:none">Expire Selected</button>
+        <button id="btn-tm-bulk-delete" class="btn-secondary tm-bulk-btn btn-delete" style="width:auto;display:none">Delete Selected</button>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="tm-show-expired"> Show Expired
         </label>
@@ -129,6 +139,7 @@
         <table id="tm-table">
           <thead>
             <tr>
+              <th style="width:30px"><input type="checkbox" id="tm-check-all" title="Select all"></th>
               <th style="width:10px"></th>
               <th class="sortable" data-col="counterparty" style="text-align:left">Counterparty</th>
               <th class="sortable" data-col="trade_date">Date</th>
@@ -169,12 +180,17 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-portfolio" class="page">
 
+    <!-- Under construction banner (FIL) -->
+    <div id="pf-no-live-banner" class="under-construction-banner" style="display:none">
+      Live Greeks, IV, and mark prices are unavailable for this asset (no Deribit feed). Payoffs use Black-Scholes with manual IV (80%).
+    </div>
+
     <!-- Summary banner -->
     <section class="card" id="portfolio-summary">
       <h2>Portfolio MTM Summary</h2>
       <div class="risk-grid">
         <div class="risk-metric">
-          <span class="risk-label">ETH Spot</span>
+          <span class="risk-label" id="pf-spot-label">ETH Spot</span>
           <span class="risk-value" id="pf-spot">--</span>
         </div>
         <div class="risk-metric">
@@ -248,6 +264,10 @@
           </select>
         </label>
         <div class="pf-toolbar-spacer"></div>
+        <label class="toggle-label" style="margin:0">
+          <input type="checkbox" id="pf-include-expired"> Include Expired
+        </label>
+        <button id="btn-pf-compare" class="btn-secondary" style="width:auto;margin:0;display:none">Compare Old vs New</button>
         <button id="btn-pf-expiring-10d" class="btn-secondary" style="width:auto;margin:0">Expiring &lt;10d</button>
         <button id="btn-pf-add-trade" class="btn-secondary" style="width:auto;margin:0">+ Add Trade</button>
         <button id="btn-pf-remove-selected" class="btn-secondary" style="width:auto;margin:0">Remove Selected</button>
@@ -265,7 +285,7 @@
         <table id="pf-positions-table">
           <thead>
             <tr>
-              <th style="width:32px"><input type="checkbox" id="pf-check-all" checked></th>
+              <th style="min-width:32px" id="pf-col-select"><input type="checkbox" id="pf-check-all" checked></th>
               <th class="sortable" data-col="counterparty" style="text-align:left">Counterparty</th>
               <th class="sortable" data-col="trade_id">ID</th>
               <th class="sortable" data-col="trade_date">Trade Date</th>
@@ -311,25 +331,120 @@
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Pricing                                                -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-pricing" class="page">
+
+    <div id="pricing-fil-banner" class="under-construction-banner" style="display:none">
+      Pricing requires live Deribit data. This feature is under construction for FIL.
+    </div>
+
+    <!-- Pricing Builder (side-by-side: inputs left, chart right) — same layout as Structure Builder -->
+    <div id="pricing-row">
+      <section class="card" id="pricing-section">
+        <h2>Pricing</h2>
+        <div id="pricing-body">
+          <!-- Expiry select -->
+          <div style="margin-bottom:.75rem">
+            <label style="font-size:.75rem;color:var(--muted);display:block;margin-bottom:.3rem">Expiry</label>
+            <select id="expiry-select" style="width:100%;margin:0">
+              <option value="">Loading&hellip;</option>
+            </select>
+          </div>
+          <!-- Strategy templates -->
+          <div style="margin-bottom:.75rem">
+            <div class="btn-grid btn-grid-3" style="gap:.35rem">
+              <button class="btn-template" data-strategy="long_call">Long Call</button>
+              <button class="btn-template" data-strategy="long_put">Long Put</button>
+              <button class="btn-template" data-strategy="bull_call_spread">Bull Spread</button>
+              <button class="btn-template" data-strategy="bear_put_spread">Bear Spread</button>
+              <button class="btn-template" data-strategy="straddle">Straddle</button>
+              <button class="btn-template" data-strategy="strangle">Strangle</button>
+              <button class="btn-template" data-strategy="iron_condor">Iron Condor</button>
+            </div>
+          </div>
+          <!-- Legs table -->
+          <table id="legs-table">
+            <colgroup>
+              <col class="col-expiry">
+              <col class="col-side-type">
+              <col class="col-strike">
+              <col class="col-qty">
+              <col class="col-remove">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Expiry</th>
+                <th>Side / Type</th>
+                <th>Strike</th>
+                <th>Qty</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="legs-body"></tbody>
+          </table>
+          <button id="btn-add-leg" class="btn-secondary" style="margin-top:.5rem">+ Add Leg</button>
+          <!-- Spot range -->
+          <div style="margin-top:.75rem">
+            <div class="form-row" style="margin-bottom:.5rem">
+              <label>Min <input type="number" id="spot-min" value="1000"></label>
+              <label>Max <input type="number" id="spot-max" value="6000"></label>
+            </div>
+          </div>
+          <!-- Pricing results -->
+          <div id="repl-results-section" style="display:none;margin-top:.75rem">
+            <div id="repl-summary" class="result-box">&mdash;</div>
+            <table id="repl-table">
+              <thead>
+                <tr>
+                  <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
+                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th>
+                </tr>
+              </thead>
+              <tbody id="repl-body"></tbody>
+            </table>
+            <button id="btn-apply-repl" class="btn-secondary" style="margin-top:.35rem">Apply premiums to legs</button>
+          </div>
+          <!-- Action buttons -->
+          <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-direction:column">
+            <button id="btn-replicate" class="btn-primary btn-deribit" style="flex:1">
+              Price via Vol Surface
+            </button>
+            <button id="btn-compute" class="btn-secondary" style="flex:1">Payoff at Expiry (manual premiums)</button>
+            <button id="btn-load-chain" class="btn-secondary" disabled style="flex:1">Load Option Chain</button>
+          </div>
+        </div>
+      </section>
+      <section class="card" id="pricing-chart-section">
+        <h2>Payoff Profile</h2>
+        <div id="payoff-chart" style="min-height:650px"></div>
+        <div id="smile-chart" style="display:none;min-height:400px;margin-top:1rem"></div>
+      </section>
+    </div>
+
+    <!-- Option chain table (full width below) -->
+    <section class="card" id="chain-section" style="display:none">
+      <h2>Option Chain &mdash; <span id="chain-expiry"></span></h2>
+      <div class="chain-wrapper">
+        <table id="chain-table">
+          <thead>
+            <tr>
+              <th>Instrument</th><th>Type</th><th>Strike</th><th>Mark</th>
+              <th>IV %</th><th>&Delta;</th><th>&Gamma;</th><th>&Theta;</th><th>&nu;</th>
+              <th>Bid</th><th>Ask</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="chain-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
   <!-- PAGE: Strategy Builder                                      -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-structurer" class="page">
-
-    <!-- Hidden elements needed by existing JS that references them -->
-    <div style="display:none">
-      <select id="expiry-select"><option value="">Loading...</option></select>
-      <table id="legs-table"><tbody id="legs-body"></tbody></table>
-      <button id="btn-add-leg"></button>
-      <input type="number" id="spot-min" value="1000">
-      <input type="number" id="spot-max" value="6000">
-      <button id="btn-replicate"></button>
-      <button id="btn-compute"></button>
-      <button id="btn-load-chain"></button>
-      <div id="repl-results-section"><div id="repl-summary"></div><table id="repl-table"><tbody id="repl-body"></tbody></table><button id="btn-apply-repl"></button></div>
-      <div id="payoff-chart"></div>
-      <div id="smile-chart"></div>
-      <div id="chain-section"><span id="chain-expiry"></span><table id="chain-table"><tbody id="chain-body"></tbody></table></div>
-    </div>
 
     <!-- Structurer tools -->
     <section class="card">
@@ -457,22 +572,71 @@
       </div>
     </section>
 
-    <!-- Hidden elements needed by existing JS for structure builder -->
-    <div style="display:none">
-      <div id="sb-structure-row">
-        <div id="sb-structure-section"><span id="sb-structure-toggle"></span><span id="sb-structure-toggle-icon"></span>
-          <div id="sb-structure-body">
-            <table id="sb-legs-table"><tbody id="sb-legs-body"></tbody></table>
-            <button id="btn-sb-add-leg"></button>
-            <div id="sb-pricing-results"><div id="sb-pricing-summary"></div>
-              <table id="sb-premiums-table"><tbody id="sb-premiums-body"></tbody></table>
+    <!-- Structure Builder (side-by-side: inputs left, chart right) -->
+    <div id="sb-structure-row">
+      <section class="card" id="sb-structure-section">
+        <h2 style="cursor:pointer" id="sb-structure-toggle">
+          Structure Builder
+          <span style="float:right;font-size:.7rem;color:var(--muted)" id="sb-structure-toggle-icon">[ - ]</span>
+        </h2>
+        <div id="sb-structure-body">
+          <div style="margin-bottom:.75rem">
+            <div class="btn-grid btn-grid-3" style="gap:.35rem">
+              <button class="btn-template sb-template" data-strategy="long_call">Long Call</button>
+              <button class="btn-template sb-template" data-strategy="long_put">Long Put</button>
+              <button class="btn-template sb-template" data-strategy="bull_call_spread">Bull Spread</button>
+              <button class="btn-template sb-template" data-strategy="bear_put_spread">Bear Spread</button>
+              <button class="btn-template sb-template" data-strategy="straddle">Straddle</button>
+              <button class="btn-template sb-template" data-strategy="strangle">Strangle</button>
+              <button class="btn-template sb-template" data-strategy="iron_condor">Iron Condor</button>
             </div>
-            <button id="btn-sb-price-structure"></button>
-            <button id="btn-sb-add-to-portfolio"></button>
+          </div>
+          <table id="sb-legs-table">
+            <colgroup>
+              <col class="col-expiry">
+              <col class="col-side-type">
+              <col class="col-strike">
+              <col class="col-qty">
+              <col class="col-remove">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Expiry</th>
+                <th>Side / Type</th>
+                <th>Strike</th>
+                <th>Qty</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="sb-legs-body"></tbody>
+          </table>
+          <button id="btn-sb-add-leg" class="btn-secondary" style="margin-top:.5rem">+ Add Leg</button>
+          <div id="sb-pricing-results" style="display:none;margin-top:.75rem">
+            <div id="sb-pricing-summary" class="result-box">--</div>
+            <table id="sb-premiums-table">
+              <thead>
+                <tr>
+                  <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
+                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th>
+                </tr>
+              </thead>
+              <tbody id="sb-premiums-body"></tbody>
+            </table>
+          </div>
+          <div style="display:flex;gap:.5rem;margin-top:.75rem">
+            <button id="btn-sb-price-structure" class="btn-primary btn-deribit" style="flex:1">
+              Price via Vol Surface
+            </button>
+            <button id="btn-sb-add-to-portfolio" class="btn-primary" style="flex:1;background:var(--green);display:none">
+              Add to Portfolio
+            </button>
           </div>
         </div>
-        <div id="sb-structure-chart-section"><div id="sb-structure-chart"></div></div>
-      </div>
+      </section>
+      <section class="card" id="sb-structure-chart-section">
+        <h2>New Structure &mdash; Payoff Profile</h2>
+        <div id="sb-structure-chart"></div>
+      </section>
     </div>
 
     <!-- Chart controls -->
@@ -502,6 +666,10 @@
   <!-- PAGE: Roll Analysis & Optimizer (merged)                    -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-roll" class="page">
+
+    <div id="roll-fil-banner" class="under-construction-banner" style="display:none">
+      Roll &amp; Optimizer requires live Deribit data. This feature is under construction for FIL.
+    </div>
 
     <!-- Sub-tabs for Roll vs Optimizer -->
     <div class="sub-tab-bar">
@@ -764,55 +932,95 @@
 
 <!-- Create/Edit Trade Modal -->
 <div id="modal-trade" class="modal-overlay" style="display:none">
-  <div class="modal">
+  <div class="modal" style="width:720px">
     <h2 id="modal-trade-title">New Trade</h2>
-    <form id="trade-form">
+
+    <!-- Strategy preset buttons (hidden in edit mode) -->
+    <div id="tf-strategy-bar" class="tf-strategy-bar">
+      <button type="button" class="tf-preset active" data-preset="single">Single Leg</button>
+      <button type="button" class="tf-preset" data-preset="put_spread">Put Spread</button>
+      <button type="button" class="tf-preset" data-preset="call_spread">Call Spread</button>
+      <button type="button" class="tf-preset" data-preset="straddle">Straddle</button>
+      <button type="button" class="tf-preset" data-preset="strangle">Strangle</button>
+      <button type="button" class="tf-preset" data-preset="iron_condor">Iron Condor</button>
+    </div>
+
+    <form id="trade-form" novalidate>
       <input type="hidden" id="tf-id">
-      <div class="modal-grid">
+
+      <!-- Shared fields -->
+      <div class="modal-grid" style="margin-bottom:.75rem">
         <label class="modal-field">Counterparty
           <input type="text" id="tf-counterparty" value="">
         </label>
         <label class="modal-field">Trade Date
           <input type="date" id="tf-trade-date">
         </label>
-        <label class="modal-field">Side
-          <select id="tf-side">
-            <option value="Buy">Buy</option>
-            <option value="Sell">Sell</option>
-            <option value="Unwind">Unwind</option>
-          </select>
-        </label>
-        <label class="modal-field">Option Type
-          <select id="tf-option-type">
-            <option value="Call">Call</option>
-            <option value="Put">Put</option>
-          </select>
-        </label>
         <label class="modal-field">Expiry
           <input type="date" id="tf-expiry">
         </label>
-        <label class="modal-field">Strike
-          <input type="number" id="tf-strike" step="1" min="0">
-        </label>
-        <label class="modal-field">Qty (ETH)
-          <input type="number" id="tf-qty" step="1" min="0">
-        </label>
         <label class="modal-field">Ref Spot
-          <input type="number" id="tf-ref-spot" step="0.01">
-        </label>
-        <label class="modal-field">Premium per Contract
-          <input type="number" id="tf-premium-per" step="0.01">
-        </label>
-        <label class="modal-field">Premium USD
-          <input type="number" id="tf-premium-usd" step="0.01">
-        </label>
-        <label class="modal-field">Notional ($mm)
-          <input type="number" id="tf-notional" step="0.01">
-        </label>
-        <label class="modal-field">% OTM
-          <input type="number" id="tf-pct-otm" step="0.01">
+          <input type="number" id="tf-ref-spot" step="0.01" placeholder="auto-filled">
         </label>
       </div>
+
+      <!-- Single-leg fields (shown for single/edit) -->
+      <div id="tf-single-section">
+        <div class="modal-grid">
+          <label class="modal-field">Side
+            <select id="tf-side">
+              <option value="Buy">Buy</option>
+              <option value="Sell">Sell</option>
+              <option value="Unwind">Unwind</option>
+            </select>
+          </label>
+          <label class="modal-field">Option Type
+            <select id="tf-option-type">
+              <option value="Call">Call</option>
+              <option value="Put">Put</option>
+            </select>
+          </label>
+          <label class="modal-field">Strike
+            <input type="number" id="tf-strike" step="any" min="0">
+          </label>
+          <label class="modal-field">Qty (ETH)
+            <input type="number" id="tf-qty" step="100" min="0">
+          </label>
+          <label class="modal-field">Premium per Contract
+            <input type="number" id="tf-premium-per" step="0.01">
+          </label>
+          <label class="modal-field">Premium USD
+            <input type="number" id="tf-premium-usd" step="0.01">
+          </label>
+          <label class="modal-field">Notional ($mm)
+            <input type="number" id="tf-notional" step="0.01">
+          </label>
+          <label class="modal-field">% OTM
+            <input type="number" id="tf-pct-otm" step="0.01">
+          </label>
+        </div>
+      </div>
+
+      <!-- Multi-leg section (shown for strategies) -->
+      <div id="tf-multi-section" style="display:none">
+        <div class="modal-grid" style="margin-bottom:.5rem">
+          <label class="modal-field">Qty per Leg (ETH)
+            <input type="number" id="tf-multi-qty" step="100" min="1" value="1000">
+          </label>
+        </div>
+        <table class="tf-legs-table">
+          <thead>
+            <tr>
+              <th>Leg</th><th>Side</th><th>Type</th><th>Strike</th>
+              <th>Prem/Contract</th><th>Premium USD</th>
+              <th style="width:30px"></th>
+            </tr>
+          </thead>
+          <tbody id="tf-legs-body"></tbody>
+        </table>
+        <button type="button" id="btn-tf-add-leg" class="btn-secondary" style="width:auto;margin-top:.4rem;font-size:.75rem;padding:.3rem .7rem">+ Add Leg</button>
+      </div>
+
       <div class="modal-actions">
         <button type="button" id="btn-modal-cancel" class="btn-secondary" style="width:auto;margin:0">Cancel</button>
         <button type="submit" id="btn-modal-save" class="btn-primary" style="width:auto">Save</button>

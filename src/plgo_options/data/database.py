@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import aiosqlite
@@ -11,13 +12,20 @@ from plgo_options.data.trades import read_eth_trades
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).resolve().parents[3] / "data" / "plgo_options.db"
+# Use DB_DIR env var for persistent storage (e.g. GCS FUSE mount on Cloud Run).
+# Falls back to local data/ directory for development.
+_db_dir = os.environ.get("DB_DIR")
+if _db_dir:
+    DB_PATH = Path(_db_dir) / "plgo_options.db"
+else:
+    DB_PATH = Path(__file__).resolve().parents[3] / "data" / "plgo_options.db"
 
 _db: aiosqlite.Connection | None = None
 
 TRADES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL DEFAULT 'ETH',
     counterparty TEXT NOT NULL DEFAULT '',
     trade_id TEXT DEFAULT '',
     trade_date TEXT DEFAULT '',
@@ -58,17 +66,26 @@ async def get_db() -> aiosqlite.Connection:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         _db = await aiosqlite.connect(str(DB_PATH))
         _db.row_factory = aiosqlite.Row
-        await _db.execute("PRAGMA journal_mode=WAL")
+        # Use DELETE journal mode for GCS FUSE compatibility (WAL doesn't sync reliably)
+        await _db.execute("PRAGMA journal_mode=DELETE")
         await _db.execute("PRAGMA foreign_keys=ON")
     return _db
 
 
 async def init_db():
-    """Create tables and auto-import from Excel if DB is empty."""
+    """Create tables, run migrations, and auto-import from Excel if DB is empty."""
     db = await get_db()
     await db.execute(TRADES_SCHEMA)
     await db.execute(AUDIT_SCHEMA)
     await db.commit()
+
+    # Migration: add 'asset' column if missing (existing DBs)
+    cursor = await db.execute("PRAGMA table_info(trades)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "asset" not in columns:
+        logger.info("Migrating: adding 'asset' column to trades table...")
+        await db.execute("ALTER TABLE trades ADD COLUMN asset TEXT NOT NULL DEFAULT 'ETH'")
+        await db.commit()
 
     # Auto-import from Excel on first run
     cursor = await db.execute("SELECT COUNT(*) FROM trades")
@@ -79,8 +96,8 @@ async def init_db():
         logger.info("Empty database — importing trades from Excel...")
         try:
             excel_trades = read_eth_trades()
-            imported = await _import_excel_trades(db, excel_trades)
-            logger.info("Imported %d trades from Excel", imported)
+            imported = await _import_excel_trades(db, excel_trades, asset="ETH")
+            logger.info("Imported %d ETH trades from Excel", imported)
         except Exception as e:
             logger.warning("Excel import failed: %s", e)
 
@@ -101,8 +118,18 @@ def _safe_float(v) -> float:
         return 0.0
 
 
-async def _import_excel_trades(db: aiosqlite.Connection, excel_trades: list[dict]) -> int:
+async def _import_excel_trades(
+    db: aiosqlite.Connection, excel_trades: list[dict], asset: str = "ETH",
+) -> int:
     """Map Excel column names to DB columns and insert."""
+    # Detect qty column name — ETH uses "ETH Options", FIL may use "FIL Options" or "Options"
+    qty_col = "ETH Options"
+    if asset != "ETH":
+        for candidate in [f"{asset} Options", "FIL Options", "Options", "Qty", "Quantity"]:
+            if any(candidate in t for t in excel_trades[:1]):
+                qty_col = candidate
+                break
+
     count = 0
     for t in excel_trades:
         counterparty = str(t.get("Counterparty") or "").strip()
@@ -118,7 +145,7 @@ async def _import_excel_trades(db: aiosqlite.Connection, excel_trades: list[dict
         strike = _safe_float(t.get("Strike"))
         ref_spot = _safe_float(t.get("Ref. Spot Price"))
         pct_otm = _safe_float(t.get("% OTM"))
-        qty = _safe_float(t.get("ETH Options"))
+        qty = _safe_float(t.get(qty_col) or t.get("ETH Options"))
         notional_mm = _safe_float(t.get("$ Notional (mm)"))
         premium_per = _safe_float(t.get("Premium per Contract"))
         premium_usd = _safe_float(t.get("Premium USD"))
@@ -128,11 +155,11 @@ async def _import_excel_trades(db: aiosqlite.Connection, excel_trades: list[dict
 
         cursor = await db.execute(
             """INSERT INTO trades
-               (counterparty, trade_id, trade_date, side, option_type,
+               (asset, counterparty, trade_id, trade_date, side, option_type,
                 expiry, strike, ref_spot, pct_otm, qty,
                 notional_mm, premium_per, premium_usd, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
-            (counterparty, trade_id, trade_date, side, option_type,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+            (asset, counterparty, trade_id, trade_date, side, option_type,
              expiry, strike, ref_spot, pct_otm, qty,
              notional_mm, premium_per, premium_usd),
         )
