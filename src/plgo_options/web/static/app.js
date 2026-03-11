@@ -5727,6 +5727,7 @@ function optv2RenderResult(data) {
       `<td>${optv2Fmt(t.iv_pct, 1)}</td>`,
       `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
       `<td>${optv2Fmt(t.notional, 2)}</td>`,
+      `<td style="text-align:center"><span style="font-weight:700;font-size:.8rem;color:${t.is_unwind ? 'var(--green)' : 'var(--muted)'}">${t.is_unwind ? '✓ Yes' : '✗ No'}</span></td>`,
       `<td>${optv2Fmt(t.delta_contribution, 4)}</td>`,
       `<td>${optv2Fmt(t.gamma_contribution, 6)}</td>`,
       `<td>${optv2Fmt(t.vega_contribution, 4)}</td>`,

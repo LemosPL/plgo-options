@@ -299,8 +299,18 @@ class OptimizerV2:
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
         lambda_vega: float = 100.0,
+        unwind_discount: float = 0.2,
+        new_position_penalty: float = 0.04,
     ) -> dict:
-        """Run the optimization and return proposed trades."""
+        """Run the optimization and return proposed trades.
+
+        Parameters
+        ----------
+        unwind_discount : float
+            Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
+        new_position_penalty : float
+            Extra cost per dollar notional for trades in instruments not already held.
+        """
         S = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
 
@@ -329,6 +339,23 @@ class OptimizerV2:
         # Vol-of-vol
         vov_daily = self._estimate_vol_of_vol_daily()
 
+        # ------------------------------------------------------------------
+        # Build a map of existing positions keyed by (expiry_code, strike, opt)
+        # so we know which candidates correspond to held instruments.
+        # A negative net_qty means we're short → buying unwinds.
+        # A positive net_qty means we're long → selling unwinds.
+        # ------------------------------------------------------------------
+        held_positions: dict[tuple[str, float, str], float] = {}
+        for p in self.positions:
+            # Extract expiry code from instrument name (e.g. "ETH-29MAY26-3000-C")
+            parts = p.instrument.split("-")
+            if len(parts) >= 4:
+                exp_code = parts[1]
+            else:
+                exp_code = ""
+            key = (exp_code, p.strike, p.opt)
+            held_positions[key] = held_positions.get(key, 0.0) + p.net_qty
+
         # Pre-compute candidate greek arrays (per contract)
         n = len(candidates)
         c_delta = np.array([c.delta for c in candidates])
@@ -344,6 +371,15 @@ class OptimizerV2:
             for c in candidates
         ])
 
+        # ------------------------------------------------------------------
+        # Per-candidate: existing position qty and "is_held" flag
+        # ------------------------------------------------------------------
+        c_held_qty = np.array([
+            held_positions.get((c.expiry_code, c.strike, c.opt), 0.0)
+            for c in candidates
+        ])
+        c_is_held = np.array([abs(q) > 0 for q in c_held_qty], dtype=float)
+
         # Current portfolio risk (before optimization)
         risk_before = self._compute_risk(
             port_delta, port_gamma, port_theta, port_vega,
@@ -351,7 +387,7 @@ class OptimizerV2:
         )
 
         def objective(x: np.ndarray) -> float:
-            """Negative utility: cost + λ·risk (we minimize this)."""
+            """Negative utility: cost + λ·risk + penalties (we minimize this)."""
             # New portfolio greeks = current + sum(x_i * candidate_greeks_i)
             new_delta = port_delta + np.dot(x, c_delta)
             new_gamma = port_gamma + np.dot(x, c_gamma)
@@ -363,8 +399,37 @@ class OptimizerV2:
                 sigma_daily, vov_daily,
             )
 
-            # Transaction cost: per-candidate rate * |x_i| * price_i
-            cost = np.sum(c_cost_rate * np.abs(x) * c_price)
+            # ----------------------------------------------------------
+            # Split each trade into "unwind" and "new" portions.
+            #
+            # For a held position with qty H and optimizer trade x:
+            #   - If x goes in the opposite direction of H (reducing exposure),
+            #     that part is an unwind → cheaper cost.
+            #   - Any remainder is a new position → higher cost.
+            #
+            # unwind_qty = min(|x|, |H|) when sign(x) != sign(H)
+            # new_qty    = |x| - unwind_qty
+            # ----------------------------------------------------------
+            # Unwind portion: x opposes held qty
+            opposite = (x * c_held_qty) < 0  # True where trade closes position
+            unwind_abs = np.where(
+                opposite,
+                np.minimum(np.abs(x), np.abs(c_held_qty)),
+                0.0,
+            )
+            new_abs = np.abs(x) - unwind_abs
+
+            # Cost for unwind portion (discounted)
+            cost_unwind = np.sum(
+                c_cost_rate * unwind_discount * unwind_abs * c_price
+            )
+            # Cost for new portion (full rate + penalty for non-held instruments)
+            cost_new = np.sum(
+                (c_cost_rate + new_position_penalty * (1.0 - c_is_held))
+                * new_abs * c_price
+            )
+
+            cost = cost_unwind + cost_new
 
             return cost + risk_aversion * risk
 
@@ -397,23 +462,75 @@ class OptimizerV2:
                 continue
             notional = abs(rounded_qty) * c.bs_price_usd
             cost_rate = float(c_cost_rate[i])
-            trades.append({
-                "instrument": "ETH-PERPETUAL" if c.opt == "F" else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}",
-                "expiry": c.expiry_date,
-                "dte": c.dte,
-                "strike": c.strike,
-                "opt": c.opt,
-                "qty": rounded_qty,
-                "side": "Buy" if rounded_qty > 0 else "Sell",
-                "iv_pct": round(c.iv_pct, 1),
-                "bs_price_usd": round(c.bs_price_usd, 2),
-                "notional": round(notional, 2),
-                "cost_bps": round(cost_rate * 10_000, 1),
-                "trade_cost": round(cost_rate * notional, 2),
-                "delta_contribution": round(rounded_qty * c.delta, 4),
-                "gamma_contribution": round(rounded_qty * c.gamma, 6),
-                "vega_contribution": round(rounded_qty * c.vega, 4),
-            })
+    
+            # Determine if this is an unwind or new position
+            held_qty = c_held_qty[i]
+            is_unwind = bool((rounded_qty * held_qty) < 0)
+            # Cap unwind qty to the actual held position size
+            unwind_qty = min(abs(rounded_qty), abs(held_qty)) if is_unwind else 0
+            new_qty = abs(rounded_qty) - unwind_qty
+
+            # Compute cost split: unwind portion at discounted rate, remainder at full rate
+            unwind_notional = unwind_qty * c.bs_price_usd
+            new_notional = new_qty * c.bs_price_usd
+            is_new_instrument = abs(held_qty) == 0
+            cost_unwind_part = cost_rate * unwind_discount * unwind_notional
+            cost_new_part = (
+                cost_rate + (new_position_penalty if is_new_instrument else 0.0)
+            ) * new_notional
+            trade_cost = cost_unwind_part + cost_new_part
+
+            instrument_name = (
+                "ETH-PERPETUAL" if c.opt == "F"
+                else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
+            )
+
+            # Emit separate rows for unwind vs new-position portions
+            if unwind_qty >= 1:
+                unwind_signed = int(unwind_qty) * (1 if rounded_qty > 0 else -1)
+                trades.append({
+                    "instrument": instrument_name,
+                    "expiry": c.expiry_date,
+                    "dte": c.dte,
+                    "strike": c.strike,
+                    "opt": c.opt,
+                    "qty": unwind_signed,
+                    "side": "Buy" if unwind_signed > 0 else "Sell",
+                    "iv_pct": round(c.iv_pct, 1),
+                    "bs_price_usd": round(c.bs_price_usd, 2),
+                    "notional": round(unwind_notional, 2),
+                    "cost_bps": round(cost_rate * 10_000, 1),
+                    "trade_cost": round(cost_unwind_part, 2),
+                    "delta_contribution": round(unwind_signed * c.delta, 4),
+                    "gamma_contribution": round(unwind_signed * c.gamma, 6),
+                    "vega_contribution": round(unwind_signed * c.vega, 4),
+                    "is_unwind": True,
+                    "unwind_qty": int(unwind_qty),
+                    "new_qty": 0,
+                })
+
+            if new_qty >= 1:
+                new_signed = int(new_qty) * (1 if rounded_qty > 0 else -1)
+                trades.append({
+                    "instrument": instrument_name,
+                    "expiry": c.expiry_date,
+                    "dte": c.dte,
+                    "strike": c.strike,
+                    "opt": c.opt,
+                    "qty": new_signed,
+                    "side": "Buy" if new_signed > 0 else "Sell",
+                    "iv_pct": round(c.iv_pct, 1),
+                    "bs_price_usd": round(c.bs_price_usd, 2),
+                    "notional": round(new_notional, 2),
+                    "cost_bps": round(cost_rate * 10_000, 1),
+                    "trade_cost": round(cost_new_part, 2),
+                    "delta_contribution": round(new_signed * c.delta, 4),
+                    "gamma_contribution": round(new_signed * c.gamma, 6),
+                    "vega_contribution": round(new_signed * c.vega, 4),
+                    "is_unwind": False,
+                    "unwind_qty": 0,
+                    "new_qty": int(new_qty),
+                })
 
         # Post-optimization portfolio greeks
         opt_x = result.x
