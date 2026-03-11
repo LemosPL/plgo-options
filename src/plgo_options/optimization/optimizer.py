@@ -137,12 +137,12 @@ class OptimizerV2:
         Parameters
         ----------
         target_expiry : optional expiry code to restrict to (e.g. "29MAY26").
-                        If None, uses the nearest quarterly expiry.
+                        If None, uses ALL available expiries.
         """
         S = self.eth_spot
         candidates = []
 
-        # Filter to a single expiry
+        # Filter smiles
         matching_smiles = []
         for smile in self.vol_surface:
             if smile["dte"] <= 0:
@@ -151,15 +151,8 @@ class OptimizerV2:
                 if smile["expiry_code"] == target_expiry:
                     matching_smiles.append(smile)
             else:
+                # No filter → use all expiries
                 matching_smiles.append(smile)
-
-        # If no target specified, pick the nearest quarterly (DTE > 14 days)
-        if not target_expiry and matching_smiles:
-            matching_smiles = [min(
-                (s for s in matching_smiles if s["dte"] > 14),
-                key=lambda s: s["dte"],
-                default=matching_smiles[0],
-            )]
 
         # Strike filter: 50%–200% of spot
         strike_lo = S * 0.50

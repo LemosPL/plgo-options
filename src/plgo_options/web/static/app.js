@@ -5324,7 +5324,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
     // Populate expiry dropdown from vol surface
     const $expiry = document.getElementById("optv2-target-expiry");
-    $expiry.innerHTML = "";
+    $expiry.innerHTML = '<option value="">All Maturities</option>';
     if (optv2Data.vol_surface) {
       const smiles = optv2Data.vol_surface
         .filter(s => s.dte > 0)
@@ -5335,8 +5335,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
         opt.textContent = `${s.expiry_code} (${s.dte}d)`;
         $expiry.appendChild(opt);
       });
-      // Default to second expiry if available (skip the nearest about-to-expire)
-      if (smiles.length > 1) $expiry.value = smiles[1].expiry_code;
+      // Default: "All Maturities" (empty value) is already selected
     }
 
     document.getElementById("btn-run-optv2").disabled = false;
