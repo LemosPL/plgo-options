@@ -875,7 +875,8 @@ function tmRender() {
 
 function tmRenderSummary() {
   const active = tmEnriched.filter(t => t.db_status === "active");
-  const totalNotional = active.reduce((s, t) => s + (t.notional_mm || 0), 0);
+  // Compute notional live: qty * ethSpot / 1e6
+  const totalNotional = active.reduce((s, t) => s + ((t.qty || 0) * (ethSpot || 0) / 1e6), 0);
   const totalMtm = active.reduce((s, t) => s + (t.current_mtm || 0), 0);
   const totalDelta = active.reduce((s, t) => s + ((t.delta || 0) * (t.net_qty || 0)), 0);
   const totalGamma = active.reduce((s, t) => s + ((t.gamma || 0) * (t.net_qty || 0)), 0);
@@ -884,15 +885,12 @@ function tmRenderSummary() {
 
   document.getElementById("tm-count").textContent = active.length;
 
-  // Format notional: convert from raw to $mm with commas
-  const notionalRaw = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0) * (t.qty || 0) * (ethSpot || 0), 0);
-  const notionalMm = totalNotional;
+  // Format notional: qty * ethSpot / 1e6 in $mm
   const $notional = document.getElementById("tm-notional");
-  if (Math.abs(notionalMm) >= 1) {
-    $notional.textContent = `$${notionalMm.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
+  if (Math.abs(totalNotional) >= 1) {
+    $notional.textContent = `$${totalNotional.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
   } else {
-    // Show in full USD if less than 1mm
-    const fullUsd = active.reduce((s, t) => s + Math.abs((t.notional_mm || 0) * 1e6), 0);
+    const fullUsd = totalNotional * 1e6;
     $notional.textContent = `$${fullUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   }
 
@@ -984,7 +982,7 @@ function tmRenderTable() {
       <td>${fmtK(t.strike)}</td>
       <td>${fmt(t.pct_otm_live, 1)}%</td>
       <td>${fmtK(t.qty)}</td>
-      <td>${fmtMm(t.notional_mm)}</td>
+      <td>${fmtMm((t.qty || 0) * (ethSpot || 0) / 1e6)}</td>
       <td>${fmtMoney(t.premium_usd)}</td>
       <td>${fmt(t.iv_pct, 1)}</td>
       <td>${fmt(t.delta, 4)}</td>
@@ -1040,15 +1038,16 @@ function tmRenderInsights() {
     });
   }
 
-  // Concentrated positions
-  const totalNotional = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0), 0);
-  if (totalNotional > 0) {
-    const concentrated = active.filter(t => Math.abs(t.notional_mm || 0) / totalNotional > 0.25);
+  // Concentrated positions (computed notional = qty * ethSpot / 1e6)
+  const calcNotional = t => (t.qty || 0) * (ethSpot || 0) / 1e6;
+  const totalNotionalIns = active.reduce((s, t) => s + Math.abs(calcNotional(t)), 0);
+  if (totalNotionalIns > 0) {
+    const concentrated = active.filter(t => Math.abs(calcNotional(t)) / totalNotionalIns > 0.25);
     if (concentrated.length > 0) {
       insights.push({
         type: "warning",
         title: "Concentrated positions (>25% of notional)",
-        body: concentrated.map(t => `${t.instrument}: $${(t.notional_mm || 0).toFixed(2)}mm (${(Math.abs(t.notional_mm || 0) / totalNotional * 100).toFixed(0)}%)`).join(", ")
+        body: concentrated.map(t => `${t.instrument}: $${calcNotional(t).toFixed(2)}mm (${(Math.abs(calcNotional(t)) / totalNotionalIns * 100).toFixed(0)}%)`).join(", ")
       });
     }
   }
@@ -4125,6 +4124,8 @@ let sbLegsPriced = [];
 let sbStructureCurves = null;
 let sbOriginalPositionIds = null;  // snapshot before adding structures
 let sbRemovedPositions = [];       // positions removed via Remove button (kept for baseline)
+let sbOldIds = new Set();          // trades assigned to "Old" curve
+let sbNewIds = new Set();          // trades assigned to "New" curve
 
 // ── Init & populate ──────────────────────────────────────
 
@@ -4163,12 +4164,19 @@ function sbPopulate() {
   if (smiles.length > 0) $targetExp.value = smiles[0].expiry_code;
 
   sbSelected = new Set();
-  sbIncluded = new Set(pfData.positions.map(p => p.id));
   sbLastResults = null;
   sbStructureCurves = null;
   sbLegsPriced = [];
   sbRemovedPositions = [];
   sbOriginalPositionIds = new Set(pfData.positions.map(p => p.id));
+  // Default: expired trades → Old, active trades → New
+  sbOldIds = new Set();
+  sbNewIds = new Set();
+  for (const p of pfData.positions) {
+    if (p.days_remaining <= 0) sbOldIds.add(p.id);
+    else sbNewIds.add(p.id);
+  }
+  sbUpdateIncludedFromOldNew();
   sbRenderTable();
   sbRenderLegs();
   sbDrawStructureChart();
@@ -4205,6 +4213,19 @@ function sbGetTargetExpiry() {
   return document.getElementById("sb-target-expiry").value;
 }
 
+// ── Old/New helpers ──────────────────────────────────────
+
+function sbUpdateIncludedFromOldNew() {
+  // sbIncluded = union of old + new for backward compat with roll logic
+  sbIncluded = new Set([...sbOldIds, ...sbNewIds]);
+}
+
+function sbUpdateHeaderChecks() {
+  const visible = sbGetFilteredPositions();
+  document.getElementById("sb-old-all").checked = visible.length > 0 && visible.every(p => sbOldIds.has(p.id));
+  document.getElementById("sb-new-all").checked = visible.length > 0 && visible.every(p => sbNewIds.has(p.id));
+}
+
 // ── Position table ───────────────────────────────────────
 
 function sbRenderTable() {
@@ -4212,9 +4233,11 @@ function sbRenderTable() {
   document.getElementById("sb-table-count").textContent = `(${list.length} trades)`;
   const globalExpiry = sbGetTargetExpiry();
   const allVisibleRoll = list.length > 0 && list.every(p => sbSelected.has(p.id));
-  const allVisibleIncl = list.length > 0 && list.every(p => sbIncluded.has(p.id));
+  const allVisibleOld = list.length > 0 && list.every(p => sbOldIds.has(p.id));
+  const allVisibleNew = list.length > 0 && list.every(p => sbNewIds.has(p.id));
   document.getElementById("sb-check-all").checked = allVisibleRoll;
-  document.getElementById("sb-include-all").checked = allVisibleIncl;
+  document.getElementById("sb-old-all").checked = allVisibleOld;
+  document.getElementById("sb-new-all").checked = allVisibleNew;
 
   const primarySort = sbSortStack[0] || null;
   const secondarySort = sbSortStack[1] || null;
@@ -4230,11 +4253,12 @@ function sbRenderTable() {
   $tbody.innerHTML = "";
 
   for (const pos of list) {
-    const included = sbIncluded.has(pos.id);
+    const isOld = sbOldIds.has(pos.id);
+    const isNew = sbNewIds.has(pos.id);
     const checked = sbSelected.has(pos.id);
     const typeColor = pos.opt === "C" ? "var(--green)" : "var(--red)";
     const sideClass = pos.side === "Long" ? "qty-long" : "qty-short";
-    const rowClass = (checked ? "roll-row-selected" : "") + (!included ? " pf-row-excluded" : "");
+    const rowClass = (checked ? "roll-row-selected" : "") + (isOld ? " sb-row-old" : "") + (isNew ? " sb-row-new" : "");
     const absQty = Math.abs(pos.net_qty);
     const newDte = rollDteForExpiry(globalExpiry);
     const T = Math.max(newDte, 0) / 365.25;
@@ -4254,7 +4278,8 @@ function sbRenderTable() {
     tr.className = rowClass;
     tr.dataset.posId = pos.id;
     tr.innerHTML =
-      `<td class="roll-include-cell"><input type="checkbox" class="roll-include" data-id="${pos.id}" ${included ? "checked" : ""}></td>` +
+      `<td><input type="checkbox" class="sb-old-check" data-id="${pos.id}" ${isOld ? "checked" : ""} style="accent-color:#f85149"></td>` +
+      `<td><input type="checkbox" class="sb-new-check" data-id="${pos.id}" ${isNew ? "checked" : ""} style="accent-color:var(--accent)"></td>` +
       `<td><input type="checkbox" class="roll-check" data-id="${pos.id}" ${checked ? "checked" : ""}></td>` +
       `<td style="text-align:left;font-size:.72rem">${pos.counterparty || ""}</td>` +
       `<td style="text-align:left;font-size:.72rem">${pos.instrument}</td>` +
@@ -4288,14 +4313,40 @@ function sbRenderTable() {
     });
   });
 
-  // Wire include checkboxes
-  $tbody.querySelectorAll(".roll-include").forEach(cb => {
+  // Wire Old checkboxes (mutually exclusive with New)
+  $tbody.querySelectorAll(".sb-old-check").forEach(cb => {
     cb.addEventListener("change", () => {
       const id = parseInt(cb.dataset.id);
-      if (cb.checked) sbIncluded.add(id); else sbIncluded.delete(id);
-      cb.closest("tr").classList.toggle("pf-row-excluded", !cb.checked);
-      const visible = sbGetFilteredPositions();
-      document.getElementById("sb-include-all").checked = visible.length > 0 && visible.every(p => sbIncluded.has(p.id));
+      if (cb.checked) {
+        sbOldIds.add(id);
+        sbNewIds.delete(id);
+        // Uncheck New checkbox in same row
+        const newCb = cb.closest("tr").querySelector(".sb-new-check");
+        if (newCb) newCb.checked = false;
+      } else {
+        sbOldIds.delete(id);
+      }
+      sbUpdateIncludedFromOldNew();
+      sbUpdateHeaderChecks();
+      sbRefreshVisuals();
+    });
+  });
+
+  // Wire New checkboxes (mutually exclusive with Old)
+  $tbody.querySelectorAll(".sb-new-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const id = parseInt(cb.dataset.id);
+      if (cb.checked) {
+        sbNewIds.add(id);
+        sbOldIds.delete(id);
+        // Uncheck Old checkbox in same row
+        const oldCb = cb.closest("tr").querySelector(".sb-old-check");
+        if (oldCb) oldCb.checked = false;
+      } else {
+        sbNewIds.delete(id);
+      }
+      sbUpdateIncludedFromOldNew();
+      sbUpdateHeaderChecks();
       sbRefreshVisuals();
     });
   });
@@ -4355,6 +4406,8 @@ function sbRemovePosition(id) {
   sbRemovedPositions.push(pos);
   pfData.positions.splice(idx, 1);
   sbIncluded.delete(id);
+  sbOldIds.delete(id);
+  sbNewIds.delete(id);
   sbSelected.delete(id);
   pfSelected.delete(id);
   sbRenderTable();
@@ -4769,6 +4822,7 @@ async function sbAddToPortfolio() {
 
       pfData.positions.push(newPos);
       pfSelected.add(newPos.id);
+      sbNewIds.add(newPos.id);
       sbIncluded.add(newPos.id);
     }
 
@@ -4886,7 +4940,6 @@ function sbDrawStructureChart() {
 
 function sbDrawChart(results) {
   const $chart = document.getElementById("sb-payoff-chart");
-  const $controls = document.getElementById("sb-chart-controls");
   $chart.style.display = "block";
 
   const spots = pfData.spot_ladder;
@@ -4895,48 +4948,41 @@ function sbDrawChart(results) {
   const hasRolls = results && results.length > 0;
   const rollMap = hasRolls ? rollBuildRollMap(results) : new Map();
   const allPositions = pfData.positions;
-  const includedPositions = allPositions.filter(p => sbIncluded.has(p.id));
-  const hasExclusion = allPositions.some(p => !sbIncluded.has(p.id)) || sbRemovedPositions.length > 0;
-  const hasNewPositions = sbOriginalPositionIds && allPositions.some(p => !sbOriginalPositionIds.has(p.id));
-  const hasScenarioChange = hasRolls || hasExclusion || hasNewPositions;
 
-  // Show toggle controls only when there's a scenario to compare
-  $controls.style.display = hasScenarioChange ? "block" : "none";
-  const showBaseline = hasScenarioChange ? document.getElementById("sb-show-baseline").checked : true;
-  const showScenario = hasScenarioChange ? document.getElementById("sb-show-scenario").checked : false;
+  const oldPositions = allPositions.filter(p => sbOldIds.has(p.id));
+  const newPositions = allPositions.filter(p => sbNewIds.has(p.id));
 
-  // Baseline = original portfolio (including positions that were removed)
-  const baselinePositions = [...allPositions, ...sbRemovedPositions]
-    .filter(p => sbOriginalPositionIds.has(p.id));
+  const showOld = document.getElementById("sb-show-old").checked;
+  const showNew = document.getElementById("sb-show-new").checked;
 
-  const baseColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
-  const scenColors = ["#ff7b72", "#e3b341", "#f0d060", "#56d364", "#79c0ff", "#d2a8ff"];
+  const oldColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
+  const newColors = ["#79c0ff", "#56d364", "#d2a8ff", "#ff7b72", "#f0d060", "#bc8cff"];
   const traces = [];
 
-  // Baseline portfolio payoff curves (always shown when no scenario, toggled otherwise)
-  if (!hasScenarioChange || showBaseline) {
+  // Old portfolio curves (solid)
+  if (showOld && oldPositions.length > 0) {
     horizons.forEach((h, i) => {
-      const baseCurve = rollBaselineCurve(spots, baselinePositions, h);
+      const curve = rollBaselineCurve(spots, oldPositions, h);
       const label = h === 0 ? "Expiry" : `T+${h}d`;
       traces.push({
-        x: spots, y: baseCurve, type: "scatter", mode: "lines",
-        name: hasScenarioChange ? `Base ${label}` : label,
-        line: { color: baseColors[i % baseColors.length], width: 2.5 },
-        legendgroup: `h${h}`,
+        x: spots, y: curve, type: "scatter", mode: "lines",
+        name: `Old ${label}`,
+        line: { color: oldColors[i % oldColors.length], width: 2.5 },
+        legendgroup: `old_h${h}`,
       });
     });
   }
 
-  // Overlay scenario curves when toggled on
-  if (hasScenarioChange && showScenario) {
+  // New portfolio curves (dashed, with roll support)
+  if (showNew && newPositions.length > 0) {
     horizons.forEach((h, i) => {
-      const scenCurve = rollSumCurve(spots, includedPositions, h, rollMap);
+      const curve = rollSumCurve(spots, newPositions, h, rollMap);
       const label = h === 0 ? "Expiry" : `T+${h}d`;
       traces.push({
-        x: spots, y: scenCurve, type: "scatter", mode: "lines",
-        name: `Scenario ${label}`,
-        line: { color: scenColors[i % scenColors.length], width: 2.5, dash: "dash" },
-        legendgroup: `h${h}`,
+        x: spots, y: curve, type: "scatter", mode: "lines",
+        name: `New ${label}`,
+        line: { color: newColors[i % newColors.length], width: 2.5, dash: "dash" },
+        legendgroup: `new_h${h}`,
       });
     });
   }
@@ -4951,21 +4997,13 @@ function sbDrawChart(results) {
     });
   }
 
-  // Dynamic title
-  let titleText = "Portfolio Payoff Profile";
-  if (hasScenarioChange) {
-    const parts = [];
-    if (hasNewPositions) parts.push("New Trades");
-    if (hasRolls) parts.push("Rolls");
-    if (hasExclusion) parts.push("Removals");
-    titleText += ` — Base vs Scenario (${parts.join(" + ")})`;
-  }
+  const titleText = `Portfolio Payoff — Old (${oldPositions.length}) vs New (${newPositions.length})`;
 
   const cc = chartColors();
   Plotly.react("sb-payoff-chart", traces, {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    xaxis: { title: `${currentAsset} Spot Price (USD)`, color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: currentAsset === "FIL" ? 2 : 500 },
     yaxis: { title: "P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 250, b: 50, l: 80 },
     showlegend: true,
@@ -4983,43 +5021,36 @@ function sbRenderMtmGrid(results) {
   const horizons = pfData.matrix_horizons;
   const ethSpot = pfData.eth_spot;
   const allPositions = pfData.positions;
-  const includedPositions = allPositions.filter(p => sbIncluded.has(p.id));
   const hasRolls = results && results.length > 0;
-  const hasExclusion = allPositions.some(p => !sbIncluded.has(p.id)) || sbRemovedPositions.length > 0;
-  const hasNewPositions = sbOriginalPositionIds && allPositions.some(p => !sbOriginalPositionIds.has(p.id));
-  const hasScenarioChange = hasRolls || hasExclusion || hasNewPositions;
   const rollMap = hasRolls ? rollBuildRollMap(results) : new Map();
 
-  // Baseline = original portfolio including removed positions
-  const baselinePositions = [...allPositions, ...sbRemovedPositions]
-    .filter(p => sbOriginalPositionIds.has(p.id));
+  const oldPositions = allPositions.filter(p => sbOldIds.has(p.id));
+  const newPositions = allPositions.filter(p => sbNewIds.has(p.id));
+  const hasOldAndNew = oldPositions.length > 0 && newPositions.length > 0;
 
-  // Update section title based on whether there's a scenario
   const $title = $section.querySelector("h2");
-  $title.innerHTML = hasScenarioChange
-    ? "Portfolio MTM Matrix &mdash; Base vs Scenario"
+  $title.innerHTML = hasOldAndNew
+    ? "Portfolio MTM Matrix &mdash; Old vs New"
     : "Portfolio MTM Matrix";
 
-  const scenLabel = hasNewPositions
-    ? (hasRolls ? "Rolled+New" : "With New")
-    : (hasRolls ? "Rolled" : "Selected");
-
-  // Header (same pattern as Roll tab: Base | Scenario)
+  // Header
   const thead = document.getElementById("sb-mtm-grid-thead");
-  if (hasScenarioChange) {
+  if (hasOldAndNew) {
     let hdrHtml = `<tr><th rowspan="2" style="text-align:left">Spot</th>`;
     for (const h of horizons) hdrHtml += `<th colspan="2">${h}d</th>`;
     hdrHtml += `</tr><tr>`;
-    for (const h of horizons) hdrHtml += `<th class="roll-mtm-base-hdr">Base</th><th class="roll-mtm-rolled-hdr">${scenLabel}</th>`;
+    for (const h of horizons) hdrHtml += `<th class="roll-mtm-base-hdr">Old</th><th class="roll-mtm-rolled-hdr">New</th>`;
     hdrHtml += `</tr>`;
     thead.innerHTML = hdrHtml;
   } else {
     thead.innerHTML = `<tr><th style="text-align:left">Spot</th>${horizons.map(h => `<th>${h}d</th>`).join("")}</tr>`;
   }
 
-  // Pick spots at $500 increments
+  // Pick spots at appropriate increments
+  const step = currentAsset === "FIL" ? 2 : 500;
+  const maxSpot = currentAsset === "FIL" ? 30 : 7000;
   const displaySpots = [];
-  for (let s = 500; s <= 7000; s += 500) {
+  for (let s = step; s <= maxSpot; s += step) {
     const idx = spots.indexOf(s);
     if (idx !== -1) displaySpots.push({ spot: s, idx });
   }
@@ -5032,12 +5063,15 @@ function sbRenderMtmGrid(results) {
     if (diff < closestDiff) { closestDiff = diff; closestSpot = ds.spot; }
   }
 
-  // Pre-compute curves: baseline = original portfolio, scenario = included + rolls
-  const baseCurves = {}, scenCurves = {};
+  // Pre-compute curves
+  const oldCurves = {}, newCurves = {};
+  const displayPositions = hasOldAndNew ? null : (newPositions.length > 0 ? newPositions : oldPositions);
   for (const h of horizons) {
-    baseCurves[h] = rollBaselineCurve(spots, baselinePositions, h);
-    if (hasScenarioChange) {
-      scenCurves[h] = rollSumCurve(spots, includedPositions, h, rollMap);
+    if (hasOldAndNew) {
+      oldCurves[h] = rollBaselineCurve(spots, oldPositions, h);
+      newCurves[h] = rollSumCurve(spots, newPositions, h, rollMap);
+    } else {
+      oldCurves[h] = rollBaselineCurve(spots, displayPositions, h);
     }
   }
 
@@ -5050,15 +5084,15 @@ function sbRenderMtmGrid(results) {
     html += `<tr class="${isSpotRow ? "roll-mtm-spot-row" : ""}">`;
     html += `<td style="text-align:left;font-weight:600;white-space:nowrap">$${spot.toLocaleString()}</td>`;
     for (const h of horizons) {
-      const base = baseCurves[h][idx];
-      const baseCls = base >= 0 ? "mtm-pos" : "mtm-neg";
-      if (hasScenarioChange) {
-        const scen = scenCurves[h][idx];
-        const scenCls = scen >= 0 ? "mtm-pos" : "mtm-neg";
-        html += `<td class="${baseCls} roll-mtm-base-cell">${fmtVal(base)}</td>`;
-        html += `<td class="${scenCls} roll-mtm-rolled-cell">${fmtVal(scen)}</td>`;
+      const oldVal = oldCurves[h][idx];
+      const oldCls = oldVal >= 0 ? "mtm-pos" : "mtm-neg";
+      if (hasOldAndNew) {
+        const newVal = newCurves[h][idx];
+        const newCls = newVal >= 0 ? "mtm-pos" : "mtm-neg";
+        html += `<td class="${oldCls} roll-mtm-base-cell">${fmtVal(oldVal)}</td>`;
+        html += `<td class="${newCls} roll-mtm-rolled-cell">${fmtVal(newVal)}</td>`;
       } else {
-        html += `<td class="${baseCls}">${fmtVal(base)}</td>`;
+        html += `<td class="${oldCls}">${fmtVal(oldVal)}</td>`;
       }
     }
     html += "</tr>";
@@ -5087,6 +5121,8 @@ document.getElementById("btn-sb-delete-selected").addEventListener("click", () =
       pfData.positions.splice(idx, 1);
     }
     sbIncluded.delete(id);
+    sbOldIds.delete(id);
+    sbNewIds.delete(id);
     sbSelected.delete(id);
     pfSelected.delete(id);
   }
@@ -5114,10 +5150,30 @@ document.getElementById("sb-check-all").addEventListener("change", (e) => {
   sbRenderTable();
 });
 
-document.getElementById("sb-include-all").addEventListener("change", (e) => {
+document.getElementById("sb-old-all").addEventListener("change", (e) => {
   sbGetFilteredPositions().forEach(p => {
-    if (e.target.checked) sbIncluded.add(p.id); else sbIncluded.delete(p.id);
+    if (e.target.checked) {
+      sbOldIds.add(p.id);
+      sbNewIds.delete(p.id);
+    } else {
+      sbOldIds.delete(p.id);
+    }
   });
+  sbUpdateIncludedFromOldNew();
+  sbRenderTable();
+  sbRefreshVisuals();
+});
+
+document.getElementById("sb-new-all").addEventListener("change", (e) => {
+  sbGetFilteredPositions().forEach(p => {
+    if (e.target.checked) {
+      sbNewIds.add(p.id);
+      sbOldIds.delete(p.id);
+    } else {
+      sbNewIds.delete(p.id);
+    }
+  });
+  sbUpdateIncludedFromOldNew();
   sbRenderTable();
   sbRefreshVisuals();
 });
@@ -5152,7 +5208,7 @@ document.querySelectorAll("#sb-trades-table .sortable").forEach(th => {
 });
 
 // Chart toggles
-["sb-show-baseline", "sb-show-scenario"].forEach(id => {
+["sb-show-old", "sb-show-new"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => sbRefreshVisuals());
 });
 
@@ -5237,6 +5293,7 @@ document.getElementById("btn-sb-add-confirm").addEventListener("click", () => {
       };
       pfData.positions.push(newPos);
       pfSelected.add(newPos.id);
+      sbNewIds.add(newPos.id);
       sbIncluded.add(newPos.id);
       sbRenderTable();
       sbRefreshVisuals();

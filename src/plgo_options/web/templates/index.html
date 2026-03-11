@@ -524,7 +524,8 @@
         <table id="sb-trades-table">
           <thead>
             <tr>
-              <th style="width:40px" title="Include in portfolio view"><span class="roll-col-label">Incl</span><br><input type="checkbox" id="sb-include-all" checked></th>
+              <th style="width:40px" title="Assign to Old curve (expired)"><span class="roll-col-label">Old</span><br><input type="checkbox" id="sb-old-all"></th>
+              <th style="width:40px" title="Assign to New curve (active)"><span class="roll-col-label">New</span><br><input type="checkbox" id="sb-new-all"></th>
               <th style="width:40px" title="Select for rolling"><span class="roll-col-label">Roll</span><br><input type="checkbox" id="sb-check-all"></th>
               <th class="sortable" data-col="counterparty" style="text-align:left">Cpty</th>
               <th class="sortable" data-col="instrument" style="text-align:left">Instrument</th>
@@ -640,19 +641,19 @@
     </div>
 
     <!-- Chart controls -->
-    <div id="sb-chart-controls" class="card" style="display:none;padding:.6rem 1rem">
+    <div id="sb-chart-controls" class="card" style="padding:.6rem 1rem">
       <label style="font-size:.8rem;color:var(--muted);cursor:pointer;margin-right:1.5rem">
-        <input type="checkbox" id="sb-show-baseline" checked style="accent-color:#484f58;margin-right:.3rem">Baseline
+        <input type="checkbox" id="sb-show-old" checked style="accent-color:#f85149;margin-right:.3rem">Old Portfolio
       </label>
       <label style="font-size:.8rem;color:var(--muted);cursor:pointer">
-        <input type="checkbox" id="sb-show-scenario" checked style="accent-color:var(--accent);margin-right:.3rem">Scenario
+        <input type="checkbox" id="sb-show-new" checked style="accent-color:var(--accent);margin-right:.3rem">New Portfolio
       </label>
     </div>
     <div id="sb-payoff-chart" class="chart-container" style="display:none;min-height:650px"></div>
 
     <!-- MTM Grid -->
     <section class="card" id="sb-mtm-section" style="display:none">
-      <h2>Portfolio MTM Matrix -- Base vs Scenario</h2>
+      <h2>Portfolio MTM Matrix &mdash; Old vs New</h2>
       <div class="chain-wrapper">
         <table id="sb-mtm-grid">
           <thead id="sb-mtm-grid-thead"></thead>

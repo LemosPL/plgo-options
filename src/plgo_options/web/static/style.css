@@ -570,8 +570,9 @@ select { margin-bottom: .5rem; }
 #roll-trades-table tr:hover > td:nth-child(1), #roll-trades-table tr:hover > td:nth-child(2) { background: var(--hover-bg); }
 #roll-trades-table tr.pf-row-excluded > td:nth-child(1), #roll-trades-table tr.pf-row-excluded > td:nth-child(2) { background: var(--surface); }
 
-#sb-trades-table tr:hover > td:nth-child(1), #sb-trades-table tr:hover > td:nth-child(2) { background: var(--hover-bg); }
-#sb-trades-table tr.pf-row-excluded > td:nth-child(1), #sb-trades-table tr.pf-row-excluded > td:nth-child(2) { background: var(--surface); }
+#sb-trades-table tr:hover > td:nth-child(1), #sb-trades-table tr:hover > td:nth-child(2), #sb-trades-table tr:hover > td:nth-child(3) { background: var(--hover-bg); }
+.sb-row-old { background: rgba(248,81,73,0.06) !important; }
+.sb-row-new { background: rgba(88,166,255,0.06) !important; }
 
 /* ── Checkbox styling ─────────────────────────────────────── */
 #pf-positions-table input[type="checkbox"],
