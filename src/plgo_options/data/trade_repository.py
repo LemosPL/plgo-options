@@ -8,7 +8,7 @@ import aiosqlite
 
 
 TRADE_FIELDS = [
-    "counterparty", "trade_id", "trade_date", "side", "option_type",
+    "asset", "counterparty", "trade_id", "trade_date", "side", "option_type",
     "instrument", "expiry", "strike", "ref_spot", "pct_otm", "qty",
     "notional_mm", "premium_per", "premium_usd", "status",
 ]
@@ -22,15 +22,20 @@ async def list_trades(
     db: aiosqlite.Connection,
     include_expired: bool = False,
     include_deleted: bool = False,
+    asset: str | None = None,
 ) -> list[dict]:
     conditions = []
+    params = []
     if not include_deleted:
         conditions.append("status != 'deleted'")
     if not include_expired:
         conditions.append("status != 'expired'")
+    if asset:
+        conditions.append("asset = ?")
+        params.append(asset)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     cursor = await db.execute(
-        f"SELECT * FROM trades {where} ORDER BY id"
+        f"SELECT * FROM trades {where} ORDER BY id", params
     )
     rows = await cursor.fetchall()
     return [_row_to_dict(r) for r in rows]

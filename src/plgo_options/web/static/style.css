@@ -65,6 +65,31 @@ a { color: var(--accent); }
   letter-spacing: -.01em;
 }
 
+/* ── Asset switcher ─────────────────────────────────────── */
+.sidebar-asset-switcher {
+  display: flex;
+  gap: .35rem;
+  padding: .25rem 1.25rem .5rem;
+}
+.asset-btn {
+  flex: 1;
+  padding: .35rem 0;
+  font-size: .75rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all .15s;
+}
+.asset-btn:hover { border-color: var(--accent); color: var(--text); }
+.asset-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .sidebar-spot {
   padding: 0 1.25rem .75rem;
   font-size: .85rem;
@@ -534,6 +559,8 @@ select { margin-bottom: .5rem; }
 
 /* ── Row states ───────────────────────────────────────────── */
 .pf-row-excluded { opacity: 0.35; }
+.pf-row-expired { opacity: 0.5; background: rgba(240,136,62,0.06) !important; }
+.pf-row-expired td:first-child::after { content: " (expired)"; font-size: .65rem; color: var(--orange); }
 .pf-row-rolled  { background: rgba(88,166,255,0.06) !important; }
 #pf-positions-table tr:hover > td:first-child { background: var(--hover-bg); }
 #pf-positions-table tr.pf-row-rolled > td:first-child { background: rgba(88,166,255,0.06); }
@@ -666,6 +693,19 @@ select { margin-bottom: .5rem; }
 .opt-badge-stagger { background: rgba(188,140,255,.15); color: #bc8cff; }
 .opt-badge-close   { background: rgba(248,81,73,.15); color: var(--red); }
 .opt-badge-partial { background: rgba(63,185,80,.15); color: var(--green); }
+
+/* ── Pricing page layout (mirrors Structure Builder) ─────── */
+#pricing-row {
+  display: grid;
+  grid-template-columns: 40% 1fr;
+  gap: 1rem;
+  align-items: stretch;
+}
+#pricing-chart-section { min-width: 0; display: flex; flex-direction: column; }
+#pricing-chart-section h2 { flex-shrink: 0; }
+#payoff-chart { flex: 1; min-height: 650px; width: 100%; }
+#smile-chart { width: 100%; }
+#pricing-body { overflow: hidden; }
 
 /* ── Structure Builder layout ─────────────────────────────── */
 #sb-structure-row {
@@ -813,6 +853,83 @@ select { margin-bottom: .5rem; }
   justify-content: flex-end;
   margin-top: 1.25rem;
 }
+
+/* ── Under construction banner ────────────────────────────── */
+.under-construction-banner {
+  background: rgba(227, 179, 65, .12);
+  border: 1px solid rgba(227, 179, 65, .3);
+  color: var(--orange);
+  padding: .6rem 1rem;
+  border-radius: var(--radius);
+  font-size: .8rem;
+  margin-bottom: .75rem;
+}
+
+/* ── Strategy preset bar ──────────────────────────────────── */
+.tf-strategy-bar {
+  display: flex;
+  gap: .35rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.tf-preset {
+  font-size: .75rem;
+  padding: .35rem .7rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all .15s;
+}
+.tf-preset:hover { border-color: var(--accent); color: var(--text); }
+.tf-preset.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ── Multi-leg table ─────────────────────────────────────── */
+.tf-legs-table {
+  width: 100%;
+  font-size: .78rem;
+  border-collapse: collapse;
+  margin-top: .35rem;
+}
+.tf-legs-table th {
+  font-size: .7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  padding: .3rem .4rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.tf-legs-table td {
+  padding: .3rem .4rem;
+  border-bottom: 1px solid var(--border);
+}
+.tf-legs-table input, .tf-legs-table select {
+  font-size: .78rem;
+  padding: .3rem .4rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+.tf-legs-table .tf-leg-remove {
+  background: none;
+  border: none;
+  color: var(--red);
+  cursor: pointer;
+  font-size: .85rem;
+  padding: .2rem .4rem;
+}
+.tf-legs-table .tf-leg-remove:hover { opacity: .7; }
+
+/* ── Bulk selection ──────────────────────────────────────── */
+.tm-bulk-btn { font-size: .78rem; padding: .4rem .7rem; }
+.btn-secondary.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tm-row-selected { background: rgba(88, 166, 255, .08) !important; }
+#tm-check-all { cursor: pointer; }
 
 /* ── History modal styles ─────────────────────────────────── */
 #history-table th, #history-table td { text-align: left; }

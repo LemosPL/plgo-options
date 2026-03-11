@@ -1,6 +1,7 @@
 "use strict";
 
 // ─── State ──────────────────────────────────────────────────
+let currentAsset = "ETH";  // "ETH" or "FIL"
 let ethSpot = null;
 let optionChain = [];   // OptionTicker[]
 let legs = [];          // {side, type, strike, premium, quantity}
@@ -19,6 +20,14 @@ const $spotMax    = document.getElementById("spot-max");
 const $chainSec   = document.getElementById("chain-section");
 const $chainExp   = document.getElementById("chain-expiry");
 const $chainBody  = document.getElementById("chain-body");
+
+// ─── Chart theme helper ────────────────────────────────────
+function chartColors() {
+  const light = document.documentElement.dataset.theme === "light";
+  return light
+    ? { paper: "#ffffff", plot: "#f6f8fa", text: "#1f2328", muted: "#656d76", grid: "#d0d7de", zeroline: "#afb8c1", legendBg: "rgba(255,255,255,0.8)", legendBorder: "#d0d7de" }
+    : { paper: "#161b22", plot: "#0d1117", text: "#e6edf3", muted: "#8b949e", grid: "#21262d", zeroline: "#30363d", legendBg: "rgba(22,27,34,0.8)", legendBorder: "#30363d" };
+}
 
 // ─── API helpers ────────────────────────────────────────────
 async function api(method, path, body) {
@@ -136,26 +145,27 @@ function drawEmptyChart() {
 }
 
 function chartLayout() {
+  const cc = chartColors();
   return {
-    title: { text: "Strategy Payoff at Expiry", font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22",
-    plot_bgcolor:  "#0d1117",
+    title: { text: "Strategy Payoff at Expiry", font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper,
+    plot_bgcolor:  cc.plot,
     xaxis: {
       title: "ETH Spot Price (USD)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
-      zerolinecolor: "#30363d",
+      color: cc.muted,
+      gridcolor: cc.grid,
+      zerolinecolor: cc.zeroline,
     },
     yaxis: {
       title: "P&L (USD)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
+      color: cc.muted,
+      gridcolor: cc.grid,
       zerolinecolor: "#f85149",
       zerolinewidth: 2,
     },
     margin: { t: 50, r: 30, b: 50, l: 60 },
     showlegend: true,
-    legend: { font: { color: "#8b949e" } },
+    legend: { font: { color: cc.muted } },
   };
 }
 
@@ -488,17 +498,18 @@ function replicateStrategy() {
     if (d.side === "buy") totalPay += amt;
     else totalReceive += amt;
   }
-  const totalCostUsd = totalPay - totalReceive;
-  const totalCostEth = spot > 0 ? totalCostUsd / spot : 0;
+  const net = totalReceive - totalPay;
+  const netEth = spot > 0 ? net / spot : 0;
 
   // Summary
   const expiryLabel = uniqueExpiries.length === 1
     ? uniqueExpiries[0]
     : uniqueExpiries.join(" / ");
-  const fmtUsd = v => "$" + v.toLocaleString(undefined, {maximumFractionDigits: 0});
+  const fmtUsd = v => "$" + Math.abs(Math.round(v)).toLocaleString();
   const payColor = totalPay > 0 ? "var(--red)" : "var(--muted)";
   const rcvColor = totalReceive > 0 ? "var(--green)" : "var(--muted)";
-  const netColor = totalCostUsd > 0 ? "var(--red)" : "var(--green)";
+  const netLabel = net >= 0 ? "Rcv" : "Pay";
+  const netColor = net >= 0 ? "var(--green)" : "var(--red)";
   const $summary = document.getElementById("repl-summary");
   $summary.innerHTML =
     `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">` +
@@ -506,7 +517,7 @@ function replicateStrategy() {
     `<span style="display:flex;gap:1rem;font-size:.95rem">` +
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
-    `<span>Net: <strong style="color:${netColor}">${fmtUsd(totalCostUsd)}</strong> (${totalCostEth.toFixed(4)} ETH)</span>` +
+    `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ETH)</span>` +
     `</span></div>`;
 
   // Per-leg table
@@ -623,7 +634,7 @@ function drawSmileChart(smile, pricedLegs) {
       },
       text: [`${leg.iv_pct.toFixed(1)}%`],
       textposition: "top center",
-      textfont: { color: "#e6edf3", size: 10 },
+      textfont: { color: chartColors().text, size: 10 },
     });
   }
 
@@ -631,15 +642,16 @@ function drawSmileChart(smile, pricedLegs) {
     ? `Deribit IV Smile — ${smile.expiry_code} (${smile.dte}d)`
     : "Deribit Implied Volatility Smile";
 
+  const cc = chartColors();
   const layout = {
-    title: { text: title, font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22",
-    plot_bgcolor: "#0d1117",
-    xaxis: { title: "Strike (USD)", color: "#8b949e", gridcolor: "#21262d" },
-    yaxis: { title: "Implied Volatility (%)", color: "#8b949e", gridcolor: "#21262d" },
+    title: { text: title, font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper,
+    plot_bgcolor: cc.plot,
+    xaxis: { title: "Strike (USD)", color: cc.muted, gridcolor: cc.grid },
+    yaxis: { title: "Implied Volatility (%)", color: cc.muted, gridcolor: cc.grid },
     margin: { t: 50, r: 30, b: 50, l: 60 },
     showlegend: true,
-    legend: { font: { color: "#8b949e" } },
+    legend: { font: { color: cc.muted } },
   };
 
   Plotly.react("smile-chart", traces, layout, { responsive: true });
@@ -669,6 +681,35 @@ document.querySelectorAll(".btn-template").forEach(btn => {
   el.addEventListener("keydown", e => { if (e.key === "Enter") computePayoff(); });
 });
 
+// ─── Asset switcher ─────────────────────────────────────────
+document.querySelectorAll(".asset-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const asset = btn.dataset.asset;
+    if (asset === currentAsset) return;
+    currentAsset = asset;
+    document.querySelectorAll(".asset-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("asset-label").textContent = asset;
+
+    // Reset all page caches so they reload with new asset
+    tmLoaded = false;
+    portfolioLoaded = false;
+    sbLoaded = false;
+    pfData = null;
+
+    // Update spot display
+    if (asset === "ETH" && ethSpot) {
+      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    } else if (asset === "FIL") {
+      document.getElementById("eth-spot").textContent = "N/A (no live feed)";
+    }
+
+    // Reload current page
+    const activePage = document.querySelector(".nav-item.active");
+    if (activePage) activePage.click();
+  });
+});
+
 // ─── Sidebar page switching ─────────────────────────────────
 document.querySelectorAll(".nav-item").forEach(item => {
   item.addEventListener("click", () => {
@@ -680,10 +721,26 @@ document.querySelectorAll(".nav-item").forEach(item => {
 
     const pg = item.dataset.page;
 
+    // Show/hide FIL under-construction banners
+    const isFil = currentAsset === "FIL";
+    const pricingBanner = document.getElementById("pricing-fil-banner");
+    const rollBanner = document.getElementById("roll-fil-banner");
+    if (pricingBanner) pricingBanner.style.display = (isFil && pg === "pricing") ? "" : "none";
+    if (rollBanner) rollBanner.style.display = (isFil && pg === "roll") ? "" : "none";
+
     // Lazy-load pages
     if (pg === "trades" && !tmLoaded) tmLoad();
+    if (pg === "pricing") {
+      // Plotly may have rendered at 0 width while page was hidden — trigger resize
+      setTimeout(() => {
+        const pc = document.getElementById("payoff-chart");
+        const sc = document.getElementById("smile-chart");
+        if (pc && pc.data) Plotly.Plots.resize(pc);
+        if (sc && sc.data) Plotly.Plots.resize(sc);
+      }, 50);
+    }
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
-    if (pg === "roll" && !rollLoaded) rollInit();
+    if (pg === "roll" && !rollLoaded && !isFil) rollInit();
     if (pg === "structurer" && !sbLoaded) sbInit();
   });
 });
@@ -720,12 +777,35 @@ document.getElementById("btn-theme-toggle").addEventListener("click", () => {
   }
   localStorage.setItem("plgo-theme", next);
   updateThemeIcons();
+  recolorCharts();
 });
 
 function updateThemeIcons() {
   const isLight = document.documentElement.dataset.theme === "light";
   document.getElementById("icon-moon").style.display = isLight ? "none" : "block";
   document.getElementById("icon-sun").style.display = isLight ? "block" : "none";
+}
+
+function recolorCharts() {
+  const cc = chartColors();
+  const update = {
+    paper_bgcolor: cc.paper,
+    plot_bgcolor: cc.plot,
+    "title.font.color": cc.text,
+    "xaxis.color": cc.muted,
+    "xaxis.gridcolor": cc.grid,
+    "yaxis.color": cc.muted,
+    "yaxis.gridcolor": cc.grid,
+    "legend.font.color": cc.muted,
+    "legend.bgcolor": cc.legendBg,
+    "legend.bordercolor": cc.legendBorder,
+    "xaxis.zerolinecolor": cc.zeroline,
+    "xaxis.tickfont.color": cc.muted,
+    "yaxis.tickfont.color": cc.muted,
+  };
+  document.querySelectorAll(".js-plotly-plot").forEach(el => {
+    Plotly.relayout(el, update).catch(() => {});
+  });
 }
 
 // ─── Trade Management ───────────────────────────────────────
@@ -738,18 +818,19 @@ let tmSortAsc = true;
 
 async function tmLoad() {
   const tmBody = document.getElementById("tm-body");
-  tmBody.innerHTML = '<tr><td colspan="21" style="text-align:center;padding:2rem;color:var(--muted)">Loading trades...</td></tr>';
+  tmBody.innerHTML = '<tr><td colspan="22" style="text-align:center;padding:2rem;color:var(--muted)">Loading trades...</td></tr>';
+  tmSelected.clear();
 
   try {
     // Fetch trades from DB
     const includeExp = document.getElementById("tm-show-expired").checked;
-    const data = await get(`/api/trades/?include_expired=${includeExp}`);
+    const data = await get(`/api/trades/?include_expired=${includeExp}&asset=${currentAsset}`);
     tmTrades = data.trades || [];
 
     // Fetch enriched data from portfolio endpoint for live Greeks/MTM
     let enriched = [];
     try {
-      const pfData = await get("/api/portfolio/pnl");
+      const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
       enriched = pfData.positions || [];
       ethSpot = pfData.eth_spot;
       document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -781,7 +862,7 @@ async function tmLoad() {
     tmLoaded = true;
     tmRender();
   } catch (e) {
-    tmBody.innerHTML = `<tr><td colspan="21" style="text-align:center;padding:2rem;color:var(--red)">Error: ${e.message}</td></tr>`;
+    tmBody.innerHTML = `<tr><td colspan="22" style="text-align:center;padding:2rem;color:var(--red)">Error: ${e.message}</td></tr>`;
   }
 }
 
@@ -882,13 +963,16 @@ function tmRenderTable() {
   const fmtMm = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm` : "--";
 
   tbody.innerHTML = rows.map(t => {
+    const tid = t.db_id || t.id;
     const isExpired = t.db_status === "expired";
-    const rowClass = isExpired ? "tm-row-expired" : "";
+    const isSelected = tmSelected.has(tid);
+    const rowClass = isExpired ? "tm-row-expired" : isSelected ? "tm-row-selected" : "";
     const statusClass = t.db_status === "active" ? "status-active" : t.db_status === "expired" ? "status-expired" : "status-deleted";
     const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
     const sideColor = (t.side || "").toLowerCase().includes("buy") || (t.side || "").toLowerCase().includes("long") ? "qty-long" : "qty-short";
 
-    return `<tr class="${rowClass}">
+    return `<tr class="${rowClass}" data-tid="${tid}">
+      <td><input type="checkbox" class="tm-row-check" data-tid="${tid}" ${isSelected ? "checked" : ""} ${isExpired ? "disabled" : ""}></td>
       <td><span class="status-dot ${statusClass}"></span></td>
       <td style="text-align:left">${t.counterparty || ""}</td>
       <td>${t.trade_date || ""}</td>
@@ -919,6 +1003,18 @@ function tmRenderTable() {
       </td>
     </tr>`;
   }).join("");
+
+  // Wire row checkboxes
+  tbody.querySelectorAll(".tm-row-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const tid = parseInt(cb.dataset.tid);
+      if (cb.checked) tmSelected.add(tid); else tmSelected.delete(tid);
+      const row = cb.closest("tr");
+      row.classList.toggle("tm-row-selected", cb.checked);
+      tmUpdateBulkUI();
+    });
+  });
+  tmUpdateBulkUI();
 }
 
 function tmRenderInsights() {
@@ -1026,13 +1122,127 @@ document.getElementById("btn-tm-refresh").addEventListener("click", () => tmLoad
 document.getElementById("btn-tm-new").addEventListener("click", () => tmOpenModal());
 document.getElementById("btn-modal-cancel").addEventListener("click", () => tmCloseModal());
 
+// ─── Multi-leg state ────────────────────────────────────────
+let tfPreset = "single";
+let tfLegs = []; // [{side, type, strike, premium_per, premium_usd}]
+
+const TF_PRESETS = {
+  single:       null,
+  put_spread:   [{ side: "Buy", type: "Put", strike: 0 }, { side: "Sell", type: "Put", strike: 0 }],
+  call_spread:  [{ side: "Buy", type: "Call", strike: 0 }, { side: "Sell", type: "Call", strike: 0 }],
+  straddle:     [{ side: "Buy", type: "Call", strike: 0 }, { side: "Buy", type: "Put", strike: 0 }],
+  strangle:     [{ side: "Buy", type: "Call", strike: 0 }, { side: "Buy", type: "Put", strike: 0 }],
+  iron_condor:  [
+    { side: "Buy", type: "Put", strike: 0 },
+    { side: "Sell", type: "Put", strike: 0 },
+    { side: "Sell", type: "Call", strike: 0 },
+    { side: "Buy", type: "Call", strike: 0 },
+  ],
+};
+
+// Preset buttons
+document.querySelectorAll(".tf-preset").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tf-preset").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    tfPreset = btn.dataset.preset;
+    tfApplyPreset();
+  });
+});
+
+function tfApplyPreset() {
+  const isSingle = tfPreset === "single";
+  document.getElementById("tf-single-section").style.display = isSingle ? "" : "none";
+  document.getElementById("tf-multi-section").style.display = isSingle ? "none" : "";
+
+  if (!isSingle) {
+    const template = TF_PRESETS[tfPreset];
+    const spot = ethSpot || 0;
+    // Pre-fill strikes relative to spot
+    tfLegs = template.map((leg, i) => {
+      let strike = leg.strike;
+      if (spot > 0 && strike === 0) {
+        if (tfPreset === "put_spread") strike = i === 0 ? Math.round(spot * 0.9) : Math.round(spot * 0.8);
+        else if (tfPreset === "call_spread") strike = i === 0 ? Math.round(spot * 1.1) : Math.round(spot * 1.2);
+        else if (tfPreset === "straddle") strike = Math.round(spot / 50) * 50;
+        else if (tfPreset === "strangle") strike = i === 0 ? Math.round(spot * 1.1) : Math.round(spot * 0.9);
+        else if (tfPreset === "iron_condor") {
+          const offsets = [0.85, 0.9, 1.1, 1.15];
+          strike = Math.round(spot * offsets[i]);
+        }
+      }
+      return { ...leg, strike, premium_per: 0, premium_usd: 0 };
+    });
+    tfRenderLegs();
+  }
+}
+
+function tfRenderLegs() {
+  const tbody = document.getElementById("tf-legs-body");
+  tbody.innerHTML = tfLegs.map((leg, i) => `<tr>
+    <td style="color:var(--muted)">${i + 1}</td>
+    <td><select class="tf-leg-side" data-idx="${i}">
+      <option value="Buy" ${leg.side === "Buy" ? "selected" : ""}>Buy</option>
+      <option value="Sell" ${leg.side === "Sell" ? "selected" : ""}>Sell</option>
+    </select></td>
+    <td><select class="tf-leg-type" data-idx="${i}">
+      <option value="Call" ${leg.type === "Call" ? "selected" : ""}>Call</option>
+      <option value="Put" ${leg.type === "Put" ? "selected" : ""}>Put</option>
+    </select></td>
+    <td><input type="number" class="tf-leg-strike" data-idx="${i}" value="${leg.strike}" step="any" min="0"></td>
+    <td><input type="number" class="tf-leg-prem" data-idx="${i}" value="${leg.premium_per}" step="0.01"></td>
+    <td><input type="number" class="tf-leg-premusd" data-idx="${i}" value="${leg.premium_usd}" step="0.01"></td>
+    <td><button type="button" class="tf-leg-remove" data-idx="${i}">&times;</button></td>
+  </tr>`).join("");
+
+  // Wire leg inputs
+  tbody.querySelectorAll(".tf-leg-side").forEach(el => el.addEventListener("change", () => { tfLegs[el.dataset.idx].side = el.value; }));
+  tbody.querySelectorAll(".tf-leg-type").forEach(el => el.addEventListener("change", () => { tfLegs[el.dataset.idx].type = el.value; }));
+  tbody.querySelectorAll(".tf-leg-strike").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].strike = parseFloat(el.value) || 0; }));
+  tbody.querySelectorAll(".tf-leg-prem").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].premium_per = parseFloat(el.value) || 0; }));
+  tbody.querySelectorAll(".tf-leg-premusd").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].premium_usd = parseFloat(el.value) || 0; }));
+  tbody.querySelectorAll(".tf-leg-remove").forEach(el => el.addEventListener("click", () => {
+    tfLegs.splice(parseInt(el.dataset.idx), 1);
+    tfRenderLegs();
+  }));
+}
+
+document.getElementById("btn-tf-add-leg").addEventListener("click", () => {
+  tfLegs.push({ side: "Buy", type: "Call", strike: Math.round(ethSpot || 2000), premium_per: 0, premium_usd: 0 });
+  tfRenderLegs();
+});
+
+// Auto-fill ref spot and compute % OTM / notional when strike or qty changes
+function tfAutoCalc() {
+  const spot = parseFloat(document.getElementById("tf-ref-spot").value) || 0;
+  const strike = parseFloat(document.getElementById("tf-strike").value) || 0;
+  const qty = parseFloat(document.getElementById("tf-qty").value) || 0;
+  if (spot > 0 && strike > 0) {
+    const otm = ((strike / spot) - 1) * 100;
+    document.getElementById("tf-pct-otm").value = otm.toFixed(2);
+  }
+  if (spot > 0 && qty > 0) {
+    document.getElementById("tf-notional").value = ((qty * spot) / 1e6).toFixed(4);
+  }
+}
+["tf-strike", "tf-qty", "tf-ref-spot"].forEach(id => {
+  document.getElementById(id).addEventListener("input", tfAutoCalc);
+});
+
 function tmOpenModal(trade = null) {
   const modal = document.getElementById("modal-trade");
   const title = document.getElementById("modal-trade-title");
   const form = document.getElementById("trade-form");
+  const stratBar = document.getElementById("tf-strategy-bar");
 
   if (trade) {
+    // Edit mode — single leg only, hide strategy bar
     title.textContent = `Edit Trade #${trade.id}`;
+    stratBar.style.display = "none";
+    document.getElementById("tf-single-section").style.display = "";
+    document.getElementById("tf-multi-section").style.display = "none";
+    tfPreset = "single";
+
     document.getElementById("tf-id").value = trade.id;
     document.getElementById("tf-counterparty").value = trade.counterparty || "";
     document.getElementById("tf-trade-date").value = trade.trade_date || "";
@@ -1047,10 +1257,21 @@ function tmOpenModal(trade = null) {
     document.getElementById("tf-notional").value = trade.notional_mm || "";
     document.getElementById("tf-pct-otm").value = trade.pct_otm || "";
   } else {
+    // New trade mode — show strategy bar, default to single
     title.textContent = "New Trade";
     form.reset();
+    stratBar.style.display = "";
     document.getElementById("tf-id").value = "";
     document.getElementById("tf-trade-date").value = new Date().toISOString().split("T")[0];
+    // Auto-fill ref spot from live price
+    if (ethSpot) document.getElementById("tf-ref-spot").value = ethSpot;
+    // Reset to single preset
+    document.querySelectorAll(".tf-preset").forEach(b => b.classList.remove("active"));
+    document.querySelector('.tf-preset[data-preset="single"]').classList.add("active");
+    tfPreset = "single";
+    tfLegs = [];
+    document.getElementById("tf-single-section").style.display = "";
+    document.getElementById("tf-multi-section").style.display = "none";
   }
 
   modal.style.display = "flex";
@@ -1063,28 +1284,75 @@ function tmCloseModal() {
 document.getElementById("trade-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("tf-id").value;
-  const data = {
-    counterparty: document.getElementById("tf-counterparty").value,
-    trade_date: document.getElementById("tf-trade-date").value,
-    side: document.getElementById("tf-side").value,
-    option_type: document.getElementById("tf-option-type").value,
-    expiry: document.getElementById("tf-expiry").value,
-    strike: parseFloat(document.getElementById("tf-strike").value) || 0,
-    qty: parseFloat(document.getElementById("tf-qty").value) || 0,
-    ref_spot: parseFloat(document.getElementById("tf-ref-spot").value) || 0,
-    premium_per: parseFloat(document.getElementById("tf-premium-per").value) || 0,
-    premium_usd: parseFloat(document.getElementById("tf-premium-usd").value) || 0,
-    notional_mm: parseFloat(document.getElementById("tf-notional").value) || 0,
-    pct_otm: parseFloat(document.getElementById("tf-pct-otm").value) || 0,
-  };
+  const counterparty = document.getElementById("tf-counterparty").value;
+  const trade_date = document.getElementById("tf-trade-date").value;
+  const expiry = document.getElementById("tf-expiry").value;
+  const ref_spot = parseFloat(document.getElementById("tf-ref-spot").value) || 0;
+
+  // Basic validation
+  if (tfPreset === "single" || id) {
+    const strike = parseFloat(document.getElementById("tf-strike").value);
+    const qty = parseFloat(document.getElementById("tf-qty").value);
+    if (!strike || strike <= 0) { alert("Strike is required"); return; }
+    if (!qty || qty <= 0) { alert("Qty is required"); return; }
+  } else {
+    const qty = parseFloat(document.getElementById("tf-multi-qty").value);
+    if (!qty || qty <= 0) { alert("Qty per leg is required"); return; }
+    if (tfLegs.length === 0) { alert("Add at least one leg"); return; }
+    if (tfLegs.some(l => !l.strike || l.strike <= 0)) { alert("All legs need a strike"); return; }
+  }
+  if (!expiry) { alert("Expiry date is required"); return; }
 
   try {
     if (id) {
+      // Edit single trade
+      const data = {
+        counterparty, trade_date, expiry, ref_spot,
+        side: document.getElementById("tf-side").value,
+        option_type: document.getElementById("tf-option-type").value,
+        strike: parseFloat(document.getElementById("tf-strike").value) || 0,
+        qty: parseFloat(document.getElementById("tf-qty").value) || 0,
+        premium_per: parseFloat(document.getElementById("tf-premium-per").value) || 0,
+        premium_usd: parseFloat(document.getElementById("tf-premium-usd").value) || 0,
+        notional_mm: parseFloat(document.getElementById("tf-notional").value) || 0,
+        pct_otm: parseFloat(document.getElementById("tf-pct-otm").value) || 0,
+      };
       await api("PUT", `/api/trades/${id}`, data);
-    } else {
+    } else if (tfPreset === "single") {
+      // Create single leg
+      const data = {
+        asset: currentAsset, counterparty, trade_date, expiry, ref_spot,
+        side: document.getElementById("tf-side").value,
+        option_type: document.getElementById("tf-option-type").value,
+        strike: parseFloat(document.getElementById("tf-strike").value) || 0,
+        qty: parseFloat(document.getElementById("tf-qty").value) || 0,
+        premium_per: parseFloat(document.getElementById("tf-premium-per").value) || 0,
+        premium_usd: parseFloat(document.getElementById("tf-premium-usd").value) || 0,
+        notional_mm: parseFloat(document.getElementById("tf-notional").value) || 0,
+        pct_otm: parseFloat(document.getElementById("tf-pct-otm").value) || 0,
+      };
       await post("/api/trades/", data);
+    } else {
+      // Create multi-leg strategy — one trade per leg
+      const qty = parseFloat(document.getElementById("tf-multi-qty").value) || 0;
+      for (const leg of tfLegs) {
+        const otm = ref_spot > 0 ? ((leg.strike / ref_spot) - 1) * 100 : 0;
+        const notional = ref_spot > 0 ? (qty * ref_spot) / 1e6 : 0;
+        await post("/api/trades/", {
+          asset: currentAsset, counterparty, trade_date, expiry, ref_spot,
+          side: leg.side,
+          option_type: leg.type,
+          strike: leg.strike,
+          qty,
+          premium_per: leg.premium_per,
+          premium_usd: leg.premium_usd,
+          notional_mm: notional,
+          pct_otm: otm,
+        });
+      }
     }
     tmCloseModal();
+    tmInvalidatePortfolio();
     tmLoad();
   } catch (err) {
     alert("Failed to save trade: " + err.message);
@@ -1100,6 +1368,7 @@ async function tmExpireTrade(id) {
   if (!confirm("Mark this trade as expired?")) return;
   try {
     await post(`/api/trades/${id}/expire`);
+    tmInvalidatePortfolio();
     tmLoad();
   } catch (err) {
     alert("Failed to expire trade: " + err.message);
@@ -1110,11 +1379,71 @@ async function tmDeleteTrade(id) {
   if (!confirm("Delete this trade? (soft delete)")) return;
   try {
     await api("DELETE", `/api/trades/${id}`);
+    tmInvalidatePortfolio();
     tmLoad();
   } catch (err) {
     alert("Failed to delete trade: " + err.message);
   }
 }
+
+/** Invalidate cached portfolio/strategy builder so they re-fetch from DB on next visit. */
+function tmInvalidatePortfolio() {
+  portfolioLoaded = false;
+  sbLoaded = false;
+  pfData = null;
+}
+
+// ─── Bulk select & actions ──────────────────────────────────
+let tmSelected = new Set();
+
+function tmUpdateBulkUI() {
+  const n = tmSelected.size;
+  document.getElementById("btn-tm-bulk-expire").style.display = n > 0 ? "" : "none";
+  document.getElementById("btn-tm-bulk-delete").style.display = n > 0 ? "" : "none";
+  document.getElementById("btn-tm-bulk-expire").textContent = `Expire Selected (${n})`;
+  document.getElementById("btn-tm-bulk-delete").textContent = `Delete Selected (${n})`;
+  // Update header checkbox
+  const visibleActive = tmEnriched.filter(t => t.db_status === "active");
+  const allChecked = visibleActive.length > 0 && visibleActive.every(t => tmSelected.has(t.db_id || t.id));
+  document.getElementById("tm-check-all").checked = allChecked;
+}
+
+document.getElementById("tm-check-all").addEventListener("change", (e) => {
+  const visibleActive = tmEnriched.filter(t => t.db_status === "active");
+  if (e.target.checked) {
+    visibleActive.forEach(t => tmSelected.add(t.db_id || t.id));
+  } else {
+    tmSelected.clear();
+  }
+  tmRenderTable();
+  tmUpdateBulkUI();
+});
+
+document.getElementById("btn-tm-bulk-expire").addEventListener("click", async () => {
+  const ids = [...tmSelected];
+  if (!confirm(`Expire ${ids.length} trade(s)?`)) return;
+  try {
+    await post("/api/trades/bulk-expire", { ids });
+    tmSelected.clear();
+    tmInvalidatePortfolio();
+    tmLoad();
+  } catch (err) {
+    alert("Bulk expire failed: " + err.message);
+  }
+});
+
+document.getElementById("btn-tm-bulk-delete").addEventListener("click", async () => {
+  const ids = [...tmSelected];
+  if (!confirm(`Delete ${ids.length} trade(s)?`)) return;
+  try {
+    for (const id of ids) await api("DELETE", `/api/trades/${id}`);
+    tmSelected.clear();
+    tmInvalidatePortfolio();
+    tmLoad();
+  } catch (err) {
+    alert("Bulk delete failed: " + err.message);
+  }
+});
 
 async function tmShowHistory(id) {
   const modal = document.getElementById("modal-history");
@@ -1305,27 +1634,28 @@ function drawExposureChart(positions) {
     });
   }
 
+  const cc = chartColors();
   const layout = {
-    title: { text: "Net Exposure by Strike", font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22",
-    plot_bgcolor: "#0d1117",
+    title: { text: "Net Exposure by Strike", font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper,
+    plot_bgcolor: cc.plot,
     barmode: "group",
     xaxis: {
       title: "Strike (USD)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
+      color: cc.muted,
+      gridcolor: cc.grid,
       type: "category",
     },
     yaxis: {
       title: "Net Quantity (ETH Options)",
-      color: "#8b949e",
-      gridcolor: "#21262d",
+      color: cc.muted,
+      gridcolor: cc.grid,
       zerolinecolor: "#f85149",
       zerolinewidth: 2,
     },
     margin: { t: 50, r: 30, b: 60, l: 60 },
     showlegend: true,
-    legend: { font: { color: "#8b949e" } },
+    legend: { font: { color: cc.muted } },
   };
 
   Plotly.newPlot("exposure-chart", traces, layout, { responsive: true });
@@ -1394,16 +1724,29 @@ function pfLookupIv(targetDte, strike) {
   return ivs[ivs.length - 1];
 }
 
+// ── Compare mode state ────────────────────────────────────
+let pfCompareMode = false;
+let pfExpiredData = null; // portfolio data including expired trades (for compare)
+let pfOldSet = new Set();  // trade IDs in old portfolio (user-selected)
+let pfNewSet = new Set();  // trade IDs in new portfolio (user-selected)
+
 // ── Load ──────────────────────────────────────────────────
 async function loadPortfolio() {
   const $btn = document.getElementById("btn-refresh-portfolio");
   $btn.classList.add("loading");
   $btn.textContent = "Loading…";
 
+  const includeExpired = document.getElementById("pf-include-expired").checked;
+
   try {
-    pfData = await get("/api/portfolio/pnl");
-    pfSelected = new Set(pfData.positions.map(p => p.id));
+    pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExpired}`);
+    pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
+
+    // Show/hide compare button when expired trades are included
+    const hasExpired = pfData.positions.some(p => p.db_status === "expired");
+    document.getElementById("btn-pf-compare").style.display = hasExpired ? "" : "none";
+    if (!hasExpired) pfCompareMode = false;
 
     // Populate expiry filter
     const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
@@ -1415,10 +1758,22 @@ async function loadPortfolio() {
       $expF.appendChild(opt);
     });
 
+    // Show/hide no-live-data banner for FIL
+    const banner = document.getElementById("pf-no-live-banner");
+    if (banner) banner.style.display = pfData.no_live_data ? "" : "none";
+    document.getElementById("pf-spot-label").textContent = `${currentAsset} Spot`;
+
     pfRenderAll();
     portfolioLoaded = true;
   } catch (e) {
     console.error("Failed to load portfolio:", e);
+    if (e.message && e.message.includes("404")) {
+      // No trades for this asset yet
+      const banner = document.getElementById("pf-no-live-banner");
+      if (banner) banner.style.display = "none";
+      portfolioLoaded = true;
+      return;
+    }
     alert("Failed to load portfolio P&L — check console.\n" + e.message);
   } finally {
     $btn.classList.remove("loading");
@@ -1545,7 +1900,8 @@ function pfRenderTable() {
     const rolled = pfRolled.has(pos.id);
     const typeColor = pos.opt === "C" ? "var(--green)" : "var(--red)";
     const sideClass = pos.side === "Long" ? "qty-long" : pos.side === "Short" ? "qty-short" : "";
-    const rowClass = (!checked ? "pf-row-excluded" : "") + (rolled ? " pf-row-rolled" : "");
+    const isExpired = pos.db_status === "expired";
+    const rowClass = (isExpired ? "pf-row-expired " : "") + (!checked ? "pf-row-excluded" : "") + (rolled ? " pf-row-rolled" : "");
     const rollDte = rolled ? pfRolled.get(pos.id).newDte : Math.round(pos.days_remaining + 90);
     const fmtNum = (v, d=0) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "—";
     const otmClass = pos.pct_otm_live > 0 ? "mtm-neg" : pos.pct_otm_live < 0 ? "mtm-pos" : "";
@@ -1577,8 +1933,12 @@ function pfRenderTable() {
 
     const tr = document.createElement("tr");
     tr.className = rowClass;
-    tr.innerHTML =
-      `<td><input type="checkbox" class="pf-check" data-id="${pos.id}" ${checked ? "checked" : ""}></td>` +
+    const firstCol = pfCompareMode
+      ? `<td style="white-space:nowrap;font-size:.7rem">` +
+        `<label style="color:var(--orange);margin-right:4px"><input type="checkbox" class="pf-old-check" data-id="${pos.id}" ${pfOldSet.has(pos.id) ? "checked" : ""}> Old</label>` +
+        `<label style="color:var(--accent)"><input type="checkbox" class="pf-new-check" data-id="${pos.id}" ${pfNewSet.has(pos.id) ? "checked" : ""}> New</label></td>`
+      : `<td><input type="checkbox" class="pf-check" data-id="${pos.id}" ${checked ? "checked" : ""}></td>`;
+    tr.innerHTML = firstCol +
       `<td style="text-align:left">${pos.counterparty}</td>` +
       `<td>${pos.trade_id ?? ""}</td>` +
       `<td>${pos.trade_date}</td>` +
@@ -1615,6 +1975,22 @@ function pfRenderTable() {
       const id = parseInt(cb.dataset.id);
       if (cb.checked) pfSelected.add(id); else pfSelected.delete(id);
       pfOnSelectionChange();
+    });
+  });
+
+  // Compare mode: Old/New checkboxes
+  $tbody.querySelectorAll(".pf-old-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const id = parseInt(cb.dataset.id);
+      if (cb.checked) pfOldSet.add(id); else pfOldSet.delete(id);
+      pfRenderPayoffChart();
+    });
+  });
+  $tbody.querySelectorAll(".pf-new-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const id = parseInt(cb.dataset.id);
+      if (cb.checked) pfNewSet.add(id); else pfNewSet.delete(id);
+      pfRenderPayoffChart();
     });
   });
 
@@ -1710,6 +2086,34 @@ function pfBaselineCurve(horizon) {
 }
 
 // ── Payoff chart ──────────────────────────────────────────
+
+function pfSumCurveForSet(positionIds, horizon) {
+  const key = String(horizon);
+  const spots = pfData.spot_ladder;
+  const result = new Array(spots.length).fill(0);
+  for (const p of pfData.positions) {
+    if (!positionIds.has(p.id)) continue;
+    const curve = p.payoff_by_horizon[key];
+    if (curve) for (let i = 0; i < spots.length; i++) result[i] += curve[i];
+  }
+  return result;
+}
+
+/** Initialize compare sets with sensible defaults:
+ *  Old = expired trades, New = active trades. User can override.
+ */
+function pfInitCompareSets() {
+  pfOldSet = new Set();
+  pfNewSet = new Set();
+  for (const p of pfData.positions) {
+    if (p.db_status === "expired") {
+      pfOldSet.add(p.id);
+    } else {
+      pfNewSet.add(p.id);
+    }
+  }
+}
+
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
   const horizons = pfData.chart_horizons;
@@ -1717,39 +2121,71 @@ function pfRenderPayoffChart() {
 
   const colors = ["#8b949e", "#f85149", "#d29922", "#3fb950", "#58a6ff", "#bc8cff"];
   const scenColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
+  const expiredColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166"];
+  const activeColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364"];
   const traces = [];
 
-  // Baseline curves (dashed gray if scenario differs)
-  horizons.forEach((h, i) => {
-    const curve = pfBaselineCurve(h);
-    const label = h === 0 ? "Baseline: Expiry" : `Baseline: T+${h}d`;
-    traces.push({
-      x: spots, y: curve,
-      type: "scatter", mode: "lines",
-      name: label,
-      line: {
-        color: hasScenarioChange ? "#484f58" : scenColors[i % scenColors.length],
-        width: hasScenarioChange ? 1.5 : 2.5,
-        dash: hasScenarioChange ? "dot" : "solid",
-      },
-      visible: true,
-      legendgroup: "baseline",
-    });
-  });
-
-  // Scenario curves (solid) — only if different from baseline
-  if (hasScenarioChange) {
+  if (pfCompareMode) {
+    // ── Compare mode: Old portfolio vs New portfolio ──────────
+    // Old portfolio curves (dotted) — user-selected
     horizons.forEach((h, i) => {
-      const curve = pfSumCurves(pfSelected, h);
-      const label = h === 0 ? "Scenario: Expiry" : `Scenario: T+${h}d`;
+      const curve = pfSumCurveForSet(pfOldSet, h);
+      const label = h === 0 ? "Old Portfolio: Expiry" : `Old Portfolio: T+${h}d`;
       traces.push({
         x: spots, y: curve,
         type: "scatter", mode: "lines",
         name: label,
-        line: { color: scenColors[i % scenColors.length], width: 2.5 },
-        legendgroup: "scenario",
+        line: { color: expiredColors[i % expiredColors.length], width: 2, dash: "dot" },
+        legendgroup: "old",
       });
     });
+
+    // New portfolio curves (solid) — user-selected
+    horizons.forEach((h, i) => {
+      const curve = pfSumCurveForSet(pfNewSet, h);
+      const label = h === 0 ? "New Portfolio: Expiry" : `New Portfolio: T+${h}d`;
+      traces.push({
+        x: spots, y: curve,
+        type: "scatter", mode: "lines",
+        name: label,
+        line: { color: activeColors[i % activeColors.length], width: 2.5 },
+        legendgroup: "new",
+      });
+    });
+  } else {
+    // ── Normal mode ──────────────────────────────────────────
+    // Baseline curves (dashed gray if scenario differs)
+    horizons.forEach((h, i) => {
+      const curve = pfBaselineCurve(h);
+      const label = h === 0 ? "Baseline: Expiry" : `Baseline: T+${h}d`;
+      traces.push({
+        x: spots, y: curve,
+        type: "scatter", mode: "lines",
+        name: label,
+        line: {
+          color: hasScenarioChange ? "#484f58" : scenColors[i % scenColors.length],
+          width: hasScenarioChange ? 1.5 : 2.5,
+          dash: hasScenarioChange ? "dot" : "solid",
+        },
+        visible: true,
+        legendgroup: "baseline",
+      });
+    });
+
+    // Scenario curves (solid) — only if different from baseline
+    if (hasScenarioChange) {
+      horizons.forEach((h, i) => {
+        const curve = pfSumCurves(pfSelected, h);
+        const label = h === 0 ? "Scenario: Expiry" : `Scenario: T+${h}d`;
+        traces.push({
+          x: spots, y: curve,
+          type: "scatter", mode: "lines",
+          name: label,
+          line: { color: scenColors[i % scenColors.length], width: 2.5 },
+          legendgroup: "scenario",
+        });
+      });
+    }
   }
 
   // Spot line
@@ -1763,25 +2199,30 @@ function pfRenderPayoffChart() {
     legendgroup: "spot",
   });
 
+  const cc = chartColors();
+  const assetLabel = currentAsset + " Spot Price (USD)";
+  const titleText = pfCompareMode
+    ? "Portfolio Comparison — Old Portfolio (dotted) vs New Portfolio (solid)"
+    : hasScenarioChange
+      ? "Portfolio Payoff — Baseline (dotted) vs Scenario (solid)"
+      : "Portfolio Payoff Profile — All Positions";
   const layout = {
     title: {
-      text: hasScenarioChange
-        ? "Portfolio Payoff — Baseline (dotted) vs Scenario (solid)"
-        : "Portfolio Payoff Profile — All Positions",
-      font: { color: "#e6edf3", size: 16 },
+      text: titleText,
+      font: { color: cc.text, size: 16 },
     },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
-    xaxis: { title: "ETH Spot Price (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d", dtick: 500 },
-    yaxis: { title: "Portfolio P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
+    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
+    xaxis: { title: assetLabel, color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: currentAsset === "FIL" ? 1 : 500 },
+    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 200, b: 50, l: 80 },
     showlegend: true,
     legend: {
-      font: { color: "#8b949e", size: 10 },
+      font: { color: cc.muted, size: 10 },
       orientation: "v",
       x: 1.02, y: 1,
       xanchor: "left", yanchor: "top",
-      bgcolor: "rgba(22,27,34,0.8)",
-      bordercolor: "#30363d",
+      bgcolor: cc.legendBg,
+      bordercolor: cc.legendBorder,
       borderwidth: 1,
     },
   };
@@ -1855,6 +2296,21 @@ function pfRenderMtmGrid() {
 document.getElementById("btn-refresh-portfolio").addEventListener("click", () => {
   portfolioLoaded = false;
   loadPortfolio();
+});
+
+document.getElementById("pf-include-expired").addEventListener("change", () => {
+  portfolioLoaded = false;
+  loadPortfolio();
+});
+
+document.getElementById("btn-pf-compare").addEventListener("click", () => {
+  pfCompareMode = !pfCompareMode;
+  const btn = document.getElementById("btn-pf-compare");
+  btn.textContent = pfCompareMode ? "Exit Compare" : "Compare Old vs New";
+  btn.classList.toggle("active", pfCompareMode);
+  if (pfCompareMode) pfInitCompareSets();
+  pfRenderTable();
+  pfRenderPayoffChart();
 });
 
 document.getElementById("btn-pf-select-all").addEventListener("click", () => {
@@ -2148,7 +2604,7 @@ let rollSortStack = [{ col: "expiry", asc: true }];
 async function rollInit() {
   if (!pfData) {
     try {
-      pfData = await get("/api/portfolio/pnl");
+      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
       portfolioLoaded = true;
       if (pfSelected.size === 0) {
         pfSelected = new Set(pfData.positions.map(p => p.id));
@@ -2352,7 +2808,7 @@ function rollRenderTable() {
         `$${fmtNum(pos.current_mtm)}</td>` +
       `<td><select class="roll-expiry-select" data-id="${pos.id}" style="font-size:.72rem;width:100%;margin:0">${expiryOpts}</select></td>` +
       `<td><input type="number" class="roll-strike-input" data-id="${pos.id}" ` +
-        `value="${pos.strike}" step="50" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
+        `value="${pos.strike}" step="any" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><input type="number" class="roll-qty-input" data-id="${pos.id}" ` +
         `value="${absQty}" step="1" min="0" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><select class="roll-type-select" data-id="${pos.id}" style="font-size:.72rem;width:100%;margin:0">` +
@@ -2710,17 +3166,18 @@ function rollDrawChart(results) {
   else if (hasRolls) titleText = "Portfolio Payoff — Baseline (dotted) vs Rolled (solid)";
   else if (hasExclusion) titleText = "Portfolio Payoff — Baseline (dotted) vs Selected (solid)";
 
+  const cc = chartColors();
   const layout = {
-    title: { text: titleText, font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
-    xaxis: { title: "ETH Spot Price (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d", dtick: 500 },
-    yaxis: { title: "Portfolio P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
+    title: { text: titleText, font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
+    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 200, b: 50, l: 80 },
     showlegend: true,
     legend: {
-      font: { color: "#8b949e", size: 10 },
+      font: { color: cc.muted, size: 10 },
       orientation: "v", x: 1.02, y: 1, xanchor: "left", yanchor: "top",
-      bgcolor: "rgba(22,27,34,0.8)", bordercolor: "#30363d", borderwidth: 1,
+      bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1,
     },
   };
 
@@ -3102,7 +3559,7 @@ let optHighlightIdx = -1;
 async function optInit() {
   if (!pfData) {
     try {
-      pfData = await get("/api/portfolio/pnl");
+      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
       portfolioLoaded = true;
       if (pfSelected.size === 0) pfSelected = new Set(pfData.positions.map(p => p.id));
     } catch (e) {
@@ -3550,15 +4007,16 @@ function optDrawChart() {
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" } });
   }
 
+  const cc = chartColors();
   Plotly.react("opt-payoff-chart", traces, {
-    title: { text: "Optimizer: Scenario Payoff Comparison", font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
-    xaxis: { title: "ETH Spot Price (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d", dtick: 500 },
-    yaxis: { title: "Portfolio P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
+    title: { text: "Optimizer: Scenario Payoff Comparison", font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
+    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 250, b: 50, l: 80 },
     showlegend: true,
-    legend: { font: { color: "#8b949e", size: 10 }, orientation: "v", x: 1.02, y: 1,
-      xanchor: "left", yanchor: "top", bgcolor: "rgba(22,27,34,0.8)", bordercolor: "#30363d", borderwidth: 1 },
+    legend: { font: { color: cc.muted, size: 10 }, orientation: "v", x: 1.02, y: 1,
+      xanchor: "left", yanchor: "top", bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
   }, { responsive: true });
 }
 
@@ -3673,7 +4131,7 @@ let sbRemovedPositions = [];       // positions removed via Remove button (kept 
 async function sbInit() {
   if (!pfData) {
     try {
-      pfData = await get("/api/portfolio/pnl");
+      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
       portfolioLoaded = true;
       if (pfSelected.size === 0) pfSelected = new Set(pfData.positions.map(p => p.id));
     } catch (e) {
@@ -3810,7 +4268,7 @@ function sbRenderTable() {
       `<td>${pos.iv_pct != null ? pos.iv_pct.toFixed(1) + "%" : "---"}</td>` +
       `<td class="${pos.current_mtm >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace">$${fmtNum(pos.current_mtm)}</td>` +
       `<td><select class="roll-expiry-select" data-id="${pos.id}" style="font-size:.72rem;width:100%;margin:0">${expiryOpts}</select></td>` +
-      `<td><input type="number" class="roll-strike-input" data-id="${pos.id}" value="${pos.strike}" step="50" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
+      `<td><input type="number" class="roll-strike-input" data-id="${pos.id}" value="${pos.strike}" step="any" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><input type="number" class="roll-qty-input" data-id="${pos.id}" value="${absQty}" step="1" min="0" style="width:100%;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><select class="roll-type-select" data-id="${pos.id}" style="font-size:.72rem;width:100%;margin:0">` +
         `<option value="C" ${pos.opt === "C" ? "selected" : ""}>Call</option>` +
@@ -4081,7 +4539,7 @@ function sbRenderLegs() {
           `<option value="C" ${leg.type === "C" ? "selected" : ""}>Call</option>` +
           `<option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option></select>` +
       `</td>` +
-      `<td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
+      `<td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="any" style="width:80px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><input type="number" class="sb-leg-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:70px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><button class="sb-leg-remove btn-secondary" data-idx="${idx}" style="padding:.15rem .4rem;font-size:.7rem;margin:0;width:auto">✕</button></td>`;
     $tbody.appendChild(tr);
@@ -4400,26 +4858,27 @@ function sbDrawStructureChart() {
     font: { size: 14, color: "#484f58" },
   }];
 
+  const cc = chartColors();
   Plotly.react("sb-structure-chart", traces, {
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
+    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: {
       title: hasData ? "ETH Spot (USD)" : "",
-      color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d",
+      color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline,
       dtick: 500,
       showticklabels: hasData,
     },
     yaxis: {
       title: hasData ? "P&L (USD)" : "",
-      color: "#8b949e", gridcolor: "#21262d",
-      zerolinecolor: hasData ? "#f85149" : "#21262d",
+      color: cc.muted, gridcolor: cc.grid,
+      zerolinecolor: hasData ? "#f85149" : cc.grid,
       zerolinewidth: hasData ? 2 : 1,
       showticklabels: hasData,
     },
     annotations: annotation,
     margin: { t: 15, r: 25, b: hasData ? 45 : 20, l: hasData ? 70 : 30 },
     showlegend: hasData,
-    legend: { font: { color: "#8b949e", size: 10 }, orientation: "h", x: 0.5, y: 1.02,
-      xanchor: "center", yanchor: "bottom", bgcolor: "rgba(22,27,34,0.8)" },
+    legend: { font: { color: cc.muted, size: 10 }, orientation: "h", x: 0.5, y: 1.02,
+      xanchor: "center", yanchor: "bottom", bgcolor: cc.legendBg },
   }, { responsive: true });
 }
 
@@ -4502,15 +4961,16 @@ function sbDrawChart(results) {
     titleText += ` — Base vs Scenario (${parts.join(" + ")})`;
   }
 
+  const cc = chartColors();
   Plotly.react("sb-payoff-chart", traces, {
-    title: { text: titleText, font: { color: "#e6edf3", size: 16 } },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117",
-    xaxis: { title: "ETH Spot Price (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#30363d", dtick: 500 },
-    yaxis: { title: "P&L (USD)", color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#f85149", zerolinewidth: 2 },
+    title: { text: titleText, font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
+    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    yaxis: { title: "P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 250, b: 50, l: 80 },
     showlegend: true,
-    legend: { font: { color: "#8b949e", size: 10 }, orientation: "v", x: 1.02, y: 1,
-      xanchor: "left", yanchor: "top", bgcolor: "rgba(22,27,34,0.8)", bordercolor: "#30363d", borderwidth: 1 },
+    legend: { font: { color: cc.muted, size: 10 }, orientation: "v", x: 1.02, y: 1,
+      xanchor: "left", yanchor: "top", bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
   }, { responsive: true });
 }
 

@@ -12,6 +12,7 @@ router = APIRouter()
 
 
 class TradeCreate(BaseModel):
+    asset: str = "ETH"
     counterparty: str = ""
     trade_id: str = ""
     trade_date: str = ""
@@ -45,14 +46,40 @@ class TradeUpdate(BaseModel):
     premium_usd: float | None = None
 
 
+class BulkExpireRequest(BaseModel):
+    ids: list[int]
+
+
 @router.get("/")
 async def list_trades(
     include_expired: bool = False,
     include_deleted: bool = False,
+    asset: str | None = None,
 ):
     db = await get_db()
-    trades = await repo.list_trades(db, include_expired, include_deleted)
+    trades = await repo.list_trades(db, include_expired, include_deleted, asset=asset)
     return {"trades": trades}
+
+
+@router.post("/")
+async def create_trade(body: TradeCreate):
+    db = await get_db()
+    data = body.model_dump(exclude_none=True)
+    trade = await repo.create_trade(db, data)
+    return trade
+
+
+@router.post("/bulk-expire")
+async def bulk_expire_trades(body: BulkExpireRequest):
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="No trade IDs provided")
+    db = await get_db()
+    results = []
+    for tid in body.ids:
+        trade = await repo.expire_trade(db, tid)
+        if trade:
+            results.append(trade)
+    return {"expired": len(results), "trades": results}
 
 
 @router.get("/{trade_id}")
@@ -61,14 +88,6 @@ async def get_trade(trade_id: int):
     trade = await repo.get_trade(db, trade_id)
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found")
-    return trade
-
-
-@router.post("/")
-async def create_trade(body: TradeCreate):
-    db = await get_db()
-    data = body.model_dump(exclude_none=True)
-    trade = await repo.create_trade(db, data)
     return trade
 
 

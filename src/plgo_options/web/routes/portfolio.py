@@ -159,12 +159,13 @@ def _match_expiry(pos_expiry: str, deribit_map: dict[str, date]) -> str | None:
 # ---------------------------------------------------------------------------
 
 @router.get("/pnl")
-async def portfolio_pnl():
+async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     """Return per-trade MTM across spot ladder and time horizons."""
+    is_fil = asset.upper() == "FIL"
     # 1. Read trades from database
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=True, include_deleted=False)
+        db_trades = await list_trades(db, include_expired=include_expired, include_deleted=False, asset=asset.upper())
         # Map DB fields to legacy column names the enrichment loop expects
         trades = []
         for t in db_trades:
@@ -193,30 +194,35 @@ async def portfolio_pnl():
         raise HTTPException(status_code=404, detail="No trades found")
 
     # 2. Fetch market data — spot, smiles (for scenario curves), and batch tickers
-    try:
-        eth_spot = await client.get_eth_spot_price()
-        smiles = await _fetch_smiles()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Market data error: {e}")
-
-    # Collect unique Deribit instrument names for batch ticker fetch.
-    # Build the real instrument from each trade's own expiry/strike/type,
-    # because Trade_ID is a deal-level ID (not per-option).
-    unique_instruments: set[str] = set()
-    for t in trades:
-        opt_code = "C" if "call" in str(t.get("Option Type") or "").lower() else "P"
-        strike_val = _safe_float(t.get("Strike"))
-        expiry_dt = _iso_to_date(str(t.get("Option Expiry Date") or ""))
-        if expiry_dt and strike_val > 0:
-            unique_instruments.add(_build_instrument(expiry_dt, strike_val, opt_code))
-
-    # Batch-fetch tickers for live greeks / mark price
+    smiles = {}
     tickers = {}
-    if unique_instruments:
+
+    if is_fil:
+        # FIL: no Deribit — use ref_spot from first trade as placeholder spot
+        spots_from_trades = [_safe_float(t.get("Ref. Spot Price")) for t in trades if _safe_float(t.get("Ref. Spot Price")) > 0]
+        eth_spot = spots_from_trades[0] if spots_from_trades else 5.0  # FIL spot placeholder
+    else:
         try:
-            tickers = await client.get_option_tickers_batch(list(unique_instruments))
-        except Exception:
-            pass  # graceful degradation — fall back to BS
+            eth_spot = await client.get_eth_spot_price()
+            smiles = await _fetch_smiles()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Market data error: {e}")
+
+        # Collect unique Deribit instrument names for batch ticker fetch.
+        unique_instruments: set[str] = set()
+        for t in trades:
+            opt_code = "C" if "call" in str(t.get("Option Type") or "").lower() else "P"
+            strike_val = _safe_float(t.get("Strike"))
+            expiry_dt = _iso_to_date(str(t.get("Option Expiry Date") or ""))
+            if expiry_dt and strike_val > 0:
+                unique_instruments.add(_build_instrument(expiry_dt, strike_val, opt_code))
+
+        # Batch-fetch tickers for live greeks / mark price
+        if unique_instruments:
+            try:
+                tickers = await client.get_option_tickers_batch(list(unique_instruments))
+            except Exception:
+                pass  # graceful degradation — fall back to BS
 
     # Deribit expiry → date mapping (for smile matching)
     deribit_dates: dict[str, date] = {}
@@ -277,7 +283,8 @@ async def portfolio_pnl():
         # ------------------------------------------------------------------
         expiry_date = _iso_to_date(expiry_raw)
         if expiry_date:
-            instrument = _build_instrument(expiry_date, strike, opt)
+            prefix = "FIL" if is_fil else "ETH"
+            instrument = _build_instrument(expiry_date, strike, opt).replace("ETH-", f"{prefix}-") if not is_fil else f"FIL-{expiry_date.strftime('%d%b%y').upper()}-{int(strike) if strike == int(strike) else strike}-{opt}"
             days_rem = max((expiry_date - today).days, 0)
         else:
             instrument = trade_id_raw  # fallback
@@ -444,13 +451,18 @@ async def portfolio_pnl():
         })
     vol_surface.sort(key=lambda x: x["dte"])
 
+    # FIL spot ladder: $0.20 to $10 at $0.10 intervals
+    spot_ladder = SPOT_LADDER if not is_fil else [round(x / 10, 2) for x in range(2, 101)]
+
     return {
+        "asset": asset.upper(),
         "eth_spot": eth_spot,
-        "spot_ladder": SPOT_LADDER,
+        "spot_ladder": spot_ladder,
         "matrix_horizons": MATRIX_HORIZONS,
         "chart_horizons": sorted(set(CHART_HORIZONS + [0])),
         "all_horizons": sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0])),
         "vol_surface": vol_surface,
+        "no_live_data": is_fil,
         "positions": enriched,
         "totals": {
             "total_entry_premium": round(total_entry, 2),
