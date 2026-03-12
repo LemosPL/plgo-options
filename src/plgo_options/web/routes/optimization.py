@@ -19,6 +19,7 @@ class OptimizationParams(BaseModel):
     target_expiry: str | None = None
     lambda_delta: float = 1.0
     lambda_vega: float = 100.0
+    fixed_trade_cost: float = 2000.0  # USD penalty per distinct instrument traded
 
 
 @router.post("/run")
@@ -49,6 +50,7 @@ async def run_optimizer(params: OptimizationParams):
             target_expiry=params.target_expiry,
             lambda_delta=params.lambda_delta,
             lambda_vega=params.lambda_vega,
+            fixed_trade_cost=params.fixed_trade_cost,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")

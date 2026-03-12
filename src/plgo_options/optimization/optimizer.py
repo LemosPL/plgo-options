@@ -301,6 +301,7 @@ class OptimizerV2:
         lambda_vega: float = 100.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
+        fixed_trade_cost: float = 200.0,  # USD penalty per distinct instrument traded
     ) -> dict:
         """Run the optimization and return proposed trades.
 
@@ -310,6 +311,8 @@ class OptimizerV2:
             Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
         new_position_penalty : float
             Extra cost per dollar notional for trades in instruments not already held.
+        fixed_trade_cost : float
+            Fixed USD penalty per distinct instrument traded (sparsity incentive).
         """
         S = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
@@ -387,7 +390,11 @@ class OptimizerV2:
         )
 
         def objective(x: np.ndarray) -> float:
-            """Negative utility: cost + λ·risk + penalties (we minimize this)."""
+            """Negative utility: cost − λ·risk_reduction.
+
+            At x=0 (no trades), this returns exactly 0.
+            A trade is only proposed if λ·risk_reduction > cost.
+            """
             # New portfolio greeks = current + sum(x_i * candidate_greeks_i)
             new_delta = port_delta + np.dot(x, c_delta)
             new_gamma = port_gamma + np.dot(x, c_gamma)
@@ -398,6 +405,9 @@ class OptimizerV2:
                 new_delta, new_gamma, new_theta, new_vega,
                 sigma_daily, vov_daily,
             )
+
+            # Risk reduction relative to doing nothing
+            risk_reduction = risk_before - risk
 
             # ----------------------------------------------------------
             # Split each trade into "unwind" and "new" portions.
@@ -431,7 +441,15 @@ class OptimizerV2:
 
             cost = cost_unwind + cost_new
 
-            return cost + risk_aversion * risk
+            # Fixed per-trade penalty: smooth approximation of 𝟙(x_i ≠ 0)
+            # tanh(|x_i| / ε) ≈ 0 when x_i ≈ 0, ≈ 1 when |x_i| >> ε
+            if fixed_trade_cost > 0:
+                epsilon = 0.3  # transition sharpness (≈ 0.3 contracts)
+                cost += fixed_trade_cost * float(np.sum(
+                    np.tanh(np.abs(x) / epsilon)
+                ))
+
+            return cost - risk_aversion * risk_reduction
 
         # Bounds: limit trade sizes, respect collateral
         # Max contracts per instrument: collateral / price (rough)
@@ -443,6 +461,9 @@ class OptimizerV2:
         # Start from zero (no trades)
         x0 = np.zeros(n)
 
+        # Value of doing nothing — any solution MUST beat this
+        do_nothing_value = objective(x0)  # == 0.0 with the risk_reduction formulation
+
         result = minimize(
             objective,
             x0,
@@ -451,9 +472,31 @@ class OptimizerV2:
             options={"maxiter": 2000, "ftol": 1e-10},
         )
 
+        best_x = result.x.copy()
+        best_val = result.fun
+
+        # Multi-start refinement — only if the solver actually proposed trades.
+        # If it stayed near zero, scaling zero is pointless.
+        if np.max(np.abs(result.x)) > 0.5:
+            for scale in [0.25, 0.5, 0.75]:
+                res2 = minimize(
+                    objective,
+                    result.x * scale,
+                    method="SLSQP",
+                    bounds=bounds,
+                    options={"maxiter": 500, "ftol": 1e-9},
+                )
+                if res2.fun < best_val:
+                    best_val = res2.fun
+                    best_x = res2.x.copy()
+
+        # ── HARD GUARD: reject solutions worse than doing nothing ──
+        if best_val >= do_nothing_value - 1e-6:
+            best_x = np.zeros(n)
+
         # Extract proposed trades (filter out tiny quantities)
         trades = []
-        for i, qty in enumerate(result.x):
+        for i, qty in enumerate(best_x):
             if abs(qty) < 0.5:
                 continue
             c = candidates[i]
@@ -462,7 +505,7 @@ class OptimizerV2:
                 continue
             notional = abs(rounded_qty) * c.bs_price_usd
             cost_rate = float(c_cost_rate[i])
-    
+
             # Determine if this is an unwind or new position
             held_qty = c_held_qty[i]
             is_unwind = bool((rounded_qty * held_qty) < 0)
@@ -533,7 +576,7 @@ class OptimizerV2:
                 })
 
         # Post-optimization portfolio greeks
-        opt_x = result.x
+        opt_x = best_x
         new_delta = port_delta + np.dot(opt_x, c_delta)
         new_gamma = port_gamma + np.dot(opt_x, c_gamma)
         new_theta = port_theta + np.dot(opt_x, c_theta)
@@ -545,6 +588,11 @@ class OptimizerV2:
         )
 
         total_cost = sum(t["trade_cost"] for t in trades)
+
+        # Add fixed cost per distinct instrument traded
+        n_distinct_instruments = len({t["instrument"] for t in trades})
+        total_fixed_cost = fixed_trade_cost * n_distinct_instruments
+        total_cost_with_fixed = total_cost + total_fixed_cost
 
         # ------------------------------------------------------------------
         # Compute before/after payoff curves and P&L matrix
@@ -619,10 +667,15 @@ class OptimizerV2:
                 "payoff_by_horizon": after_payoff,
             },
             "trades": trades,
-            "total_trade_cost": round(total_cost, 2),
-            "utility_improvement": round(risk_before - risk_after - total_cost, 2),
+            "total_trade_cost": round(total_cost_with_fixed, 2),
+            "total_proportional_cost": round(total_cost, 2),
+            "total_fixed_cost": round(total_fixed_cost, 2),
+            "n_distinct_instruments": n_distinct_instruments,
+            "fixed_trade_cost_per_instrument": fixed_trade_cost,
+            "utility_improvement": round(risk_before - risk_after - total_cost_with_fixed, 2),
             "candidates_evaluated": n,
             "optimizer_converged": result.success,
+            "rejected_as_worse_than_nothing": bool(np.all(best_x == 0) and result.fun >= do_nothing_value - 1e-6),
         }
 
 
@@ -671,3 +724,4 @@ def _bs_greeks(
              - r * K * math.exp(-r * T) * (norm.cdf(d2) if opt == "C" else norm.cdf(-d2))) / 365.25
 
     return delta, gamma, theta, vega, price
+
