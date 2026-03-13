@@ -830,7 +830,7 @@ async function tmLoad() {
     // Fetch enriched data from portfolio endpoint for live Greeks/MTM
     let enriched = [];
     try {
-      const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
+      const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExp}`);
       enriched = pfData.positions || [];
       ethSpot = pfData.eth_spot;
       document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -875,7 +875,8 @@ function tmRender() {
 
 function tmRenderSummary() {
   const active = tmEnriched.filter(t => t.db_status === "active");
-  const totalNotional = active.reduce((s, t) => s + (t.notional_mm || 0), 0);
+  // Compute notional live: qty * ethSpot / 1e6
+  const totalNotional = active.reduce((s, t) => s + ((t.qty || 0) * (ethSpot || 0) / 1e6), 0);
   const totalMtm = active.reduce((s, t) => s + (t.current_mtm || 0), 0);
   const totalDelta = active.reduce((s, t) => s + ((t.delta || 0) * (t.net_qty || 0)), 0);
   const totalGamma = active.reduce((s, t) => s + ((t.gamma || 0) * (t.net_qty || 0)), 0);
@@ -884,15 +885,12 @@ function tmRenderSummary() {
 
   document.getElementById("tm-count").textContent = active.length;
 
-  // Format notional: convert from raw to $mm with commas
-  const notionalRaw = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0) * (t.qty || 0) * (ethSpot || 0), 0);
-  const notionalMm = totalNotional;
+  // Format notional: qty * ethSpot / 1e6 in $mm
   const $notional = document.getElementById("tm-notional");
-  if (Math.abs(notionalMm) >= 1) {
-    $notional.textContent = `$${notionalMm.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
+  if (Math.abs(totalNotional) >= 1) {
+    $notional.textContent = `$${totalNotional.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
   } else {
-    // Show in full USD if less than 1mm
-    const fullUsd = active.reduce((s, t) => s + Math.abs((t.notional_mm || 0) * 1e6), 0);
+    const fullUsd = totalNotional * 1e6;
     $notional.textContent = `$${fullUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   }
 
@@ -984,7 +982,7 @@ function tmRenderTable() {
       <td>${fmtK(t.strike)}</td>
       <td>${fmt(t.pct_otm_live, 1)}%</td>
       <td>${fmtK(t.qty)}</td>
-      <td>${fmtMm(t.notional_mm)}</td>
+      <td>${fmtMm((t.qty || 0) * (ethSpot || 0) / 1e6)}</td>
       <td>${fmtMoney(t.premium_usd)}</td>
       <td>${fmt(t.iv_pct, 1)}</td>
       <td>${fmt(t.delta, 4)}</td>
@@ -1040,15 +1038,16 @@ function tmRenderInsights() {
     });
   }
 
-  // Concentrated positions
-  const totalNotional = active.reduce((s, t) => s + Math.abs(t.notional_mm || 0), 0);
-  if (totalNotional > 0) {
-    const concentrated = active.filter(t => Math.abs(t.notional_mm || 0) / totalNotional > 0.25);
+  // Concentrated positions (computed notional = qty * ethSpot / 1e6)
+  const calcNotional = t => (t.qty || 0) * (ethSpot || 0) / 1e6;
+  const totalNotionalIns = active.reduce((s, t) => s + Math.abs(calcNotional(t)), 0);
+  if (totalNotionalIns > 0) {
+    const concentrated = active.filter(t => Math.abs(calcNotional(t)) / totalNotionalIns > 0.25);
     if (concentrated.length > 0) {
       insights.push({
         type: "warning",
         title: "Concentrated positions (>25% of notional)",
-        body: concentrated.map(t => `${t.instrument}: $${(t.notional_mm || 0).toFixed(2)}mm (${(Math.abs(t.notional_mm || 0) / totalNotional * 100).toFixed(0)}%)`).join(", ")
+        body: concentrated.map(t => `${t.instrument}: $${calcNotional(t).toFixed(2)}mm (${(Math.abs(calcNotional(t)) / totalNotionalIns * 100).toFixed(0)}%)`).join(", ")
       });
     }
   }
@@ -1743,10 +1742,17 @@ async function loadPortfolio() {
     pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
 
-    // Show/hide compare button when expired trades are included
-    const hasExpired = pfData.positions.some(p => p.db_status === "expired");
-    document.getElementById("btn-pf-compare").style.display = hasExpired ? "" : "none";
-    if (!hasExpired) pfCompareMode = false;
+    // Default: expired → Old only, active → both Old AND New
+    pfOldSet = new Set();
+    pfNewSet = new Set();
+    for (const p of pfData.positions) {
+      if (p.db_status === "expired") {
+        pfOldSet.add(p.id);
+      } else {
+        pfOldSet.add(p.id);
+        pfNewSet.add(p.id);
+      }
+    }
 
     // Populate expiry filter
     const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
@@ -1853,6 +1859,12 @@ function pfCalcScenarioMtm() {
 }
 
 // ── Position table ────────────────────────────────────────
+function pfUpdateOldNewHeaders() {
+  const visible = pfGetFilteredPositions();
+  document.getElementById("pf-old-all").checked = visible.length > 0 && visible.every(p => pfOldSet.has(p.id));
+  document.getElementById("pf-new-all").checked = visible.length > 0 && visible.every(p => pfNewSet.has(p.id));
+}
+
 function pfGetFilteredPositions() {
   const fExpiry = document.getElementById("pf-filter-expiry").value;
   const fType = document.getElementById("pf-filter-type").value;
@@ -1888,9 +1900,11 @@ function pfRenderTable() {
     }
   });
 
-  // Update header checkbox
-  const allVisible = list.every(p => pfSelected.has(p.id));
-  document.getElementById("pf-check-all").checked = allVisible && list.length > 0;
+  // Update header checkboxes
+  const allVisibleOld = list.length > 0 && list.every(p => pfOldSet.has(p.id));
+  const allVisibleNew = list.length > 0 && list.every(p => pfNewSet.has(p.id));
+  document.getElementById("pf-old-all").checked = allVisibleOld;
+  document.getElementById("pf-new-all").checked = allVisibleNew;
 
   const $tbody = document.getElementById("pf-positions-body");
   $tbody.innerHTML = "";
@@ -1931,14 +1945,13 @@ function pfRenderTable() {
       rollIvHtml = `${rollIvPct.toFixed(1)}%`;
     }
 
+    const isOld = pfOldSet.has(pos.id);
+    const isNew = pfNewSet.has(pos.id);
     const tr = document.createElement("tr");
-    tr.className = rowClass;
-    const firstCol = pfCompareMode
-      ? `<td style="white-space:nowrap;font-size:.7rem">` +
-        `<label style="color:var(--orange);margin-right:4px"><input type="checkbox" class="pf-old-check" data-id="${pos.id}" ${pfOldSet.has(pos.id) ? "checked" : ""}> Old</label>` +
-        `<label style="color:var(--accent)"><input type="checkbox" class="pf-new-check" data-id="${pos.id}" ${pfNewSet.has(pos.id) ? "checked" : ""}> New</label></td>`
-      : `<td><input type="checkbox" class="pf-check" data-id="${pos.id}" ${checked ? "checked" : ""}></td>`;
-    tr.innerHTML = firstCol +
+    tr.className = rowClass + (!isOld && !isNew ? " pf-row-excluded" : "");
+    tr.innerHTML =
+      `<td><input type="checkbox" class="pf-old-check" data-id="${pos.id}" ${isOld ? "checked" : ""} style="accent-color:#f0883e"></td>` +
+      `<td><input type="checkbox" class="pf-new-check" data-id="${pos.id}" ${isNew ? "checked" : ""} style="accent-color:var(--accent)"></td>` +
       `<td style="text-align:left">${pos.counterparty}</td>` +
       `<td>${pos.trade_id ?? ""}</td>` +
       `<td>${pos.trade_date}</td>` +
@@ -1969,28 +1982,23 @@ function pfRenderTable() {
     $tbody.appendChild(tr);
   }
 
-  // Wire events
-  $tbody.querySelectorAll(".pf-check").forEach(cb => {
-    cb.addEventListener("change", () => {
-      const id = parseInt(cb.dataset.id);
-      if (cb.checked) pfSelected.add(id); else pfSelected.delete(id);
-      pfOnSelectionChange();
-    });
-  });
-
-  // Compare mode: Old/New checkboxes
+  // Wire Old checkboxes (independent — a trade can be in both Old and New)
   $tbody.querySelectorAll(".pf-old-check").forEach(cb => {
     cb.addEventListener("change", () => {
       const id = parseInt(cb.dataset.id);
       if (cb.checked) pfOldSet.add(id); else pfOldSet.delete(id);
-      pfRenderPayoffChart();
+      pfUpdateOldNewHeaders();
+      pfOnSelectionChange();
     });
   });
+
+  // Wire New checkboxes (independent)
   $tbody.querySelectorAll(".pf-new-check").forEach(cb => {
     cb.addEventListener("change", () => {
       const id = parseInt(cb.dataset.id);
       if (cb.checked) pfNewSet.add(id); else pfNewSet.delete(id);
-      pfRenderPayoffChart();
+      pfUpdateOldNewHeaders();
+      pfOnSelectionChange();
     });
   });
 
@@ -2026,21 +2034,11 @@ function pfRenderTable() {
 }
 
 function pfOnSelectionChange() {
+  // Update pfSelected to union of old + new for summary/roll compat
+  pfSelected = new Set([...pfOldSet, ...pfNewSet]);
   pfRenderSummary();
   pfRenderPayoffChart();
   pfRenderMtmGrid();
-  // Update row styling without full re-render
-  document.querySelectorAll("#pf-positions-body tr").forEach(tr => {
-    const cb = tr.querySelector(".pf-check");
-    if (!cb) return;
-    const id = parseInt(cb.dataset.id);
-    tr.classList.toggle("pf-row-excluded", !pfSelected.has(id));
-    tr.classList.toggle("pf-row-rolled", pfRolled.has(id));
-  });
-  // Sync header checkbox
-  const visible = pfGetFilteredPositions();
-  document.getElementById("pf-check-all").checked =
-    visible.length > 0 && visible.every(p => pfSelected.has(p.id));
 }
 
 // ── Curve helpers ─────────────────────────────────────────
@@ -2117,100 +2115,60 @@ function pfInitCompareSets() {
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
   const horizons = pfData.chart_horizons;
-  const hasScenarioChange = pfSelected.size !== pfData.positions.length || pfRolled.size > 0;
 
-  const colors = ["#8b949e", "#f85149", "#d29922", "#3fb950", "#58a6ff", "#bc8cff"];
-  const scenColors = ["#f85149", "#d29922", "#e3b341", "#3fb950", "#58a6ff", "#bc8cff"];
-  const expiredColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166"];
-  const activeColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364"];
+  const oldColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166", "#bc8cff"];
+  const newColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364", "#d2a8ff"];
   const traces = [];
 
-  if (pfCompareMode) {
-    // ── Compare mode: Old portfolio vs New portfolio ──────────
-    // Old portfolio curves (dotted) — user-selected
+  const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
+  const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
+
+  // Old portfolio curves (dotted)
+  if (oldPositions.length > 0) {
     horizons.forEach((h, i) => {
       const curve = pfSumCurveForSet(pfOldSet, h);
-      const label = h === 0 ? "Old Portfolio: Expiry" : `Old Portfolio: T+${h}d`;
+      const label = h === 0 ? "Old: Expiry" : `Old: T+${h}d`;
       traces.push({
-        x: spots, y: curve,
-        type: "scatter", mode: "lines",
+        x: spots, y: curve, type: "scatter", mode: "lines",
         name: label,
-        line: { color: expiredColors[i % expiredColors.length], width: 2, dash: "dot" },
-        legendgroup: "old",
+        line: { color: oldColors[i % oldColors.length], width: 2, dash: "dot" },
+        legendgroup: `old_h${h}`,
       });
     });
+  }
 
-    // New portfolio curves (solid) — user-selected
+  // New portfolio curves (solid)
+  if (newPositions.length > 0) {
     horizons.forEach((h, i) => {
-      const curve = pfSumCurveForSet(pfNewSet, h);
-      const label = h === 0 ? "New Portfolio: Expiry" : `New Portfolio: T+${h}d`;
+      const curve = pfSumCurves(pfNewSet, h);
+      const label = h === 0 ? "New: Expiry" : `New: T+${h}d`;
       traces.push({
-        x: spots, y: curve,
-        type: "scatter", mode: "lines",
+        x: spots, y: curve, type: "scatter", mode: "lines",
         name: label,
-        line: { color: activeColors[i % activeColors.length], width: 2.5 },
-        legendgroup: "new",
+        line: { color: newColors[i % newColors.length], width: 2.5 },
+        legendgroup: `new_h${h}`,
       });
     });
-  } else {
-    // ── Normal mode ──────────────────────────────────────────
-    // Baseline curves (dashed gray if scenario differs)
-    horizons.forEach((h, i) => {
-      const curve = pfBaselineCurve(h);
-      const label = h === 0 ? "Baseline: Expiry" : `Baseline: T+${h}d`;
-      traces.push({
-        x: spots, y: curve,
-        type: "scatter", mode: "lines",
-        name: label,
-        line: {
-          color: hasScenarioChange ? "#484f58" : scenColors[i % scenColors.length],
-          width: hasScenarioChange ? 1.5 : 2.5,
-          dash: hasScenarioChange ? "dot" : "solid",
-        },
-        visible: true,
-        legendgroup: "baseline",
-      });
-    });
-
-    // Scenario curves (solid) — only if different from baseline
-    if (hasScenarioChange) {
-      horizons.forEach((h, i) => {
-        const curve = pfSumCurves(pfSelected, h);
-        const label = h === 0 ? "Scenario: Expiry" : `Scenario: T+${h}d`;
-        traces.push({
-          x: spots, y: curve,
-          type: "scatter", mode: "lines",
-          name: label,
-          line: { color: scenColors[i % scenColors.length], width: 2.5 },
-          legendgroup: "scenario",
-        });
-      });
-    }
   }
 
   // Spot line
   const allY = traces.flatMap(t => t.y);
-  traces.push({
-    x: [pfData.eth_spot, pfData.eth_spot],
-    y: [Math.min(...allY), Math.max(...allY)],
-    type: "scatter", mode: "lines",
-    name: `Spot $${pfData.eth_spot.toFixed(0)}`,
-    line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
-    legendgroup: "spot",
-  });
+  if (allY.length > 0) {
+    traces.push({
+      x: [pfData.eth_spot, pfData.eth_spot],
+      y: [Math.min(...allY), Math.max(...allY)],
+      type: "scatter", mode: "lines",
+      name: `Spot $${pfData.eth_spot.toFixed(0)}`,
+      line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
+      legendgroup: "spot",
+    });
+  }
 
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
-  const titleText = pfCompareMode
-    ? "Portfolio Comparison — Old Portfolio (dotted) vs New Portfolio (solid)"
-    : hasScenarioChange
-      ? "Portfolio Payoff — Baseline (dotted) vs Scenario (solid)"
-      : "Portfolio Payoff Profile — All Positions";
+  const titleText = `Portfolio Payoff — Old (${oldPositions.length}) vs New (${newPositions.length})`;
   const layout = {
-    title: {
-      text: titleText,
-      font: { color: cc.text, size: 16 },
-    },
+    title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel, color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: currentAsset === "FIL" ? 1 : 500 },
     yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
@@ -2218,12 +2176,9 @@ function pfRenderPayoffChart() {
     showlegend: true,
     legend: {
       font: { color: cc.muted, size: 10 },
-      orientation: "v",
-      x: 1.02, y: 1,
+      orientation: "v", x: 1.02, y: 1,
       xanchor: "left", yanchor: "top",
-      bgcolor: cc.legendBg,
-      bordercolor: cc.legendBorder,
-      borderwidth: 1,
+      bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1,
     },
   };
 
@@ -2233,23 +2188,36 @@ function pfRenderPayoffChart() {
 // ── MTM Matrix (HTML table with dollar values) ───────────
 function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
-  const horizons = pfData.matrix_horizons; // [30, 45, 60, 90, 120, 150, 180, 270, 360]
+  const horizons = pfData.matrix_horizons;
   const ethSpot = pfData.eth_spot;
+
+  const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
+  const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
+  const hasOldAndNew = oldPositions.length > 0 && newPositions.length > 0;
 
   // Build header row
   const thead = document.getElementById("pf-mtm-grid-thead");
-  thead.innerHTML = `<tr><th style="text-align:left">Spot</th>${horizons.map(h => `<th>${h}d</th>`).join("")}</tr>`;
+  if (hasOldAndNew) {
+    let hdrHtml = `<tr><th rowspan="2" style="text-align:left">Spot</th>`;
+    for (const h of horizons) hdrHtml += `<th colspan="2">${h}d</th>`;
+    hdrHtml += `</tr><tr>`;
+    for (const h of horizons) hdrHtml += `<th style="color:#f0883e;font-size:.7rem">Old</th><th style="color:var(--accent);font-size:.7rem">New</th>`;
+    hdrHtml += `</tr>`;
+    thead.innerHTML = hdrHtml;
+  } else {
+    thead.innerHTML = `<tr><th style="text-align:left">Spot</th>${horizons.map(h => `<th>${h}d</th>`).join("")}</tr>`;
+  }
 
-  // Pick spots at $500 increments, reversed ($500 on top, $7000 on bottom)
-  const step = 500;
+  // Pick spots at appropriate increments
+  const step = currentAsset === "FIL" ? 2 : 500;
+  const maxSpot = currentAsset === "FIL" ? 30 : 7000;
   const displaySpots = [];
-  for (let s = step; s <= 7000; s += step) {
+  for (let s = step; s <= maxSpot; s += step) {
     const idx = spots.indexOf(s);
     if (idx !== -1) displaySpots.push({ spot: s, idx });
   }
-  displaySpots.reverse(); // $500 on top
+  displaySpots.reverse();
 
-  // Find the row closest to current spot
   let closestSpot = displaySpots[0]?.spot ?? 0;
   let closestDiff = Infinity;
   for (const ds of displaySpots) {
@@ -2257,7 +2225,20 @@ function pfRenderMtmGrid() {
     if (diff < closestDiff) { closestDiff = diff; closestSpot = ds.spot; }
   }
 
-  // Build rows
+  // Pre-compute curves
+  const oldCurves = {}, newCurves = {};
+  const singleSet = newPositions.length > 0 ? pfNewSet : pfOldSet;
+  for (const h of horizons) {
+    if (hasOldAndNew) {
+      oldCurves[h] = pfSumCurveForSet(pfOldSet, h);
+      newCurves[h] = pfSumCurves(pfNewSet, h);
+    } else {
+      oldCurves[h] = pfSumCurveForSet(singleSet, h);
+    }
+  }
+
+  const fmtVal = v => { const r = Math.round(v); return r >= 0 ? `$${r.toLocaleString()}` : `-$${Math.abs(r).toLocaleString()}`; };
+
   const tbody = document.getElementById("pf-mtm-grid-body");
   let html = "";
   for (const { spot, idx } of displaySpots) {
@@ -2265,27 +2246,16 @@ function pfRenderMtmGrid() {
     html += `<tr class="${isSpotRow ? "pf-mtm-spot-row" : ""}">`;
     html += `<td style="text-align:left;font-weight:600;white-space:nowrap">$${spot.toLocaleString()}</td>`;
     for (const h of horizons) {
-      let pnl = 0;
-      for (const p of pfData.positions) {
-        if (!pfSelected.has(p.id)) continue;
-        if (pfRolled.has(p.id)) {
-          const newDte = pfRolled.get(p.id).newDte;
-          const T = Math.max(newDte - h, 0) / 365.25;
-          const rollIvPct = pfLookupIv(newDte, p.strike) ?? p.iv_pct;
-          const sigma = rollIvPct / 100;
-          const val = bsPrice(spot, p.strike, T, 0, sigma, p.opt);
-          pnl += p.net_qty * val;
-        } else {
-          const curve = p.payoff_by_horizon[String(h)];
-          if (curve) pnl += curve[idx];
-        }
+      const oldVal = oldCurves[h][idx];
+      const oldCls = oldVal >= 0 ? "mtm-pos" : "mtm-neg";
+      if (hasOldAndNew) {
+        const newVal = newCurves[h][idx];
+        const newCls = newVal >= 0 ? "mtm-pos" : "mtm-neg";
+        html += `<td class="${oldCls}" style="font-size:.75rem">${fmtVal(oldVal)}</td>`;
+        html += `<td class="${newCls}" style="font-size:.75rem">${fmtVal(newVal)}</td>`;
+      } else {
+        html += `<td class="${oldCls}">${fmtVal(oldVal)}</td>`;
       }
-      const rounded = Math.round(pnl);
-      const cls = rounded >= 0 ? "mtm-pos" : "mtm-neg";
-      const formatted = rounded >= 0
-        ? `$${rounded.toLocaleString()}`
-        : `-$${Math.abs(rounded).toLocaleString()}`;
-      html += `<td class="${cls}">${formatted}</td>`;
     }
     html += "</tr>";
   }
@@ -2303,44 +2273,46 @@ document.getElementById("pf-include-expired").addEventListener("change", () => {
   loadPortfolio();
 });
 
-document.getElementById("btn-pf-compare").addEventListener("click", () => {
-  pfCompareMode = !pfCompareMode;
-  const btn = document.getElementById("btn-pf-compare");
-  btn.textContent = pfCompareMode ? "Exit Compare" : "Compare Old vs New";
-  btn.classList.toggle("active", pfCompareMode);
-  if (pfCompareMode) pfInitCompareSets();
+// Header Old/New all checkboxes
+document.getElementById("pf-old-all").addEventListener("change", (e) => {
+  pfGetFilteredPositions().forEach(p => {
+    if (e.target.checked) pfOldSet.add(p.id); else pfOldSet.delete(p.id);
+  });
   pfRenderTable();
-  pfRenderPayoffChart();
+  pfOnSelectionChange();
+});
+
+document.getElementById("pf-new-all").addEventListener("change", (e) => {
+  pfGetFilteredPositions().forEach(p => {
+    if (e.target.checked) pfNewSet.add(p.id); else pfNewSet.delete(p.id);
+  });
+  pfRenderTable();
+  pfOnSelectionChange();
 });
 
 document.getElementById("btn-pf-select-all").addEventListener("click", () => {
   const visible = pfGetFilteredPositions();
-  visible.forEach(p => pfSelected.add(p.id));
+  visible.forEach(p => { pfOldSet.add(p.id); pfNewSet.add(p.id); });
   pfRenderTable();
   pfOnSelectionChange();
 });
 
 document.getElementById("btn-pf-deselect-all").addEventListener("click", () => {
   const visible = pfGetFilteredPositions();
-  visible.forEach(p => pfSelected.delete(p.id));
+  visible.forEach(p => { pfOldSet.delete(p.id); pfNewSet.delete(p.id); });
   pfRenderTable();
   pfOnSelectionChange();
 });
 
 document.getElementById("btn-pf-expiring-10d").addEventListener("click", () => {
   if (!pfData) return;
-  // Deselect all first, then select only positions expiring within 10 days
-  pfSelected.clear();
+  // Mark positions expiring within 10 days as Old
   pfData.positions.forEach(p => {
-    if (p.days_remaining <= 10) pfSelected.add(p.id);
+    if (p.days_remaining <= 10) {
+      pfOldSet.add(p.id);
+      pfNewSet.delete(p.id);
+    }
   });
-  pfRenderTable();
-  pfOnSelectionChange();
-});
-
-document.getElementById("pf-check-all").addEventListener("change", (e) => {
-  const visible = pfGetFilteredPositions();
-  visible.forEach(p => { if (e.target.checked) pfSelected.add(p.id); else pfSelected.delete(p.id); });
   pfRenderTable();
   pfOnSelectionChange();
 });
@@ -2440,6 +2412,7 @@ document.getElementById("btn-pf-add-trade").addEventListener("click", () => {
       };
 
       pfData.positions.push(newPos);
+      pfNewSet.add(newPos.id);
       pfSelected.add(newPos.id);
       pfRenderAll();
     })
@@ -2457,7 +2430,8 @@ document.getElementById("btn-pf-remove-selected").addEventListener("click", () =
   if (!confirm(`Remove ${toRemove.size} selected trade(s) from the scenario?`)) return;
 
   pfData.positions = pfData.positions.filter(p => !toRemove.has(p.id));
-  pfSelected = new Set(pfData.positions.map(p => p.id));
+  for (const id of toRemove) { pfOldSet.delete(id); pfNewSet.delete(id); }
+  pfSelected = new Set([...pfOldSet, ...pfNewSet]);
   pfRolled = new Map([...pfRolled].filter(([k]) => pfSelected.has(k)));
   pfRenderAll();
 });

@@ -562,8 +562,10 @@ select { margin-bottom: .5rem; }
 .pf-row-expired { opacity: 0.5; background: rgba(240,136,62,0.06) !important; }
 .pf-row-expired td:first-child::after { content: " (expired)"; font-size: .65rem; color: var(--orange); }
 .pf-row-rolled  { background: rgba(88,166,255,0.06) !important; }
-#pf-positions-table tr:hover > td:first-child { background: var(--hover-bg); }
+#pf-positions-table tr:hover > td:nth-child(1), #pf-positions-table tr:hover > td:nth-child(2) { background: var(--hover-bg); }
 #pf-positions-table tr.pf-row-rolled > td:first-child { background: rgba(88,166,255,0.06); }
+.pf-row-old { background: rgba(240,136,62,0.06) !important; }
+.pf-row-new { background: rgba(88,166,255,0.06) !important; }
 
 .roll-row-selected { background: rgba(88,166,255,0.06) !important; }
 .roll-row-selected td:nth-child(1), .roll-row-selected td:nth-child(2) { background: rgba(88,166,255,0.06); }

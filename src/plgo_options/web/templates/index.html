@@ -271,7 +271,6 @@
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="pf-include-expired"> Include Expired
         </label>
-        <button id="btn-pf-compare" class="btn-secondary" style="width:auto;margin:0;display:none">Compare Old vs New</button>
         <button id="btn-pf-expiring-10d" class="btn-secondary" style="width:auto;margin:0">Expiring &lt;10d</button>
         <button id="btn-pf-add-trade" class="btn-secondary" style="width:auto;margin:0">+ Add Trade</button>
         <button id="btn-pf-remove-selected" class="btn-secondary" style="width:auto;margin:0">Remove Selected</button>
@@ -289,7 +288,8 @@
         <table id="pf-positions-table">
           <thead>
             <tr>
-              <th style="min-width:32px" id="pf-col-select"><input type="checkbox" id="pf-check-all" checked></th>
+              <th style="width:40px" title="Assign to Old curve (expired)"><span class="roll-col-label">Old</span><br><input type="checkbox" id="pf-old-all"></th>
+              <th style="width:40px" title="Assign to New curve (active)"><span class="roll-col-label">New</span><br><input type="checkbox" id="pf-new-all"></th>
               <th class="sortable" data-col="counterparty" style="text-align:left">Counterparty</th>
               <th class="sortable" data-col="trade_id">ID</th>
               <th class="sortable" data-col="trade_date">Trade Date</th>

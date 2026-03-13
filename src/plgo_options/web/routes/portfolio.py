@@ -19,6 +19,25 @@ from plgo_options.market_data.deribit_client import DeribitClient
 router = APIRouter()
 client = DeribitClient()
 
+
+def bs_greeks(S: float, K: float, T: float, r: float, sigma: float, opt: str):
+    """Compute BS greeks (delta, gamma, theta, vega) for a single option."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return None, None, None, None
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    nd1 = norm.pdf(d1)
+    if opt == "C":
+        delta = norm.cdf(d1)
+        theta = (-S * nd1 * sigma / (2 * sqrt_T) - r * K * math.exp(-r * T) * norm.cdf(d2)) / 365.25
+    else:
+        delta = norm.cdf(d1) - 1
+        theta = (-S * nd1 * sigma / (2 * sqrt_T) + r * K * math.exp(-r * T) * norm.cdf(-d2)) / 365.25
+    gamma = nd1 / (S * sigma * sqrt_T)
+    vega = S * nd1 * sqrt_T / 100  # per 1% IV move
+    return delta, gamma, theta, vega
+
 # Spot ladder: $500 to $7000 at $100 intervals
 SPOT_LADDER = list(range(500, 7100, 100))
 
@@ -304,17 +323,16 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             theta = ticker.theta
             vega = ticker.vega
         else:
-            # Expired or no ticker — compute from BS / smile
+            # No Deribit ticker — compute from BS / smile
             deribit_mark_usd = None
-            delta = None
-            gamma = None
-            theta = None
-            vega = None
             iv_pct = DEFAULT_IV * 100
             # Try smile interpolation
             matched = _match_expiry(expiry_raw, deribit_dates)
             if matched and matched in smiles:
                 iv_pct = smiles[matched].iv_at(strike)
+            # Compute BS greeks as fallback
+            T_bs = max(days_rem, 0) / 365.25
+            delta, gamma, theta, vega = bs_greeks(eth_spot, strike, T_bs, 0.0, iv_pct / 100.0, opt)
 
         sigma = iv_pct / 100.0
 
