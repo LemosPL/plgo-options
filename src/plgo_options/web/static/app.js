@@ -5632,6 +5632,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       txn_cost_pct: parseFloat(document.getElementById("optv2-txn-cost").value) || 5.0,
       max_collateral: parseFloat(document.getElementById("optv2-max-collateral").value) || 4000000,
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
+      fixed_trade_cost: parseFloat(document.getElementById("optv2-fixed-trade-cost").value) || 2000.0,
     };
     const res = await fetch("/api/optimization/run", {
       method: "POST",
