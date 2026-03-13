@@ -87,6 +87,16 @@ class OptimizerV2:
         self.totals = totals
         self.snapshot_path = snapshot_path
 
+    @staticmethod
+    def _safe_num(value, default: float = 0.0) -> float:
+        """Convert possibly-missing numeric values to float."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     @classmethod
     def from_snapshot(cls, path: Path) -> OptimizerV2:
         """Load an OptimizerV2 instance from a snapshot JSON file."""
@@ -254,36 +264,67 @@ class OptimizerV2:
         vega = sum((p.vega or 0) * p.net_qty for p in self.positions)
         return delta, gamma, theta, vega
 
+    def _portfolio_vega_by_expiry(self) -> dict[str, float]:
+        """Return portfolio vega bucketed by expiry code."""
+        vega_by_expiry: dict[str, float] = {}
+        for p in self.positions:
+            parts = p.instrument.split("-")
+            if len(parts) >= 4:
+                exp_code = parts[1]
+            else:
+                exp_code = "UNKNOWN"
+            vega_by_expiry[exp_code] = vega_by_expiry.get(exp_code, 0.0) + (p.vega or 0.0) * p.net_qty
+        return vega_by_expiry
+
     # ------------------------------------------------------------------
     # Risk computation
     # ------------------------------------------------------------------
 
     def _compute_risk(
-        self,
-        port_delta: float,
-        port_gamma: float,
-        port_theta: float,
-        port_vega: float,
-        sigma_daily: float,
-        vov_daily: float,
-        lambda_delta: float = 1.0,
-        lambda_vega: float = 100.0,
+            self,
+            port_delta: float,
+            port_gamma: float,
+            port_theta: float,
+            port_vega: float,
+            sigma_daily: float,
+            vov_daily: float,
+            lambda_delta: float = 1.0,
+            lambda_gamma: float = 1.0,
+            lambda_vega: float = 100.0,
+            port_vega_by_expiry: dict[str, float] | None = None,
+            vega_cross_expiry_corr: float = 0.35,
     ) -> float:
-        """Weighted daily P&L standard deviation from greeks."""
+        """Weighted daily P&L standard deviation from greeks.
+
+        Vega is treated as expiry-bucketed. Offsetting vega across expiries is
+        only partial, controlled by vega_cross_expiry_corr in [0, 1]:
+          - 0.0 => expiries independent, no cross-expiry netting
+          - 1.0 => fully shared vol shock, equivalent to total-vega netting
+        """
         S = self.eth_spot
 
         # Delta P&L variance: (Δ · S · σ_daily)²
         var_delta = (port_delta * S * sigma_daily) ** 2
 
         # Gamma P&L variance: (½ · Γ · S² · σ_daily²)²
-        var_gamma = (0.5 * port_gamma * S**2 * sigma_daily**2) ** 2
+        var_gamma = (0.5 * port_gamma * S ** 2 * sigma_daily ** 2) ** 2
 
-        # Vega P&L variance: (Vega · σ_vol_daily)²
-        var_vega = (port_vega * vov_daily) ** 2
+        if port_vega_by_expiry:
+            rho = min(max(vega_cross_expiry_corr, 0.0), 1.0)
+            bucket_vars = [
+                (vega_bucket * vov_daily) ** 2
+                for vega_bucket in port_vega_by_expiry.values()
+            ]
+            total_vega = sum(port_vega_by_expiry.values())
+            shared_var_vega = (total_vega * vov_daily) ** 2
+            var_vega = (1.0 - rho) * sum(bucket_vars) + rho * shared_var_vega
+        else:
+            # Backward-compatible fallback
+            var_vega = (port_vega * vov_daily) ** 2
 
         return math.sqrt(
             lambda_delta * var_delta
-            + lambda_delta * var_gamma
+            + lambda_gamma * var_gamma
             + lambda_vega * var_vega
         )
 
@@ -298,9 +339,11 @@ class OptimizerV2:
         max_collateral: float = 4_000_000.0,
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
+        lambda_gamma: float = 1.0,
         lambda_vega: float = 100.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
+        vega_cross_expiry_corr: float = 0.0,
     ) -> dict:
         """Run the optimization and return proposed trades.
 
@@ -310,6 +353,9 @@ class OptimizerV2:
             Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
         new_position_penalty : float
             Extra cost per dollar notional for trades in instruments not already held.
+        vega_cross_expiry_corr : float
+            Correlation of vol shocks across expiries. Lower means less cross-expiry
+            vega netting; higher means more shared vega risk.
         """
         S = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
@@ -322,6 +368,7 @@ class OptimizerV2:
 
         # Current portfolio greeks
         port_delta, port_gamma, port_theta, port_vega = self._portfolio_greeks()
+        port_vega_by_expiry = self._portfolio_vega_by_expiry()
 
         # Market parameters
         # ATM IV for daily spot vol
@@ -358,27 +405,71 @@ class OptimizerV2:
 
         # Pre-compute candidate greek arrays (per contract)
         n = len(candidates)
-        c_delta = np.array([c.delta for c in candidates])
-        c_gamma = np.array([c.gamma for c in candidates])
-        c_theta = np.array([c.theta for c in candidates])
-        c_vega = np.array([c.vega for c in candidates])
-        c_price = np.array([c.bs_price_usd for c in candidates])
+        c_delta = np.array(
+            [0.0 if c.delta is None else float(c.delta) for c in candidates],
+            dtype=float,
+        )
+        c_gamma = np.array(
+            [0.0 if c.gamma is None else float(c.gamma) for c in candidates],
+            dtype=float,
+        )
+        c_theta = np.array(
+            [self._safe_num(c.theta) for c in candidates],
+            dtype=float,
+        )
+        c_vega = np.array(
+            [self._safe_num(c.vega) for c in candidates],
+            dtype=float,
+        )
+        c_price = np.array(
+            [max(self._safe_num(c.bs_price_usd), 0.0) for c in candidates],
+            dtype=float,
+        )
+        c_iv_pct = np.array(
+            [max(self._safe_num(c.iv_pct), 0.0) for c in candidates],
+            dtype=float,
+        )
+        c_strike = np.array(
+            [self._safe_num(c.strike) for c in candidates],
+            dtype=float,
+        )
+        c_dte = np.array(
+            [int(self._safe_num(c.dte)) for c in candidates],
+            dtype=int,
+        )
 
         # ----------------------------------------------------------
         # Strike weighting: ensure OTM strikes get a minimum weight.
-        # Compute a "greek magnitude" per candidate, then floor at
-        # min_strike_weight_pct of the maximum across all candidates.
-        # This prevents the optimizer from completely ignoring wings.
+        #
+        # IMPORTANT:
+        # Weighting is done within each expiry bucket, not globally
+        # across all candidates. Otherwise, an all-expiry run can
+        # distort the effective greeks of a given expiry versus
+        # running that expiry on its own.
         # ----------------------------------------------------------
-        min_strike_weight_pct = 0.10  # 10% of the max weight
-        greek_mag = np.sqrt(
-            (c_delta * S) ** 2
-            + (c_gamma * S ** 2) ** 2
-            + (c_vega) ** 2
-        )
-        max_mag = greek_mag.max() if greek_mag.max() > 0 else 1.0
-        raw_weight = greek_mag / max_mag  # normalised 0..1
-        strike_weight = np.maximum(raw_weight, min_strike_weight_pct)
+        min_strike_weight_pct = 0.10  # 10% of the max weight per expiry
+        strike_weight = np.ones(n)
+
+        expiry_to_indices: dict[str, list[int]] = {}
+        for i, c in enumerate(candidates):
+            expiry_to_indices.setdefault(c.expiry_code, []).append(i)
+
+        for exp_code, idxs in expiry_to_indices.items():
+            idx_arr = np.array(idxs, dtype=int)
+
+            greek_mag_bucket = np.sqrt(
+                (c_delta[idx_arr] * S) ** 2
+                + (c_gamma[idx_arr] * S**2) ** 2
+                + c_vega[idx_arr] ** 2
+            )
+
+            bucket_max = greek_mag_bucket.max() if greek_mag_bucket.size > 0 else 0.0
+            if bucket_max <= 0:
+                raw_weight_bucket = np.ones(len(idx_arr))
+            else:
+                raw_weight_bucket = greek_mag_bucket / bucket_max
+
+            strike_weight[idx_arr] = np.maximum(raw_weight_bucket, min_strike_weight_pct)
 
         # Apply strike weights to the greeks the optimizer sees
         c_delta = c_delta * strike_weight
@@ -402,10 +493,21 @@ class OptimizerV2:
         ])
         c_is_held = np.array([abs(q) > 0 for q in c_held_qty], dtype=float)
 
+        expiry_codes = sorted({c.expiry_code for c in candidates if c.expiry_code != "PERP"})
+        c_vega_by_expiry = {
+            exp_code: np.array([
+                c_vega[i] if candidates[i].expiry_code == exp_code else 0.0
+                for i in range(n)
+            ])
+            for exp_code in expiry_codes
+        }
+
         # Current portfolio risk (before optimization)
         risk_before = self._compute_risk(
             port_delta, port_gamma, port_theta, port_vega,
-            sigma_daily, vov_daily, lambda_delta, lambda_vega,
+            sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+            port_vega_by_expiry=port_vega_by_expiry,
+            vega_cross_expiry_corr=vega_cross_expiry_corr,
         )
 
         def objective(x: np.ndarray) -> float:
@@ -419,10 +521,16 @@ class OptimizerV2:
             new_gamma = port_gamma + np.dot(x, c_gamma)
             new_theta = port_theta + np.dot(x, c_theta)
             new_vega = port_vega + np.dot(x, c_vega)
+            new_vega_by_expiry = {
+                exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(x, c_vega_by_expiry[exp_code])
+                for exp_code in expiry_codes
+            }
 
             risk = self._compute_risk(
                 new_delta, new_gamma, new_theta, new_vega,
-                sigma_daily, vov_daily,
+                sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+                port_vega_by_expiry=new_vega_by_expiry,
+                vega_cross_expiry_corr=vega_cross_expiry_corr,
             )
 
             # Risk reduction relative to doing nothing
@@ -489,9 +597,8 @@ class OptimizerV2:
             rounded_qty = round(qty)
             if rounded_qty == 0:
                 continue
-            notional = abs(rounded_qty) * c.bs_price_usd
             cost_rate = float(c_cost_rate[i])
-    
+
             # Determine if this is an unwind or new position
             held_qty = c_held_qty[i]
             is_unwind = bool((rounded_qty * held_qty) < 0)
@@ -500,18 +607,25 @@ class OptimizerV2:
             new_qty = abs(rounded_qty) - unwind_qty
 
             # Compute cost split: unwind portion at discounted rate, remainder at full rate
-            unwind_notional = unwind_qty * c.bs_price_usd
-            new_notional = new_qty * c.bs_price_usd
+            price_i = float(c_price[i])
+            iv_pct_i = float(c_iv_pct[i])
+            strike_i = float(c_strike[i])
+            dte_i = int(c_dte[i])
+            delta_i = float(c_delta[i] / strike_weight[i]) if strike_weight[i] != 0 else 0.0
+            gamma_i = float(c_gamma[i] / strike_weight[i]) if strike_weight[i] != 0 else 0.0
+            vega_i = float(c_vega[i] / strike_weight[i]) if strike_weight[i] != 0 else 0.0
+
+            unwind_notional = unwind_qty * price_i
+            new_notional = new_qty * price_i
             is_new_instrument = abs(held_qty) == 0
             cost_unwind_part = cost_rate * unwind_discount * unwind_notional
             cost_new_part = (
                 cost_rate + (new_position_penalty if is_new_instrument else 0.0)
             ) * new_notional
-            trade_cost = cost_unwind_part + cost_new_part
 
             instrument_name = (
                 "ETH-PERPETUAL" if c.opt == "F"
-                else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
+                else f"ETH-{c.expiry_code}-{int(strike_i)}-{c.opt}"
             )
 
             # Emit separate rows for unwind vs new-position portions
@@ -520,19 +634,19 @@ class OptimizerV2:
                 trades.append({
                     "instrument": instrument_name,
                     "expiry": c.expiry_date,
-                    "dte": c.dte,
-                    "strike": c.strike,
+                    "dte": dte_i,
+                    "strike": strike_i,
                     "opt": c.opt,
                     "qty": unwind_signed,
                     "side": "Buy" if unwind_signed > 0 else "Sell",
-                    "iv_pct": round(c.iv_pct, 1),
-                    "bs_price_usd": round(c.bs_price_usd, 2),
+                    "iv_pct": round(iv_pct_i, 1),
+                    "bs_price_usd": round(price_i, 2),
                     "notional": round(unwind_notional, 2),
                     "cost_bps": round(cost_rate * 10_000, 1),
                     "trade_cost": round(cost_unwind_part, 2),
-                    "delta_contribution": round(unwind_signed * c.delta, 4),
-                    "gamma_contribution": round(unwind_signed * c.gamma, 6),
-                    "vega_contribution": round(unwind_signed * c.vega, 4),
+                    "delta_contribution": round(unwind_signed * delta_i, 4),
+                    "gamma_contribution": round(unwind_signed * gamma_i, 6),
+                    "vega_contribution": round(unwind_signed * vega_i, 4),
                     "is_unwind": True,
                     "unwind_qty": int(unwind_qty),
                     "new_qty": 0,
@@ -543,19 +657,19 @@ class OptimizerV2:
                 trades.append({
                     "instrument": instrument_name,
                     "expiry": c.expiry_date,
-                    "dte": c.dte,
-                    "strike": c.strike,
+                    "dte": dte_i,
+                    "strike": strike_i,
                     "opt": c.opt,
                     "qty": new_signed,
                     "side": "Buy" if new_signed > 0 else "Sell",
-                    "iv_pct": round(c.iv_pct, 1),
-                    "bs_price_usd": round(c.bs_price_usd, 2),
+                    "iv_pct": round(iv_pct_i, 1),
+                    "bs_price_usd": round(price_i, 2),
                     "notional": round(new_notional, 2),
                     "cost_bps": round(cost_rate * 10_000, 1),
                     "trade_cost": round(cost_new_part, 2),
-                    "delta_contribution": round(new_signed * c.delta, 4),
-                    "gamma_contribution": round(new_signed * c.gamma, 6),
-                    "vega_contribution": round(new_signed * c.vega, 4),
+                    "delta_contribution": round(new_signed * delta_i, 4),
+                    "gamma_contribution": round(new_signed * gamma_i, 6),
+                    "vega_contribution": round(new_signed * vega_i, 4),
                     "is_unwind": False,
                     "unwind_qty": 0,
                     "new_qty": int(new_qty),
@@ -567,10 +681,16 @@ class OptimizerV2:
         new_gamma = port_gamma + np.dot(opt_x, c_gamma)
         new_theta = port_theta + np.dot(opt_x, c_theta)
         new_vega = port_vega + np.dot(opt_x, c_vega)
+        new_vega_by_expiry = {
+            exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(opt_x, c_vega_by_expiry[exp_code])
+            for exp_code in expiry_codes
+        }
 
         risk_after = self._compute_risk(
             new_delta, new_gamma, new_theta, new_vega,
-            sigma_daily, vov_daily, lambda_delta, lambda_vega,
+            sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+            port_vega_by_expiry=new_vega_by_expiry,
+            vega_cross_expiry_corr=vega_cross_expiry_corr,
         )
 
         total_cost = sum(t["trade_cost"] for t in trades)
@@ -630,6 +750,10 @@ class OptimizerV2:
                 "atm_iv_pct": round(atm_iv * 100, 1),
                 "sigma_daily": round(sigma_daily, 4),
                 "vov_daily": round(vov_daily, 2),
+                "vega_cross_expiry_corr": round(vega_cross_expiry_corr, 2),
+                "lambda_delta": lambda_delta,
+                "lambda_gamma": lambda_gamma,
+                "lambda_vega": lambda_vega,
             },
             "before": {
                 "delta": round(port_delta, 2),
@@ -667,10 +791,10 @@ def _bs_vec(
         return np.maximum(spots - K, 0.0) if opt == "C" else np.maximum(K - spots, 0.0)
     d1 = (np.log(spots / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
+
     if opt == "C":
         return spots * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
     return K * math.exp(-r * T) * norm.cdf(-d2) - spots * norm.cdf(-d1)
-
 
 def _bs_greeks(
     S: float, K: float, T: float, r: float, sigma: float, opt: str,
@@ -696,7 +820,9 @@ def _bs_greeks(
 
     gamma = pdf_d1 / (S * sigma * sqrtT)
     vega = S * pdf_d1 * sqrtT / 100.0  # per 1 vol point
-    theta = (-(S * pdf_d1 * sigma) / (2 * sqrtT)
-             - r * K * math.exp(-r * T) * (norm.cdf(d2) if opt == "C" else norm.cdf(-d2))) / 365.25
+    theta = (
+        -(S * pdf_d1 * sigma) / (2 * sqrtT)
+        - r * K * math.exp(-r * T) * (norm.cdf(d2) if opt == "C" else norm.cdf(-d2))
+    ) / 365.25
 
     return delta, gamma, theta, vega, price

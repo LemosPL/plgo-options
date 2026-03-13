@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import traceback
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -18,8 +20,9 @@ class OptimizationParams(BaseModel):
     max_collateral: float = 4_000_000.0
     target_expiry: str | None = None
     lambda_delta: float = 1.0
+    lambda_gamma: float = 1.0
     lambda_vega: float = 100.0
-    fixed_trade_cost: float = 2000.0  # USD penalty per distinct instrument traded
+    vega_cross_expiry_corr: float = 0.0
 
 
 @router.post("/run")
@@ -49,10 +52,16 @@ async def run_optimizer(params: OptimizationParams):
             max_collateral=params.max_collateral,
             target_expiry=params.target_expiry,
             lambda_delta=params.lambda_delta,
+            lambda_gamma=params.lambda_gamma,
             lambda_vega=params.lambda_vega,
-            fixed_trade_cost=params.fixed_trade_cost,
+            vega_cross_expiry_corr=params.vega_cross_expiry_corr,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
+        tb = traceback.format_exc()
+        print(tb)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Optimization failed: {e}\n\n{tb}",
+        )
 
     return result

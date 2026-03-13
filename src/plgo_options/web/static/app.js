@@ -5625,14 +5625,19 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   $btn.disabled = true;
 
   try {
+    const readNum = (id, fallback) => {
+      const v = parseFloat(document.getElementById(id).value);
+      return Number.isNaN(v) ? fallback : v;
+    };
+
     const params = {
-      risk_aversion: parseFloat(document.getElementById("optv2-risk-aversion").value) || 1.0,
-      lambda_delta: parseFloat(document.getElementById("optv2-lambda-delta").value) || 1.0,
-      lambda_vega: parseFloat(document.getElementById("optv2-lambda-vega").value) || 100.0,
-      txn_cost_pct: parseFloat(document.getElementById("optv2-txn-cost").value) || 5.0,
-      max_collateral: parseFloat(document.getElementById("optv2-max-collateral").value) || 4000000,
+      risk_aversion: readNum("optv2-risk-aversion", 1.0),
+      lambda_delta: readNum("optv2-lambda-delta", 1.0),
+      lambda_gamma: readNum("optv2-lambda-gamma", 1.0),
+      lambda_vega: readNum("optv2-lambda-vega", 100.0),
+      txn_cost_pct: readNum("optv2-txn-cost", 5.0),
+      max_collateral: readNum("optv2-max-collateral", 4000000),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
-      fixed_trade_cost: parseFloat(document.getElementById("optv2-fixed-trade-cost").value) || 2000.0,
     };
     const res = await fetch("/api/optimization/run", {
       method: "POST",
