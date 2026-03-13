@@ -364,6 +364,28 @@ class OptimizerV2:
         c_vega = np.array([c.vega for c in candidates])
         c_price = np.array([c.bs_price_usd for c in candidates])
 
+        # ----------------------------------------------------------
+        # Strike weighting: ensure OTM strikes get a minimum weight.
+        # Compute a "greek magnitude" per candidate, then floor at
+        # min_strike_weight_pct of the maximum across all candidates.
+        # This prevents the optimizer from completely ignoring wings.
+        # ----------------------------------------------------------
+        min_strike_weight_pct = 0.10  # 10% of the max weight
+        greek_mag = np.sqrt(
+            (c_delta * S) ** 2
+            + (c_gamma * S ** 2) ** 2
+            + (c_vega) ** 2
+        )
+        max_mag = greek_mag.max() if greek_mag.max() > 0 else 1.0
+        raw_weight = greek_mag / max_mag  # normalised 0..1
+        strike_weight = np.maximum(raw_weight, min_strike_weight_pct)
+
+        # Apply strike weights to the greeks the optimizer sees
+        c_delta = c_delta * strike_weight
+        c_gamma = c_gamma * strike_weight
+        c_theta = c_theta * strike_weight
+        c_vega = c_vega * strike_weight
+
         # Per-candidate cost rate: 5bps for perp, txn_cost_pct for options
         PERP_COST_BPS = 5.0  # 5 basis points = 0.05%
         c_cost_rate = np.array([
@@ -387,7 +409,11 @@ class OptimizerV2:
         )
 
         def objective(x: np.ndarray) -> float:
-            """Negative utility: cost + λ·risk + penalties (we minimize this)."""
+            """Negative utility: cost − λ·risk_reduction.
+
+                        At x=0 (no trades), this returns exactly 0.
+                        A trade is only proposed if λ·risk_reduction > cost.
+                        """
             # New portfolio greeks = current + sum(x_i * candidate_greeks_i)
             new_delta = port_delta + np.dot(x, c_delta)
             new_gamma = port_gamma + np.dot(x, c_gamma)
@@ -398,6 +424,9 @@ class OptimizerV2:
                 new_delta, new_gamma, new_theta, new_vega,
                 sigma_daily, vov_daily,
             )
+
+            # Risk reduction relative to doing nothing
+            risk_reduction = risk_before - risk
 
             # ----------------------------------------------------------
             # Split each trade into "unwind" and "new" portions.
@@ -431,7 +460,7 @@ class OptimizerV2:
 
             cost = cost_unwind + cost_new
 
-            return cost + risk_aversion * risk
+            return cost - risk_aversion * risk_reduction
 
         # Bounds: limit trade sizes, respect collateral
         # Max contracts per instrument: collateral / price (rough)
