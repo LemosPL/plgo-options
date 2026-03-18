@@ -6,7 +6,8 @@ import openpyxl
 
 def read_eth_trades() -> list[dict]:
     """Read trades from the 'Trades' tab of the ETH dashboard Excel file."""
-    file_path = Path(__file__).resolve().parent.parent / "data" / "ETH - Dashboard Risk+PnL Improvement Proposal.xlsx"
+    #file_path = Path(__file__).resolve().parent.parent / "data" / "ETH - Dashboard Risk+PnL Improvement Proposal.xlsx"
+    file_path = Path(__file__).resolve().parent.parent / "data" / "PLGO_Trades_2026-03-17.xlsx"
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     ws = wb["Trades"]
@@ -37,7 +38,7 @@ def read_eth_trades() -> list[dict]:
 if __name__ == "__main__":
     trades = read_eth_trades()
     print(f"Loaded {len(trades)} trades\n")
-    for trade in trades[:5]:
+    for trade in trades[:50]:
         print(trade)
-    if len(trades) > 5:
+    if len(trades) > 50:
         print(f"\n... and {len(trades) - 5} more trades")

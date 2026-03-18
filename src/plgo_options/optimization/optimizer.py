@@ -20,10 +20,13 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import norm
+
+#from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
 
 
 @dataclass
@@ -98,11 +101,8 @@ class OptimizerV2:
             return default
 
     @classmethod
-    def from_snapshot(cls, path: Path) -> OptimizerV2:
-        """Load an OptimizerV2 instance from a snapshot JSON file."""
-        with open(path) as f:
-            data = json.load(f)
-
+    def from_snapshot_dict(cls, data: dict) -> OptimizerV2:
+        """Load an OptimizerV2 instance from an in-memory snapshot dict."""
         positions = [
             Position(
                 id=p["id"],
@@ -134,8 +134,15 @@ class OptimizerV2:
             vol_surface=data["vol_surface"],
             positions=positions,
             totals=data["totals"],
-            snapshot_path=path,
+            snapshot_path=Path(data.get("snapshot_path", "")),
         )
+
+    @classmethod
+    def from_snapshot(cls, path: Path) -> OptimizerV2:
+        """Load an OptimizerV2 instance from a snapshot JSON file."""
+        with open(path) as f:
+            data = json.load(f)
+        return cls.from_snapshot_dict(data)
 
     # ------------------------------------------------------------------
     # Build candidate instruments from vol surface
@@ -152,6 +159,18 @@ class OptimizerV2:
         S = self.eth_spot
         candidates = []
 
+        # Build a lookup of currently held option positions so that in ALL-maturities
+        # mode we only consider instruments we already have a position in.
+        held_option_keys: set[tuple[str, float, str]] = set()
+        held_expiry_codes: set[str] = set()
+        for p in self.positions:
+            parts = p.instrument.split("-")
+            if len(parts) >= 4:
+                exp_code = parts[1]
+                key = (exp_code, p.strike, p.opt)
+                held_option_keys.add(key)
+                held_expiry_codes.add(exp_code)
+
         # Filter smiles
         matching_smiles = []
         for smile in self.vol_surface:
@@ -161,12 +180,13 @@ class OptimizerV2:
                 if smile["expiry_code"] == target_expiry:
                     matching_smiles.append(smile)
             else:
-                # No filter → use all expiries
-                matching_smiles.append(smile)
+                # ALL-expiries mode: only include expiries where we currently hold positions
+                if smile["expiry_code"] in held_expiry_codes:
+                    matching_smiles.append(smile)
 
         # Strike filter: 50%–200% of spot
-        strike_lo = S * 0.50
-        strike_hi = S * 2.00
+        strike_lo = S * 0.25
+        strike_hi = S * 4.00
 
         for smile in matching_smiles:
             expiry_code = smile["expiry_code"]
@@ -184,6 +204,11 @@ class OptimizerV2:
                     continue
 
                 for opt in ("C", "P"):
+                    # In ALL-expiries mode, only keep option contracts we already hold.
+                    # Perp is always included separately below.
+                    if target_expiry is None and (expiry_code, strike, opt) not in held_option_keys:
+                        continue
+
                     delta, gamma, theta, vega, price = _bs_greeks(
                         S, strike, T, 0.0, sigma, opt
                     )
@@ -275,6 +300,27 @@ class OptimizerV2:
                 exp_code = "UNKNOWN"
             vega_by_expiry[exp_code] = vega_by_expiry.get(exp_code, 0.0) + (p.vega or 0.0) * p.net_qty
         return vega_by_expiry
+
+    def _expiry_sort_key(self, expiry_code: str) -> tuple[int, str]:
+        """Sort expiry buckets chronologically from codes like 29MAY26."""
+        if expiry_code == "PERP":
+            return (-1, expiry_code)
+
+        try:
+            expiry_date = datetime.strptime(expiry_code.upper(), "%d%b%y").date()
+            return (expiry_date.toordinal(), expiry_code)
+        except ValueError:
+            return (10**9, expiry_code)
+
+    def _active_position_expiry_codes(self) -> list[str]:
+        """Return active expiry codes present in current positions, ordered by expiry."""
+        expiry_codes: set[str] = set()
+        for p in self.positions:
+            parts = p.instrument.split("-")
+            if len(parts) >= 4 and parts[1]:
+                expiry_codes.add(parts[1])
+        print(f"Active expiry codes: {expiry_codes}")
+        return sorted(expiry_codes, key=self._expiry_sort_key)
 
     # ------------------------------------------------------------------
     # Risk computation
@@ -570,12 +616,21 @@ class OptimizerV2:
 
             return cost - risk_aversion * risk_reduction
 
-        # Bounds: limit trade sizes, respect collateral
-        # Max contracts per instrument: collateral / price (rough)
-        max_qty = np.array([
-            max_collateral / max(p, 1.0) for p in c_price
-        ])
-        bounds = [(-mq, mq) for mq in max_qty]
+        # Bounds: unwind-only
+        bounds = []
+        for c, held_qty, price in zip(candidates, c_held_qty, c_price):
+            if c.opt == "F":
+                # ETH-PERPETUAL stays unrestricted
+                bounds.append((-max_collateral / max(price, 1.0), max_collateral / max(price, 1.0)))
+            elif held_qty > 0:
+                # long option: can only sell to reduce/close
+                bounds.append((-abs(held_qty), 0.0))
+            elif held_qty < 0:
+                # short option: can only buy to reduce/close
+                bounds.append((0.0, abs(held_qty)))
+            else:
+                # no existing option position: no trade
+                bounds.append((0.0, 0.0))
 
         # Start from zero (no trades)
         x0 = np.zeros(n)
@@ -674,6 +729,8 @@ class OptimizerV2:
                     "unwind_qty": 0,
                     "new_qty": int(new_qty),
                 })
+
+        print(np.array(trades))
 
         # Post-optimization portfolio greeks
         opt_x = result.x

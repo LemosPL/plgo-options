@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import traceback
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from plgo_options.web.routes.portfolio import portfolio_pnl
-from plgo_options.optimization.snapshot import save_snapshot
-from plgo_options.optimization.optimizer import OptimizerV2
+from plgo_options.optimization.optim_usecase import (
+    OptimizerRunParams,
+    OptimizerUseCase,
+)
 
 router = APIRouter()
 
@@ -27,8 +30,7 @@ class OptimizationParams(BaseModel):
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
-    """Snapshot all optimizer inputs, load into OptimizerV2, and run."""
-    # 1. Gather the full risk profile (same data as Load Risk Profile)
+    """Gather optimizer inputs, persist a reproducible use case, and run it."""
     try:
         pnl_data = await portfolio_pnl()
     except HTTPException:
@@ -36,26 +38,24 @@ async def run_optimizer(params: OptimizationParams):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to gather portfolio data: {e}")
 
-    # 2. Save snapshot (include params for reproducibility)
-    pnl_data["optimization_params"] = params.model_dump()
-    try:
-        path = save_snapshot(pnl_data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save snapshot: {e}")
+    run_params = OptimizerRunParams(
+        risk_aversion=params.risk_aversion,
+        txn_cost_pct=params.txn_cost_pct,
+        max_collateral=params.max_collateral,
+        target_expiry=params.target_expiry,
+        lambda_delta=params.lambda_delta,
+        lambda_gamma=params.lambda_gamma,
+        lambda_vega=params.lambda_vega,
+        vega_cross_expiry_corr=params.vega_cross_expiry_corr,
+    )
 
-    # 3. Load snapshot into optimizer and run
+    usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
+
     try:
-        optimizer = OptimizerV2.from_snapshot(path)
-        result = optimizer.run(
-            risk_aversion=params.risk_aversion,
-            txn_cost_pct=params.txn_cost_pct,
-            max_collateral=params.max_collateral,
-            target_expiry=params.target_expiry,
-            lambda_delta=params.lambda_delta,
-            lambda_gamma=params.lambda_gamma,
-            lambda_vega=params.lambda_vega,
-            vega_cross_expiry_corr=params.vega_cross_expiry_corr,
-        )
+        save_dir = Path("data/optimization_snapshots/usecases")
+        save_path = usecase.save_auto(save_dir)
+        result = usecase.run()
+        # usecase.save(save_path)  # overwrite same file, now including result
     except Exception as e:
         tb = traceback.format_exc()
         print(tb)
