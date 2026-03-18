@@ -16,7 +16,10 @@ client = DeribitClient()
 
 
 @router.get("/spot")
-async def get_eth_spot() -> dict:
+async def get_eth_spot(asset: str = "ETH") -> dict:
+    if asset.upper() == "FIL":
+        price = await client.get_fil_spot_price()
+        return {"fil_spot": price}
     price = await client.get_eth_spot_price()
     return {"eth_spot": price}
 
@@ -45,13 +48,15 @@ async def get_expirations() -> list[str]:
 
 
 @router.get("/vol-surface")
-async def get_vol_surface() -> dict:
-    """Fetch the full ETH vol surface from Deribit (all expiries).
+async def get_vol_surface(asset: str = "ETH") -> dict:
+    """Fetch vol surface. ETH from Deribit directly; FIL scaled from ETH by HV ratio."""
+    is_fil = asset.upper() == "FIL"
 
-    Returns spot price, expiry list with DTE, and per-expiry smile data
-    (strikes + IVs) for frontend caching.
-    """
-    eth_spot = await client.get_eth_spot_price()
+    if is_fil:
+        spot = await client.get_fil_spot_price()
+    else:
+        spot = await client.get_eth_spot_price()
+
     summaries = await client._get("get_book_summary_by_currency", {
         "currency": "ETH",
         "kind": "option",
@@ -69,11 +74,21 @@ async def get_vol_surface() -> dict:
             continue
         expiry_data.setdefault(parts[1], {}).setdefault(float(parts[2]), []).append(mark_iv)
 
+    # For FIL: scale ETH IVs by historical vol ratio and project strikes to FIL moneyness
+    vol_ratio = 1.0
+    eth_spot_for_moneyness = None
+    if is_fil:
+        try:
+            vol_ratio = await client.get_historical_vol_ratio(days=30)
+            eth_spot_for_moneyness = await client.get_eth_spot_price()
+        except Exception:
+            vol_ratio = 1.5
+
     today = datetime.utcnow().date()
     smiles = []
     for exp_code, strike_ivs in expiry_data.items():
         strikes = sorted(strike_ivs.keys())
-        ivs = [float(np.mean(strike_ivs[k])) for k in strikes]
+        ivs = [float(np.mean(strike_ivs[k])) * vol_ratio for k in strikes]
         if len(strikes) < 2:
             continue
         try:
@@ -81,17 +96,24 @@ async def get_vol_surface() -> dict:
         except ValueError:
             continue
         dte = max((exp_date - today).days, 0)
+
+        # Project ETH strikes to FIL via moneyness: FIL_strike = ETH_strike / ETH_spot * FIL_spot
+        if is_fil and eth_spot_for_moneyness and eth_spot_for_moneyness > 0:
+            fil_strikes = [round(k / eth_spot_for_moneyness * spot, 4) for k in strikes]
+        else:
+            fil_strikes = [float(k) for k in strikes]
+
         smiles.append({
             "expiry_code": exp_code,
             "expiry_date": exp_date.isoformat(),
             "dte": dte,
-            "strikes": [float(k) for k in strikes],
+            "strikes": fil_strikes,
             "ivs": ivs,
         })
 
     smiles.sort(key=lambda x: x["dte"])
 
     return {
-        "eth_spot": eth_spot,
+        "eth_spot": spot,
         "smiles": smiles,
     }

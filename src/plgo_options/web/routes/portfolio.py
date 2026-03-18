@@ -217,9 +217,28 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     tickers = {}
 
     if is_fil:
-        # FIL: no Deribit — use ref_spot from first trade as placeholder spot
-        spots_from_trades = [_safe_float(t.get("Ref. Spot Price")) for t in trades if _safe_float(t.get("Ref. Spot Price")) > 0]
-        eth_spot = spots_from_trades[0] if spots_from_trades else 5.0  # FIL spot placeholder
+        # FIL: fetch live spot + ETH vol surface scaled by HV ratio
+        try:
+            eth_spot = await client.get_fil_spot_price()
+        except Exception:
+            spots_from_trades = [_safe_float(t.get("Ref. Spot Price")) for t in trades if _safe_float(t.get("Ref. Spot Price")) > 0]
+            eth_spot = spots_from_trades[0] if spots_from_trades else 3.0
+
+        # Build FIL vol surface = ETH vol surface × (FIL HV / ETH HV)
+        # Project strikes from ETH moneyness to FIL price space
+        try:
+            eth_smiles = await _fetch_smiles()
+            vol_ratio = await client.get_historical_vol_ratio(days=30)
+            eth_spot_ref = await client.get_eth_spot_price()
+            for exp_code, smile in eth_smiles.items():
+                scaled_ivs = [iv * vol_ratio for iv in smile.ivs.tolist()]
+                if eth_spot_ref > 0:
+                    fil_strikes = [k / eth_spot_ref * eth_spot for k in smile.strikes.tolist()]
+                else:
+                    fil_strikes = smile.strikes.tolist()
+                smiles[exp_code] = VolSmile(fil_strikes, scaled_ivs)
+        except Exception:
+            pass  # fall back to DEFAULT_IV
     else:
         try:
             eth_spot = await client.get_eth_spot_price()
@@ -255,7 +274,10 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
 
     # 3. Enrich each trade
     enriched = []
-    spot_arr = np.array(SPOT_LADDER, dtype=float)
+    # Use correct spot ladder for payoff computation per asset
+    FIL_SPOT_LADDER = [round(0.2 + i * 0.1, 2) for i in range(29)]  # $0.20 to $3.00 at $0.10
+    active_ladder = FIL_SPOT_LADDER if is_fil else SPOT_LADDER
+    spot_arr = np.array(active_ladder, dtype=float)
     all_horizons = sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0]))
 
     for idx, t in enumerate(trades):
@@ -469,8 +491,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         })
     vol_surface.sort(key=lambda x: x["dte"])
 
-    # FIL spot ladder: $0.20 to $10 at $0.10 intervals
-    spot_ladder = SPOT_LADDER if not is_fil else [round(x / 10, 2) for x in range(2, 101)]
+    spot_ladder = active_ladder
 
     return {
         "asset": asset.upper(),
@@ -480,7 +501,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         "chart_horizons": sorted(set(CHART_HORIZONS + [0])),
         "all_horizons": sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0])),
         "vol_surface": vol_surface,
-        "no_live_data": is_fil,
+        "no_live_data": False,
         "positions": enriched,
         "totals": {
             "total_entry_premium": round(total_entry, 2),

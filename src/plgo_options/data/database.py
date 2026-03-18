@@ -8,7 +8,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from plgo_options.data.trades import read_eth_trades
+from plgo_options.data.trades import read_eth_trades, read_fil_trades
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,52 @@ async def init_db():
             imported = await _import_excel_trades(db, excel_trades, asset="ETH")
             logger.info("Imported %d ETH trades from Excel", imported)
         except Exception as e:
-            logger.warning("Excel import failed: %s", e)
+            logger.warning("ETH Excel import failed: %s", e)
+
+    # Auto-import FIL trades if none exist yet
+    cursor = await db.execute("SELECT COUNT(*) FROM trades WHERE asset = 'FIL'")
+    row = await cursor.fetchone()
+    fil_count = row[0] if row else 0
+
+    if fil_count == 0:
+        logger.info("No FIL trades — importing from FIL Excel...")
+        try:
+            fil_trades = read_fil_trades()
+            imported = await _import_excel_trades(db, fil_trades, asset="FIL")
+            logger.info("Imported %d FIL trades from Excel", imported)
+        except Exception as e:
+            logger.warning("FIL Excel import failed: %s", e)
+
+
+    # Auto-expire trades past their expiry date (runs every startup)
+    await _auto_expire_trades(db)
+
+
+async def _auto_expire_trades(db: aiosqlite.Connection):
+    """Mark active trades with expiry <= today as expired."""
+    from datetime import date
+    today = date.today().isoformat()
+    cursor = await db.execute(
+        "SELECT id FROM trades WHERE status = 'active' AND expiry <= ? AND expiry != ''",
+        (today,),
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return
+    ids = [row[0] for row in rows]
+    await db.execute(
+        f"UPDATE trades SET status = 'expired', updated_at = datetime('now') "
+        f"WHERE id IN ({','.join('?' * len(ids))})",
+        ids,
+    )
+    for tid in ids:
+        await db.execute(
+            "INSERT INTO trade_audit_log (trade_id, action, field_changed, old_value, new_value, changed_by) "
+            "VALUES (?, 'update', 'status', 'active', 'expired', 'auto_expiry')",
+            (tid,),
+        )
+    await db.commit()
+    logger.info("Auto-expired %d trades (expiry <= %s)", len(ids), today)
 
 
 async def close_db():

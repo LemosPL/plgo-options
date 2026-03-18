@@ -1,4 +1,4 @@
-"""Read trades from the ETH dashboard Excel file."""
+"""Read trades from the ETH/FIL dashboard Excel files."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ TRADE_COLUMNS = [
     "Premium USD",
 ]
 
+# --- ETH paths ---
 # Primary: bundled data/ directory (works in Docker and local)
 _PROJECT_DATA_PATH = (
     Path(__file__).resolve().parents[3]
@@ -36,6 +37,17 @@ _PROJECT_DATA_PATH = (
 # Fallback: user's Downloads folder (local dev)
 _DOWNLOADS_PATH = (
     Path.home() / "Downloads" / "ETH - Dashboard Risk+PnL Improvement Proposal (9).xlsx"
+)
+
+# --- FIL paths ---
+_FIL_PROJECT_DATA_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "data"
+    / "FIL - Dashboard Risk+PnL Improvement Proposal.xlsx"
+)
+
+_FIL_DOWNLOADS_PATH = (
+    Path.home() / "Downloads" / "FIL - Dashboard Risk+PnL Improvement Proposal (2).xlsx"
 )
 
 
@@ -100,6 +112,65 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
             continue
         record = dict(zip(headers, row))
         # Normalise dates/datetimes → ISO strings
+        for k, v in record.items():
+            if isinstance(v, datetime):
+                record[k] = v.isoformat()
+            elif isinstance(v, date):
+                record[k] = v.isoformat()
+        trades.append(record)
+
+    wb.close()
+    return trades
+
+
+def read_fil_trades(file_path: Path | None = None) -> list[dict]:
+    """Return a list of trade dicts from the FIL 'Trades' tab.
+
+    Same structure as read_eth_trades but reads from the FIL spreadsheet.
+    The FIL spreadsheet reuses 'ETH Options' as the qty column header.
+    """
+    fp = file_path
+    if fp is None:
+        if _FIL_PROJECT_DATA_PATH.exists():
+            fp = _FIL_PROJECT_DATA_PATH
+        else:
+            fp = _FIL_DOWNLOADS_PATH
+
+    try:
+        wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+    except (FileNotFoundError, PermissionError, OSError):
+        alt = _FIL_PROJECT_DATA_PATH if fp != _FIL_PROJECT_DATA_PATH else _FIL_DOWNLOADS_PATH
+        if alt.exists():
+            fp = alt
+            wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+        else:
+            raise
+
+    ws = wb["Trades"]
+    rows = ws.iter_rows(values_only=True)
+
+    # Scan for the header row that starts with "Counterparty"
+    headers: list[str] | None = None
+    for row in rows:
+        if row and str(row[0]).strip().lower() == "counterparty":
+            headers = [
+                str(h).strip() if h is not None else f"col_{i}"
+                for i, h in enumerate(row)
+            ]
+            break
+
+    if headers is None:
+        wb.close()
+        raise ValueError(
+            "Could not find header row starting with 'Counterparty' "
+            "in the FIL 'Trades' sheet"
+        )
+
+    trades: list[dict] = []
+    for row in rows:
+        if all(cell is None for cell in row):
+            continue
+        record = dict(zip(headers, row))
         for k, v in record.items():
             if isinstance(v, datetime):
                 record[k] = v.isoformat()

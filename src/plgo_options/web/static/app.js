@@ -7,6 +7,10 @@ let optionChain = [];   // OptionTicker[]
 let legs = [];          // {side, type, strike, premium, quantity}
 let volSurface = null;  // cached Deribit vol surface {eth_spot, smiles: [{expiry_code, dte, strikes, ivs}]}
 
+// ─── Asset-aware formatting helpers ─────────────────────────
+const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(4) : Number(v).toFixed(0);
+const fmtStrike = (v) => currentAsset === "FIL" ? Number(v).toFixed(4) : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
 // ─── DOM refs ───────────────────────────────────────────────
 const $spot       = document.getElementById("eth-spot");
 const $expSel     = document.getElementById("expiry-select");
@@ -86,18 +90,19 @@ function pricerBs(S, K, T, r, sigma, type) {
 // ─── Bootstrap ──────────────────────────────────────────────
 async function init() {
   // Fetch spot + vol surface in parallel
-  const spotP = get("/api/market/spot").catch(e => { console.error("Spot fetch failed:", e); return null; });
-  const volP = get("/api/market/vol-surface").catch(e => { console.error("Vol surface fetch failed:", e); return null; });
+  const spotP = get(`/api/market/spot?asset=${currentAsset}`).catch(e => { console.error("Spot fetch failed:", e); return null; });
+  const volP = get(`/api/market/vol-surface?asset=${currentAsset}`).catch(e => { console.error("Vol surface fetch failed:", e); return null; });
   const expP = get("/api/market/expirations").catch(e => { console.error("Expiry fetch failed:", e); return null; });
 
   const [spotData, volData, expiries] = await Promise.all([spotP, volP, expP]);
 
   // Spot
   if (spotData) {
-    ethSpot = spotData.eth_spot;
-    $spot.textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    $spotMin.value = Math.round(ethSpot * 0.4);
-    $spotMax.value = Math.round(ethSpot * 2.0);
+    ethSpot = spotData.eth_spot || spotData.fil_spot;
+    const fracDigits = currentAsset === "FIL" ? 4 : 2;
+    $spot.textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: fracDigits })}`;
+    $spotMin.value = currentAsset === "FIL" ? 0.2 : Math.round(ethSpot * 0.4);
+    $spotMax.value = currentAsset === "FIL" ? 3.0 : Math.round(ethSpot * 2.0);
   } else {
     $spot.textContent = "Error";
   }
@@ -151,7 +156,8 @@ function chartLayout() {
     paper_bgcolor: cc.paper,
     plot_bgcolor:  cc.plot,
     xaxis: {
-      title: "ETH Spot Price (USD)",
+      title: currentAsset + " Spot Price (USD) — log scale",
+      type: "log",
       color: cc.muted,
       gridcolor: cc.grid,
       zerolinecolor: cc.zeroline,
@@ -221,7 +227,7 @@ async function computePayoff() {
         y: [Math.min(...data.pnl), Math.max(...data.pnl)],
         type: "scatter",
         mode: "lines",
-        name: `Spot $${ethSpot.toFixed(0)}`,
+        name: `Spot $${fmtSpot(ethSpot)}`,
         line: { color: "#3fb950", width: 1.5, dash: "dash" },
       });
     }
@@ -297,37 +303,45 @@ function renderLegs() {
 
 // ─── Strategy templates ─────────────────────────────────────
 function applyTemplate(name) {
-  const s = ethSpot ? Math.round(ethSpot / 100) * 100 : 2800;
+  const isFil = currentAsset === "FIL";
+  const s = isFil
+    ? (ethSpot ? Math.round(ethSpot * 20) / 20 : 1.0)
+    : (ethSpot ? Math.round(ethSpot / 100) * 100 : 2800);
+  // Strike offsets scaled per asset
+  const w = isFil ? 0.1 : 200;   // wing width (narrow spread)
+  const W = isFil ? 0.25 : 500;  // wing width (wide spread)
+  const ww = isFil ? 0.3 : 600;  // iron condor outer wing
+  const r = (v) => isFil ? Math.round(v * 100) / 100 : Math.round(v);
   legs = [];
 
   switch (name) {
     case "long_call":
-      addLeg("buy", "C", s, "0");
+      addLeg("buy", "C", r(s), "0");
       break;
     case "long_put":
-      addLeg("buy", "P", s, "0");
+      addLeg("buy", "P", r(s), "0");
       break;
     case "bull_call_spread":
-      addLeg("buy",  "C", s,       "0");
-      addLeg("sell", "C", s + 500,  "0");
+      addLeg("buy",  "C", r(s),       "0");
+      addLeg("sell", "C", r(s + W),   "0");
       break;
     case "bear_put_spread":
-      addLeg("buy",  "P", s,       "0");
-      addLeg("sell", "P", s - 500,  "0");
+      addLeg("buy",  "P", r(s),       "0");
+      addLeg("sell", "P", r(s - W),   "0");
       break;
     case "straddle":
-      addLeg("buy", "C", s, "0");
-      addLeg("buy", "P", s, "0");
+      addLeg("buy", "C", r(s), "0");
+      addLeg("buy", "P", r(s), "0");
       break;
     case "strangle":
-      addLeg("buy", "C", s + 300, "0");
-      addLeg("buy", "P", s - 300, "0");
+      addLeg("buy", "C", r(s + w), "0");
+      addLeg("buy", "P", r(s - w), "0");
       break;
     case "iron_condor":
-      addLeg("buy",  "P", s - 600, "0");
-      addLeg("sell", "P", s - 200, "0");
-      addLeg("sell", "C", s + 200, "0");
-      addLeg("buy",  "C", s + 600, "0");
+      addLeg("buy",  "P", r(s - ww), "0");
+      addLeg("sell", "P", r(s - w),  "0");
+      addLeg("sell", "C", r(s + w),  "0");
+      addLeg("buy",  "C", r(s + ww), "0");
       break;
   }
   renderLegs();
@@ -513,11 +527,11 @@ function replicateStrategy() {
   const $summary = document.getElementById("repl-summary");
   $summary.innerHTML =
     `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">` +
-    `<span>Expiry: <strong>${expiryLabel}</strong> &nbsp;|&nbsp; ETH = $${spot.toLocaleString()}</span>` +
+    `<span>Expiry: <strong>${expiryLabel}</strong> &nbsp;|&nbsp; ${currentAsset} = $${fmtSpot(spot)}</span>` +
     `<span style="display:flex;gap:1rem;font-size:.95rem">` +
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
-    `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ETH)</span>` +
+    `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
     `</span></div>`;
 
   // Per-leg table
@@ -570,7 +584,7 @@ function replicateStrategy() {
   }
 
   traces.push({ x: [spot, spot], y: [yMin, yMax], type: "scatter", mode: "lines",
-    name: `Spot $${spot.toFixed(0)}`, line: { color: "#3fb950", width: 1.5, dash: "dash" } });
+    name: `Spot $${fmtSpot(spot)}`, line: { color: "#3fb950", width: 1.5, dash: "dash" } });
 
   Plotly.react("payoff-chart", traces, chartLayout(), { responsive: true });
 
@@ -616,7 +630,7 @@ function drawSmileChart(smile, pricedLegs) {
     {
       x: obsStrikes, y: obsIvs,
       type: "scatter", mode: "markers",
-      name: "Deribit Market IV",
+      name: currentAsset === "FIL" ? "Proxy IV (ETH-scaled)" : "Deribit Market IV",
       marker: { color: "#e6edf3", size: 5, symbol: "circle", opacity: 0.6 },
     },
   ];
@@ -638,9 +652,10 @@ function drawSmileChart(smile, pricedLegs) {
     });
   }
 
+  const smileLabel = currentAsset === "FIL" ? "Proxy IV Smile (ETH-scaled)" : "Deribit IV Smile";
   const title = smile.expiry_code
-    ? `Deribit IV Smile — ${smile.expiry_code} (${smile.dte}d)`
-    : "Deribit Implied Volatility Smile";
+    ? `${smileLabel} — ${smile.expiry_code} (${smile.dte}d)`
+    : smileLabel;
 
   const cc = chartColors();
   const layout = {
@@ -697,16 +712,25 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     sbLoaded = false;
     pfData = null;
 
-    // Update spot display
-    if (asset === "ETH" && ethSpot) {
-      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    } else if (asset === "FIL") {
-      document.getElementById("eth-spot").textContent = "N/A (no live feed)";
-    }
-
-    // Reload current page
-    const activePage = document.querySelector(".nav-item.active");
-    if (activePage) activePage.click();
+    // Fetch spot + vol surface for the new asset, then reload page
+    Promise.all([
+      get(`/api/market/spot?asset=${asset}`).catch(() => null),
+      get(`/api/market/vol-surface?asset=${asset}`).catch(() => null),
+    ]).then(([spotData, volData]) => {
+      if (spotData) {
+        ethSpot = spotData.eth_spot || spotData.fil_spot;
+        document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: asset === "FIL" ? 4 : 2 })}`;
+        // Update pricer spot range for the asset
+        $spotMin.value = asset === "FIL" ? 0.2 : Math.round(ethSpot * 0.4);
+        $spotMax.value = asset === "FIL" ? 3.0 : Math.round(ethSpot * 2.0);
+      }
+      if (volData) {
+        volSurface = volData;
+      }
+      // Reload current page after data is ready
+      const activePage = document.querySelector(".nav-item.active");
+      if (activePage) activePage.click();
+    });
   });
 });
 
@@ -721,12 +745,22 @@ document.querySelectorAll(".nav-item").forEach(item => {
 
     const pg = item.dataset.page;
 
-    // Show/hide FIL under-construction banners
+    // Show/hide FIL banners and Deribit-only elements
     const isFil = currentAsset === "FIL";
     const pricingBanner = document.getElementById("pricing-fil-banner");
     const rollBanner = document.getElementById("roll-fil-banner");
-    if (pricingBanner) pricingBanner.style.display = (isFil && pg === "pricing") ? "" : "none";
+    if (pricingBanner) pricingBanner.style.display = "none";  // no longer needed — FIL pricer works
     if (rollBanner) rollBanner.style.display = (isFil && pg === "roll") ? "" : "none";
+
+    // Hide Deribit option chain for FIL (no exchange-listed FIL options)
+    const chainBtn = document.getElementById("btn-load-chain");
+    const chainSec = document.getElementById("chain-section");
+    if (chainBtn) chainBtn.style.display = isFil ? "none" : "";
+    if (chainSec && isFil) chainSec.style.display = "none";
+
+    // Show/hide FIL proxy IV methodology banner
+    const proxyBanner = document.getElementById("pricing-proxy-banner");
+    if (proxyBanner) proxyBanner.style.display = (isFil && pg === "pricing") ? "flex" : "none";
 
     // Lazy-load pages
     if (pg === "trades" && !tmLoaded) tmLoad();
@@ -756,7 +790,7 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
     if (pane) pane.classList.add("active");
 
     // Lazy-load optimizer
-    if (btn.dataset.subtab === "optimizer" && !optLoaded) optInit();
+    if (btn.dataset.subtab === "optimizer" && !opt2Loaded) opt2Init();
   });
 });
 
@@ -833,7 +867,8 @@ async function tmLoad() {
       const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExp}`);
       enriched = pfData.positions || [];
       ethSpot = pfData.eth_spot;
-      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+      const fracDigits = currentAsset === "FIL" ? 4 : 2;
+      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: fracDigits })}`;
     } catch (e) {
       console.warn("Could not fetch enriched data:", e);
     }
@@ -955,9 +990,11 @@ function tmRenderTable() {
 
   document.getElementById("tm-table-count").textContent = `(${rows.length})`;
 
+  const isFil = currentAsset === "FIL";
+  const priceDec = isFil ? 4 : 0;
   const fmt = (v, d = 2) => v != null && v !== "" ? Number(v).toFixed(d) : "--";
-  const fmtK = (v) => v != null && v !== "" ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }) : "--";
-  const fmtMoney = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const fmtK = (v) => v != null && v !== "" ? Number(v).toLocaleString(undefined, { maximumFractionDigits: priceDec }) : "--";
+  const fmtMoney = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: priceDec })}` : "--";
   const fmtMm = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm` : "--";
 
   tbody.innerHTML = rows.map(t => {
@@ -1548,7 +1585,7 @@ async function loadPositions() {
       tr.innerHTML = `
         <td style="text-align:left" class="${sideClass}"><strong>${p.side}</strong></td>
         <td style="text-align:left; color:${typeColor}">${p.option_type}</td>
-        <td>${p.strike.toLocaleString()}</td>
+        <td>${fmtStrike(p.strike)}</td>
         <td>${p.expiry}</td>
         <td>${p.days_remaining.toFixed(0)}</td>
         <td>${(p.pct_otm * 100).toFixed(1)}%</td>
@@ -1802,7 +1839,7 @@ function pfRenderSummary() {
   const sel = all.filter(p => pfSelected.has(p.id));
 
   document.getElementById("pf-spot").textContent =
-    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: currentAsset === "FIL" ? 4 : 0 })}`;
   document.getElementById("pf-count").textContent = all.length;
   document.getElementById("pf-selected-count").textContent = sel.length;
 
@@ -2158,7 +2195,7 @@ function pfRenderPayoffChart() {
       x: [pfData.eth_spot, pfData.eth_spot],
       y: [Math.min(...allY), Math.max(...allY)],
       type: "scatter", mode: "lines",
-      name: `Spot $${pfData.eth_spot.toFixed(0)}`,
+      name: `Spot $${fmtSpot(pfData.eth_spot)}`,
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
       legendgroup: "spot",
     });
@@ -2170,7 +2207,7 @@ function pfRenderPayoffChart() {
   const layout = {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: assetLabel, color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: currentAsset === "FIL" ? 1 : 500 },
+    xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 200, b: 50, l: 80 },
     showlegend: true,
@@ -2209,12 +2246,13 @@ function pfRenderMtmGrid() {
   }
 
   // Pick spots at appropriate increments
-  const step = currentAsset === "FIL" ? 2 : 500;
-  const maxSpot = currentAsset === "FIL" ? 30 : 7000;
+  const step = currentAsset === "FIL" ? 0.2 : 500;
+  const maxSpot = currentAsset === "FIL" ? 3.0 : 7000;
   const displaySpots = [];
   for (let s = step; s <= maxSpot; s += step) {
-    const idx = spots.indexOf(s);
-    if (idx !== -1) displaySpots.push({ spot: s, idx });
+    const rounded = Math.round(s * 100) / 100;  // avoid float drift
+    const idx = spots.findIndex(sp => Math.abs(sp - rounded) < 0.001);
+    if (idx !== -1) displaySpots.push({ spot: rounded, idx });
   }
   displaySpots.reverse();
 
@@ -3129,7 +3167,7 @@ function rollDrawChart(results) {
     traces.push({
       x: [spot, spot], y: [Math.min(...allY), Math.max(...allY)],
       type: "scatter", mode: "lines",
-      name: `Spot $${spot.toFixed(0)}`,
+      name: `Spot $${fmtSpot(spot)}`,
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
       legendgroup: "spot",
     });
@@ -3144,7 +3182,7 @@ function rollDrawChart(results) {
   const layout = {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    xaxis: { title: currentAsset + " Spot Price (USD) — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 200, b: 50, l: 80 },
     showlegend: true,
@@ -3522,567 +3560,481 @@ document.getElementById("btn-roll-export-xlsx").addEventListener("click", () => 
 });
 
 // ═══════════════════════════════════════════════════════════
-// ═══  OPTIMIZER TAB  ═══════════════════════════════════════
+// ═══  OPTIMIZER TAB (v3 — Ask + Workbench + Add)  ═════════
 // ═══════════════════════════════════════════════════════════
 
-let optLoaded = false;
-let optSelected = new Set();
-let optScenarios = [];
-let optHighlightIdx = -1;
+let opt2Loaded = false;
+let opt2Data = null;
+let opt2HighlightIdx = -1;
+let opt2Filtered = [];
+let opt2WbLegs = [];  // editable workbench legs
+let opt2WbName = "";
 
-async function optInit() {
-  if (!pfData) {
-    try {
-      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
-      portfolioLoaded = true;
-      if (pfSelected.size === 0) pfSelected = new Set(pfData.positions.map(p => p.id));
-    } catch (e) {
-      console.error("Failed to load portfolio for optimizer:", e);
-      alert("Failed to load portfolio data.\n" + e.message);
-      return;
+async function opt2Init() {
+  try {
+    const expiries = await get("/api/optimizer/expiries");
+    const $sel = document.getElementById("opt2-expiry");
+    $sel.innerHTML = '<option value="">All expiries</option>';
+    for (const e of expiries) {
+      const o = document.createElement("option");
+      o.value = e.code;
+      o.textContent = `${e.code} (${e.dte}d)`;
+      $sel.appendChild(o);
     }
-  }
-  optPopulate();
+  } catch (e) { /* ok */ }
+  opt2Loaded = true;
 }
 
-function optPopulate() {
-  const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
-  const $expF = document.getElementById("opt-filter-expiry");
-  $expF.innerHTML = '<option value="">All</option>';
-  expiries.forEach(e => { const o = document.createElement("option"); o.value = e; o.textContent = e; $expF.appendChild(o); });
+// ── Run suggestion engine ────────────────────────────────
 
-  optSelected = new Set();
-  optScenarios = [];
-  optHighlightIdx = -1;
-  optRenderPositions();
-  optUpdateSelectionSummary();
-  document.getElementById("opt-results-section").style.display = "none";
-  document.getElementById("opt-payoff-chart").style.display = "none";
-  document.getElementById("opt-detail-section").style.display = "none";
-  optLoaded = true;
-}
+async function opt2Run() {
+  const $status = document.getElementById("opt2-status");
+  const $btn = document.getElementById("btn-opt2-run");
+  $btn.disabled = true;
+  $btn.textContent = "Scanning...";
+  $status.style.display = "block";
 
-function optGetFilteredPositions() {
-  const fExpiry = document.getElementById("opt-filter-expiry").value;
-  const fType = document.getElementById("opt-filter-type").value;
-  const fSide = document.getElementById("opt-filter-side").value;
-  let list = [...pfData.positions];
-  if (fExpiry) list = list.filter(p => p.expiry.split("T")[0] === fExpiry);
-  if (fType) list = list.filter(p => p.opt === fType);
-  if (fSide) list = list.filter(p => p.side === fSide);
-  list.sort((a, b) => a.days_remaining - b.days_remaining);
-  return list;
-}
+  ["opt2-portfolio-section", "opt2-payoff-chart", "opt2-results-section", "opt2-workbench-section"]
+    .forEach(id => { document.getElementById(id).style.display = "none"; });
 
-function optRenderPositions() {
-  const list = optGetFilteredPositions();
-  document.getElementById("opt-table-count").textContent = `(${list.length} positions)`;
-  const allChecked = list.length > 0 && list.every(p => optSelected.has(p.id));
-  document.getElementById("opt-check-all").checked = allChecked;
-
-  const fmtNum = (v, d=0) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
-  const $tbody = document.getElementById("opt-positions-body");
-  $tbody.innerHTML = "";
-
-  for (const pos of list) {
-    const checked = optSelected.has(pos.id);
-    const typeColor = pos.opt === "C" ? "var(--green)" : "var(--red)";
-    const sideClass = pos.side === "Long" ? "qty-long" : "qty-short";
-    const curMark = pos.mark_price_usd ?? 0;
-    const tr = document.createElement("tr");
-    if (checked) tr.classList.add("roll-row-selected");
-    tr.innerHTML =
-      `<td><input type="checkbox" class="opt-check" data-id="${pos.id}" ${checked ? "checked" : ""}></td>` +
-      `<td style="text-align:left;font-size:.72rem">${pos.counterparty || ""}</td>` +
-      `<td style="text-align:left;font-size:.72rem">${pos.instrument}</td>` +
-      `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
-      `<td style="text-align:left;color:${typeColor}">${pos.opt === "C" ? "Call" : "Put"}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.strike)}</td>` +
-      `<td>${pos.expiry}</td>` +
-      `<td>${Math.round(pos.days_remaining)}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.net_qty)}</td>` +
-      `<td style="font-family:monospace">$${fmtNum(curMark, 2)}</td>` +
-      `<td>${pos.iv_pct != null ? pos.iv_pct.toFixed(1) + "%" : "---"}</td>` +
-      `<td class="${pos.current_mtm >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace">$${fmtNum(pos.current_mtm)}</td>` +
-      `<td style="font-family:monospace">${pos.delta != null ? pos.delta.toFixed(3) : "---"}</td>`;
-    $tbody.appendChild(tr);
-  }
-
-  $tbody.querySelectorAll(".opt-check").forEach(cb => {
-    cb.addEventListener("change", () => {
-      const id = parseInt(cb.dataset.id);
-      if (cb.checked) optSelected.add(id); else optSelected.delete(id);
-      cb.closest("tr").classList.toggle("roll-row-selected", cb.checked);
-      const visible = optGetFilteredPositions();
-      document.getElementById("opt-check-all").checked = visible.length > 0 && visible.every(p => optSelected.has(p.id));
-      optUpdateSelectionSummary();
-    });
-  });
-}
-
-function optUpdateSelectionSummary() {
-  const sel = pfData.positions.filter(p => optSelected.has(p.id));
-  document.getElementById("opt-sel-count").textContent = sel.length;
-  const totalMtm = sel.reduce((s, p) => s + (p.current_mtm || 0), 0);
-  const $mtm = document.getElementById("opt-sel-mtm");
-  $mtm.textContent = `$${Math.round(totalMtm).toLocaleString()}`;
-  $mtm.className = `risk-value ${totalMtm >= 0 ? "mtm-pos" : "mtm-neg"}`;
-  const totalDelta = sel.reduce((s, p) => s + ((p.delta || 0) * p.net_qty), 0);
-  document.getElementById("opt-sel-delta").textContent = totalDelta.toFixed(2);
-  const minDte = sel.length > 0 ? Math.min(...sel.map(p => p.days_remaining)) : 0;
-  document.getElementById("opt-sel-min-dte").textContent = sel.length > 0 ? `${Math.round(minDte)}d` : "--";
-}
-
-// ── Scenario computation helpers ─────────────────────────
-
-function optComputeLegRoll(pos, targetExpCode, newStrike, newOpt, spot) {
-  const newDte = rollDteForExpiry(targetExpCode);
-  const T = Math.max(newDte, 0) / 365.25;
-  const rollIvPct = pfLookupIv(newDte, newStrike) ?? pos.iv_pct;
-  const sigma = rollIvPct / 100;
-  const newMark = bsPrice(spot, newStrike, T, 0, sigma, newOpt);
-  const curMark = pos.mark_price_usd ?? 0;
-  const closeValue = pos.net_qty * curMark;
-  const openValue = pos.net_qty * newMark;
-  const cost = closeValue - openValue;
-  return { newDte, newMark, rollIvPct, curMark, cost, closeValue, openValue };
-}
-
-function optCalcScenarioDelta(selectedPositions, scenarioLegs, spot) {
-  const portfolioDelta = pfData.totals?.portfolio_delta || 0;
-  const removedDelta = selectedPositions.reduce((s, p) => s + ((p.delta || 0) * p.net_qty), 0);
-  let addedDelta = 0;
-  for (const leg of scenarioLegs) {
-    if (leg.action === "Close") continue;
-    const T = Math.max(leg.newDte, 0) / 365.25;
-    if (T <= 0) continue;
-    const sigma = (leg.rollIvPct || leg.pos.iv_pct || 80) / 100;
-    const d1 = (Math.log(spot / leg.newStrike) + (0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
-    const nd1 = normCdf(d1);
-    const legDelta = leg.newOpt === "C" ? nd1 : nd1 - 1;
-    addedDelta += leg.newNetQty * legDelta;
-  }
-  return portfolioDelta - removedDelta + addedDelta;
-}
-
-function optCalcScenarioPayoff(selectedPositions, scenarioLegs, spot, horizonDte) {
-  const spots = pfData.spot_ladder;
-  const selectedIds = new Set(selectedPositions.map(p => p.id));
-  const horizon = Math.min(horizonDte, 30);
-  // Unmodified positions contribution
-  const curve = new Array(spots.length).fill(0);
-  for (const p of pfData.positions) {
-    if (selectedIds.has(p.id)) continue;
-    const c = p.payoff_by_horizon[String(horizon)];
-    if (c) for (let i = 0; i < spots.length; i++) curve[i] += c[i];
-  }
-  // Scenario legs contribution
-  for (const leg of scenarioLegs) {
-    if (leg.action === "Close") continue;
-    const T = Math.max(leg.newDte - horizon, 0) / 365.25;
-    const sigma = (leg.rollIvPct || 80) / 100;
-    for (let i = 0; i < spots.length; i++) {
-      curve[i] += leg.newNetQty * bsPrice(spots[i], leg.newStrike, T, 0, sigma, leg.newOpt);
-    }
-  }
-  const spotUp = Math.round(spot * 1.2);
-  const spotDown = Math.round(spot * 0.8);
-  const idxUp = spots.findIndex(s => s >= spotUp);
-  const idxDown = spots.findIndex(s => s >= spotDown);
-  return { curve, up20: idxUp >= 0 ? curve[idxUp] : 0, down20: idxDown >= 0 ? curve[idxDown] : 0 };
-}
-
-// ── Scenario builders ────────────────────────────────────
-
-function optBuildRollScenario(positions, targetExpCode, spot) {
-  const dte = rollDteForExpiry(targetExpCode);
-  let totalClose = 0, totalOpen = 0, totalCost = 0;
-  const legs = [];
-  for (const pos of positions) {
-    const info = optComputeLegRoll(pos, targetExpCode, pos.strike, pos.opt, spot);
-    totalClose += info.closeValue; totalOpen += info.openValue; totalCost += info.cost;
-    legs.push({ pos, action: "Roll", newExpCode: targetExpCode, newDte: info.newDte,
-      newStrike: pos.strike, newOpt: pos.opt, newNetQty: pos.net_qty,
-      curMark: info.curMark, newMark: info.newMark, rollIvPct: info.rollIvPct, cost: info.cost });
-  }
-  const delta = optCalcScenarioDelta(positions, legs, spot);
-  const payoff = optCalcScenarioPayoff(positions, legs, spot, dte);
-  return { name: `Roll to ${targetExpCode} (${dte}d)`, type: "roll",
-    legsRolled: positions.length, legsClosed: 0, netCost: totalCost, totalClose, totalOpen,
-    deltaAfter: delta, payoffUp20: payoff.up20, payoffDown20: payoff.down20,
-    payoffCurve: payoff.curve, medianDte: dte, legs };
-}
-
-function optAdjustStrike(pos, adjDelta, spot) {
-  if (pos.opt === "C") return Math.round((pos.strike + adjDelta) / 50) * 50;
-  return Math.round((pos.strike - adjDelta) / 50) * 50;
-}
-
-function optBuildStrikeAdjScenario(positions, targetExpCode, adj, spot) {
-  const dte = rollDteForExpiry(targetExpCode);
-  let totalClose = 0, totalOpen = 0, totalCost = 0;
-  const legs = [];
-  for (const pos of positions) {
-    const newStrike = Math.max(50, optAdjustStrike(pos, adj.delta, spot));
-    const info = optComputeLegRoll(pos, targetExpCode, newStrike, pos.opt, spot);
-    totalClose += info.closeValue; totalOpen += info.openValue; totalCost += info.cost;
-    legs.push({ pos, action: "Roll+Adj", newExpCode: targetExpCode, newDte: info.newDte,
-      newStrike, newOpt: pos.opt, newNetQty: pos.net_qty,
-      curMark: info.curMark, newMark: info.newMark, rollIvPct: info.rollIvPct, cost: info.cost });
-  }
-  const delta = optCalcScenarioDelta(positions, legs, spot);
-  const payoff = optCalcScenarioPayoff(positions, legs, spot, dte);
-  return { name: `Roll to ${targetExpCode} / ${adj.label}`, type: "adjust",
-    legsRolled: positions.length, legsClosed: 0, netCost: totalCost, totalClose, totalOpen,
-    deltaAfter: delta, payoffUp20: payoff.up20, payoffDown20: payoff.down20,
-    payoffCurve: payoff.curve, medianDte: dte, legs };
-}
-
-function optBuildStaggerScenario(positions, exp1Code, exp2Code, spot) {
-  const dte1 = rollDteForExpiry(exp1Code);
-  const dte2 = rollDteForExpiry(exp2Code);
-  const medDte = Math.round((dte1 + dte2) / 2);
-  let totalClose = 0, totalOpen = 0, totalCost = 0;
-  const legs = [];
-  positions.forEach((pos, i) => {
-    const expCode = i % 2 === 0 ? exp1Code : exp2Code;
-    const legDte = i % 2 === 0 ? dte1 : dte2;
-    const info = optComputeLegRoll(pos, expCode, pos.strike, pos.opt, spot);
-    totalClose += info.closeValue; totalOpen += info.openValue; totalCost += info.cost;
-    legs.push({ pos, action: "Roll", newExpCode: expCode, newDte: legDte,
-      newStrike: pos.strike, newOpt: pos.opt, newNetQty: pos.net_qty,
-      curMark: info.curMark, newMark: info.newMark, rollIvPct: info.rollIvPct, cost: info.cost });
-  });
-  const delta = optCalcScenarioDelta(positions, legs, spot);
-  const payoff = optCalcScenarioPayoff(positions, legs, spot, medDte);
-  return { name: `Stagger ${exp1Code}/${exp2Code} (50/50)`, type: "stagger",
-    legsRolled: positions.length, legsClosed: 0, netCost: totalCost, totalClose, totalOpen,
-    deltaAfter: delta, payoffUp20: payoff.up20, payoffDown20: payoff.down20,
-    payoffCurve: payoff.curve, medianDte: medDte, legs };
-}
-
-function optBuildCloseScenario(positions, spot) {
-  let totalClose = 0;
-  const legs = [];
-  for (const pos of positions) {
-    const curMark = pos.mark_price_usd ?? 0;
-    const closeValue = pos.net_qty * curMark;
-    totalClose += closeValue;
-    legs.push({ pos, action: "Close", newExpCode: null, newDte: 0,
-      newStrike: null, newOpt: null, newNetQty: 0,
-      curMark, newMark: 0, rollIvPct: null, cost: closeValue });
-  }
-  const selectedIds = new Set(positions.map(p => p.id));
-  const spots = pfData.spot_ladder;
-  const baseCurve = rollBaselineCurve(spots, pfData.positions, 0);
-  const closedCurve = rollBaselineCurve(spots, positions, 0);
-  const curve = baseCurve.map((v, i) => v - closedCurve[i]);
-  const spotUp = Math.round(spot * 1.2);
-  const spotDown = Math.round(spot * 0.8);
-  const idxUp = spots.findIndex(s => s >= spotUp);
-  const idxDown = spots.findIndex(s => s >= spotDown);
-  const portfolioDelta = pfData.totals?.portfolio_delta || 0;
-  const closedDelta = positions.reduce((s, p) => s + ((p.delta || 0) * p.net_qty), 0);
-  return { name: "Close All Selected", type: "close",
-    legsRolled: 0, legsClosed: positions.length, netCost: totalClose, totalClose, totalOpen: 0,
-    deltaAfter: portfolioDelta - closedDelta,
-    payoffUp20: idxUp >= 0 ? curve[idxUp] : 0, payoffDown20: idxDown >= 0 ? curve[idxDown] : 0,
-    payoffCurve: curve, medianDte: 0, legs };
-}
-
-function optBuildPartialCloseScenario(positions, closedIds, rollExpCode, spot, nClosed) {
-  const dte = rollDteForExpiry(rollExpCode);
-  let totalClose = 0, totalOpen = 0, totalCost = 0;
-  const legs = [];
-  let legsRolled = 0, legsClosed = 0;
-  for (const pos of positions) {
-    if (closedIds.has(pos.id)) {
-      const curMark = pos.mark_price_usd ?? 0;
-      const closeValue = pos.net_qty * curMark;
-      totalClose += closeValue; totalCost += closeValue; legsClosed++;
-      legs.push({ pos, action: "Close", newExpCode: null, newDte: 0,
-        newStrike: null, newOpt: null, newNetQty: 0,
-        curMark, newMark: 0, rollIvPct: null, cost: closeValue });
-    } else {
-      const info = optComputeLegRoll(pos, rollExpCode, pos.strike, pos.opt, spot);
-      totalClose += info.closeValue; totalOpen += info.openValue; totalCost += info.cost; legsRolled++;
-      legs.push({ pos, action: "Roll", newExpCode: rollExpCode, newDte: info.newDte,
-        newStrike: pos.strike, newOpt: pos.opt, newNetQty: pos.net_qty,
-        curMark: info.curMark, newMark: info.newMark, rollIvPct: info.rollIvPct, cost: info.cost });
-    }
-  }
-  const delta = optCalcScenarioDelta(positions, legs, spot);
-  const payoff = optCalcScenarioPayoff(positions, legs, spot, dte);
-  return { name: `Close ${nClosed} expensive, roll rest → ${rollExpCode}`, type: "partial",
-    legsRolled, legsClosed, netCost: totalCost, totalClose, totalOpen,
-    deltaAfter: delta, payoffUp20: payoff.up20, payoffDown20: payoff.down20,
-    payoffCurve: payoff.curve, medianDte: dte, legs };
-}
-
-// ── Main scenario generation ─────────────────────────────
-
-function optGenerateScenarios() {
-  if (!pfData) return;
-  const selectedPositions = pfData.positions.filter(p => optSelected.has(p.id));
-  if (selectedPositions.length === 0) { alert("Select at least one position to optimize."); return; }
-
-  const spot = pfData.eth_spot;
-  const allSmiles = (pfData.vol_surface || []).filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte);
-  if (allSmiles.length === 0) { alert("No vol surface data available."); return; }
-
-  // Only offer roll targets that extend at least 7 days beyond the
-  // longest-dated selected position — rolling to an earlier or same date is useless
-  const maxSelectedDte = Math.max(...selectedPositions.map(p => p.days_remaining));
-  const smiles = allSmiles.filter(s => s.dte >= maxSelectedDte + 7);
-  if (smiles.length === 0) { alert("No valid roll targets found. All available expiries are too close to the selected positions' expiry."); return; }
-
-  const scenarios = [];
-
-  // Family 1: Roll to single expiry
-  for (const smile of smiles) {
-    scenarios.push(optBuildRollScenario(selectedPositions, smile.expiry_code, spot));
-  }
-
-  // Family 2: Roll + strike adjustment (3 nearest valid expiries)
-  const nearExpiries = smiles.slice(0, 3);
-  const strikeAdj = [
-    { delta: -200, label: "Tighten $200" },   // closer to ATM → better downside protection
-    { delta: -100, label: "Tighten $100" },
-    { delta: 100,  label: "Widen $100" },      // further OTM → cheaper roll cost
-    { delta: 200,  label: "Widen $200" },
-  ];
-  for (const smile of nearExpiries) {
-    for (const adj of strikeAdj) {
-      scenarios.push(optBuildStrikeAdjScenario(selectedPositions, smile.expiry_code, adj, spot));
-    }
-  }
-
-  // Family 3: Stagger across 2 valid expiries
-  for (let i = 0; i < Math.min(smiles.length - 1, 3); i++) {
-    scenarios.push(optBuildStaggerScenario(selectedPositions, smiles[i].expiry_code, smiles[i + 1].expiry_code, spot));
-  }
-
-  // Family 4: Close all (de-emphasized — user prefers rolling)
-  scenarios.push(optBuildCloseScenario(selectedPositions, spot));
-
-  // Family 5: Partial close + roll (use nearest valid roll target)
-  if (selectedPositions.length >= 2 && smiles.length > 0) {
-    const nearestExp = smiles[0].expiry_code;
-    const legCosts = selectedPositions.map(pos => {
-      const info = optComputeLegRoll(pos, nearestExp, pos.strike, pos.opt, spot);
-      return { pos, absCost: Math.abs(info.cost) };
-    });
-    legCosts.sort((a, b) => b.absCost - a.absCost);
-    const maxClose = Math.min(selectedPositions.length - 1, 3);
-    for (let n = 1; n <= maxClose; n++) {
-      const closedIds = new Set(legCosts.slice(0, n).map(lc => lc.pos.id));
-      scenarios.push(optBuildPartialCloseScenario(selectedPositions, closedIds, nearestExp, spot, n));
-    }
-  }
-
-  // Composite score: minimize roll cost + maximize downside protection
-  // Higher score = better (least cost + best protection at -20%)
-  for (const sc of scenarios) {
-    sc.score = sc.netCost + 0.3 * sc.payoffDown20;
-  }
-  scenarios.sort((a, b) => b.score - a.score);
-  scenarios.forEach((s, i) => s.rank = i + 1);
-
-  optScenarios = scenarios;
-  optHighlightIdx = 0;
-  optRenderResults();
-  optDrawChart();
-  optRenderDetail(scenarios[0]);
-}
-
-// ── Rendering ────────────────────────────────────────────
-
-function optRenderResults() {
-  const $section = document.getElementById("opt-results-section");
-  $section.style.display = "block";
-  document.getElementById("opt-results-count").textContent = `(${optScenarios.length} scenarios)`;
-
-  const fmtCost = v => {
-    const r = Math.round(v);
-    return `<span class="${r >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace;font-weight:600">${r >= 0 ? "+" : ""}$${Math.abs(r).toLocaleString()}</span>`;
+  const body = {
+    query: document.getElementById("opt2-ask").value,
+    budget: parseFloat(document.getElementById("opt2-budget").value) || 15000,
+    target_expiry: document.getElementById("opt2-expiry").value || null,
   };
 
-  const badgeCls = { roll: "opt-badge-roll", adjust: "opt-badge-adjust", stagger: "opt-badge-stagger", close: "opt-badge-close", partial: "opt-badge-partial" };
-  const badgeLbl = { roll: "Roll", adjust: "Adjust", stagger: "Stagger", close: "Close", partial: "Partial" };
+  try {
+    opt2Data = await post("/api/optimizer/suggest", body);
+  } catch (e) {
+    alert("Optimizer error: " + e.message);
+    $status.style.display = "none";
+    $btn.disabled = false;
+    $btn.textContent = "Suggest Trades";
+    return;
+  }
 
-  const $tbody = document.getElementById("opt-results-body");
+  $status.style.display = "none";
+  $btn.disabled = false;
+  $btn.textContent = "Suggest Trades";
+
+  opt2RenderPortfolio();
+  opt2ApplyFilter();
+  opt2DrawChart();
+}
+
+// ── Portfolio table ──────────────────────────────────────
+
+function opt2RenderPortfolio() {
+  if (!opt2Data) return;
+  const p = opt2Data.current_profile;
+  const pos = opt2Data.positions || [];
+  const $s = (id, v) => { document.getElementById(id).textContent = v; };
+  const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
+
+  $s("opt2-spot-val", `$${opt2Data.spot.toLocaleString(undefined, {maximumFractionDigits: 2})}`);
+  $s("opt2-port-count", `(${pos.length} legs)`);
+
+  const $pnl = document.getElementById("opt2-pnl-spot");
+  $pnl.textContent = fmtM(p.at_spot);
+  $pnl.className = `risk-value ${p.at_spot >= 0 ? "mtm-pos" : "mtm-neg"}`;
+
+  const $worst = document.getElementById("opt2-worst");
+  $worst.textContent = fmtM(p.min);
+  $worst.className = `risk-value ${p.min >= 0 ? "mtm-pos" : "mtm-neg"}`;
+
+  $s("opt2-worst-at", `$${Math.round(p.min_at).toLocaleString()}`);
+  $s("opt2-breakeven", p.breakeven ? `$${Math.round(p.breakeven).toLocaleString()}` : "N/A");
+
+  const $best = document.getElementById("opt2-best");
+  $best.textContent = fmtM(p.max);
+  $best.className = "risk-value mtm-pos";
+
+  const $tbody = document.getElementById("opt2-port-body");
   $tbody.innerHTML = "";
-
-  optScenarios.forEach((sc, idx) => {
-    const costR = Math.round(sc.netCost);
-    const scoreR = Math.round(sc.score);
-    // Color by composite score (cost + downside protection)
-    const rowCls = (scoreR >= 0 ? "opt-row-positive" : "opt-row-negative") + (idx === optHighlightIdx ? " opt-row-selected" : "") + (sc.type === "close" ? " opt-row-close-warn" : "");
+  for (const r of pos) {
+    const sideColor = r.side.toLowerCase().includes("buy") ? "var(--green)" : "var(--red)";
+    const typeColor = r.opt === "C" ? "var(--green)" : "var(--red)";
+    const exp = r.expiry?.split("T")[0] || "";
+    const dte = Math.max(0, Math.round((new Date(exp) - new Date()) / 86400000));
+    const premFmt = r.premium_usd ? "$" + Math.round(r.premium_usd).toLocaleString() : "--";
     const tr = document.createElement("tr");
-    tr.className = rowCls;
-    tr.dataset.scenIdx = idx;
     tr.innerHTML =
-      `<td>${sc.rank}</td>` +
-      `<td style="text-align:left">${sc.name}</td>` +
-      `<td style="text-align:left"><span class="opt-badge ${badgeCls[sc.type] || ''}">${badgeLbl[sc.type] || sc.type}</span></td>` +
-      `<td>${sc.legsRolled}</td>` +
-      `<td>${sc.legsClosed}</td>` +
-      `<td>${fmtCost(sc.netCost)}</td>` +
-      `<td class="${costR >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-weight:600">${costR >= 0 ? "Receive" : "Pay"}</td>` +
-      `<td style="font-weight:700">${fmtCost(sc.payoffDown20)}</td>` +
-      `<td>${fmtCost(sc.payoffUp20)}</td>` +
-      `<td style="font-family:monospace">${sc.deltaAfter.toFixed(2)}</td>` +
-      `<td style="font-family:monospace;font-weight:600">${scoreR >= 0 ? "+" : ""}${scoreR.toLocaleString()}</td>`;
+      `<td style="text-align:left;font-size:.72rem">${r.counterparty || ""}</td>` +
+      `<td style="color:${sideColor};font-size:.75rem">${r.side}</td>` +
+      `<td style="color:${typeColor}">${r.opt === "C" ? "Call" : "Put"}</td>` +
+      `<td style="font-family:monospace">$${r.strike.toLocaleString()}</td>` +
+      `<td>${exp}</td><td>${dte}d</td>` +
+      `<td style="font-family:monospace">${r.net_qty.toLocaleString()}</td>` +
+      `<td style="font-family:monospace;font-size:.72rem">${premFmt}</td>`;
     $tbody.appendChild(tr);
+  }
+  document.getElementById("opt2-portfolio-section").style.display = "block";
+}
 
+// ── Filter & sort ────────────────────────────────────────
+
+function opt2ApplyFilter() {
+  if (!opt2Data) return;
+  let list = [...opt2Data.suggestions];
+  const catF = document.getElementById("opt2-filter-cat").value;
+  if (catF) list = list.filter(s => s.category === catF);
+  const sort = document.getElementById("opt2-sort").value;
+  if (sort === "cost_asc") list.sort((a, b) => Math.abs(a.net_cost_usd) - Math.abs(b.net_cost_usd));
+  else if (sort === "downside") list.sort((a, b) => b.impact.downside - a.impact.downside);
+  else if (sort === "upside") list.sort((a, b) => b.impact.upside - a.impact.upside);
+  else if (sort === "floor") list.sort((a, b) => b.impact.min_improvement - a.impact.min_improvement);
+  opt2Filtered = list;
+
+  const cats = [...new Set(opt2Data.suggestions.map(s => s.category))].sort();
+  const $catSel = document.getElementById("opt2-filter-cat");
+  const curCat = $catSel.value;
+  $catSel.innerHTML = '<option value="">All</option>';
+  for (const c of cats) {
+    const o = document.createElement("option");
+    o.value = c; o.textContent = c.replace(/_/g, " ");
+    if (c === curCat) o.selected = true;
+    $catSel.appendChild(o);
+  }
+  opt2RenderResults();
+}
+
+// ── Results table ────────────────────────────────────────
+
+function opt2RenderResults() {
+  const $section = document.getElementById("opt2-results-section");
+  $section.style.display = "block";
+  const desc = opt2Data.parsed_query?.description || "";
+  document.getElementById("opt2-results-count").textContent =
+    `(${opt2Filtered.length} of ${opt2Data.num_suggestions})` + (desc ? ` -- ${desc}` : "");
+
+  const fmtImp = v => {
+    const r = Math.round(v);
+    if (r === 0) return '<span style="color:var(--muted)">--</span>';
+    return `<span class="${r > 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace">${r > 0 ? "+" : ""}$${Math.abs(r).toLocaleString()}</span>`;
+  };
+  const catLabels = {
+    bull_call_spread: "Bull Call", bear_put_spread: "Bear Put", risk_reversal: "Risk Rev",
+    put_protection: "Put Protect", collar: "Collar", put_ratio: "Put Ratio", bear_reversal: "Bear Rev",
+  };
+  const catColors = {
+    bull_call_spread: "#3fb950", bear_put_spread: "#f85149", risk_reversal: "#58a6ff",
+    put_protection: "#d29922", collar: "#bc8cff", put_ratio: "#f0883e", bear_reversal: "#da3633",
+  };
+
+  const $tbody = document.getElementById("opt2-results-body");
+  $tbody.innerHTML = "";
+  opt2Filtered.forEach((s, idx) => {
+    const costR = Math.round(s.net_cost_usd);
+    const isHl = idx === opt2HighlightIdx;
+    const tr = document.createElement("tr");
+    tr.style.cursor = "pointer";
+    if (isHl) tr.classList.add("roll-row-selected");
+    const catColor = catColors[s.category] || "var(--muted)";
+    tr.innerHTML =
+      `<td>${idx + 1}</td>` +
+      `<td style="text-align:left;font-size:.78rem">${s.name}</td>` +
+      `<td style="text-align:left"><span style="color:${catColor};font-weight:600;font-size:.72rem">${catLabels[s.category] || s.category}</span></td>` +
+      `<td>${s.dte}d</td>` +
+      `<td><span class="${Math.abs(costR) < 500 ? '' : costR > 0 ? 'mtm-neg' : 'mtm-pos'}" style="font-family:monospace;font-weight:600">${costR >= 0 ? "" : "-"}$${Math.abs(costR).toLocaleString()}</span></td>` +
+      `<td>${fmtImp(s.impact.at_spot)}</td>` +
+      `<td>${fmtImp(s.impact.downside)}</td>` +
+      `<td>${fmtImp(s.impact.upside)}</td>` +
+      `<td>${fmtImp(s.impact.min_improvement)}</td>` +
+      `<td style="font-family:monospace;font-weight:700">${Math.round(s.score).toLocaleString()}</td>`;
+    $tbody.appendChild(tr);
     tr.addEventListener("click", () => {
-      optHighlightIdx = idx;
-      optRenderResults();
-      optDrawChart();
-      optRenderDetail(sc);
+      opt2HighlightIdx = idx;
+      opt2RenderResults();
+      opt2OpenWorkbench(s);
+      opt2DrawChart();
     });
   });
 }
 
-function optDrawChart() {
-  const $chart = document.getElementById("opt-payoff-chart");
-  $chart.style.display = "block";
+// ── Workbench (editable legs) ────────────────────────────
 
-  const spots = pfData.spot_ladder;
-  const spot = pfData.eth_spot;
-  const scenColors = ["#58a6ff", "#f85149", "#d29922", "#3fb950", "#bc8cff"];
-  const traces = [];
+function opt2OpenWorkbench(s) {
+  opt2WbLegs = s.legs.map(l => ({ ...l }));  // deep copy
+  opt2WbName = s.name;
+  document.getElementById("opt2-wb-name").textContent = s.name;
+  opt2RenderWorkbench();
+  // Show initial impact from the suggestion
+  opt2ShowWbImpact(s.net_cost_usd, s.impact, s.new_payoff);
+  document.getElementById("opt2-workbench-section").style.display = "block";
+  document.getElementById("opt2-workbench-section").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
-  // Baseline
-  const baselineCurve = rollBaselineCurve(spots, pfData.positions, 0);
-  traces.push({ x: spots, y: baselineCurve, type: "scatter", mode: "lines",
-    name: "Current Portfolio", line: { color: "#484f58", width: 2, dash: "dot" } });
+function opt2RenderWorkbench() {
+  const $tbody = document.getElementById("opt2-wb-body");
+  $tbody.innerHTML = "";
+  const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
 
-  // Top 5 scenarios (highlighted one first)
-  let toPlot = [];
-  if (optHighlightIdx >= 0) toPlot.push(optHighlightIdx);
-  for (let i = 0; i < optScenarios.length && toPlot.length < 5; i++) {
-    if (!toPlot.includes(i)) toPlot.push(i);
-  }
-  toPlot.forEach((idx, ci) => {
-    const sc = optScenarios[idx];
-    const isHl = idx === optHighlightIdx;
-    traces.push({ x: spots, y: sc.payoffCurve, type: "scatter", mode: "lines",
-      name: `#${sc.rank}: ${sc.name}`,
-      line: { color: scenColors[ci % scenColors.length], width: isHl ? 3 : 1.8 },
-      opacity: isHl ? 1 : 0.6 });
+  opt2WbLegs.forEach((leg, idx) => {
+    const sideColor = leg.side === "buy" ? "var(--green)" : "var(--red)";
+    const typeColor = leg.opt === "C" ? "var(--green)" : "var(--red)";
+    const legCost = leg.side === "buy" ? leg.price_usd * leg.qty : -leg.price_usd * leg.qty;
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td><button class="btn-secondary opt2-wb-remove" data-idx="${idx}" style="width:22px;height:22px;padding:0;margin:0;font-size:.7rem;line-height:1;border-radius:3px" title="Remove leg">x</button></td>` +
+      `<td style="text-align:left;font-size:.72rem">${leg.instrument}</td>` +
+      `<td style="color:${sideColor};font-weight:600;text-transform:uppercase">` +
+        `<select class="opt2-wb-side" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
+        `<option value="buy" ${leg.side==="buy"?"selected":""}>Buy</option>` +
+        `<option value="sell" ${leg.side==="sell"?"selected":""}>Sell</option></select></td>` +
+      `<td style="color:${typeColor}">${leg.opt === "C" ? "Call" : "Put"}</td>` +
+      `<td><input type="number" class="opt2-wb-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
+      `<td><input type="number" class="opt2-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
+      `<td style="font-size:.72rem">${leg.expiry_code} (${leg.dte}d)</td>` +
+      `<td style="font-family:monospace;font-size:.72rem">$${leg.bid_usd.toFixed(2)}</td>` +
+      `<td style="font-family:monospace;font-size:.72rem">$${leg.ask_usd.toFixed(2)}</td>` +
+      `<td>${leg.spread_pct.toFixed(1)}%</td>` +
+      `<td>${leg.mark_iv ? leg.mark_iv.toFixed(1) + "%" : "--"}</td>` +
+      `<td style="font-family:monospace;font-weight:600">${fmtM(legCost)}</td>`;
+    $tbody.appendChild(tr);
   });
 
-  // Spot marker
-  const allY = traces.flatMap(t => t.y);
-  if (allY.length > 0) {
-    traces.push({ x: [spot, spot], y: [Math.min(...allY), Math.max(...allY)],
-      type: "scatter", mode: "lines", name: `Spot $${spot.toFixed(0)}`,
-      line: { color: "#3fb950", width: 1.5, dash: "dashdot" } });
+  // Wire events
+  $tbody.querySelectorAll(".opt2-wb-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      opt2WbLegs.splice(parseInt(btn.dataset.idx), 1);
+      opt2RenderWorkbench();
+    });
+  });
+  $tbody.querySelectorAll(".opt2-wb-qty").forEach(inp => {
+    inp.addEventListener("change", () => { opt2WbLegs[parseInt(inp.dataset.idx)].qty = parseFloat(inp.value) || 0; });
+  });
+  $tbody.querySelectorAll(".opt2-wb-strike").forEach(inp => {
+    inp.addEventListener("change", () => { opt2WbLegs[parseInt(inp.dataset.idx)].strike = parseFloat(inp.value) || 0; });
+  });
+  $tbody.querySelectorAll(".opt2-wb-side").forEach(sel => {
+    sel.addEventListener("change", () => { opt2WbLegs[parseInt(sel.dataset.idx)].side = sel.value; });
+  });
+
+  // Update total
+  let total = 0;
+  for (const l of opt2WbLegs) {
+    total += (l.side === "buy" ? 1 : -1) * l.price_usd * l.qty;
+  }
+  const $t = document.getElementById("opt2-wb-total");
+  $t.innerHTML = `<span class="${Math.abs(Math.round(total)) < 500 ? '' : total > 0 ? 'mtm-neg' : 'mtm-pos'}" style="font-family:monospace">${total >= 0 ? "" : "-"}$${Math.abs(Math.round(total)).toLocaleString()}</span>`;
+}
+
+function opt2ShowWbImpact(cost, impact, newPayoff) {
+  const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
+  const setV = (id, v, cls) => {
+    const el = document.getElementById(id);
+    el.textContent = typeof v === "string" ? v : fmtM(v);
+    if (cls !== undefined) el.className = `risk-value ${cls}`;
+  };
+
+  const cr = Math.round(cost);
+  setV("opt2-wb-cost", cost, Math.abs(cr) < 500 ? "" : cr > 0 ? "mtm-neg" : "mtm-pos");
+  setV("opt2-wb-pnl-spot", impact.at_spot || 0, (impact.at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-worst", impact.new_min || 0, (impact.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-be", impact.new_breakeven ? `$${Math.round(impact.new_breakeven).toLocaleString()}` : "N/A", "");
+  setV("opt2-wb-floor-imp", impact.min_improvement || 0, (impact.min_improvement || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  const beImp = impact.breakeven_improvement || 0;
+  setV("opt2-wb-be-imp", beImp || "--", beImp > 0 ? "mtm-pos" : beImp < 0 ? "mtm-neg" : "");
+
+  // Store for chart
+  if (newPayoff) opt2Data._wbPayoff = newPayoff;
+}
+
+// ── Calculate (re-price workbench with live data) ────────
+
+async function opt2Calculate() {
+  const legs = opt2WbLegs.map(l => ({
+    instrument: l.instrument, side: l.side, qty: l.qty,
+    strike: l.strike, opt: l.opt, expiry_code: l.expiry_code,
+  }));
+
+  const $btn = document.getElementById("btn-opt2-calc");
+  $btn.disabled = true; $btn.textContent = "Calculating...";
+
+  try {
+    const result = await post("/api/optimizer/calculate", { legs });
+    // Update leg costs
+    for (let i = 0; i < opt2WbLegs.length && i < result.leg_costs.length; i++) {
+      const lc = result.leg_costs[i];
+      opt2WbLegs[i].bid_usd = lc.bid_usd;
+      opt2WbLegs[i].ask_usd = lc.ask_usd;
+      opt2WbLegs[i].price_usd = lc.price_usd;
+      opt2WbLegs[i].spread_pct = lc.spread_pct;
+      if (lc.mark_iv) opt2WbLegs[i].mark_iv = lc.mark_iv;
+    }
+    opt2RenderWorkbench();
+    opt2ShowWbImpact(result.total_cost, {
+      at_spot: result.pnl_at_spot - opt2Data.current_profile.at_spot,
+      new_min: result.new_min,
+      min_improvement: result.floor_change,
+      new_breakeven: result.new_breakeven,
+      breakeven_improvement: result.be_change,
+    }, result.new_payoff);
+    // Update chart
+    opt2Data._wbPayoff = result.new_payoff;
+    opt2Data._wbSpots = result.spot_ladder;
+    opt2DrawChart();
+  } catch (e) {
+    alert("Calculate error: " + e.message);
+  }
+  $btn.disabled = false; $btn.textContent = "Calculate";
+}
+
+// ── Add to Portfolio ─────────────────────────────────────
+
+async function opt2AddToPortfolio() {
+  if (opt2WbLegs.length === 0) { alert("No legs in workbench"); return; }
+
+  const $btn = document.getElementById("btn-opt2-add-to-portfolio");
+  $btn.disabled = true; $btn.textContent = "Adding...";
+
+  let added = 0;
+  for (const leg of opt2WbLegs) {
+    const parts = leg.instrument.split("-");
+    const expCode = parts[1] || "";
+    let expiryDate = "";
+    try {
+      const d = new Date(Date.UTC(
+        2000 + parseInt(expCode.slice(-2)),
+        "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC".indexOf(expCode.slice(-5, -2)) / 3,
+        parseInt(expCode.slice(0, -5) || expCode.slice(0, -5))
+      ));
+      // Parse properly
+      const dt = new Date(0);
+      const m = expCode.match(/^(\d+)([A-Z]{3})(\d{2})$/);
+      if (m) {
+        const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
+        dt.setFullYear(2000 + parseInt(m[3]), months[m[2]], parseInt(m[1]));
+        expiryDate = dt.toISOString().split("T")[0];
+      }
+    } catch (e) { /* skip */ }
+
+    try {
+      await post("/api/trades/", {
+        asset: "ETH",
+        counterparty: "Optimizer",
+        side: leg.side === "buy" ? "Buy" : "Sell",
+        option_type: leg.opt === "C" ? "Call" : "Put",
+        instrument: leg.instrument,
+        expiry: expiryDate,
+        strike: leg.strike,
+        qty: leg.qty,
+        premium_per: leg.price_usd,
+        premium_usd: (leg.side === "buy" ? -1 : 1) * leg.price_usd * leg.qty,
+        ref_spot: opt2Data.spot,
+      });
+      added++;
+    } catch (e) {
+      console.error("Failed to add trade:", e);
+    }
   }
 
+  $btn.disabled = false;
+  $btn.textContent = "Add Trades to Portfolio";
+
+  if (added > 0) {
+    alert(`${added} trade(s) added to portfolio. Refresh Portfolio P&L to see the impact.`);
+    // Reset portfolio data so it reloads
+    pfData = null; portfolioLoaded = false;
+    opt2WbLegs = [];
+    document.getElementById("opt2-workbench-section").style.display = "none";
+  }
+}
+
+// ── Chart ────────────────────────────────────────────────
+
+function opt2DrawChart() {
+  if (!opt2Data) return;
+  const $chart = document.getElementById("opt2-payoff-chart");
+  $chart.style.display = "block";
+
+  const spots = opt2Data.spot_ladder;
+  const spot = opt2Data.spot;
+  const traces = [];
+
+  traces.push({
+    x: spots, y: opt2Data.current_payoff, type: "scatter", mode: "lines",
+    name: "Current Portfolio", line: { color: "#484f58", width: 2.5, dash: "dot" },
+  });
+
+  // Workbench payoff (if calculated)
+  if (opt2Data._wbPayoff) {
+    const wbSpots = opt2Data._wbSpots || spots;
+    traces.push({
+      x: wbSpots, y: opt2Data._wbPayoff, type: "scatter", mode: "lines",
+      name: "With Workbench Trades",
+      line: { color: "#3fb950", width: 3 },
+    });
+  }
+  // Or preview from clicked suggestion
+  else if (opt2HighlightIdx >= 0 && opt2Filtered[opt2HighlightIdx]) {
+    const s = opt2Filtered[opt2HighlightIdx];
+    traces.push({
+      x: spots, y: s.new_payoff, type: "scatter", mode: "lines",
+      name: `Preview: ${s.name}`,
+      line: { color: "#58a6ff", width: 2.5 },
+    });
+  }
+
+  const allY = traces.flatMap(t => t.y);
+  const yMin = Math.min(...allY);
+  const yMax = Math.max(...allY);
+  traces.push({
+    x: [spot, spot], y: [yMin, yMax], type: "scatter", mode: "lines",
+    name: `Spot $${spot.toLocaleString(undefined, {maximumFractionDigits: 0})}`,
+    line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
+  });
+
   const cc = chartColors();
-  Plotly.react("opt-payoff-chart", traces, {
-    title: { text: "Optimizer: Scenario Payoff Comparison", font: { color: cc.text, size: 16 } },
+  const title = opt2Data.parsed_query?.description
+    ? `Optimizer: ${opt2Data.parsed_query.description} | Budget: $${opt2Data.budget.toLocaleString()}`
+    : `Portfolio Payoff | Budget: $${opt2Data.budget.toLocaleString()}`;
+  Plotly.react("opt2-payoff-chart", traces, {
+    title: { text: title, font: { color: cc.text, size: 14 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
-    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
-    margin: { t: 50, r: 250, b: 50, l: 80 },
+    xaxis: { title: "ETH Spot (USD)", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
+    yaxis: { title: "Portfolio Payoff at Expiry (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
+    margin: { t: 50, r: 260, b: 50, l: 90 },
     showlegend: true,
     legend: { font: { color: cc.muted, size: 10 }, orientation: "v", x: 1.02, y: 1,
       xanchor: "left", yanchor: "top", bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
   }, { responsive: true });
 }
 
-function optRenderDetail(sc) {
-  const $section = document.getElementById("opt-detail-section");
-  $section.style.display = "block";
-  document.getElementById("opt-detail-name").textContent = sc.name;
+// ── Event wiring ─────────────────────────────────────────
 
-  const fmtCost = v => {
-    const r = Math.round(v);
-    return `<span class="${r >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace;font-weight:600">${r >= 0 ? "Rcv" : "Pay"} $${Math.abs(r).toLocaleString()}</span>`;
-  };
+document.getElementById("btn-opt2-run").addEventListener("click", opt2Run);
+document.getElementById("btn-opt2-calc").addEventListener("click", opt2Calculate);
+document.getElementById("btn-opt2-add-to-portfolio").addEventListener("click", opt2AddToPortfolio);
 
-  const costR = Math.round(sc.netCost);
-  const $cost = document.getElementById("opt-detail-cost");
-  $cost.textContent = `${costR >= 0 ? "" : "-"}$${Math.abs(costR).toLocaleString()}`;
-  $cost.className = `risk-value ${costR >= 0 ? "mtm-pos" : "mtm-neg"}`;
-  const $dir = document.getElementById("opt-detail-dir");
-  $dir.textContent = costR >= 0 ? "Net Receive" : "Net Pay";
-  $dir.className = `risk-value ${costR >= 0 ? "mtm-pos" : "mtm-neg"}`;
-  document.getElementById("opt-detail-delta").textContent = sc.deltaAfter.toFixed(2);
-  document.getElementById("opt-detail-up").innerHTML = fmtCost(sc.payoffUp20);
-  document.getElementById("opt-detail-down").innerHTML = fmtCost(sc.payoffDown20);
-
-  const fmtNum = (v, d=2) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
-  const $tbody = document.getElementById("opt-detail-body");
-  $tbody.innerHTML = "";
-
-  for (const leg of sc.legs) {
-    const sideClass = leg.pos.side === "Long" ? "qty-long" : "qty-short";
-    const actionColor = leg.action === "Close" ? "var(--red)" : "var(--accent)";
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td style="text-align:left;font-size:.72rem">${leg.pos.instrument}</td>` +
-      `<td style="text-align:left;color:${actionColor};font-weight:600">${leg.action}</td>` +
-      `<td style="text-align:left" class="${sideClass}">${leg.pos.side_raw}</td>` +
-      `<td>${leg.newOpt ? (leg.newOpt === "C" ? "Call" : "Put") : "---"}</td>` +
-      `<td style="font-family:monospace">${leg.newStrike != null ? fmtNum(leg.newStrike, 0) : "---"}</td>` +
-      `<td style="font-family:monospace">${fmtNum(leg.newNetQty, 0)}</td>` +
-      `<td style="font-family:monospace">$${fmtNum(leg.curMark)}</td>` +
-      `<td>${leg.newExpCode || "---"}</td>` +
-      `<td style="font-family:monospace">${leg.newMark ? "$" + fmtNum(leg.newMark) : "---"}</td>` +
-      `<td>${leg.rollIvPct != null ? leg.rollIvPct.toFixed(1) + "%" : "---"}</td>` +
-      `<td>${fmtCost(leg.cost)}</td>`;
-    $tbody.appendChild(tr);
-  }
-
-  document.getElementById("opt-detail-foot").innerHTML =
-    `<tr><td style="text-align:left;font-weight:700" colspan="6">TOTAL</td>` +
-    `<td></td><td></td><td></td><td></td><td>${fmtCost(sc.netCost)}</td></tr>`;
-
-  $section.scrollIntoView({ behavior: "smooth", block: "nearest" });
-}
-
-// ── Optimizer event wiring ───────────────────────────────
-
-document.getElementById("btn-opt-generate").addEventListener("click", optGenerateScenarios);
-
-document.getElementById("btn-opt-select-all").addEventListener("click", () => {
-  optGetFilteredPositions().forEach(p => optSelected.add(p.id));
-  optRenderPositions();
-  optUpdateSelectionSummary();
-});
-
-document.getElementById("btn-opt-deselect-all").addEventListener("click", () => {
-  optSelected.clear();
-  optScenarios = [];
-  optRenderPositions();
-  optUpdateSelectionSummary();
-  document.getElementById("opt-results-section").style.display = "none";
-  document.getElementById("opt-payoff-chart").style.display = "none";
-  document.getElementById("opt-detail-section").style.display = "none";
-});
-
-document.getElementById("opt-check-all").addEventListener("change", (e) => {
-  optGetFilteredPositions().forEach(p => {
-    if (e.target.checked) optSelected.add(p.id); else optSelected.delete(p.id);
+// Preset buttons
+document.querySelectorAll(".opt2-preset").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById("opt2-ask").value = btn.dataset.q;
+    opt2Run();
   });
-  optRenderPositions();
-  optUpdateSelectionSummary();
 });
 
-document.getElementById("btn-opt-expiring-10d").addEventListener("click", () => {
-  if (!pfData) return;
-  optSelected.clear();
-  pfData.positions.forEach(p => { if (p.days_remaining <= 10) optSelected.add(p.id); });
-  optRenderPositions();
-  optUpdateSelectionSummary();
+// Enter key on ask input
+document.getElementById("opt2-ask").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); opt2Run(); }
 });
 
-["opt-filter-expiry", "opt-filter-type", "opt-filter-side"].forEach(id => {
-  document.getElementById(id).addEventListener("change", () => { if (pfData) optRenderPositions(); });
+// Add empty leg
+document.getElementById("btn-opt2-add-leg").addEventListener("click", () => {
+  if (!opt2Data) return;
+  opt2WbLegs.push({
+    instrument: "", side: "buy", qty: opt2Data.base_qty, strike: Math.round(opt2Data.spot / 50) * 50,
+    opt: "P", expiry_code: opt2Data.available_expiries?.[0] || "", dte: 30,
+    price_usd: 0, bid_usd: 0, ask_usd: 0, spread_pct: 0, mark_iv: null,
+  });
+  opt2RenderWorkbench();
+});
+
+["opt2-filter-cat", "opt2-sort"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => {
+    if (opt2Data) { opt2HighlightIdx = -1; opt2ApplyFilter(); opt2DrawChart(); }
+  });
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -4797,7 +4749,7 @@ function sbDrawStructureChart() {
       traces.push({
         x: [spot, spot], y: [Math.min(...allY), Math.max(...allY)],
         type: "scatter", mode: "lines",
-        name: `Spot $${spot.toFixed(0)}`,
+        name: `Spot $${fmtSpot(spot)}`,
         line: { color: "#3fb950", width: 1.5, dash: "dashdot" }
       });
     }
@@ -4813,8 +4765,8 @@ function sbDrawStructureChart() {
           traces.push({
             x: [beSpot, beSpot], y: [yMin * 0.3, yMax * 0.3],
             type: "scatter", mode: "lines+text",
-            name: `BE $${beSpot.toFixed(0)}`,
-            text: [null, `BE $${beSpot.toFixed(0)}`],
+            name: `BE $${fmtSpot(beSpot)}`,
+            text: [null, `BE $${fmtSpot(beSpot)}`],
             textposition: "top center",
             textfont: { color: "#d29922", size: 10 },
             line: { color: "#d29922", width: 1, dash: "dot" },
@@ -4836,9 +4788,9 @@ function sbDrawStructureChart() {
   Plotly.react("sb-structure-chart", traces, {
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: {
-      title: hasData ? "ETH Spot (USD)" : "",
+      title: hasData ? currentAsset + " Spot (USD) — log scale" : "",
+      type: "log",
       color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline,
-      dtick: 500,
       showticklabels: hasData,
     },
     yaxis: {
@@ -4920,7 +4872,7 @@ function sbDrawChart(results) {
   if (allY.length > 0) {
     traces.push({
       x: [spot, spot], y: [Math.min(...allY), Math.max(...allY)],
-      type: "scatter", mode: "lines", name: `Spot $${spot.toFixed(0)}`,
+      type: "scatter", mode: "lines", name: `Spot $${fmtSpot(spot)}`,
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" }, legendgroup: "spot",
     });
   }
@@ -4939,7 +4891,7 @@ function sbDrawChart(results) {
   Plotly.react("sb-payoff-chart", traces, {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot Price (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline, dtick: 500 },
+    xaxis: { title: currentAsset + " Spot Price (USD) — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 250, b: 50, l: 80 },
     showlegend: true,

@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
 
@@ -341,6 +341,11 @@
 
     <div id="pricing-fil-banner" class="under-construction-banner" style="display:none">
       Pricing requires live Deribit data. This feature is under construction for FIL.
+    </div>
+    <div id="pricing-proxy-banner" style="display:none; padding: .5rem 1rem; margin-bottom: .75rem; background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.25); border-radius: 6px; font-size: .8rem; color: var(--text); display: flex; align-items: center; gap: .5rem;">
+      <span class="proxy-info-icon" title="FIL Proxy IV Methodology:&#10;&#10;1. Fetch the full ETH implied volatility surface from Deribit (all strikes &amp; expiries).&#10;2. Compute 30-day annualised historical volatility for both FIL and ETH using daily closes from CoinGecko.&#10;3. Calculate vol ratio = HV(FIL) / HV(ETH).&#10;4. Scale every ETH IV by the vol ratio to produce a synthetic FIL vol surface.&#10;5. Use this scaled surface for Black-Scholes pricing, Greeks, and smile interpolation.&#10;&#10;This preserves the ETH term structure and smile shape but shifts the IV level to reflect FIL's realised volatility."
+        style="display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; background:rgba(88,166,255,0.3); color:#58a6ff; font-size:.7rem; font-weight:700; cursor:help; flex-shrink:0;">i</span>
+      <span>FIL pricing uses a <strong>proxy IV surface</strong> derived from ETH Deribit options scaled by the FIL/ETH historical volatility ratio.</span>
     </div>
 
     <!-- Pricing Builder (side-by-side: inputs left, chart right) — same layout as Structure Builder -->
@@ -831,100 +836,153 @@
     <!-- ── Optimizer sub-tab ── -->
     <div id="subtab-optimizer" class="sub-tab-pane">
 
+      <!-- ── 1. ASK: What do you want to improve? ── -->
       <section class="card">
-        <div class="pf-toolbar">
-          <label class="pf-filter-label">Expiry
-            <select id="opt-filter-expiry"><option value="">All</option></select>
+        <h2 style="margin-bottom:.6rem">What do you want to improve?</h2>
+        <div class="pf-toolbar" style="flex-wrap:wrap;gap:.6rem;align-items:flex-end">
+          <label class="pf-filter-label" style="flex:1;min-width:300px">Describe what you need
+            <input type="text" id="opt2-ask" placeholder="e.g. improve payoff from 0 to 2000, or reduce downside below 1800, or lock gains above 3000..."
+              style="width:100%;font-size:.85rem;padding:.5rem .6rem">
           </label>
-          <label class="pf-filter-label">Type
-            <select id="opt-filter-type">
-              <option value="">All</option>
-              <option value="C">Call</option>
-              <option value="P">Put</option>
+          <label class="pf-filter-label">Max Cost ($)
+            <input type="number" id="opt2-budget" value="15000" step="1000" min="0"
+              style="width:100px;font-size:.8rem;padding:.4rem .5rem">
+          </label>
+          <label class="pf-filter-label">Expiry
+            <select id="opt2-expiry" style="min-width:120px">
+              <option value="">All expiries</option>
             </select>
           </label>
-          <label class="pf-filter-label">Side
-            <select id="opt-filter-side">
-              <option value="">All</option>
-              <option value="Long">Long</option>
-              <option value="Short">Short</option>
+          <button id="btn-opt2-run" class="btn-primary" style="width:auto;padding:.5rem 1.5rem;font-size:.9rem">
+            Suggest Trades
+          </button>
+        </div>
+        <div style="margin-top:.5rem;display:flex;gap:.4rem;flex-wrap:wrap">
+          <button class="btn-secondary opt2-preset" data-q="improve payoff between 0 and 2000" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">Improve 0-2000</button>
+          <button class="btn-secondary opt2-preset" data-q="reduce downside risk below current spot" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">Reduce downside</button>
+          <button class="btn-secondary opt2-preset" data-q="lock gains if price goes back down" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">Lock gains</button>
+          <button class="btn-secondary opt2-preset" data-q="lower the breakeven point" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">Lower breakeven</button>
+          <button class="btn-secondary opt2-preset" data-q="add upside participation above 3500" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">More upside &gt;3500</button>
+          <button class="btn-secondary opt2-preset" data-q="protect against crash below 1500" style="width:auto;margin:0;font-size:.72rem;padding:.25rem .6rem">Crash protection</button>
+        </div>
+        <div id="opt2-status" style="display:none;text-align:center;padding:1rem;color:var(--muted);font-size:.85rem">
+          Fetching price data, scanning Deribit instruments...
+        </div>
+      </section>
+
+      <!-- ── 2. PORTFOLIO SUMMARY ── -->
+      <section class="card" id="opt2-portfolio-section" style="display:none">
+        <h2>Current Portfolio <small id="opt2-port-count"></small></h2>
+        <div class="risk-grid" style="margin-bottom:.75rem">
+          <div class="risk-metric"><span class="risk-label">ETH Spot</span><span class="risk-value" id="opt2-spot-val">--</span></div>
+          <div class="risk-metric"><span class="risk-label">P&amp;L at Spot</span><span class="risk-value" id="opt2-pnl-spot">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Worst Case</span><span class="risk-value" id="opt2-worst">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Worst At</span><span class="risk-value" id="opt2-worst-at">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Breakeven</span><span class="risk-value" id="opt2-breakeven">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Best Case</span><span class="risk-value" id="opt2-best">--</span></div>
+        </div>
+        <div class="chain-wrapper" style="max-height:250px">
+          <table id="opt2-port-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Cpty</th>
+                <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>DTE</th>
+                <th>Net Qty</th><th>Premium</th>
+              </tr>
+            </thead>
+            <tbody id="opt2-port-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── 3. PAYOFF CHART ── -->
+      <div id="opt2-payoff-chart" class="chart-container" style="display:none;min-height:650px"></div>
+
+      <!-- ── 4. SUGGESTIONS ── -->
+      <section class="card" id="opt2-results-section" style="display:none">
+        <h2>Suggested Structures <small id="opt2-results-count"></small></h2>
+        <div class="pf-toolbar" style="margin-bottom:.5rem">
+          <label class="pf-filter-label">Category
+            <select id="opt2-filter-cat"><option value="">All</option></select>
+          </label>
+          <label class="pf-filter-label">Sort
+            <select id="opt2-sort">
+              <option value="score">Best Score</option>
+              <option value="cost_asc">Cheapest First</option>
+              <option value="downside">Best Downside</option>
+              <option value="upside">Best Upside</option>
+              <option value="floor">Best Floor</option>
             </select>
           </label>
           <div class="pf-toolbar-spacer"></div>
-          <button id="btn-opt-expiring-10d" class="btn-secondary" style="width:auto;margin:0">Expiring &lt;10d</button>
-          <button id="btn-opt-select-all" class="btn-secondary" style="width:auto;margin:0">Select All</button>
-          <button id="btn-opt-deselect-all" class="btn-secondary" style="width:auto;margin:0">Deselect All</button>
-          <button id="btn-opt-generate" class="btn-primary" style="width:auto">Generate Scenarios</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Select Positions to Optimize <small id="opt-table-count"></small></h2>
-        <div class="risk-grid" id="opt-selection-summary" style="margin-bottom:.75rem">
-          <div class="risk-metric"><span class="risk-label">Selected</span><span class="risk-value" id="opt-sel-count">0</span></div>
-          <div class="risk-metric"><span class="risk-label">Total MTM</span><span class="risk-value" id="opt-sel-mtm">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Net Delta</span><span class="risk-value" id="opt-sel-delta">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Min DTE</span><span class="risk-value" id="opt-sel-min-dte">--</span></div>
-        </div>
-        <div class="chain-wrapper" style="max-height:300px">
-          <table id="opt-positions-table">
-            <thead>
-              <tr>
-                <th style="width:32px"><input type="checkbox" id="opt-check-all"></th>
-                <th style="text-align:left">Cpty</th><th style="text-align:left">Instrument</th>
-                <th style="text-align:left">Side</th><th style="text-align:left">Type</th>
-                <th>Strike</th><th>Expiry</th><th>DTE</th><th>Net Qty</th>
-                <th>Cur Mark</th><th>IV%</th><th>MTM</th><th>Delta</th>
-              </tr>
-            </thead>
-            <tbody id="opt-positions-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card" id="opt-results-section" style="display:none">
-        <h2>Scenario Rankings <small id="opt-results-count"></small></h2>
-        <div class="chain-wrapper" style="max-height:500px">
-          <table id="opt-results-table">
-            <thead>
-              <tr>
-                <th>#</th><th style="text-align:left">Scenario</th><th style="text-align:left">Strategy</th>
-                <th>Legs Rolled</th><th>Legs Closed</th><th>Net Cost</th><th>Direction</th>
-                <th title="P&amp;L at ETH -20%">P&amp;L &darr;20%</th>
-                <th title="P&amp;L at ETH +20%">P&amp;L &uarr;20%</th>
-                <th>Delta After</th><th title="Composite score">Score</th>
-              </tr>
-            </thead>
-            <tbody id="opt-results-body"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <div id="opt-payoff-chart" class="chart-container" style="display:none;min-height:650px"></div>
-
-      <section class="card" id="opt-detail-section" style="display:none">
-        <h2>Scenario Detail: <span id="opt-detail-name">--</span></h2>
-        <div class="risk-grid" style="margin-bottom:.75rem">
-          <div class="risk-metric"><span class="risk-label">Net Cost</span><span class="risk-value" id="opt-detail-cost">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Direction</span><span class="risk-value" id="opt-detail-dir">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Delta After</span><span class="risk-value" id="opt-detail-delta">--</span></div>
-          <div class="risk-metric"><span class="risk-label">P&amp;L &darr;20%</span><span class="risk-value" id="opt-detail-down">--</span></div>
-          <div class="risk-metric"><span class="risk-label">P&amp;L &uarr;20%</span><span class="risk-value" id="opt-detail-up">--</span></div>
+          <small style="color:var(--muted)">Click a row to open in workbench below</small>
         </div>
         <div class="chain-wrapper" style="max-height:350px">
-          <table id="opt-detail-table">
+          <table id="opt2-results-table">
             <thead>
               <tr>
-                <th style="text-align:left">Instrument</th><th style="text-align:left">Action</th>
-                <th style="text-align:left">Side</th><th>Type</th><th>Strike</th><th>Net Qty</th>
-                <th>Cur Mark</th><th>New Expiry</th><th>New Mark</th><th>IV Used</th><th>Leg Cost</th>
+                <th style="width:30px">#</th>
+                <th style="text-align:left">Strategy</th>
+                <th style="text-align:left">Category</th>
+                <th>DTE</th>
+                <th>Net Cost</th>
+                <th title="Payoff change at current spot">At Spot</th>
+                <th title="Downside improvement">Downside</th>
+                <th title="Upside improvement">Upside</th>
+                <th title="Worst-case improvement">Floor</th>
+                <th>Score</th>
               </tr>
             </thead>
-            <tbody id="opt-detail-body"></tbody>
-            <tfoot id="opt-detail-foot"></tfoot>
+            <tbody id="opt2-results-body"></tbody>
           </table>
         </div>
       </section>
+
+      <!-- ── 5. TRADE WORKBENCH (editable legs) ── -->
+      <section class="card" id="opt2-workbench-section" style="display:none">
+        <h2>Trade Workbench: <span id="opt2-wb-name">--</span></h2>
+        <p style="color:var(--muted);font-size:.8rem;margin-bottom:.6rem">Edit qty, expiry, or strike below then hit <b>Calculate</b> to update costs and payoff impact.</p>
+        <div class="chain-wrapper" style="max-height:300px">
+          <table id="opt2-wb-table">
+            <thead>
+              <tr>
+                <th style="width:28px"></th>
+                <th style="text-align:left">Instrument</th>
+                <th>Side</th><th>Type</th>
+                <th style="width:90px">Strike</th>
+                <th style="width:90px">Qty</th>
+                <th style="width:110px">Expiry</th>
+                <th>Bid</th><th>Ask</th><th>Spread%</th><th>IV%</th>
+                <th>Leg Cost</th>
+              </tr>
+            </thead>
+            <tbody id="opt2-wb-body"></tbody>
+            <tfoot>
+              <tr>
+                <td colspan="11" style="text-align:right;font-weight:700">Total Execution Cost:</td>
+                <td id="opt2-wb-total" style="font-weight:700;font-family:monospace">--</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div class="risk-grid" style="margin:.75rem 0" id="opt2-wb-impact">
+          <div class="risk-metric"><span class="risk-label">Net Cost</span><span class="risk-value" id="opt2-wb-cost">--</span></div>
+          <div class="risk-metric"><span class="risk-label">P&amp;L at Spot</span><span class="risk-value" id="opt2-wb-pnl-spot">--</span></div>
+          <div class="risk-metric"><span class="risk-label">New Worst</span><span class="risk-value" id="opt2-wb-new-worst">--</span></div>
+          <div class="risk-metric"><span class="risk-label">New Breakeven</span><span class="risk-value" id="opt2-wb-new-be">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Floor Change</span><span class="risk-value" id="opt2-wb-floor-imp">--</span></div>
+          <div class="risk-metric"><span class="risk-label">BE Change</span><span class="risk-value" id="opt2-wb-be-imp">--</span></div>
+        </div>
+        <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+          <button id="btn-opt2-calc" class="btn-primary" style="width:auto">Calculate</button>
+          <button id="btn-opt2-add-leg" class="btn-secondary" style="width:auto;margin:0">+ Add Leg</button>
+          <div class="pf-toolbar-spacer"></div>
+          <button id="btn-opt2-add-to-portfolio" class="btn-primary" style="width:auto;background:linear-gradient(135deg,#238636,#2ea043);border-color:#238636">
+            Add Trades to Portfolio
+          </button>
+        </div>
+      </section>
+
     </div>
   </div>
 
@@ -1199,6 +1257,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=15"></script>
 </body>
 </html>

@@ -16,6 +16,7 @@ from plgo_options.web.routes import positions
 from plgo_options.web.routes import portfolio
 from plgo_options.web.routes import trades
 from plgo_options.web.routes import optimization
+from plgo_options.web.routes import optimizer
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
     app.include_router(trades.router, prefix="/api/trades", tags=["trades"])
     app.include_router(optimization.router, prefix="/api/optimization", tags=["optimization"])
+    app.include_router(optimizer.router, prefix="/api/optimizer", tags=["optimizer"])
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():

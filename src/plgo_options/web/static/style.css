@@ -71,6 +71,10 @@ a { color: var(--accent); }
   gap: .35rem;
   padding: .25rem 1.25rem .5rem;
 }
+@keyframes asset-pulse {
+  0%, 100% { box-shadow: 0 0 4px rgba(88,166,255,0.15); border-color: var(--border); }
+  50% { box-shadow: 0 0 10px rgba(88,166,255,0.45); border-color: rgba(88,166,255,0.6); }
+}
 .asset-btn {
   flex: 1;
   padding: .35rem 0;
@@ -82,12 +86,15 @@ a { color: var(--accent); }
   border-radius: var(--radius);
   cursor: pointer;
   transition: all .15s;
+  animation: asset-pulse 2.5s ease-in-out infinite;
 }
-.asset-btn:hover { border-color: var(--accent); color: var(--text); }
+.asset-btn:hover { border-color: var(--accent); color: var(--text); box-shadow: 0 0 12px rgba(88,166,255,0.5); animation: none; }
 .asset-btn.active {
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
+  animation: none;
+  box-shadow: none;
 }
 
 .sidebar-spot {
