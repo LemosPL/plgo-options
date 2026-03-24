@@ -29,11 +29,14 @@ from scipy.stats import norm
 #from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
 
 
+Counterparties = ["Keyrock", "Flowdesk", "Deribit"]
+
 @dataclass
 class Position:
     id: int
     instrument: str
     opt: str
+    counterparty: str | None
     side: str
     strike: float
     expiry: str
@@ -58,6 +61,7 @@ class Candidate:
     dte: int
     strike: float
     opt: str  # "C" or "P"
+    counterparty: str
     iv_pct: float
     # BS greeks per contract (computed at current spot)
     delta: float
@@ -122,6 +126,7 @@ class OptimizerV2:
                 current_mtm=p["current_mtm"],
                 payoff_by_horizon=p["payoff_by_horizon"],
                 mtm_by_horizon=p["mtm_by_horizon"],
+                counterparty=p.get("counterparty", "brokerage"),
             )
             for p in data["positions"]
         ]
@@ -164,6 +169,7 @@ class OptimizerV2:
         held_option_keys: set[tuple[str, float, str]] = set()
         held_expiry_codes: set[str] = set()
         for p in self.positions:
+            print(f"Position: {p.instrument}")
             parts = p.instrument.split("-")
             if len(parts) >= 4:
                 exp_code = parts[1]
@@ -203,28 +209,36 @@ class OptimizerV2:
                 if sigma <= 0 or strike <= 0:
                     continue
 
+                #for#
                 for opt in ("C", "P"):
-                    # In ALL-expiries mode, only keep option contracts we already hold.
-                    # Perp is always included separately below.
-                    if target_expiry is None and (expiry_code, strike, opt) not in held_option_keys:
-                        continue
+                    for counterparty in Counterparties:
+                        # In ALL-expiries mode, only keep option contracts we already hold.
+                        # Perp is always included separately below.
+                        if counterparty == "Deribit":
+                            if opt == "C" and (strike < S or strike > S * 2):
+                                continue
+                            elif opt == "P" and (strike > S or strike < S * 0.5):
+                                continue
+                        elif (target_expiry is None and (expiry_code, strike, opt) not in held_option_keys):
+                            continue
 
-                    delta, gamma, theta, vega, price = _bs_greeks(
-                        S, strike, T, 0.0, sigma, opt
-                    )
-                    candidates.append(Candidate(
-                        expiry_code=expiry_code,
-                        expiry_date=expiry_date,
-                        dte=dte,
-                        strike=strike,
-                        opt=opt,
-                        iv_pct=iv_pct,
-                        delta=delta,
-                        gamma=gamma,
-                        theta=theta,
-                        vega=vega,
-                        bs_price_usd=price,
-                    ))
+                        delta, gamma, theta, vega, price = _bs_greeks(
+                            S, strike, T, 0.0, sigma, opt
+                        )
+                        candidates.append(Candidate(
+                            expiry_code=expiry_code,
+                            expiry_date=expiry_date,
+                            dte=dte,
+                            strike=strike,
+                            opt=opt,
+                            iv_pct=iv_pct,
+                            counterparty=counterparty,
+                            delta=delta,
+                            gamma=gamma,
+                            theta=theta,
+                            vega=vega,
+                            bs_price_usd=price,
+                        ))
 
         # ETH perpetual future: delta=1, no gamma/theta/vega, price = spot
         candidates.append(Candidate(
@@ -234,6 +248,7 @@ class OptimizerV2:
             strike=S,
             opt="F",
             iv_pct=0.0,
+            counterparty="deribit",
             delta=1.0,
             gamma=0.0,
             theta=0.0,
@@ -381,7 +396,8 @@ class OptimizerV2:
     def run(
         self,
         risk_aversion: float = 1.0,
-        txn_cost_pct: float = 5.0,
+        brokerage_txn_cost_pct: float = 5.0,
+        deribit_txn_cost_pct: float = 0.15,
         max_collateral: float = 4_000_000.0,
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
@@ -403,6 +419,7 @@ class OptimizerV2:
             Correlation of vol shocks across expiries. Lower means less cross-expiry
             vega netting; higher means more shared vega risk.
         """
+        print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
         S = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
 
@@ -526,7 +543,7 @@ class OptimizerV2:
         # Per-candidate cost rate: 5bps for perp, txn_cost_pct for options
         PERP_COST_BPS = 5.0  # 5 basis points = 0.05%
         c_cost_rate = np.array([
-            PERP_COST_BPS / 10_000.0 if c.opt == "F" else txn_cost_pct / 100.0
+            PERP_COST_BPS / 10_000.0 if c.opt == "F" else brokerage_txn_cost_pct / 100.0
             for c in candidates
         ])
 
@@ -622,6 +639,8 @@ class OptimizerV2:
             if c.opt == "F":
                 # ETH-PERPETUAL stays unrestricted
                 bounds.append((-max_collateral / max(price, 1.0), max_collateral / max(price, 1.0)))
+            elif c.counterparty == "Deribit":
+                bounds.append((-max_collateral / max(price, 1.0), max_collateral / max(price, 1.0)))
             elif held_qty > 0:
                 # long option: can only sell to reduce/close
                 bounds.append((-abs(held_qty), 0.0))
@@ -687,6 +706,7 @@ class OptimizerV2:
             if unwind_qty >= 1:
                 unwind_signed = int(unwind_qty) * (1 if rounded_qty > 0 else -1)
                 trades.append({
+                    "counterparty": c.counterparty,
                     "instrument": instrument_name,
                     "expiry": c.expiry_date,
                     "dte": dte_i,
@@ -710,6 +730,7 @@ class OptimizerV2:
             if new_qty >= 1:
                 new_signed = int(new_qty) * (1 if rounded_qty > 0 else -1)
                 trades.append({
+                    "counterparty": c.counterparty,
                     "instrument": instrument_name,
                     "expiry": c.expiry_date,
                     "dte": dte_i,
@@ -802,7 +823,8 @@ class OptimizerV2:
             "chart_horizons": horizons,
             "params": {
                 "risk_aversion": risk_aversion,
-                "txn_cost_pct": txn_cost_pct,
+                "brokerage_txn_cost_pct": brokerage_txn_cost_pct,
+                "deribit_txn_cost_pct": deribit_txn_cost_pct,
                 "max_collateral": max_collateral,
                 "atm_iv_pct": round(atm_iv * 100, 1),
                 "sigma_daily": round(sigma_daily, 4),

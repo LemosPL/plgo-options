@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Python 3.11 (plgo_options)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11 (plgo_options)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.9 (hummingbot_binance_okx_starter_v2)" project-jdk-type="Python SDK" />
 </project>

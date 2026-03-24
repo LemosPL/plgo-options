@@ -1005,8 +1005,11 @@
         <label class="pf-filter-label">λ Vega
           <input type="number" id="optv2-lambda-vega" value="100" step="10" min="0" style="width:5rem">
         </label>
-        <label class="pf-filter-label">Txn Cost (%)
-          <input type="number" id="optv2-txn-cost" value="5" step="0.5" min="0" style="width:5rem">
+        <label class="pf-filter-label">Brokerage Txn Cost (%)
+          <input type="number" id="optv2-brokerage-txn-cost" value="5" step="0.1" min="0" style="width:5rem">
+        </label>
+        <label class="pf-filter-label">Deribit Txn Cost (%)
+          <input type="number" id="optv2-deribit-txn-cost" value="0.15" step="0.01" min="0" style="width:5rem">
         </label>
         <label class="pf-filter-label">Max Collateral ($)
           <input type="number" id="optv2-max-collateral" value="4000000" step="100000" min="0" style="width:8rem">
@@ -1015,6 +1018,10 @@
           <select id="optv2-target-expiry" style="width:8rem">
             <option value="">All Maturities</option>
           </select>
+        </label>
+        <label class="toggle-label" style="margin:0">
+          <input type="checkbox" id="optv2-save-usecase">
+          Save usecase snapshot
         </label>
         <button id="btn-run-optv2" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
       </div>
@@ -1106,6 +1113,7 @@
         <table class="pf-table">
           <thead>
             <tr>
+              <th>Counterparty</th>
               <th>Instrument</th>
               <th>Side</th>
               <th>Qty</th>

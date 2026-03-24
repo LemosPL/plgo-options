@@ -33,7 +33,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260318_171121_ALL.json")
+        path = Path("../data/optimization_snapshots/usecases/20260323_131339_ALL.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -45,6 +45,7 @@ def main() -> None:
     #print(f"Saved replay result to: {out_path}")
     print(f"status: {result.get('status')}")
     trades = result.get('trades', [])
+    print(len(trades))
     print(f"trades: {len(trades or [])}")
     print(np.array(trades, dtype=object))
 
