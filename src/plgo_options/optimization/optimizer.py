@@ -153,13 +153,19 @@ class OptimizerV2:
     # Build candidate instruments from vol surface
     # ------------------------------------------------------------------
 
-    def _build_candidates(self, target_expiry: str | None = None) -> list[Candidate]:
+    def _build_candidates(
+        self,
+        target_expiry: str | None = None,
+        min_dte: int = 0,
+    ) -> list[Candidate]:
         """Generate tradeable instruments from the vol surface.
 
         Parameters
         ----------
         target_expiry : optional expiry code to restrict to (e.g. "29MAY26").
                         If None, uses ALL available expiries.
+        min_dte : minimum days to expiry. Instruments with fewer DTE are excluded.
+                  Hard floor of 7 days is enforced even if a lower value is passed.
         """
         S = self.eth_spot
         candidates = []
@@ -176,10 +182,16 @@ class OptimizerV2:
                 held_option_keys.add(key)
                 held_expiry_codes.add(exp_code)
 
+        # Hard floor: never suggest options expiring within 7 days
+        MIN_DTE_FLOOR = 7
+        effective_min_dte = max(min_dte, MIN_DTE_FLOOR)
+
         # Filter smiles
         matching_smiles = []
         for smile in self.vol_surface:
             if smile["dte"] <= 0:
+                continue
+            if smile["dte"] < effective_min_dte:
                 continue
             if target_expiry:
                 if smile["expiry_code"] == target_expiry:
@@ -212,7 +224,6 @@ class OptimizerV2:
                 for opt in ("C", "P"):
                     for counterparty in Counterparties:
                         # In ALL-expiries mode, only keep option contracts we already hold.
-                        # Perp is always included separately below.
                         if counterparty == "Deribit":
                             if opt == "C" and (strike < S or strike > S * 2):
                                 continue
@@ -224,6 +235,9 @@ class OptimizerV2:
                         delta, gamma, theta, vega, price = _bs_greeks(
                             S, strike, T, 0.0, sigma, opt
                         )
+                        # Skip dust options — BS price < $1 means untradeable
+                        if price < 1.0:
+                            continue
                         candidates.append(Candidate(
                             expiry_code=expiry_code,
                             expiry_date=expiry_date,
@@ -399,6 +413,7 @@ class OptimizerV2:
         deribit_txn_cost_pct: float = 0.1,
         max_collateral: float = 4_000_000.0,
         target_expiry: str | None = None,
+        min_dte: int = 0,
         lambda_delta: float = 1.0,
         lambda_gamma: float = 1.0,
         lambda_vega: float = 100.0,
@@ -420,7 +435,7 @@ class OptimizerV2:
         """
         print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
         spot = self.eth_spot
-        candidates = self._build_candidates(target_expiry=target_expiry)
+        candidates = self._build_candidates(target_expiry=target_expiry, min_dte=min_dte)
 
         if not candidates:
             return {
@@ -542,6 +557,22 @@ class OptimizerV2:
         # Per-candidate cost rate: 5bps for perp, txn_cost_pct for options
         perp_cost_bps = 2.0  # 5 basis points = 0.05%
         c_cost_rate = self.compute_costs(spot, candidates, perp_cost_bps, brokerage_txn_cost_pct, deribit_txn_cost_pct)
+
+        # DTE-based cost penalty: near-expiry options have wider spreads
+        # and are harder to trade.  Scale cost up for DTE < 30.
+        # At 30+ DTE: 1x (no penalty).  At 7 DTE: ~4x.  At 1 DTE: ~30x.
+        DTE_PENALTY_THRESHOLD = 30
+        c_dte_float = np.array([float(max(c.dte, 1)) for c in candidates])
+        c_dte_penalty = np.where(
+            c_dte_float < DTE_PENALTY_THRESHOLD,
+            DTE_PENALTY_THRESHOLD / c_dte_float,
+            1.0,
+        )
+        # Don't penalise the perpetual
+        for i, c in enumerate(candidates):
+            if c.opt == "F":
+                c_dte_penalty[i] = 1.0
+        c_cost_rate = c_cost_rate * c_dte_penalty
 
         # ------------------------------------------------------------------
         # Per-candidate: existing position qty and "is_held" flag

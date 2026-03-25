@@ -2,39 +2,54 @@
 
 from __future__ import annotations
 
+import math
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import httpx
 import numpy as np
+from scipy.stats import norm
 
 from plgo_options.data.database import get_db
 from plgo_options.data.trade_repository import list_trades
 from plgo_options.market_data.deribit_client import DeribitClient
-from plgo_options.config import DERIBIT_BASE_URL, REQUEST_TIMEOUT
+from plgo_options.pricing.options import bs_price
+from plgo_options.pricing.vol_surface import VolSmile
+from plgo_options.config import DERIBIT_BASE_URL, REQUEST_TIMEOUT, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 
 router = APIRouter()
 client = DeribitClient()
 
 MIN_DTE = 7
 SPOT_STEP = 50
+DEFAULT_IV = 0.80  # 80% fallback
 
 
 class OptimizeRequest(BaseModel):
-    query: str = ""                     # user's natural language request
+    query: str = ""
     budget: float = 15000
     base_qty: float = 0
     min_dte: int = 7
     max_spread_pct: float = 40
     target_expiry: str | None = None
+    target_payoff: list[dict] | None = None  # drawn target: [{x: spot, y: payoff}, ...]
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []  # [{role: "user"|"bot", text: "..."}]
+    workbench_legs: list[dict] = []  # legs currently in the workbench
+    added_trades: list[dict] = []  # trades already added to portfolio from optimizer
+    closed_trade_ids: list[int] = []  # trades "closed" in the optimizer working portfolio (for rolls)
+    target_payoff: list[dict] | None = None  # drawn target: [{x: spot, y: payoff}, ...]
 
 
 class CalculateRequest(BaseModel):
-    """Re-calculate costs for edited workbench legs."""
-    legs: list[dict]  # [{instrument, side, qty, strike, opt, expiry_code}]
+    legs: list[dict]
+    closed_trade_ids: list[int] = []  # trades "closed" via rolls — exclude from base payoff
 
 
 def _safe_float(v) -> float:
@@ -45,9 +60,127 @@ def _safe_float(v) -> float:
 
 
 def _payoff_vec(spot_arr, strike, opt, qty):
+    """Intrinsic payoff at expiry — kept as fallback."""
     if opt == "C":
         return qty * np.maximum(spot_arr - strike, 0.0)
     return qty * np.maximum(strike - spot_arr, 0.0)
+
+
+def _bs_vec(spots, K, T, r, sigma, opt):
+    """Vectorised Black-Scholes across an array of spot prices."""
+    if T <= 0:
+        return np.maximum(spots - K, 0.0) if opt == "C" else np.maximum(K - spots, 0.0)
+    d1 = (np.log(spots / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if opt == "C":
+        return spots * norm.cdf(d1) - K * math.exp(-r * T) * norm.cdf(d2)
+    return K * math.exp(-r * T) * norm.cdf(-d2) - spots * norm.cdf(-d1)
+
+
+def _bs_payoff_vec(spot_arr, strike, opt, qty, T, sigma):
+    """BS-aware payoff for a position across spot ladder."""
+    if sigma is None or sigma <= 0 or T is None:
+        return _payoff_vec(spot_arr, strike, opt, qty)
+    return qty * _bs_vec(spot_arr, strike, T, 0.0, sigma, opt)
+
+
+async def _fetch_smiles() -> dict[str, VolSmile]:
+    """Fetch all ETH option IVs from Deribit and build vol smiles per expiry."""
+    summaries = await client._get("get_book_summary_by_currency", {
+        "currency": "ETH", "kind": "option",
+    })
+    expiry_data: dict[str, dict[float, list[float]]] = {}
+    for s in summaries:
+        name = s.get("instrument_name", "")
+        mark_iv = s.get("mark_iv")
+        if not name or mark_iv is None or mark_iv <= 0:
+            continue
+        parts = name.split("-")
+        if len(parts) < 4:
+            continue
+        expiry_data.setdefault(parts[1], {}).setdefault(float(parts[2]), []).append(mark_iv)
+
+    smiles: dict[str, VolSmile] = {}
+    for exp, strike_ivs in expiry_data.items():
+        strikes = sorted(strike_ivs.keys())
+        ivs = [float(np.mean(strike_ivs[k])) for k in strikes]
+        if len(strikes) >= 2:
+            smiles[exp] = VolSmile(strikes, ivs)
+    return smiles
+
+
+def _match_expiry_to_smile(expiry_iso: str, smiles: dict[str, VolSmile]) -> str | None:
+    """Match an ISO date expiry to a Deribit expiry code in the smiles dict."""
+    try:
+        if "T" in expiry_iso:
+            pos_date = datetime.fromisoformat(expiry_iso).date()
+        else:
+            pos_date = datetime.strptime(expiry_iso[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+    best, best_diff = None, 999
+    for exp_code in smiles:
+        try:
+            ddate = datetime.strptime(exp_code, "%d%b%y").date()
+        except ValueError:
+            continue
+        diff = abs((ddate - pos_date).days)
+        if diff < best_diff:
+            best_diff, best = diff, exp_code
+    return best if best_diff <= 7 else None
+
+
+def _get_sigma(strike, expiry_str, smiles, expiry_code=None):
+    """Get IV (as decimal) for a position from the vol surface."""
+    matched = expiry_code
+    if not matched:
+        matched = _match_expiry_to_smile(expiry_str, smiles)
+    if matched and matched in smiles:
+        return smiles[matched].iv_at(strike) / 100.0
+    return DEFAULT_IV
+
+
+def _get_dte(expiry_str):
+    """Get days to expiry from an expiry string."""
+    today = date.today()
+    try:
+        if "T" in expiry_str:
+            exp_date = datetime.fromisoformat(expiry_str).date()
+        else:
+            exp_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
+        return max((exp_date - today).days, 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _time_to_expiry_years(expiry_code: str) -> float:
+    """Exact T in years from now to Deribit expiry (08:00 UTC).
+    Same formula as pricing.py for consistent pricing.
+    """
+    try:
+        dt = datetime.strptime(expiry_code, "%d%b%y")
+        expiry_dt = dt.replace(hour=8, minute=0, second=0, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = expiry_dt - now
+        return max(delta.total_seconds() / (365.25 * 86400), 1e-6)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _T_from_iso(expiry_str: str) -> float:
+    """Exact T in years from an ISO date expiry string."""
+    try:
+        if "T" in expiry_str:
+            exp_date = datetime.fromisoformat(expiry_str).date()
+        else:
+            exp_date = datetime.strptime(expiry_str[:10], "%Y-%m-%d").date()
+        expiry_dt = datetime(exp_date.year, exp_date.month, exp_date.day,
+                             8, 0, 0, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delta = expiry_dt - now
+        return max(delta.total_seconds() / (365.25 * 86400), 1e-6)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def _find_breakeven(spot_arr, payoff):
@@ -101,8 +234,14 @@ def _parse_query(query: str, spot: float) -> dict:
             result["focus_zone_lo"] = spot * 1.05
             result["focus_zone_hi"] = spot * 3
     elif any(w in q for w in ["lock", "gain", "secure"]):
-        result["objective"] = "lock_gains"
-        result["description"] = "Locking gains / protecting against reversal"
+        if "upside" in q or "protect" in q:
+            result["objective"] = "lock_gains"
+            result["description"] = "Locking gains + protecting upside"
+            result["focus_zone_lo"] = spot * 0.85
+            result["focus_zone_hi"] = spot * 1.5
+        else:
+            result["objective"] = "lock_gains"
+            result["description"] = "Locking gains / protecting against reversal"
     elif any(w in q for w in ["breakeven", "break even", "break-even"]):
         result["objective"] = "lower_breakeven"
         result["description"] = "Lowering the breakeven point"
@@ -149,6 +288,12 @@ async def suggest_trades(req: OptimizeRequest):
     if not db_trades:
         raise HTTPException(404, "No active ETH trades found")
 
+    # Fetch vol surface for BS pricing
+    try:
+        smiles = await _fetch_smiles()
+    except Exception:
+        smiles = {}
+
     positions = []
     positions_display = []
     for t in db_trades:
@@ -158,9 +303,13 @@ async def suggest_trades(req: OptimizeRequest):
         sign = 1.0 if side in ("buy", "long") else -1.0
         strike = _safe_float(t["strike"])
         qty = _safe_float(t["qty"])
+        expiry_str = str(t.get("expiry", ""))
         if strike <= 0 or qty <= 0:
             continue
-        positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty})
+        dte = _get_dte(expiry_str)
+        sigma = _get_sigma(strike, expiry_str, smiles)
+        positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
         positions_display.append({
             "id": t["id"], "counterparty": t.get("counterparty", ""),
             "side": t["side"], "opt": opt, "strike": strike,
@@ -168,13 +317,14 @@ async def suggest_trades(req: OptimizeRequest):
             "premium_usd": _safe_float(t.get("premium_usd")),
         })
 
-    # 4. Spot ladder & current payoff
+    # 4. Spot ladder & current payoff (BS-aware with vol surface)
     lo = max(500, int(spot * 0.2))
     hi = int(spot * 3.5)
     spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
     current_payoff = np.zeros_like(spot_arr)
     for p in positions:
-        current_payoff += _payoff_vec(spot_arr, p["strike"], p["opt"], p["net_qty"])
+        T = max(p["dte"], 0) / 365.25
+        current_payoff += _bs_payoff_vec(spot_arr, p["strike"], p["opt"], p["net_qty"], T, p["sigma"])
 
     breakeven = _find_breakeven(spot_arr, current_payoff)
     spot_idx = int(np.argmin(np.abs(spot_arr - spot)))
@@ -255,7 +405,8 @@ async def suggest_trades(req: OptimizeRequest):
                 return
             suggestions.append(_score_suggestion(
                 name, cat, legs, cost, dte, spot, spot_arr,
-                current_payoff, spot_idx, breakeven, objective, zone_lo, zone_hi))
+                current_payoff, spot_idx, breakeven, objective, zone_lo, zone_hi,
+                target_payoff=req.target_payoff))
 
         # Bull Call Spreads
         for i, bc in enumerate(calls):
@@ -381,16 +532,18 @@ async def suggest_trades(req: OptimizeRequest):
 
 
 def _score_suggestion(name, category, legs, net_cost, dte, spot, spot_arr,
-                      current_payoff, spot_idx, current_be, objective, zone_lo, zone_hi):
-    """Build and score a suggestion."""
+                      current_payoff, spot_idx, current_be, objective, zone_lo, zone_hi,
+                      target_payoff=None):
+    """Build and score a suggestion using BS pricing with market IV."""
     candidate = np.zeros_like(spot_arr)
+    T = max(dte, 0) / 365.25
     for leg in legs:
         inst = leg["inst"]
         sign = 1.0 if leg["side"] == "buy" else -1.0
-        if inst["opt"] == "C":
-            candidate += sign * leg["qty"] * np.maximum(spot_arr - inst["strike"], 0.0)
-        else:
-            candidate += sign * leg["qty"] * np.maximum(inst["strike"] - spot_arr, 0.0)
+        # Use mark IV from Deribit for this instrument
+        mark_iv = inst.get("mark_iv")
+        sigma = mark_iv / 100.0 if mark_iv and mark_iv > 0 else DEFAULT_IV
+        candidate += _bs_payoff_vec(spot_arr, inst["strike"], inst["opt"], sign * leg["qty"], T, sigma)
 
     new_payoff = current_payoff + candidate
     diff = new_payoff - current_payoff
@@ -434,6 +587,28 @@ def _score_suggestion(name, category, legs, net_cost, dte, spot, spot_arr,
     else:
         score = 0.25 * at_spot_imp + 0.20 * down_imp + 0.20 * min_imp + 0.15 * be_imp + 0.10 * up_imp + 0.10 * zone_imp
 
+    # Target-matching: when user drew a target profile, score how close we get
+    target_match_pct = None
+    if target_payoff and len(target_payoff) >= 2:
+        # Interpolate target to spot_arr using numpy
+        tgt_x = np.array([p["x"] for p in target_payoff], dtype=float)
+        tgt_y = np.array([p["y"] for p in target_payoff], dtype=float)
+        # Interpolate target values at each spot_arr point (clamp outside range)
+        target_at_spots = np.interp(spot_arr, tgt_x, tgt_y)
+        # Only score where target is defined (between min and max target x)
+        mask = (spot_arr >= tgt_x.min()) & (spot_arr <= tgt_x.max())
+        if mask.any():
+            # Distance: how far current payoff is from target vs how far new payoff is
+            curr_dist = np.abs(current_payoff[mask] - target_at_spots[mask])
+            new_dist = np.abs(new_payoff[mask] - target_at_spots[mask])
+            # Improvement = reduction in distance (positive = closer to target)
+            improvement = float(np.mean(curr_dist) - np.mean(new_dist))
+            # Match percentage: how close new_payoff is to target (100% = perfect match)
+            max_range = max(float(np.ptp(target_at_spots[mask])), 1.0)
+            target_match_pct = max(0.0, 100.0 * (1.0 - float(np.mean(new_dist)) / max_range))
+            # Override scoring — target match dominates
+            score = improvement + 0.10 * at_spot_imp + 0.05 * min_imp
+
     formatted_legs = []
     for leg in legs:
         inst = leg["inst"]
@@ -447,7 +622,7 @@ def _score_suggestion(name, category, legs, net_cost, dte, spot, spot_arr,
             "spread_pct": inst["spread_pct"], "mark_iv": inst.get("mark_iv"),
         })
 
-    return {
+    result = {
         "name": name, "category": category, "legs": formatted_legs,
         "net_cost_usd": round(net_cost, 2), "dte": dte,
         "score": round(score, 2),
@@ -461,6 +636,9 @@ def _score_suggestion(name, category, legs, net_cost, dte, spot, spot_arr,
         },
         "new_payoff": np.round(new_payoff, 2).tolist(),
     }
+    if target_match_pct is not None:
+        result["target_match_pct"] = round(target_match_pct, 1)
+    return result
 
 
 @router.post("/calculate")
@@ -477,21 +655,33 @@ async def calculate_workbench(req: CalculateRequest):
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
-    # Current payoff
+    # Fetch vol surface for BS pricing
+    try:
+        smiles = await _fetch_smiles()
+    except Exception:
+        smiles = {}
+
+    # Current payoff (BS-aware) — exclude trades "closed" via rolls
+    closed_ids = set(req.closed_trade_ids)
     lo = max(500, int(spot * 0.2))
     hi = int(spot * 3.5)
     spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
     current_payoff = np.zeros_like(spot_arr)
     for t in db_trades:
+        if t["id"] in closed_ids:
+            continue  # excluded from working portfolio (rolled)
         side = str(t["side"]).lower()
         opt = "C" if "call" in str(t["option_type"]).lower() else "P"
         sign = 1.0 if side in ("buy", "long") else -1.0
         strike = _safe_float(t["strike"])
         qty = _safe_float(t["qty"])
+        expiry_str = str(t.get("expiry", ""))
         if strike > 0 and qty > 0:
-            current_payoff += _payoff_vec(spot_arr, strike, opt, sign * qty)
+            T = _T_from_iso(expiry_str)
+            sigma = _get_sigma(strike, expiry_str, smiles)
+            current_payoff += _bs_payoff_vec(spot_arr, strike, opt, sign * qty, T, sigma)
 
-    # Workbench payoff
+    # Workbench payoff (BS-aware)
     wb_payoff = np.zeros_like(spot_arr)
     total_cost = 0.0
     leg_costs = []
@@ -506,33 +696,73 @@ async def calculate_workbench(req: CalculateRequest):
         pass
 
     for leg in req.legs:
-        inst_name = leg.get("instrument", "")
         side = leg.get("side", "buy")
         qty = float(leg.get("qty", 0))
         strike = float(leg.get("strike", 0))
         opt = leg.get("opt", "C")
+        expiry_code = leg.get("expiry_code", "")
         sign = 1.0 if side == "buy" else -1.0
 
-        # Get live price
-        mkt = summaries.get(inst_name, {})
-        bid = mkt.get("bid_price") or 0
-        ask = mkt.get("ask_price") or 0
-        price_eth = ask if side == "buy" else bid
+        # Rebuild instrument name from actual strike/expiry/opt (don't trust stale name)
+        if strike > 0 and expiry_code:
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            inst_name = f"ETH-{expiry_code}-{strike_str}-{opt}"
+        else:
+            inst_name = leg.get("instrument", "")
 
-        leg_cost = sign * price_eth * qty * spot
+        # Exact T in years (seconds precision, 08:00 UTC expiry — same as Pricer)
+        T = _time_to_expiry_years(expiry_code) if expiry_code else 0.0
+        dte = int(T * 365.25)
+
+        # Use BS pricing with vol surface IV — same method as Strategy Builder / Pricer
+        sigma = _get_sigma(strike, "", smiles, expiry_code=expiry_code)
+        mark_iv = sigma * 100.0
+
+        if strike > 0 and spot > 0 and T > 0:
+            bs_val_usd = bs_price(spot, strike, T, 0.0, sigma, opt)
+        else:
+            # At/past expiry — intrinsic
+            bs_val_usd = max(spot - strike, 0.0) if opt == "C" else max(strike - spot, 0.0)
+
+        bs_val_eth = bs_val_usd / spot if spot > 0 else 0
+
+        # Deribit bid/ask for reference only
+        mkt = summaries.get(inst_name, {})
+        deribit_bid = mkt.get("bid_price") or 0
+        deribit_ask = mkt.get("ask_price") or 0
+        # Use Deribit mark_iv if available for display, but price from BS
+        if mkt.get("mark_iv") and mkt["mark_iv"] > 0:
+            mark_iv = mkt["mark_iv"]
+
+        # Use Deribit bid/ask for cost (same as Suggestions table):
+        # Buy → pay the ask, Sell → receive the bid.
+        # Fall back to BS price only when Deribit data is unavailable.
+        bid_display = round(deribit_bid * spot, 2) if deribit_bid > 0 else round(bs_val_usd * 0.995, 2)
+        ask_display = round(deribit_ask * spot, 2) if deribit_ask > 0 else round(bs_val_usd * 1.005, 2)
+        spread_pct = round((deribit_ask - deribit_bid) / deribit_ask * 100, 1) if deribit_ask > 0 else 1.0
+
+        if deribit_bid > 0 and deribit_ask > 0:
+            # Use market prices: buy at ask, sell at bid
+            price_usd = ask_display if side == "buy" else bid_display
+        else:
+            # No Deribit data — fall back to BS
+            price_usd = bs_val_usd
+
+        leg_cost = sign * price_usd * qty
         total_cost += leg_cost
+
         leg_costs.append({
             "instrument": inst_name, "side": side, "qty": qty,
             "strike": strike, "opt": opt,
-            "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
-            "price_usd": round(price_eth * spot, 2),
+            "bid_usd": bid_display, "ask_usd": ask_display,
+            "price_usd": round(price_usd, 2),
             "leg_cost": round(leg_cost, 2),
-            "spread_pct": round((ask - bid) / ask * 100, 1) if ask > 0 else 0,
-            "mark_iv": mkt.get("mark_iv"),
+            "spread_pct": spread_pct,
+            "mark_iv": mark_iv,
         })
 
         if strike > 0 and qty > 0:
-            wb_payoff += _payoff_vec(spot_arr, strike, opt, sign * qty)
+            wb_payoff += _bs_payoff_vec(spot_arr, strike, opt, sign * qty, T, sigma)
 
     new_payoff = current_payoff + wb_payoff
     breakeven = _find_breakeven(spot_arr, current_payoff)
@@ -552,6 +782,1762 @@ async def calculate_workbench(req: CalculateRequest):
         "floor_change": round(float(new_payoff.min() - current_payoff.min()), 2),
         "be_change": round(breakeven - new_be, 2) if breakeven and new_be else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# match_target: Find multi-leg strategies that best match a drawn profile
+# Split into DOWNSIDE (below spot) and UPSIDE (above spot) for better matching.
+# ---------------------------------------------------------------------------
+
+async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[str, dict | None]:
+    """
+    Decompose the gap between current portfolio and drawn target into
+    tradeable option legs.  Solves TWO independent zones:
+      1. Downside strategy  (spot_arr <= spot) — mostly puts
+      2. Upside strategy    (spot_arr > spot)  — mostly calls
+    Uses LASSO (if available) or numpy least-squares with iterative pruning.
+    Returns both strategies + a combined strategy.
+    """
+    try:
+        from sklearn.linear_model import Lasso
+        HAS_SKLEARN = True
+    except ImportError:
+        HAS_SKLEARN = False
+
+    if not target_payoff or len(target_payoff) < 2:
+        return "No target profile provided.", None
+
+    try:
+        spot = await client.get_eth_spot_price()
+    except Exception as e:
+        return f"Failed to fetch spot: {e}", None
+
+    try:
+        db = await get_db()
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+    except Exception as e:
+        return f"Failed to read trades: {e}", None
+
+    if not db_trades:
+        return "No active ETH trades found.", None
+
+    smiles = {}
+    try:
+        smiles = await _fetch_smiles()
+    except Exception:
+        pass
+
+    positions = []
+    for t in db_trades:
+        side_str = str(t["side"]).lower()
+        opt_raw = str(t["option_type"]).lower()
+        opt = "C" if "call" in opt_raw else "P"
+        sign = 1.0 if side_str in ("buy", "long") else -1.0
+        strike = _safe_float(t["strike"])
+        qty = _safe_float(t["qty"])
+        expiry_str = str(t.get("expiry", ""))
+        if strike <= 0 or qty <= 0:
+            continue
+        dte = _get_dte(expiry_str)
+        sigma = _get_sigma(strike, expiry_str, smiles)
+        positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
+
+    lo = max(500, int(spot * 0.2))
+    hi = int(spot * 3.5)
+    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    current_payoff = np.zeros_like(spot_arr)
+    for p in positions:
+        T = max(p["dte"], 0) / 365.25
+        current_payoff += _bs_payoff_vec(spot_arr, p["strike"], p["opt"], p["net_qty"], T, p["sigma"])
+
+    tgt_x = np.array([p["x"] for p in target_payoff], dtype=float)
+    tgt_y = np.array([p["y"] for p in target_payoff], dtype=float)
+    target_interp = np.interp(spot_arr, tgt_x, tgt_y)
+    gap = target_interp - current_payoff
+
+    drawn_mask = (spot_arr >= tgt_x.min()) & (spot_arr <= tgt_x.max())
+    if drawn_mask.sum() < 5:
+        return "Target profile range too narrow.", None
+
+    # ── Fetch tradeable instruments ──
+    try:
+        summaries = await client._get("get_book_summary_by_currency", {
+            "currency": "ETH", "kind": "option",
+        })
+    except Exception as e:
+        return f"Deribit error: {e}", None
+
+    today = date.today()
+    min_dte = inp.get("min_dte", 14)
+    max_spread = inp.get("max_spread_pct", 40)
+    candidates = []
+    for s in summaries:
+        name = s.get("instrument_name", "")
+        parts = name.split("-")
+        if len(parts) != 4 or parts[0] != "ETH":
+            continue
+        try:
+            exp_date = datetime.strptime(parts[1], "%d%b%y").date()
+        except ValueError:
+            continue
+        dte = (exp_date - today).days
+        if dte < min_dte:
+            continue
+        strike = float(parts[2])
+        opt = parts[3]
+        bid = s.get("bid_price") or 0
+        ask = s.get("ask_price") or 0
+        if bid <= 0 or ask <= 0:
+            continue
+        spread = (ask - bid) / ask * 100
+        if spread > max_spread:
+            continue
+        if strike < spot * 0.3 or strike > spot * 3.5:
+            continue
+        candidates.append({
+            "name": name, "expiry_code": parts[1], "dte": dte,
+            "strike": strike, "opt": opt,
+            "bid": bid, "ask": ask, "mid": (bid + ask) / 2,
+            "mark_iv": s.get("mark_iv"),
+        })
+
+    if not candidates:
+        return "No liquid instruments found.", None
+
+    # ── Pre-compute full payoff matrix for all candidates ──
+    full_payoff = np.zeros((len(spot_arr), len(candidates)))
+    for j, c in enumerate(candidates):
+        sigma_c = _get_sigma(c["strike"], c["expiry_code"], smiles) or 0.8
+        T = max(c["dte"], 1) / 365.25
+        full_payoff[:, j] = _bs_vec(spot_arr, c["strike"], T, 0.0, sigma_c, c["opt"])
+
+    # ── Helper: solve one zone ──
+    def _solve_zone(zone_mask, zone_name, prefer_opt=None, min_legs=3, max_legs=10):
+        """Run LASSO on a subset of spot_arr. Returns list of (cand_idx, weight)."""
+        zm = drawn_mask & zone_mask
+        if zm.sum() < 3:
+            return []
+
+        # Filter candidates relevant to this zone
+        cand_idxs = []
+        for j, c in enumerate(candidates):
+            # For downside: prefer puts + calls with strike < spot
+            # For upside: prefer calls + puts with strike > spot
+            if prefer_opt == "P":
+                # Downside: include all puts + calls with strike <= spot * 1.3
+                if c["opt"] == "P" or c["strike"] <= spot * 1.3:
+                    cand_idxs.append(j)
+            elif prefer_opt == "C":
+                # Upside: include all calls + puts with strike >= spot * 0.7
+                if c["opt"] == "C" or c["strike"] >= spot * 0.7:
+                    cand_idxs.append(j)
+            else:
+                cand_idxs.append(j)
+
+        if len(cand_idxs) < 2:
+            cand_idxs = list(range(len(candidates)))
+
+        pm = full_payoff[np.ix_(np.where(zm)[0], cand_idxs)]
+        zone_gap = gap[zm]
+
+        # Normalize: scale both payoff matrix columns and gap
+        gap_scale = max(np.abs(zone_gap).max(), 1.0)
+        # Also scale each column of pm by its own max to equalize features
+        col_scale = np.abs(pm).max(axis=0)
+        col_scale[col_scale < 1e-6] = 1.0  # avoid div by zero
+        pm_scaled = pm / col_scale[np.newaxis, :]
+        gap_scaled = zone_gap / gap_scale
+
+        best_w = None
+        best_score = -1e18
+
+        # Method 1: LASSO (if sklearn available) — best sparsity control
+        if HAS_SKLEARN:
+            alphas = [1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002,
+                      0.001, 0.0005, 0.0002, 0.0001, 0.00005, 0.00001]
+            for alpha in alphas:
+                try:
+                    lasso = Lasso(alpha=alpha, max_iter=20000, positive=False, fit_intercept=False)
+                    lasso.fit(pm_scaled, gap_scaled)
+                    w = lasso.coef_ * gap_scale / col_scale
+                    n_active = int(np.sum(np.abs(w) > 0.5))
+                    if n_active < min_legs or n_active > max_legs:
+                        continue
+                    residual = zone_gap - pm @ w
+                    score = 1.0 - np.std(residual) / max(np.std(zone_gap), 1.0)
+                    if score > best_score:
+                        best_score = score
+                        best_w = w.copy()
+                except Exception:
+                    continue
+
+            if best_w is None:
+                for alpha in alphas:
+                    try:
+                        lasso = Lasso(alpha=alpha, max_iter=20000, positive=False, fit_intercept=False)
+                        lasso.fit(pm_scaled, gap_scaled)
+                        w = lasso.coef_ * gap_scale / col_scale
+                        if int(np.sum(np.abs(w) > 0.5)) >= 1:
+                            best_w = w.copy()
+                            break
+                    except Exception:
+                        continue
+
+        # Method 2: Numpy least-squares with iterative pruning (no sklearn needed)
+        if best_w is None:
+            try:
+                from numpy.linalg import lstsq
+                # Solve full least-squares
+                w_raw, _, _, _ = lstsq(pm, zone_gap, rcond=None)
+                # Iteratively prune smallest legs until we have target count
+                target_n = min(max_legs, max(min_legs, 6))
+                w_pruned = w_raw.copy()
+                for _ in range(max(len(w_pruned) - target_n, 0)):
+                    abs_w = np.abs(w_pruned)
+                    abs_w[abs_w < 0.01] = 1e18  # don't re-prune zeros
+                    drop_idx = np.argmin(abs_w)
+                    w_pruned[drop_idx] = 0.0
+                    # Re-solve with remaining non-zero indices
+                    active = np.where(np.abs(w_pruned) > 0.01)[0]
+                    if len(active) < min_legs:
+                        break
+                    w_sub, _, _, _ = lstsq(pm[:, active], zone_gap, rcond=None)
+                    w_pruned = np.zeros(pm.shape[1])
+                    w_pruned[active] = w_sub
+                best_w = w_pruned
+            except Exception:
+                return []
+
+        if best_w is None:
+            return []
+
+        result = []
+        for local_j, w_val in enumerate(best_w):
+            if abs(w_val) < 0.5:
+                continue
+            result.append((cand_idxs[local_j], w_val))
+        return result
+
+    # ── Solve downside and upside independently ──
+    spot_idx = int(np.argmin(np.abs(spot_arr - spot)))
+    downside_mask = np.zeros(len(spot_arr), dtype=bool)
+    downside_mask[:spot_idx + 1] = True  # at or below spot
+    upside_mask = np.zeros(len(spot_arr), dtype=bool)
+    upside_mask[spot_idx:] = True  # at or above spot (overlap at spot)
+
+    down_weights = _solve_zone(downside_mask, "Downside", prefer_opt="P", min_legs=2, max_legs=8)
+    up_weights = _solve_zone(upside_mask, "Upside", prefer_opt="C", min_legs=2, max_legs=8)
+
+    # ── Convert weights to legs ──
+    def _weights_to_legs(weights_list):
+        legs = []
+        for cand_idx, w_val in weights_list:
+            c = candidates[cand_idx]
+            qty = round(abs(w_val) / 10) * 10
+            if qty < 10:
+                qty = round(abs(w_val))
+            if qty < 1:
+                continue
+            side = "buy" if w_val > 0 else "sell"
+            legs.append({
+                "instrument": c["name"], "side": side, "qty": qty,
+                "strike": c["strike"], "opt": c["opt"],
+                "expiry_code": c["expiry_code"], "dte": c["dte"],
+                "price_eth": c["ask"] if side == "buy" else c["bid"],
+                "price_usd": round((c["ask"] if side == "buy" else c["bid"]) * spot, 2),
+                "bid_usd": round(c["bid"] * spot, 2),
+                "ask_usd": round(c["ask"] * spot, 2),
+                "spread_pct": round((c["ask"] - c["bid"]) / c["ask"] * 100, 1),
+                "mark_iv": c.get("mark_iv"),
+            })
+        legs.sort(key=lambda l: (l["expiry_code"], l["strike"], l["opt"]))
+        return legs
+
+    down_legs = _weights_to_legs(down_weights)
+    up_legs = _weights_to_legs(up_weights)
+    combined_legs = _weights_to_legs(down_weights + up_weights)
+
+    # ── Compute payoff and cost for a set of legs ──
+    def _compute_strategy(legs_list, name_label):
+        if not legs_list:
+            return None
+        net_cost = 0.0
+        for l in legs_list:
+            s = -1 if l["side"] == "buy" else 1
+            net_cost += s * l["price_usd"] * l["qty"]
+
+        new_pf = current_payoff.copy()
+        for l in legs_list:
+            sigma_l = _get_sigma(l["strike"], l["expiry_code"], smiles) or 0.8
+            T = max(l["dte"], 1) / 365.25
+            s = 1.0 if l["side"] == "buy" else -1.0
+            new_pf += s * l["qty"] * _bs_vec(spot_arr, l["strike"], T, 0.0, sigma_l, l["opt"])
+
+        new_gap = np.abs(new_pf[drawn_mask] - target_interp[drawn_mask])
+        old_gap = np.abs(current_payoff[drawn_mask] - target_interp[drawn_mask])
+        tgt_range = max(float(np.ptp(target_interp[drawn_mask])), 1.0)
+        match_pct = max(0.0, 100.0 * (1.0 - float(np.mean(new_gap)) / tgt_range))
+        improvement_pct = max(0.0, 100.0 * (1.0 - float(np.mean(new_gap)) / max(float(np.mean(old_gap)), 1.0)))
+        new_min = float(new_pf.min())
+
+        return {
+            "suggestion": {
+                "name": f"{name_label} ({len(legs_list)} legs, {match_pct:.0f}% match)",
+                "category": "target_match",
+                "legs": legs_list,
+                "net_cost_usd": round(net_cost, 2),
+                "dte": max(l["dte"] for l in legs_list),
+                "score": round(match_pct * 100, 2),
+                "target_match_pct": round(match_pct, 1),
+                "impact": {
+                    "at_spot": round(float(new_pf[spot_idx] - current_payoff[spot_idx]), 2),
+                    "min_improvement": round(new_min - float(current_payoff.min()), 2),
+                    "new_min": round(new_min, 2),
+                    "downside": 0, "upside": 0, "zone": 0,
+                    "breakeven_improvement": 0, "new_breakeven": None,
+                },
+                "new_payoff": np.round(new_pf, 2).tolist(),
+            },
+            "match_pct": match_pct,
+            "improvement_pct": improvement_pct,
+            "net_cost": net_cost,
+            "new_min": new_min,
+            "new_pf": new_pf,
+        }
+
+    # Build all three strategies
+    strat_down = _compute_strategy(down_legs, "Downside Protection")
+    strat_up = _compute_strategy(up_legs, "Upside Shaping")
+    strat_combined = _compute_strategy(combined_legs, "Combined Target Match")
+
+    suggestions = []
+    summary_parts = []
+
+    for label, strat, legs_list in [
+        ("DOWNSIDE (below spot)", strat_down, down_legs),
+        ("UPSIDE (above spot)", strat_up, up_legs),
+        ("COMBINED (full target)", strat_combined, combined_legs),
+    ]:
+        if not strat:
+            summary_parts.append(f"\n=== {label} ===\nNo matching strategy found for this zone.\n")
+            continue
+        suggestions.append(strat["suggestion"])
+        leg_lines = []
+        for l in legs_list:
+            sl = "Buy" if l["side"] == "buy" else "Sell"
+            leg_lines.append(f"  {sl} {l['qty']} ETH {l['strike']}{l['opt']} {l['expiry_code']} @ ${l['price_usd']:.2f}")
+        summary_parts.append(
+            f"\n=== {label}: {strat['match_pct']:.1f}% match, {len(legs_list)} legs ===\n"
+            f"Legs:\n" + "\n".join(leg_lines) + "\n"
+            f"ACTUAL COST: ${strat['net_cost']:,.0f}\n"
+            f"Floor change: {strat['new_min'] - float(current_payoff.min()):+,.0f}\n"
+            f"P&L at spot change: {strat['suggestion']['impact']['at_spot']:+,.0f}\n"
+        )
+
+    if not suggestions:
+        return "Could not find strategies matching the target profile.", None
+
+    summary = (
+        f"=== TARGET MATCH — 3 STRATEGIES ===\n"
+        + "\n".join(summary_parts)
+        + "\nIMPORTANT: Report these exact costs to the user. All 3 strategies are in the Suggestions table.\n"
+        f"Recommend the COMBINED strategy for best overall match, but note the user can add DOWNSIDE and UPSIDE separately."
+    )
+
+    result = {
+        "suggestions": suggestions,
+        "num_suggestions": len(suggestions),
+        "spot_ladder": spot_arr.tolist(),
+        "current_payoff": np.round(current_payoff, 2).tolist(),
+        "spot": spot,
+    }
+
+    return summary, result
+
+
+@router.post("/chat")
+async def chat(req: ChatRequest):
+    """Conversational optimizer — powered by Claude for real inference."""
+    try:
+        import anthropic
+    except ImportError:
+        return {"type": "question", "text": "**Setup required:** `pip install anthropic python-dotenv` on this server.", "context": {}}
+
+    import json as _json
+
+    if not ANTHROPIC_API_KEY:
+        return {"type": "question", "text": "**Setup required:** Set `ANTHROPIC_API_KEY` in your `.env` file.", "context": {}}
+
+    msg = req.message.strip()
+    history = req.history
+
+    # ── Load live portfolio context ──
+    try:
+        spot = await client.get_eth_spot_price()
+    except Exception:
+        spot = 0
+
+    try:
+        db = await get_db()
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+    except Exception:
+        db_trades = []
+
+    # Fetch vol surface for BS pricing
+    try:
+        smiles = await _fetch_smiles()
+    except Exception:
+        smiles = {}
+
+    closed_ids = set(req.closed_trade_ids)
+    # Filter out "closed" (rolled) trades from portfolio context
+    active_trades = [t for t in db_trades if t["id"] not in closed_ids]
+    num_positions = len(active_trades)
+    positions = []
+    positions_detail = []  # rich detail for Claude
+    expiry_groups: dict[str, int] = {}
+    today = date.today()
+    for t in active_trades:
+        side = str(t["side"]).lower()
+        opt = "C" if "call" in str(t.get("option_type", "")).lower() else "P"
+        sign = 1.0 if side in ("buy", "long") else -1.0
+        strike = _safe_float(t["strike"])
+        qty = _safe_float(t["qty"])
+        expiry_str = str(t.get("expiry", ""))
+        exp_short = expiry_str.split("T")[0]
+        try:
+            exp_date = datetime.fromisoformat(expiry_str).date() if "T" in expiry_str else datetime.strptime(exp_short, "%Y-%m-%d").date()
+            dte = (exp_date - today).days
+        except (ValueError, TypeError):
+            dte = 0
+        if strike > 0 and qty > 0:
+            sigma = _get_sigma(strike, expiry_str, smiles)
+            positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
+                              "expiry": expiry_str, "counterparty": t.get("counterparty", ""),
+                              "dte": dte, "sigma": sigma})
+            side_label = "Long" if sign > 0 else "Short"
+            positions_detail.append({
+                "id": t["id"], "counterparty": t.get("counterparty", ""),
+                "side": side_label, "type": "Call" if opt == "C" else "Put",
+                "strike": strike, "qty": qty, "net_qty": sign * qty,
+                "expiry": exp_short, "dte": dte,
+                "premium_usd": _safe_float(t.get("premium_usd")),
+            })
+        expiry_groups[exp_short] = expiry_groups.get(exp_short, 0) + 1
+
+    net_calls = sum(p["net_qty"] for p in positions if p["opt"] == "C")
+    net_puts = sum(p["net_qty"] for p in positions if p["opt"] == "P")
+
+    lo = max(500, int(spot * 0.2)) if spot > 0 else 500
+    hi = int(spot * 3.5) if spot > 0 else 8000
+    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    current_payoff = np.zeros_like(spot_arr)
+    for p in positions:
+        T = max(p["dte"], 0) / 365.25
+        current_payoff += _bs_payoff_vec(spot_arr, p["strike"], p["opt"], p["net_qty"], T, p["sigma"])
+
+    spot_idx = int(np.argmin(np.abs(spot_arr - spot))) if spot > 0 else 0
+    pnl_at_spot = float(current_payoff[spot_idx]) if len(current_payoff) > 0 else 0
+    worst = float(current_payoff.min()) if len(current_payoff) > 0 else 0
+    worst_at = float(spot_arr[np.argmin(current_payoff)]) if len(current_payoff) > 0 else 0
+    best = float(current_payoff.max()) if len(current_payoff) > 0 else 0
+    breakeven = _find_breakeven(spot_arr, current_payoff)
+
+    # P&L at key spot levels
+    key_spots = [int(spot * m) for m in [0.3, 0.5, 0.7, 0.85, 1.0, 1.2, 1.5, 2.0, 3.0]]
+    pnl_ladder = {}
+    for ks in key_spots:
+        ki = int(np.argmin(np.abs(spot_arr - ks)))
+        pnl_ladder[f"${ks:,}"] = round(float(current_payoff[ki]), 2)
+
+    # Workbench context
+    wb_legs = req.workbench_legs
+    added_trades = req.added_trades
+    wb_total_cost = 0.0
+    wb_payoff = np.zeros_like(spot_arr)
+    for leg in wb_legs:
+        sign = 1.0 if leg.get("side") == "buy" else -1.0
+        strike = _safe_float(leg.get("strike"))
+        qty = _safe_float(leg.get("qty"))
+        opt_type = leg.get("opt", "C")
+        price_usd = _safe_float(leg.get("price_usd"))
+        expiry_code = leg.get("expiry_code", "")
+        dte_leg = int(leg.get("dte", 0))
+        mark_iv = _safe_float(leg.get("mark_iv"))
+        if strike > 0 and qty > 0:
+            T = max(dte_leg, 0) / 365.25
+            if mark_iv > 0:
+                sigma = mark_iv / 100.0
+            elif expiry_code and expiry_code in smiles:
+                sigma = smiles[expiry_code].iv_at(strike) / 100.0
+            else:
+                sigma = DEFAULT_IV
+            wb_payoff += _bs_payoff_vec(spot_arr, strike, opt_type, sign * qty, T, sigma)
+        wb_total_cost += sign * price_usd * qty
+
+    new_payoff = current_payoff + wb_payoff
+    new_worst = float(new_payoff.min()) if len(new_payoff) > 0 else 0
+    new_pnl_at_spot = float(new_payoff[spot_idx]) if len(new_payoff) > 0 else 0
+    new_breakeven = _find_breakeven(spot_arr, new_payoff)
+
+    context = {
+        "spot": spot, "num_positions": num_positions,
+        "net_calls": net_calls, "net_puts": net_puts,
+        "pnl_at_spot": pnl_at_spot, "worst": worst, "worst_at": worst_at,
+        "breakeven": breakeven,
+    }
+
+    # ── Fast path: detect pasted trades and add directly ──
+    # Pattern: "Long/Short Put/Call ETH-DDMMMYY-STRIKE-C/P ... qty"
+    trade_pattern = re.findall(
+        r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP])\s+[\d-]+\s+\d+\s+\d+\s+[-\d.]+\s+(\d+)',
+        msg, re.IGNORECASE
+    )
+    if not trade_pattern:
+        # Also try simpler format: "Long Put ETH-26JUN26-2400-P qty 3000"
+        trade_pattern = re.findall(
+            r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP]).*?(\d{3,})',
+            msg, re.IGNORECASE
+        )
+
+    # Pre-built suggestion data from pasted trades (used by Claude for analysis)
+    fast_path_data = None
+    fast_path_summary = None
+
+    if trade_pattern and len(trade_pattern) >= 2:
+        # Parse trades and build suggestions directly for speed
+        parsed_legs = []
+        for match in trade_pattern:
+            side_raw, type_raw, exp_code, strike_str, opt, qty_str = match
+            parsed_legs.append({
+                "side": "buy" if side_raw.lower() == "long" else "sell",
+                "opt": opt.upper(),
+                "strike": float(strike_str),
+                "expiry_code": exp_code.upper(),
+                "qty": float(qty_str),
+            })
+
+        # Group into put spreads / call spreads (pair buy+sell by type)
+        strategies = []
+        buys = [l for l in parsed_legs if l["side"] == "buy"]
+        sells = [l for l in parsed_legs if l["side"] == "sell"]
+
+        # Try to pair each buy with a sell of same type
+        used_sells = set()
+        for b in buys:
+            for j, s in enumerate(sells):
+                if j not in used_sells and s["opt"] == b["opt"] and s["expiry_code"] == b["expiry_code"]:
+                    spread_type = "Put Spread" if b["opt"] == "P" else "Call Spread"
+                    hi = max(b["strike"], s["strike"])
+                    lo = min(b["strike"], s["strike"])
+                    strategies.append({
+                        "name": f"{spread_type} {b['expiry_code']}: {int(hi)}/{int(lo)}",
+                        "legs": [b, s],
+                    })
+                    used_sells.add(j)
+                    break
+
+        # Any unpaired legs go as individual strategies
+        for j, s in enumerate(sells):
+            if j not in used_sells:
+                strategies.append({"name": f"{'Sell' if s['side'] == 'sell' else 'Buy'} {s['expiry_code']} {int(s['strike'])}{s['opt']}", "legs": [s]})
+        unpaired_buys = [b for b in buys if not any(b in strat["legs"] for strat in strategies)]
+        for b in unpaired_buys:
+            strategies.append({"name": f"Buy {b['expiry_code']} {int(b['strike'])}{b['opt']}", "legs": [b]})
+
+        # If no clean pairing, just put all legs in one strategy
+        if not strategies:
+            strategies = [{"name": "Custom Strategy", "legs": parsed_legs}]
+
+        # Fetch live prices from Deribit
+        try:
+            summaries_raw = await client._get("get_book_summary_by_currency", {
+                "currency": "ETH", "kind": "option",
+            })
+            summaries = {s.get("instrument_name", ""): s for s in summaries_raw}
+        except Exception:
+            summaries = {}
+
+        all_suggestions = []
+        for strat in strategies:
+            formatted_legs = []
+            total_cost = 0.0
+            for leg in strat["legs"]:
+                strike_str = str(int(leg["strike"])) if leg["strike"] == int(leg["strike"]) else str(leg["strike"])
+                inst_name = f"ETH-{leg['expiry_code']}-{strike_str}-{leg['opt']}"
+                mkt = summaries.get(inst_name, {})
+                bid = mkt.get("bid_price") or 0
+                ask = mkt.get("ask_price") or 0
+                mark_iv = mkt.get("mark_iv")
+                price_eth = ask if leg["side"] == "buy" else bid
+                try:
+                    exp_date = datetime.strptime(leg["expiry_code"], "%d%b%y").date()
+                    dte = (exp_date - date.today()).days
+                except ValueError:
+                    dte = 0
+                sign = 1.0 if leg["side"] == "buy" else -1.0
+                leg_cost = sign * price_eth * leg["qty"] * spot
+                total_cost += leg_cost
+                spread_pct = round((ask - bid) / ask * 100, 1) if ask > 0 else 0
+                formatted_legs.append({
+                    "instrument": inst_name, "side": leg["side"], "qty": leg["qty"],
+                    "strike": leg["strike"], "opt": leg["opt"],
+                    "expiry_code": leg["expiry_code"], "dte": dte,
+                    "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
+                    "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
+                    "spread_pct": spread_pct, "mark_iv": mark_iv,
+                })
+
+            # Compute payoff (BS-aware with market IV)
+            candidate = np.zeros_like(spot_arr)
+            for fl in formatted_legs:
+                s = 1.0 if fl["side"] == "buy" else -1.0
+                T_fl = max(fl["dte"], 0) / 365.25
+                fl_iv = fl.get("mark_iv")
+                fl_sigma = fl_iv / 100.0 if fl_iv and fl_iv > 0 else DEFAULT_IV
+                candidate += _bs_payoff_vec(spot_arr, fl["strike"], fl["opt"], s * fl["qty"], T_fl, fl_sigma)
+            new_pf = current_payoff + candidate
+            new_be_strat = _find_breakeven(spot_arr, new_pf)
+
+            all_suggestions.append({
+                "name": strat["name"], "category": "custom", "legs": formatted_legs,
+                "net_cost_usd": round(total_cost, 2),
+                "dte": formatted_legs[0]["dte"] if formatted_legs else 0,
+                "score": 0,
+                "impact": {
+                    "at_spot": round(float(new_pf[spot_idx]) - pnl_at_spot, 2),
+                    "min_improvement": round(float(new_pf.min()) - worst, 2),
+                    "new_min": round(float(new_pf.min()), 2),
+                    "downside": 0, "upside": 0, "zone": 0,
+                    "breakeven_improvement": round(breakeven - new_be_strat, 2) if breakeven and new_be_strat else 0,
+                    "new_breakeven": round(new_be_strat, 2) if new_be_strat else None,
+                },
+                "new_payoff": np.round(new_pf, 2).tolist(),
+            })
+
+        fast_path_data = {
+            "spot": spot, "spot_ladder": spot_arr.tolist(),
+            "current_payoff": np.round(current_payoff, 2).tolist(),
+            "current_profile": {
+                "at_spot": pnl_at_spot, "min": worst, "min_at": worst_at,
+                "max": best, "max_at": float(spot_arr[np.argmax(current_payoff)]),
+                "breakeven": breakeven,
+            },
+            "positions": [], "base_qty": 3000, "budget": 50000,
+            "objective": "custom", "parsed_query": {"description": "User-provided trades"},
+            "num_positions": num_positions, "num_instruments": len(parsed_legs),
+            "num_suggestions": len(all_suggestions),
+            "available_expiries": sorted(set(l["expiry_code"] for l in parsed_legs)),
+            "suggestions": all_suggestions,
+        }
+
+        # Build a detailed summary for Claude to analyze
+        summary_lines = []
+        for s in all_suggestions:
+            cost_str = f"${abs(round(s['net_cost_usd'])):,}"
+            if s['net_cost_usd'] < 0:
+                cost_str += " credit"
+            else:
+                cost_str = f"${round(s['net_cost_usd']):,} debit"
+            legs_desc = ", ".join(
+                f"{l['side'].upper()} {l['qty']:.0f}x {l['instrument']} @ ${l['price_usd']:,.2f} (IV: {l['mark_iv'] or 'N/A'}%, spread: {l['spread_pct']}%)"
+                for l in s["legs"]
+            )
+            summary_lines.append(
+                f"Strategy: {s['name']}\n"
+                f"  Legs: {legs_desc}\n"
+                f"  Net cost: {cost_str}\n"
+                f"  Impact: P&L at spot {s['impact']['at_spot']:+,.0f}, "
+                f"floor change {s['impact']['min_improvement']:+,.0f} (new floor: ${s['impact']['new_min']:,.0f}), "
+                f"BE change {s['impact']['breakeven_improvement']:+,.0f}"
+                + (f" (new BE: ${s['impact']['new_breakeven']:,.0f})" if s['impact']['new_breakeven'] else "")
+            )
+        fast_path_summary = "\n".join(summary_lines)
+
+    # ── Auto-run match_target when user drew a target profile ──
+    target_match_summary = None
+    if req.target_payoff and len(req.target_payoff) >= 2 and not fast_path_data:
+        try:
+            mt_text, mt_data = await _handle_match_target({}, req.target_payoff)
+            if mt_data and mt_data.get("suggestions"):
+                fast_path_data = mt_data
+                target_match_summary = mt_text
+        except Exception as e:
+            import traceback as _tb
+            print(f"Auto match_target error:\n{_tb.format_exc()}")
+            target_match_summary = f"Target matching failed: {e}"
+
+    # ── Build system prompt ──
+    fmt_spot = f"${spot:,.2f}"
+    fmt_net_calls = f"{net_calls:+,.0f}"
+    fmt_net_puts = f"{net_puts:+,.0f}"
+    fmt_pnl = f"${pnl_at_spot:,.0f}"
+    fmt_worst = f"${worst:,.0f}"
+    fmt_worst_at = f"${worst_at:,.0f}"
+    fmt_best = f"${best:,.0f}"
+    fmt_be = f"${breakeven:,.0f}" if breakeven else "N/A"
+    fmt_expiries = ', '.join(sorted(expiry_groups.keys())[:8])
+    fmt_ladder = _json.dumps(pnl_ladder)
+    fmt_positions = _json.dumps(positions_detail, default=str)
+
+    system_prompt = """YOU MUST FOLLOW THESE RULES. THEY ARE NON-NEGOTIABLE:
+
+1. You have 3 tools: `scan_trades`, `build_strategy`, `suggest_rolls`. USE THEM.
+2. When the user gives you specific trades (strikes, expiries, sides, qtys) — IMMEDIATELY call `build_strategy` to add them to the Suggestions table. Do NOT just describe them in text.
+3. When the user asks to "add", "test", "try", "show" trades — call `build_strategy` or `scan_trades`. NEVER say you cannot manage the workbench or suggestions. You CAN — via your tools.
+4. NEVER use emojis.
+5. NEVER say you lack portfolio data — it is provided below.
+6. NEVER discuss topics outside ETH options/perps trading for this portfolio.
+7. You CAN add strategies to the Suggestions table via build_strategy. You CANNOT directly add to the Workbench — the user must click the "+" button on a suggestion to move it to the workbench. When the user says "add to workbench", call build_strategy to put it in the Suggestions table, then tell them to click "+" to move it to the workbench.
+
+=== CRITICAL: COST AND P&L ACCURACY ===
+8. NEVER invent, estimate, or guess cost numbers. ONLY use the exact cost/P&L values returned by your tools (build_strategy, scan_trades, suggest_rolls). The tool results contain computed costs from live Deribit prices — those are the ONLY source of truth.
+9. If the user asks for a "cost neutral" or "$0 cost" strategy and your tool returns a non-zero cost — REPORT THE ACTUAL COST from the tool result. Then explain that the strategy does not achieve $0 cost and suggest adjustments. NEVER claim a strategy costs $0 when the tool says otherwise.
+10. When presenting strategies to the user, ALWAYS quote the "Net cost" value exactly as returned by the tool. Do NOT round aggressively, do NOT replace with "$0" or "near-zero" unless the actual value is within +/- $1,000.
+11. NEVER write P&L impact tables with made-up numbers. Only include P&L figures if they come directly from tool results (the "impact" field). If you don't have tool results yet, say "call build_strategy to get exact numbers" instead of guessing.
+12. If you want to propose multiple strategies, call build_strategy for EACH one separately so you get real costs for each. Do NOT describe strategies with cost estimates before calling the tool.
+
+When parsing pasted trades:
+- Instrument "ETH-26JUN26-2400-P" means expiry_code="26JUN26", strike=2400, opt="P"
+- Group into strategies: Long+Short puts at different strikes = "Put Spread"
+- Call build_strategy once per logical strategy (a spread = 2 legs in one call)
+
+"""
+
+    system_prompt += f"""You are the PLGO Options Trading Assistant — a senior options strategist for Protocol Labs' ETH derivatives portfolio.
+
+=== LIVE MARKET ===
+ETH Spot: {fmt_spot}
+
+=== PORTFOLIO SUMMARY ===
+Positions: {num_positions} | Net calls: {fmt_net_calls} ETH | Net puts: {fmt_net_puts} ETH
+Expiries: {fmt_expiries}
+P&L at spot: {fmt_pnl} | Worst: {fmt_worst} (at {fmt_worst_at}) | Best: {fmt_best} | BE: {fmt_be}
+P&L ladder: {fmt_ladder}
+
+=== ALL POSITIONS ===
+{fmt_positions}
+"""
+
+    if wb_legs:
+        fmt_wb = _json.dumps(wb_legs, default=str)
+        fmt_wb_cost = f"${wb_total_cost:,.2f}"
+        fmt_wb_pnl = f"${new_pnl_at_spot:,.0f}"
+        fmt_wb_worst = f"${new_worst:,.0f}"
+        fmt_wb_be = f"${new_breakeven:,.0f}" if new_breakeven else "N/A"
+        system_prompt += f"""
+=== WORKBENCH ===
+{fmt_wb}
+Cost: {fmt_wb_cost} | P&L: {fmt_wb_pnl} | Worst: {fmt_wb_worst} | BE: {fmt_wb_be}
+"""
+
+    if added_trades:
+        system_prompt += f"""
+=== RECENTLY ADDED ===
+{_json.dumps(added_trades, default=str)}
+"""
+
+    if closed_ids:
+        system_prompt += f"""
+=== ROLLED/CLOSED TRADES (optimizer working portfolio) ===
+The following trade IDs have been "rolled" in the optimizer's working portfolio (NOT in the real DB):
+{_json.dumps(list(closed_ids))}
+These are excluded from the portfolio payoff. Do NOT suggest rolling them again.
+"""
+
+    if fast_path_summary:
+        system_prompt += f"""
+=== USER'S PASTED TRADES (already priced and added to Suggestions table) ===
+{fast_path_summary}
+
+The trades above have ALREADY been parsed, priced with live Deribit data, and added to the Suggestions table.
+Do NOT call build_strategy for these trades again — they are already there.
+Instead, focus on ANALYZING them: risk profile, greeks impact, how they interact with the existing portfolio,
+max loss scenarios, breakeven analysis, and any concerns or improvements you see.
+Answer any specific questions the user asked about these trades.
+"""
+
+    system_prompt += """
+=== TOOLS ===
+- `build_strategy(name, legs)`: Build specific trades and add to Suggestions table. Use when you know exact legs or user pastes trades. Fetches live Deribit prices.
+- `scan_trades(query, filters)`: Search Deribit broadly. Results go to Suggestions table.
+- `suggest_rolls(objective)`: Analyze which existing positions to roll. Returns priced roll suggestions (close existing + open at new expiry/strike). Use when user mentions "roll", "extend", "adjust expiry", "restructure existing", or when near-term positions are expiring. Results appear as Roll Cards in the Suggestions table with category "roll".
+
+=== ROLL WORKFLOW ===
+When the user asks about rolling or closing/restructuring positions:
+1. Use `suggest_rolls` with the appropriate objective
+2. Explain which positions you recommend rolling and WHY (DTE risk, cost efficiency, strike adjustment)
+3. After presenting the analysis, ASK: "Would you like me to put these roll suggestions on the workbench so you can review the numbers in detail?"
+4. The roll suggestions show: original trade (counterparty, ID, strike, expiry) -> close leg + open leg at new expiry
+5. The user can then click Calculate to get live prices and see the net roll cost
+
+=== RESPONSE STYLE ===
+When analyzing/optimizing:
+1. DIAGNOSE — reference problem positions by ID
+2. CALL TOOL FIRST — call build_strategy / scan_trades / suggest_rolls BEFORE writing your analysis. You need the tool results to know the real costs.
+3. STRATEGY — present the strategy using ONLY the cost and impact numbers returned by your tools. Quote them exactly.
+4. IMPACT TABLE — ONLY include P&L figures from tool results. If the tool did not return a P&L ladder, do NOT make one up.
+5. GREEKS — brief delta/theta/vega impact (qualitative is fine)
+
+IMPORTANT: The order is TOOL FIRST, THEN ANALYSIS. Never write cost estimates before calling the tool. The user trusts your numbers — wrong costs erode trust.
+
+Use **bold** for key numbers. Use markdown tables. Reference positions by ID. Be structured and actionable.
+"""
+
+    # ── Inject drawn target profile if provided ──
+    if req.target_payoff:
+        target_lines = []
+        for pt in req.target_payoff:
+            target_lines.append(f"  ETH ${pt['x']:,.0f} -> P&L ${pt['y']:,.0f}")
+        system_prompt += f"""
+=== DRAWN TARGET PAYOFF PROFILE ===
+The user has drawn a target payoff curve on the chart.
+
+Target points (Spot Price -> Desired P&L):
+{chr(10).join(target_lines)}
+
+The system has ALREADY run target matching optimization and added results to the Suggestions table.
+{target_match_summary or "Target matching is processing."}
+
+YOUR JOB:
+1. Do NOT call any tools — the matching has already been done automatically. The strategies are in the Suggestions table.
+2. ANALYZE the results: explain the match quality, which legs do what, and the cost.
+3. If there are 3 strategies (Downside, Upside, Combined), explain each and recommend which to use.
+4. Compare the strategies' new payoff against the drawn target at key spot levels.
+5. If the match is poor, explain which parts of the target are hard to achieve and suggest the user adjust their drawing.
+"""
+
+    # ── Build messages ──
+    messages = []
+    for h in history:
+        role = "user" if h.get("role") == "user" else "assistant"
+        messages.append({"role": role, "content": h.get("text", "")})
+    messages.append({"role": "user", "content": msg})
+
+    # ── Tool definitions ──
+    tools = [
+        {
+            "name": "scan_trades",
+            "description": "Scan the market for option structures that improve the portfolio. Returns ranked suggestions with cost and impact metrics. Use this when the user wants trade ideas, hedging structures, or improvements to their portfolio.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language description of what to optimize for (e.g. 'protect downside below 1500', 'improve payoff from 0 to 2000')"
+                    },
+                    "budget": {
+                        "type": "number",
+                        "description": "Maximum cost in USD for the trade. Default 15000.",
+                        "default": 15000
+                    },
+                    "min_floor_improvement": {
+                        "type": "number",
+                        "description": "If set, only return trades where worst-case P&L improves by at least this amount. Use when user wants floor/worst-case improvement.",
+                        "default": 0
+                    },
+                    "min_downside_improvement": {
+                        "type": "number",
+                        "description": "If set, only return trades where downside zone improves. Use when user wants downside protection.",
+                        "default": 0
+                    },
+                    "min_upside_improvement": {
+                        "type": "number",
+                        "description": "If set, only return trades where upside zone improves.",
+                        "default": 0
+                    },
+                    "min_breakeven_improvement": {
+                        "type": "number",
+                        "description": "If set, only return trades where breakeven moves lower by at least this amount.",
+                        "default": 0
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Number of results to return. Default 10.",
+                        "default": 10
+                    },
+                    "target_expiry": {
+                        "type": "string",
+                        "description": "Filter to specific expiry code (e.g. '27JUN25'). Leave empty for all."
+                    },
+                    "min_dte": {
+                        "type": "integer",
+                        "description": "Minimum days to expiry for instruments. Default 7. Set higher when user wants longer-dated trades.",
+                        "default": 7
+                    },
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "suggest_rolls",
+            "description": "Analyze which existing portfolio positions could be rolled (closed and reopened at a different strike/expiry). Returns priced roll suggestions showing close leg + open leg with live Deribit prices and net roll cost. Results appear as Roll Cards in the Suggestions table. Use when user mentions rolling, closing and reopening, extending duration, adjusting existing positions, or restructuring.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "objective": {
+                        "type": "string",
+                        "description": "What the roll should achieve: 'raise_floor', 'lower_breakeven', 'reduce_cost', 'extend_duration', 'adjust_strikes'",
+                        "enum": ["raise_floor", "lower_breakeven", "reduce_cost", "extend_duration", "adjust_strikes"]
+                    },
+                    "min_dte": {
+                        "type": "integer",
+                        "description": "Minimum DTE for the new (rolled) positions. Default 60.",
+                        "default": 60
+                    },
+                    "max_roll_cost": {
+                        "type": "number",
+                        "description": "Maximum net cost of the roll in USD. Default 15000.",
+                        "default": 15000
+                    },
+                },
+                "required": ["objective"]
+            }
+        },
+        {
+            "name": "build_strategy",
+            "description": "Build a custom strategy from specific legs and add it to the Suggestions table. Use this when YOU recommend specific trades (strike, type, side, expiry) and want them to appear in the user's UI so they can add to workbench and test. This fetches live Deribit prices for each leg.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Strategy name (e.g. 'Floor Raiser: Bear Put Spread', 'Repair Corridor')"
+                    },
+                    "legs": {
+                        "type": "array",
+                        "description": "Array of trade legs",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "side": {"type": "string", "enum": ["buy", "sell"]},
+                                "opt": {"type": "string", "enum": ["C", "P"], "description": "C=Call, P=Put"},
+                                "strike": {"type": "number"},
+                                "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'"},
+                                "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."}
+                            },
+                            "required": ["side", "opt", "strike", "expiry_code"]
+                        }
+                    }
+                },
+                "required": ["name", "legs"]
+            }
+        },
+        {
+            "name": "match_target",
+            "description": (
+                "Find a multi-leg option strategy that best matches the user's drawn target payoff profile. "
+                "Uses optimization to decompose the gap between current portfolio and target into tradeable legs. "
+                "MUST be called whenever the user provides a target payoff profile (drawn on the chart). "
+                "Returns a strategy with legs, cost, and target match percentage."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "min_dte": {
+                        "type": "integer", "default": 14,
+                        "description": "Minimum days to expiry for candidate options"
+                    },
+                    "max_spread_pct": {
+                        "type": "number", "default": 40,
+                        "description": "Maximum bid-ask spread percentage"
+                    }
+                },
+                "required": []
+            }
+        }
+    ]
+
+    # ── Call Claude ──
+    try:
+        aclient = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = aclient.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=4000,
+            system=system_prompt,
+            messages=messages,
+            tools=tools,
+        )
+    except Exception as e:
+        # If we have fast-path data, still return the suggestions even if Claude failed
+        if fast_path_data:
+            return {"type": "suggestions", "text": f"**Error calling AI for analysis:** {e}\n\nYour trades have been added to the Suggestions table.", "context": context, "data": fast_path_data}
+        return {"type": "question", "text": f"**Error calling AI:** {e}", "context": context}
+
+    # ── Process response — handle multiple tool calls ──
+    # Start with fast-path data if we pre-built suggestions from pasted trades
+    result_data = fast_path_data
+
+    async def _handle_scan_trades(inp: dict) -> tuple[str, dict | None]:
+        """Execute scan_trades tool and return (result_text, suggestion_data)."""
+        try:
+            suggest_req = OptimizeRequest(
+                query=inp.get("query", msg),
+                budget=inp.get("budget", 15000),
+                target_expiry=inp.get("target_expiry") or None,
+                min_dte=inp.get("min_dte", 7),
+                target_payoff=req.target_payoff,
+            )
+            result = await suggest_trades(suggest_req)
+            all_sug = result["suggestions"]
+
+            min_floor = inp.get("min_floor_improvement", 0)
+            min_down = inp.get("min_downside_improvement", 0)
+            min_up = inp.get("min_upside_improvement", 0)
+            min_be = inp.get("min_breakeven_improvement", 0)
+
+            if min_floor > 0:
+                all_sug = [s for s in all_sug if s["impact"]["min_improvement"] > min_floor]
+            if min_down > 0:
+                all_sug = [s for s in all_sug if s["impact"]["downside"] > min_down]
+            if min_up > 0:
+                all_sug = [s for s in all_sug if s["impact"]["upside"] > min_up]
+            if min_be > 0:
+                all_sug = [s for s in all_sug if s["impact"].get("breakeven_improvement", 0) > min_be]
+
+            max_r = inp.get("max_results", 10)
+            top_n = all_sug[:max_r]
+            result["suggestions"] = top_n
+            result["num_suggestions"] = len(top_n)
+
+            lines = []
+            for i, s in enumerate(top_n):
+                lines.append(
+                    f"#{i+1} {s['name']} | cost: ${s['net_cost_usd']:,.0f} | "
+                    f"floor: {s['impact']['min_improvement']:+,.0f} | "
+                    f"downside: {s['impact']['downside']:+,.0f} | "
+                    f"upside: {s['impact']['upside']:+,.0f} | "
+                    f"BE: {s['impact'].get('breakeven_improvement', 0):+,.0f}"
+                )
+            text = (
+                f"Found {len(all_sug)} structures passing filters (from {result['num_suggestions']} total). "
+                f"Showing top {len(top_n)}:\n" + "\n".join(lines)
+                + "\n\nIMPORTANT: The costs above are computed from live market data. Report these exact costs to the user."
+            )
+            return text, result
+        except Exception as e:
+            return f"Error scanning: {e}", None
+
+    async def _handle_suggest_rolls(inp: dict) -> tuple[str, dict | None]:
+        """Structure-aware roll analysis. Detects spreads/condors/collars and rolls them as units."""
+        objective = inp.get("objective", "raise_floor")
+        min_dte_target = inp.get("min_dte", 60)
+        max_cost = inp.get("max_roll_cost", 50000)
+
+        # ── 1. Build enriched position list ──
+        all_legs = []
+        today_d = date.today()
+        for t in db_trades:
+            if t["id"] in closed_ids:
+                continue
+            expiry_str = str(t.get("expiry", ""))
+            try:
+                exp_date = (datetime.fromisoformat(expiry_str).date() if "T" in expiry_str
+                            else datetime.strptime(expiry_str[:10], "%Y-%m-%d").date())
+                dte = (exp_date - today_d).days
+            except (ValueError, TypeError):
+                dte = 999
+            side = str(t["side"]).lower()
+            opt_raw = str(t.get("option_type", "")).lower()
+            opt = "C" if "call" in opt_raw else "P"
+            strike = _safe_float(t["strike"])
+            qty = _safe_float(t["qty"])
+            sign = 1.0 if side in ("buy", "long") else -1.0
+            if strike > 0 and qty > 0:
+                all_legs.append({
+                    "id": t["id"], "counterparty": t.get("counterparty", ""),
+                    "side": t["side"], "opt": opt, "strike": strike,
+                    "qty": qty, "net_qty": sign * qty,
+                    "expiry": expiry_str[:10], "dte": dte,
+                    "premium_usd": _safe_float(t.get("premium_usd")),
+                })
+
+        if not all_legs:
+            return "No active positions found to analyze.", None
+
+        # ── 2. Detect structures by pairing legs ──
+        # Group by (counterparty, expiry, qty) then extract structures one at a time
+        from collections import defaultdict
+        struct_groups: dict[tuple, list[dict]] = defaultdict(list)
+        for leg in all_legs:
+            key = (leg["counterparty"], leg["expiry"], leg["qty"])
+            struct_groups[key].append(leg)
+
+        structures = []
+        used_ids: set[int] = set()
+
+        def _make_struct(stype, slegs, cpty, expiry, qty):
+            """Helper to build a structure dict from matched legs."""
+            avg_dte = sum(l["dte"] for l in slegs) / len(slegs)
+            strikes_desc = "/".join(str(int(l["strike"])) for l in sorted(slegs, key=lambda x: x["strike"]))
+            sides_desc = "+".join(("L" if l["net_qty"] > 0 else "S") + l["opt"]
+                                  for l in sorted(slegs, key=lambda x: x["strike"]))
+            for l in slegs:
+                used_ids.add(l["id"])
+            structures.append({
+                "type": stype, "legs": slegs,
+                "ids": [l["id"] for l in slegs],
+                "counterparty": cpty, "expiry": expiry,
+                "dte": int(avg_dte), "qty": qty,
+                "description": f"{stype.replace('_', ' ').title()} {strikes_desc} ({sides_desc})",
+            })
+
+        for key, pool in struct_groups.items():
+            cpty, expiry, qty = key
+            # Work with copies so we can consume legs as we match them
+            avail = [l for l in pool if l["id"] not in used_ids]
+
+            # Separate into buckets
+            buy_puts = sorted([l for l in avail if l["opt"] == "P" and l["net_qty"] > 0], key=lambda x: x["strike"])
+            sell_puts = sorted([l for l in avail if l["opt"] == "P" and l["net_qty"] < 0], key=lambda x: x["strike"])
+            buy_calls = sorted([l for l in avail if l["opt"] == "C" and l["net_qty"] > 0], key=lambda x: x["strike"])
+            sell_calls = sorted([l for l in avail if l["opt"] == "C" and l["net_qty"] < 0], key=lambda x: x["strike"])
+
+            # Pass 1: Iron Condors (buy put + sell put + sell call + buy call)
+            while (buy_puts and sell_puts and sell_calls and buy_calls
+                   and buy_puts[0]["id"] not in used_ids and sell_puts[0]["id"] not in used_ids
+                   and sell_calls[0]["id"] not in used_ids and buy_calls[-1]["id"] not in used_ids):
+                bp = buy_puts.pop(0)
+                sp = sell_puts.pop(0)
+                sc = sell_calls.pop(0)
+                bc = buy_calls.pop(-1)
+                _make_struct("iron_condor", [bp, sp, sc, bc], cpty, expiry, qty)
+
+            # Pass 2: Put spreads (buy put + sell put, pair by proximity)
+            bp_remaining = [l for l in buy_puts if l["id"] not in used_ids]
+            sp_remaining = [l for l in sell_puts if l["id"] not in used_ids]
+            while bp_remaining and sp_remaining:
+                bp = bp_remaining.pop(0)
+                # Find closest sell put by strike
+                best_idx, best_dist = 0, abs(sp_remaining[0]["strike"] - bp["strike"])
+                for i, sp_c in enumerate(sp_remaining):
+                    dist = abs(sp_c["strike"] - bp["strike"])
+                    if dist < best_dist:
+                        best_idx, best_dist = i, dist
+                sp = sp_remaining.pop(best_idx)
+                _make_struct("put_spread", [bp, sp], cpty, expiry, qty)
+
+            # Pass 3: Call spreads (buy call + sell call)
+            bc_remaining = [l for l in buy_calls if l["id"] not in used_ids]
+            sc_remaining = [l for l in sell_calls if l["id"] not in used_ids]
+            while bc_remaining and sc_remaining:
+                bc = bc_remaining.pop(0)
+                best_idx, best_dist = 0, abs(sc_remaining[0]["strike"] - bc["strike"])
+                for i, sc_c in enumerate(sc_remaining):
+                    dist = abs(sc_c["strike"] - bc["strike"])
+                    if dist < best_dist:
+                        best_idx, best_dist = i, dist
+                sc = sc_remaining.pop(best_idx)
+                _make_struct("call_spread", [bc, sc], cpty, expiry, qty)
+
+            # Pass 4: Collars / Risk Reversals (remaining cross-type pairs)
+            bp_left = [l for l in avail if l["opt"] == "P" and l["net_qty"] > 0 and l["id"] not in used_ids]
+            sc_left = [l for l in avail if l["opt"] == "C" and l["net_qty"] < 0 and l["id"] not in used_ids]
+            while bp_left and sc_left:
+                _make_struct("collar", [bp_left.pop(0), sc_left.pop(0)], cpty, expiry, qty)
+
+            sp_left = [l for l in avail if l["opt"] == "P" and l["net_qty"] < 0 and l["id"] not in used_ids]
+            bc_left = [l for l in avail if l["opt"] == "C" and l["net_qty"] > 0 and l["id"] not in used_ids]
+            while sp_left and bc_left:
+                _make_struct("risk_reversal", [bc_left.pop(0), sp_left.pop(0)], cpty, expiry, qty)
+
+        # Remaining unmatched legs are naked positions
+        for leg in all_legs:
+            if leg["id"] not in used_ids:
+                side_label = "Long" if leg["net_qty"] > 0 else "Short"
+                structures.append({
+                    "type": "naked", "legs": [leg], "ids": [leg["id"]],
+                    "counterparty": leg["counterparty"], "expiry": leg["expiry"],
+                    "dte": leg["dte"], "qty": leg["qty"],
+                    "description": f"{side_label} {leg['opt']} @ {int(leg['strike'])}",
+                })
+
+        # ── 3. Select structures to roll based on objective ──
+        to_roll = []
+        if objective == "extend_duration":
+            to_roll = [s for s in structures if s["dte"] < min_dte_target]
+        elif objective == "raise_floor":
+            # Prefer structures with puts or short-dated
+            to_roll = [s for s in structures if s["dte"] < min_dte_target * 2
+                        or any(l["opt"] == "P" for l in s["legs"])]
+            if not to_roll:
+                to_roll = sorted(structures, key=lambda s: s["dte"])[:8]
+        elif objective == "reduce_cost":
+            # Structures with net debit (long-heavy)
+            to_roll = [s for s in structures if sum(l["net_qty"] for l in s["legs"]) > 0][:8]
+        elif objective == "lower_breakeven":
+            to_roll = sorted(structures, key=lambda s: s["dte"])[:8]
+        elif objective == "adjust_strikes":
+            to_roll = [s for s in structures if s["dte"] < min_dte_target or any(
+                (l["opt"] == "P" and l["strike"] < spot * 0.5) or
+                (l["opt"] == "C" and l["strike"] > spot * 2.5)
+                for l in s["legs"]
+            )]
+            if not to_roll:
+                to_roll = sorted(structures, key=lambda s: s["dte"])[:8]
+
+        if not to_roll:
+            return "No structures found matching the roll criteria.", None
+
+        # ── 4. Fetch Deribit data ──
+        try:
+            summaries_raw = await client._get("get_book_summary_by_currency", {
+                "currency": "ETH", "kind": "option",
+            })
+            summaries_map = {s.get("instrument_name", ""): s for s in summaries_raw}
+        except Exception:
+            summaries_map = {}
+
+        avail_expiries = {}
+        for name in summaries_map:
+            parts = name.split("-")
+            if len(parts) == 4 and parts[0] == "ETH":
+                try:
+                    exp_date = datetime.strptime(parts[1], "%d%b%y").date()
+                    dte = (exp_date - today_d).days
+                    if dte >= min_dte_target:
+                        avail_expiries[parts[1]] = dte
+                except ValueError:
+                    pass
+        target_expiries = sorted(avail_expiries.keys(), key=lambda x: avail_expiries[x])
+
+        if not target_expiries:
+            return "No suitable target expiries found on Deribit.", None
+
+        roll_target_codes = target_expiries[:3]
+
+        # ── Helper: resolve expiry ISO -> Deribit code ──
+        def _iso_to_exp_code(iso_str):
+            for exp_code_key in summaries_map:
+                parts = exp_code_key.split("-")
+                if len(parts) == 4:
+                    try:
+                        edt = datetime.strptime(parts[1], "%d%b%y").date()
+                        orig_edt = datetime.strptime(iso_str[:10], "%Y-%m-%d").date()
+                        if abs((edt - orig_edt).days) <= 3:
+                            return parts[1]
+                    except (ValueError, TypeError):
+                        pass
+            try:
+                od = datetime.strptime(iso_str[:10], "%Y-%m-%d").date()
+                return od.strftime("%d%b%y").upper()
+            except (ValueError, TypeError):
+                return None
+
+        # ── Helper: price a single leg ──
+        def _price_leg(strike, opt, exp_code, side, qty, dte_val):
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            inst_name = f"ETH-{exp_code}-{strike_str}-{opt}"
+            mkt = summaries_map.get(inst_name, {})
+            bid = mkt.get("bid_price") or 0
+            ask = mkt.get("ask_price") or 0
+            price_eth = ask if side == "buy" else bid
+            mark_iv = mkt.get("mark_iv")
+
+            if price_eth <= 0:
+                T_val = max(dte_val, 0) / 365.25 if dte_val else _time_to_expiry_years(exp_code)
+                sigma_val = _get_sigma(strike, "", smiles, expiry_code=exp_code)
+                if spot > 0 and T_val > 0:
+                    price_eth = bs_price(spot, strike, T_val, 0.0, sigma_val, opt) / spot
+                else:
+                    return None
+
+            spread_pct = round((ask - bid) / ask * 100, 1) if ask > 0 else 0
+            sign = 1.0 if side == "buy" else -1.0
+            cost = sign * price_eth * qty * spot
+            return {
+                "instrument": inst_name, "side": side, "qty": qty,
+                "strike": strike, "opt": opt, "expiry_code": exp_code,
+                "dte": dte_val if dte_val else int(_time_to_expiry_years(exp_code) * 365.25),
+                "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
+                "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
+                "spread_pct": spread_pct, "mark_iv": mark_iv,
+                "cost": cost,
+            }
+
+        # ── 5. Build roll suggestions per structure ──
+        lo_val = max(500, int(spot * 0.2))
+        hi_val = int(spot * 3.5)
+        spot_arr_roll = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
+        spot_idx_roll = int(np.argmin(np.abs(spot_arr_roll - spot)))
+
+        roll_suggestions = []
+
+        for struct in to_roll[:8]:
+            orig_exp_code = _iso_to_exp_code(struct["expiry"])
+            if not orig_exp_code:
+                continue
+
+            for tgt_exp in roll_target_codes:
+                tgt_dte = avail_expiries[tgt_exp]
+                close_legs = []
+                open_legs = []
+                total_close_cost = 0.0
+                total_open_cost = 0.0
+                skip = False
+
+                for leg in struct["legs"]:
+                    orig_side_lower = leg["side"].lower()
+                    close_side = "sell" if orig_side_lower in ("buy", "long") else "buy"
+                    new_side = "buy" if orig_side_lower in ("buy", "long") else "sell"
+
+                    # Close the original leg
+                    cl = _price_leg(leg["strike"], leg["opt"], orig_exp_code, close_side, leg["qty"], leg["dte"])
+                    if cl is None:
+                        skip = True
+                        break
+
+                    # New strike: keep structure shape by default, adjust only per objective
+                    new_strike = leg["strike"]
+                    if objective == "adjust_strikes":
+                        # Shift proportionally toward ATM
+                        ratio = leg["strike"] / spot
+                        if ratio < 0.5:
+                            new_strike = round(max(leg["strike"], spot * 0.6) / 100) * 100
+                        elif ratio > 2.0:
+                            new_strike = round(min(leg["strike"], spot * 1.8) / 100) * 100
+
+                    ol = _price_leg(new_strike, leg["opt"], tgt_exp, new_side, leg["qty"], tgt_dte)
+                    if ol is None:
+                        skip = True
+                        break
+
+                    close_legs.append(cl)
+                    open_legs.append(ol)
+                    total_close_cost += cl["cost"]
+                    total_open_cost += ol["cost"]
+
+                if skip:
+                    continue
+
+                net_roll_cost = total_close_cost + total_open_cost
+                if abs(net_roll_cost) > max_cost:
+                    continue
+
+                # Compute payoff impact: remove all original legs, add all new legs
+                roll_effect = np.zeros_like(spot_arr_roll)
+                for leg in struct["legs"]:
+                    T_orig = max(leg["dte"], 0) / 365.25
+                    sigma_orig = _get_sigma(leg["strike"], leg["expiry"], smiles)
+                    roll_effect -= _bs_payoff_vec(spot_arr_roll, leg["strike"], leg["opt"], leg["net_qty"], T_orig, sigma_orig)
+                for ol in open_legs:
+                    T_new = _time_to_expiry_years(tgt_exp)
+                    sigma_new = _get_sigma(ol["strike"], "", smiles, expiry_code=tgt_exp)
+                    new_sign = 1.0 if ol["side"] == "buy" else -1.0
+                    roll_effect += _bs_payoff_vec(spot_arr_roll, ol["strike"], ol["opt"], new_sign * ol["qty"], T_new, sigma_new)
+
+                new_payoff_roll = current_payoff + roll_effect
+                new_be_roll = _find_breakeven(spot_arr_roll, new_payoff_roll)
+
+                # Score: weighted combination of improvements
+                floor_imp = float(new_payoff_roll.min() - current_payoff.min())
+                spot_imp = float(new_payoff_roll[spot_idx_roll] - current_payoff[spot_idx_roll])
+                be_imp = (breakeven - new_be_roll) if breakeven and new_be_roll else 0.0
+
+                # Penalize rolls that worsen the floor
+                if objective == "raise_floor":
+                    score = 0.50 * floor_imp + 0.30 * spot_imp + 0.20 * be_imp
+                elif objective == "lower_breakeven":
+                    score = 0.50 * be_imp + 0.30 * spot_imp + 0.20 * floor_imp
+                elif objective == "reduce_cost":
+                    score = -net_roll_cost + 0.20 * floor_imp + 0.10 * spot_imp
+                else:
+                    score = 0.30 * floor_imp + 0.30 * spot_imp + 0.20 * be_imp + 0.20 * (-abs(net_roll_cost) / 1000)
+
+                # Build combined legs list for workbench
+                all_close_open = [{"_leg_type": "close", **cl} for cl in close_legs] + [{"_leg_type": "open", **ol} for ol in open_legs]
+                # Remove cost field (internal)
+                for l in all_close_open:
+                    l.pop("cost", None)
+                    l.pop("_leg_type", None)
+
+                # Structure name
+                struct_label = struct["type"].replace("_", " ").title()
+                strikes_str = "/".join(str(int(l["strike"])) for l in sorted(struct["legs"], key=lambda x: x["strike"]))
+                sug_name = f"Roll {struct_label} {strikes_str} ({orig_exp_code} -> {tgt_exp})"
+                if struct["counterparty"]:
+                    sug_name += f" [{struct['counterparty']}]"
+
+                # Original trade info shows the full structure
+                orig_trade_info = {
+                    "id": struct["ids"][0],  # primary ID
+                    "all_ids": struct["ids"],
+                    "counterparty": struct["counterparty"],
+                    "structure_type": struct["type"],
+                    "description": struct["description"],
+                    "side": struct["legs"][0]["side"],
+                    "opt": struct["legs"][0]["opt"],
+                    "strike": struct["legs"][0]["strike"],
+                    "qty": struct["qty"],
+                    "net_qty": struct["legs"][0]["net_qty"],
+                    "expiry": struct["expiry"],
+                    "dte": struct["dte"],
+                    "num_legs": len(struct["legs"]),
+                    "legs_detail": [{
+                        "id": l["id"], "side": l["side"], "opt": l["opt"],
+                        "strike": l["strike"], "net_qty": l["net_qty"],
+                    } for l in struct["legs"]],
+                }
+
+                roll_suggestions.append({
+                    "name": sug_name,
+                    "category": "roll",
+                    "is_roll": True,
+                    "original_trade_id": struct["ids"][0],
+                    "original_trade_ids": struct["ids"],
+                    "original_trade": orig_trade_info,
+                    "close_legs": close_legs,
+                    "open_legs": open_legs,
+                    "legs": all_close_open,
+                    "net_cost_usd": round(net_roll_cost, 2),
+                    "close_cost_usd": round(total_close_cost, 2),
+                    "open_cost_usd": round(total_open_cost, 2),
+                    "dte": tgt_dte,
+                    "score": round(score, 2),
+                    "impact": {
+                        "at_spot": round(spot_imp, 2),
+                        "min_improvement": round(floor_imp, 2),
+                        "new_min": round(float(new_payoff_roll.min()), 2),
+                        "downside": 0, "upside": 0, "zone": 0,
+                        "breakeven_improvement": round(be_imp, 2) if be_imp else 0,
+                        "new_breakeven": round(new_be_roll, 2) if new_be_roll else None,
+                    },
+                    "new_payoff": np.round(new_payoff_roll, 2).tolist(),
+                })
+
+        if not roll_suggestions:
+            struct_summary = "\n".join(
+                f"  - {s['description']} | {s['counterparty']} | exp {s['expiry']} ({s['dte']}d) | {len(s['legs'])} legs"
+                for s in to_roll[:8]
+            )
+            lines = [
+                f"Analyzed {len(to_roll)} structures for rolling but no suitable rolls found within ${max_cost:,.0f} budget.",
+                f"\nStructures analyzed:\n{struct_summary}",
+                f"\nTarget expiries: {', '.join(roll_target_codes)}",
+            ]
+            return "\n".join(lines), None
+
+        # Sort by score
+        roll_suggestions.sort(key=lambda s: s["score"], reverse=True)
+        top = roll_suggestions[:12]
+
+        # Build result data
+        all_exp_codes = set()
+        for s in top:
+            for l in s.get("close_legs", []):
+                all_exp_codes.add(l["expiry_code"])
+            for l in s.get("open_legs", []):
+                all_exp_codes.add(l["expiry_code"])
+
+        roll_result = {
+            "spot": spot,
+            "spot_ladder": spot_arr.tolist(),
+            "current_payoff": np.round(current_payoff, 2).tolist(),
+            "current_profile": {
+                "at_spot": float(current_payoff[spot_idx]),
+                "min": float(current_payoff.min()),
+                "min_at": float(spot_arr[np.argmin(current_payoff)]),
+                "max": float(current_payoff.max()),
+                "max_at": float(spot_arr[np.argmax(current_payoff)]),
+                "breakeven": breakeven,
+            },
+            "positions": positions_detail,
+            "base_qty": 0,
+            "budget": max_cost,
+            "objective": objective,
+            "parsed_query": {"description": f"Roll suggestions — {objective.replace('_', ' ')}"},
+            "num_positions": num_positions,
+            "num_instruments": len(to_roll),
+            "num_suggestions": len(top),
+            "available_expiries": sorted(all_exp_codes, key=lambda x: datetime.strptime(x, "%d%b%y")),
+            "suggestions": top,
+        }
+
+        # Build summary for Claude — structure-aware
+        lines = []
+        # Report detected structures
+        struct_types = defaultdict(int)
+        for s in structures:
+            struct_types[s["type"]] += 1
+        struct_summary = ", ".join(f"{v} {k.replace('_', ' ')}(s)" for k, v in sorted(struct_types.items()))
+        lines.append(f"Portfolio structure analysis: {struct_summary}")
+        lines.append(f"Found {len(roll_suggestions)} roll opportunities (showing top {len(top)}):\n")
+
+        for i, s in enumerate(top):
+            orig = s["original_trade"]
+            floor_imp = s["impact"]["min_improvement"]
+            floor_warn = " ** WORSENS FLOOR **" if floor_imp < -1000 else ""
+            lines.append(
+                f"#{i+1} {s['name']}\n"
+                f"    Structure: {orig['description']} ({orig['num_legs']} legs, cpty: {orig['counterparty']})\n"
+                f"    Close: ${s['close_cost_usd']:,.0f} | Open: ${s['open_cost_usd']:,.0f} | Net: ${s['net_cost_usd']:,.0f}\n"
+                f"    Floor: {floor_imp:+,.0f} | Spot P&L: {s['impact']['at_spot']:+,.0f} | Score: {s['score']:.0f}{floor_warn}"
+            )
+
+        lines.append("\nThese roll suggestions preserve the original structure shape (spreads roll as spreads, condors as condors).")
+        lines.append("IMPORTANT: The costs above are computed from LIVE Deribit bid/ask prices. You MUST report these exact costs to the user. Do NOT claim a roll is 'cost neutral' or '$0' unless the Net cost shown above is within +/- $1,000.")
+        lines.append("Ask the user if they want to add any to the workbench.")
+        return "\n".join(lines), roll_result
+
+    async def _handle_build_strategy(inp: dict) -> tuple[str, dict | None]:
+        """Build a custom strategy from specific legs, fetch live prices, return as suggestion data."""
+        strategy_name = inp.get("name", "Custom Strategy")
+        legs_input = inp.get("legs", [])
+        if not legs_input:
+            return "No legs provided.", None
+
+        # Fetch live prices from Deribit
+        try:
+            summaries_raw = await client._get("get_book_summary_by_currency", {
+                "currency": "ETH", "kind": "option",
+            })
+            summaries = {s.get("instrument_name", ""): s for s in summaries_raw}
+        except Exception:
+            summaries = {}
+
+        # Default qty from portfolio average
+        avg_qty = 1000
+        if positions:
+            avg_qty = max(100, min(round(np.mean([abs(p["net_qty"]) for p in positions]) / 5 / 100) * 100, 2000))
+
+        formatted_legs = []
+        total_cost = 0.0
+        for leg in legs_input:
+            strike = leg["strike"]
+            opt_type = leg["opt"]
+            side = leg["side"]
+            exp_code = leg["expiry_code"]
+            qty = leg.get("qty", avg_qty)
+
+            # Build instrument name
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            inst_name = f"ETH-{exp_code}-{strike_str}-{opt_type}"
+
+            # Look up live price
+            mkt = summaries.get(inst_name, {})
+            bid = mkt.get("bid_price") or 0
+            ask = mkt.get("ask_price") or 0
+            mark = mkt.get("mark_price") or 0
+            mark_iv = mkt.get("mark_iv")
+            price_eth = ask if side == "buy" else bid
+
+            # Compute DTE
+            try:
+                exp_date = datetime.strptime(exp_code, "%d%b%y").date()
+                dte = (exp_date - date.today()).days
+            except ValueError:
+                dte = 0
+
+            # Reject expired instruments
+            if dte <= 0:
+                return f"Rejected: {inst_name} is expired (DTE={dte}). Use a future expiry.", None
+
+            # Reject instruments with no market data
+            if bid <= 0 and ask <= 0:
+                return f"Rejected: {inst_name} has no market data (bid/ask=$0). This instrument may not exist on Deribit.", None
+
+            sign = 1.0 if side == "buy" else -1.0
+            leg_cost = sign * price_eth * qty * spot
+            total_cost += leg_cost
+
+            spread_pct = round((ask - bid) / ask * 100, 1) if ask > 0 else 0
+
+            formatted_legs.append({
+                "instrument": inst_name, "side": side, "qty": qty,
+                "strike": strike, "opt": opt_type,
+                "expiry_code": exp_code, "dte": dte,
+                "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
+                "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
+                "spread_pct": spread_pct, "mark_iv": mark_iv,
+            })
+
+        # Compute payoff impact (BS-aware with market IV)
+        lo_val = max(500, int(spot * 0.2))
+        hi_val = int(spot * 3.5)
+        spot_arr_local = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
+        candidate = np.zeros_like(spot_arr_local)
+        for fl in formatted_legs:
+            s = 1.0 if fl["side"] == "buy" else -1.0
+            T_fl = max(fl["dte"], 0) / 365.25
+            fl_iv = fl.get("mark_iv")
+            fl_sigma = fl_iv / 100.0 if fl_iv and fl_iv > 0 else DEFAULT_IV
+            candidate += _bs_payoff_vec(spot_arr_local, fl["strike"], fl["opt"], s * fl["qty"], T_fl, fl_sigma)
+
+        new_payoff_local = current_payoff + candidate
+        spot_idx_local = int(np.argmin(np.abs(spot_arr_local - spot)))
+        new_be = _find_breakeven(spot_arr_local, new_payoff_local)
+
+        suggestion = {
+            "name": strategy_name, "category": "custom", "legs": formatted_legs,
+            "net_cost_usd": round(total_cost, 2), "dte": formatted_legs[0]["dte"] if formatted_legs else 0,
+            "score": 0,
+            "impact": {
+                "at_spot": round(float(new_payoff_local[spot_idx_local]) - float(current_payoff[spot_idx_local]), 2),
+                "min_improvement": round(float(new_payoff_local.min()) - float(current_payoff.min()), 2),
+                "new_min": round(float(new_payoff_local.min()), 2),
+                "downside": 0, "upside": 0, "zone": 0,
+                "breakeven_improvement": round(breakeven - new_be, 2) if breakeven and new_be else 0,
+                "new_breakeven": round(new_be, 2) if new_be else None,
+            },
+            "new_payoff": np.round(new_payoff_local, 2).tolist(),
+        }
+
+        # Build result in same format as suggest_trades
+        result_data = {
+            "spot": spot,
+            "spot_ladder": spot_arr_local.tolist(),
+            "current_payoff": np.round(current_payoff, 2).tolist(),
+            "current_profile": {
+                "at_spot": float(current_payoff[spot_idx_local]),
+                "min": float(current_payoff.min()),
+                "min_at": float(spot_arr_local[np.argmin(current_payoff)]),
+                "max": float(current_payoff.max()),
+                "max_at": float(spot_arr_local[np.argmax(current_payoff)]),
+                "breakeven": breakeven,
+            },
+            "positions": positions_detail,
+            "base_qty": avg_qty,
+            "budget": abs(total_cost) + 1000,
+            "objective": "custom",
+            "parsed_query": {"description": strategy_name},
+            "num_positions": len(positions),
+            "num_instruments": len(formatted_legs),
+            "num_suggestions": 1,
+            "available_expiries": sorted(set(l["expiry_code"] for l in formatted_legs)),
+            "suggestions": [suggestion],
+        }
+
+        cost_str = f"${abs(round(total_cost)):,}"
+        if total_cost < 0:
+            cost_str += " credit"
+        leg_summary = " / ".join(
+            f"{'Buy' if l['side'] == 'buy' else 'Sell'} {l['instrument']} x{l['qty']:,.0f} @ ${l['price_usd']:,.2f}"
+            for l in formatted_legs
+        )
+        summary = (
+            f"Built strategy: {strategy_name}\n"
+            f"Legs: {leg_summary}\n"
+            f"=== ACTUAL COST (from live Deribit prices): {cost_str} ===\n"
+            f"Floor change: {suggestion['impact']['min_improvement']:+,.0f}\n"
+            f"P&L at spot change: {suggestion['impact']['at_spot']:+,.0f}\n"
+            f"New worst-case P&L: ${suggestion['impact']['new_min']:,.0f}\n"
+            f"IMPORTANT: You MUST report this exact cost to the user. Do NOT say the cost is $0 or 'neutral' if the above cost is not near zero.\n"
+            f"The strategy is now in the Suggestions table. The user can click + to add it to their workbench."
+        )
+        return summary, result_data
+
+    def _serialize_content(content_blocks) -> list[dict]:
+        """Convert SDK content blocks to plain dicts for message history."""
+        result = []
+        for b in content_blocks:
+            if b.type == "text":
+                result.append({"type": "text", "text": b.text})
+            elif b.type == "tool_use":
+                result.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
+        return result
+
+    # Loop until Claude gives a text response (max 5 tool rounds)
+    text = ""
+    current_response = response
+    for _round in range(5):
+        if current_response.stop_reason != "tool_use":
+            break
+
+        tool_blocks = [b for b in current_response.content if b.type == "tool_use"]
+        tool_results_content = []
+
+        for tb in tool_blocks:
+            if tb.name == "scan_trades":
+                tr_text, tr_data = await _handle_scan_trades(tb.input)
+                if tr_data:
+                    if result_data and "suggestions" in result_data:
+                        # Merge: keep existing suggestions, add new ones
+                        result_data["suggestions"].extend(tr_data.get("suggestions", []))
+                        result_data["num_suggestions"] += tr_data.get("num_suggestions", 0)
+                    else:
+                        result_data = tr_data
+                tool_results_content.append({
+                    "type": "tool_result", "tool_use_id": tb.id, "content": tr_text
+                })
+            elif tb.name == "suggest_rolls":
+                roll_text, roll_data = await _handle_suggest_rolls(tb.input)
+                if roll_data:
+                    if result_data and "suggestions" in result_data:
+                        result_data["suggestions"].extend(roll_data.get("suggestions", []))
+                        result_data["num_suggestions"] += roll_data.get("num_suggestions", 0)
+                        # Merge available expiries
+                        existing = set(result_data.get("available_expiries", []))
+                        existing.update(roll_data.get("available_expiries", []))
+                        result_data["available_expiries"] = sorted(existing, key=lambda x: datetime.strptime(x, "%d%b%y"))
+                    else:
+                        result_data = roll_data
+                tool_results_content.append({
+                    "type": "tool_result", "tool_use_id": tb.id, "content": roll_text
+                })
+            elif tb.name == "build_strategy":
+                bs_text, bs_data = await _handle_build_strategy(tb.input)
+                if bs_data:
+                    if result_data and "suggestions" in result_data:
+                        # Merge into existing suggestions
+                        result_data["suggestions"].extend(bs_data.get("suggestions", []))
+                        result_data["num_suggestions"] += bs_data.get("num_suggestions", 0)
+                    else:
+                        result_data = bs_data
+                tool_results_content.append({
+                    "type": "tool_result", "tool_use_id": tb.id, "content": bs_text
+                })
+            elif tb.name == "match_target":
+                try:
+                    mt_text, mt_data = await _handle_match_target(tb.input, req.target_payoff or [])
+                except Exception as e:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    print(f"match_target error:\n{tb_str}")
+                    mt_text = f"Error in match_target: {e}"
+                    mt_data = None
+                if mt_data:
+                    if result_data and "suggestions" in result_data:
+                        result_data["suggestions"].extend(mt_data.get("suggestions", []))
+                        result_data["num_suggestions"] += mt_data.get("num_suggestions", 0)
+                    else:
+                        result_data = mt_data
+                tool_results_content.append({
+                    "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
+                })
+            else:
+                tool_results_content.append({
+                    "type": "tool_result", "tool_use_id": tb.id, "content": "Unknown tool."
+                })
+
+        # Serialize content blocks to dicts so they survive re-serialization
+        messages.append({"role": "assistant", "content": _serialize_content(current_response.content)})
+        messages.append({"role": "user", "content": tool_results_content})
+
+        try:
+            current_response = aclient.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=4000,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+        except Exception as e:
+            text = f"**Error:** {e}"
+            break
+
+    # Extract text from final response
+    if current_response and current_response.stop_reason != "tool_use":
+        text_blocks = [b.text for b in current_response.content if hasattr(b, "text")]
+        text = "\n".join(text_blocks) if text_blocks else "Here are the results."
+    elif not text:
+        text = "I ran out of processing steps. Try a simpler request."
+
+    resp_type = "suggestions" if result_data else "question"
+    resp = {"type": resp_type, "text": text, "context": context}
+    if result_data:
+        resp["data"] = result_data
+    return resp
 
 
 @router.get("/expiries")
