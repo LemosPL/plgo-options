@@ -169,7 +169,6 @@ class OptimizerV2:
         held_option_keys: set[tuple[str, float, str]] = set()
         held_expiry_codes: set[str] = set()
         for p in self.positions:
-            print(f"Position: {p.instrument}")
             parts = p.instrument.split("-")
             if len(parts) >= 4:
                 exp_code = parts[1]
@@ -248,7 +247,7 @@ class OptimizerV2:
             strike=S,
             opt="F",
             iv_pct=0.0,
-            counterparty="deribit",
+            counterparty="Deribit",
             delta=1.0,
             gamma=0.0,
             theta=0.0,
@@ -397,7 +396,7 @@ class OptimizerV2:
         self,
         risk_aversion: float = 1.0,
         brokerage_txn_cost_pct: float = 5.0,
-        deribit_txn_cost_pct: float = 0.15,
+        deribit_txn_cost_pct: float = 0.1,
         max_collateral: float = 4_000_000.0,
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
@@ -420,7 +419,7 @@ class OptimizerV2:
             vega netting; higher means more shared vega risk.
         """
         print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
-        S = self.eth_spot
+        spot = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
 
         if not candidates:
@@ -441,7 +440,7 @@ class OptimizerV2:
                 continue
             strikes = smile["strikes"]
             ivs = smile["ivs"]
-            best_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - S))
+            best_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
             atm_ivs.append(ivs[best_idx])
         atm_iv = float(np.mean(atm_ivs)) / 100.0 if atm_ivs else 0.80
         sigma_daily = atm_iv / math.sqrt(252)
@@ -521,8 +520,8 @@ class OptimizerV2:
             idx_arr = np.array(idxs, dtype=int)
 
             greek_mag_bucket = np.sqrt(
-                (c_delta[idx_arr] * S) ** 2
-                + (c_gamma[idx_arr] * S**2) ** 2
+                (c_delta[idx_arr] * spot) ** 2
+                + (c_gamma[idx_arr] * spot ** 2) ** 2
                 + c_vega[idx_arr] ** 2
             )
 
@@ -541,11 +540,8 @@ class OptimizerV2:
         c_vega = c_vega * strike_weight
 
         # Per-candidate cost rate: 5bps for perp, txn_cost_pct for options
-        PERP_COST_BPS = 5.0  # 5 basis points = 0.05%
-        c_cost_rate = np.array([
-            PERP_COST_BPS / 10_000.0 if c.opt == "F" else brokerage_txn_cost_pct / 100.0
-            for c in candidates
-        ])
+        perp_cost_bps = 2.0  # 5 basis points = 0.05%
+        c_cost_rate = self.compute_costs(spot, candidates, perp_cost_bps, brokerage_txn_cost_pct, deribit_txn_cost_pct)
 
         # ------------------------------------------------------------------
         # Per-candidate: existing position qty and "is_held" flag
@@ -751,8 +747,6 @@ class OptimizerV2:
                     "new_qty": int(new_qty),
                 })
 
-        print(np.array(trades))
-
         # Post-optimization portfolio greeks
         opt_x = result.x
         new_delta = port_delta + np.dot(opt_x, c_delta)
@@ -818,7 +812,7 @@ class OptimizerV2:
         return {
             "status": "ok",
             "snapshot_path": str(self.snapshot_path),
-            "eth_spot": S,
+            "eth_spot": spot,
             "spot_ladder": self.spot_ladder,
             "chart_horizons": horizons,
             "params": {
@@ -856,6 +850,22 @@ class OptimizerV2:
             "candidates_evaluated": n,
             "optimizer_converged": result.success,
         }
+
+    def compute_costs(self, spot, candidates, perp_cost_bps, brokerage_txn_cost_pct, deribit_txn_cost_pct):
+        c_cost_list = []
+        for c in candidates:
+            if c.opt == "F":
+                cost = perp_cost_bps / 10_000.0
+            elif c.counterparty == "Deribit":
+                cost = spot * deribit_txn_cost_pct / 100.0
+            elif c.counterparty == "Flowdesk" or c.counterparty == "Keyrock":
+                cost = brokerage_txn_cost_pct / 100.0
+            else:
+                cost = float('nan')
+            c_cost_list.append(cost)
+        c_cost_rate = np.array(c_cost_list)
+
+        return c_cost_rate
 
 
 # ---------------------------------------------------------------------------

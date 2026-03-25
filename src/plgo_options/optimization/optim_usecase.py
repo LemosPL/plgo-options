@@ -13,7 +13,7 @@ from plgo_options.optimization.optimizer import OptimizerV2
 class OptimizerRunParams:
     risk_aversion: float = 1.0
     brokerage_txn_cost_pct: float = 5.0
-    deribit_txn_cost_pct: float = 0.15
+    deribit_txn_cost_pct: float = 0.1
     max_collateral: float = 4_000_000.0
     target_expiry: str | None = None
     lambda_delta: float = 001.0
