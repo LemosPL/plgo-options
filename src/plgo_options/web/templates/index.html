@@ -407,7 +407,7 @@
               <thead>
                 <tr>
                   <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
-                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th>
+                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th><th>Source</th>
                 </tr>
               </thead>
               <tbody id="repl-body"></tbody>
@@ -808,7 +808,6 @@
     <div class="sub-tab-bar">
       <button class="sub-tab-btn active" data-subtab="roll-analysis">Roll Analysis</button>
       <button class="sub-tab-btn" data-subtab="optimizer">Optimizer</button>
-      <button class="sub-tab-btn" data-subtab="holistic">Full Optimizer</button>
     </div>
 
     <!-- ── Roll Analysis sub-tab ── -->
@@ -974,17 +973,30 @@
                 <div class="opt2-msg-bubble"><strong>Optimizer</strong><br>Hi! I know your portfolio. Type <em>"hello"</em> for a summary, or tell me what you'd like to improve.</div>
               </div>
             </div>
-            <div style="padding:.4rem .75rem;display:flex;gap:.3rem;flex-wrap:wrap;border-top:1px solid var(--border);align-items:center">
-              <button class="btn-secondary opt2-preset" data-q="improve payoff between 0 and 2000" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">Improve 0-2000</button>
-              <button class="btn-secondary opt2-preset" data-q="reduce downside risk below current spot" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">Reduce downside</button>
-              <button class="btn-secondary opt2-preset" data-q="lock gains and protect upside" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">Lock gains + protect upside</button>
-              <button class="btn-secondary opt2-preset" data-q="lower the breakeven point" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">Lower breakeven</button>
-              <button class="btn-secondary opt2-preset" data-q="add upside participation above 3500" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">More upside</button>
-              <button class="btn-secondary opt2-preset" data-q="protect against crash below 1500" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px">Crash protection</button>
-              <button class="btn-secondary opt2-preset" data-q="can we roll some of our trades to extend duration?" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px;border-color:#d2a8ff;color:#d2a8ff">Suggest rolls</button>
+            <div style="padding:.5rem .75rem;display:flex;gap:.6rem;flex-wrap:wrap;border-top:1px solid var(--border);align-items:flex-start">
+              <!-- PROTECT — orange: defensive moves -->
+              <div style="display:flex;gap:.25rem;flex-wrap:wrap;align-items:center;padding:3px 6px;border-radius:8px;background:rgba(240,136,62,0.06);border:1px solid rgba(240,136,62,0.15)">
+                <span style="font-size:.6rem;font-weight:700;color:#f0883e;text-transform:uppercase;letter-spacing:.5px;margin-right:2px">Protect</span>
+                <button class="btn-secondary opt2-preset" data-q="reduce downside risk below current spot — add puts or put spreads to raise the floor" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#f0883e;color:#f0883e" title="Add put spreads or puts to raise the worst-case floor of the portfolio">Raise floor</button>
+                <button class="btn-secondary opt2-preset" data-q="protect against a crash scenario below 1500 — I need tail risk protection" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#f0883e;color:#f0883e" title="Buy deep OTM puts for tail-risk protection against extreme downside scenarios">Crash hedge</button>
+                <button class="btn-secondary opt2-preset" data-q="lower the breakeven point of the portfolio" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#f0883e;color:#f0883e" title="Restructure positions so the portfolio breaks even at a lower ETH price">Lower BE</button>
+              </div>
+              <!-- GROW — green: capture upside & price moves -->
+              <div style="display:flex;gap:.25rem;flex-wrap:wrap;align-items:center;padding:3px 6px;border-radius:8px;background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.15)">
+                <span style="font-size:.6rem;font-weight:700;color:#3fb950;text-transform:uppercase;letter-spacing:.5px;margin-right:2px">Grow</span>
+                <button class="btn-secondary opt2-preset" data-q="add upside participation — I want to benefit if ETH rallies above 3500" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950" title="Add call spreads or long calls to capture gains if ETH rallies significantly">More upside</button>
+                <button class="btn-secondary opt2-preset" data-q="lock in current gains and protect the upside zone with collars or call spreads" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950" title="Sell calls or add collars to lock in existing upside gains before they reverse">Lock gains</button>
+                <button id="btn-opt2-price-move" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950;font-weight:600" title="ETH moved — close profitable positions and reinvest the proceeds to improve the curve at near-zero cost">Price move</button>
+              </div>
+              <!-- MANAGE — purple: restructure existing book -->
+              <div style="display:flex;gap:.25rem;flex-wrap:wrap;align-items:center;padding:3px 6px;border-radius:8px;background:rgba(210,168,255,0.06);border:1px solid rgba(210,168,255,0.15)">
+                <span style="font-size:.6rem;font-weight:700;color:#d2a8ff;text-transform:uppercase;letter-spacing:.5px;margin-right:2px">Manage</span>
+                <button class="btn-secondary opt2-preset" data-q="can we roll some of our trades to extend duration? Check DTE and suggest rolls for structures close to expiry" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#d2a8ff;color:#d2a8ff" title="Find structures close to expiry and suggest rolling them to later dates to extend duration">Suggest rolls</button>
+                <button id="btn-opt2-reduce-cost" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#d2a8ff;color:#d2a8ff" title="Analyze existing structures and suggest adjustments (rolls, overlays) to lower net premium spent">Reduce cost</button>
+              </div>
               <div style="flex:1"></div>
-              <button id="btn-opt2-delete-all" class="btn-secondary" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px;color:var(--red)" title="Delete all optimizer trades &amp; reset">Reset All</button>
-              <button id="btn-opt2-refresh" class="btn-secondary" style="width:auto;margin:0;font-size:.68rem;padding:.2rem .45rem;border-radius:12px" title="Refresh portfolio data">Refresh</button>
+              <button id="btn-opt2-delete-all" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .35rem;border-radius:10px;color:var(--red)" title="Delete all optimizer trades &amp; reset">Reset All</button>
+              <button id="btn-opt2-refresh" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .35rem;border-radius:10px" title="Refresh portfolio data">Refresh</button>
             </div>
             <div style="display:flex;gap:.5rem;padding:.5rem .75rem;border-top:1px solid var(--border);background:var(--bg)">
               <input type="text" id="opt2-ask" placeholder="Type here... e.g. improve payoff from 0 to 2000"
@@ -992,7 +1004,20 @@
               <button id="btn-opt2-draw" class="btn-secondary" style="width:auto;padding:.45rem .75rem;border-radius:20px;font-size:.8rem;border-color:#f0883e;color:#f0883e" title="Draw target payoff profile on chart">Draw</button>
               <button id="btn-opt2-run" class="btn-primary" style="width:auto;padding:.45rem 1rem;border-radius:20px;font-size:.85rem">Send</button>
             </div>
-            <div id="opt2-status" style="display:none;text-align:center;padding:.5rem;color:var(--muted);font-size:.8rem">Scanning...</div>
+            <div id="opt2-status" style="display:none;padding:.5rem .75rem;border-top:1px solid var(--border);background:rgba(63,185,80,0.04)">
+              <div style="display:flex;align-items:center;gap:.5rem">
+                <div class="opt2-spinner"></div>
+                <span id="opt2-status-text" style="font-size:.78rem;color:var(--muted)">Loading portfolio...</span>
+                <span id="opt2-status-elapsed" style="font-size:.68rem;color:var(--muted);margin-left:auto;font-family:monospace"></span>
+              </div>
+              <div style="margin-top:4px;height:3px;border-radius:2px;background:var(--border);overflow:hidden">
+                <div id="opt2-status-bar" style="height:100%;width:0%;border-radius:2px;background:linear-gradient(90deg,#3fb950,#58a6ff,#d2a8ff);transition:width 0.5s ease"></div>
+              </div>
+            </div>
+            <style>
+              .opt2-spinner{width:16px;height:16px;border:2px solid var(--border);border-top-color:#3fb950;border-radius:50%;animation:opt2spin .8s linear infinite}
+              @keyframes opt2spin{to{transform:rotate(360deg)}}
+            </style>
           </section>
 
         </div>
@@ -1054,6 +1079,7 @@
               <button id="btn-opt2-clear-wb" class="btn-secondary" style="width:auto;margin:0">Clear</button>
               <div class="pf-toolbar-spacer"></div>
               <button id="btn-opt2-add-to-portfolio" class="btn-primary" style="width:auto;background:linear-gradient(135deg,#238636,#2ea043);border-color:#238636">Add to Scenario</button>
+              <button id="btn-opt2-send-to-exec" class="btn-primary" style="width:auto;background:linear-gradient(135deg,#58a6ff,#1f6feb);border-color:#1f6feb" title="Send all workbench trades to the Execution screen for live pricing and order placement">Send to Pricing</button>
             </div>
           </section>
 
@@ -1134,6 +1160,19 @@
       </section>
 
       <!-- ROW 3: Payoff chart (full width) -->
+      <!-- Saved Curves section -->
+      <section class="card" id="opt2-curves-section" style="margin-top:1rem">
+        <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+          <h2 style="margin:0;font-size:.95rem">Target Curves</h2>
+          <small style="color:var(--muted)">check = display on chart, radio = send to chat</small>
+          <div style="flex:1"></div>
+          <button id="btn-opt2-curve-save" class="btn-secondary" style="width:auto;padding:4px 12px;font-size:.75rem;border-radius:8px;border-color:#f0883e;color:#f0883e" title="Save current drawn curve">Save Current</button>
+          <button id="btn-opt2-curve-delete" class="btn-secondary" style="width:auto;padding:4px 12px;font-size:.75rem;border-radius:8px;color:var(--red)" title="Delete selected">Delete</button>
+          <button id="btn-opt2-curve-send" class="btn-primary" style="width:auto;padding:4px 12px;font-size:.75rem;border-radius:8px;background:linear-gradient(135deg,#f0883e,#d2691e)">Send to Chat</button>
+        </div>
+        <div id="opt2-curves-list" style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem;max-height:180px;overflow:auto"></div>
+      </section>
+
       <div id="opt2-chart-wrapper" style="display:none;margin-top:1rem;position:relative">
         <button id="btn-opt2-clear-target" class="btn-secondary" style="display:none;position:absolute;top:8px;right:120px;z-index:10;width:auto;padding:4px 10px;font-size:.75rem;color:#f0883e;border-color:#f0883e" title="Remove drawn target profile">&#x2715; Clear Target</button>
         <button id="btn-opt2-refresh-chart" class="btn-secondary" style="position:absolute;top:8px;right:8px;z-index:10;width:auto;padding:4px 10px;font-size:.75rem" title="Recalculate payoff chart">&#x21bb; Refresh Chart</button>
@@ -1161,265 +1200,6 @@
 
     </div>
 
-    <!-- ── Full Optimizer sub-tab ── -->
-    <div id="subtab-holistic" class="sub-tab-pane">
-
-      <!-- Intro + Config -->
-      <section class="card">
-        <h2 style="margin:0 0 .5rem">Full Portfolio Optimizer</h2>
-        <p style="margin:0 0 1rem;font-size:.82rem;color:var(--muted);line-height:1.5;max-width:80ch">
-          Analyzes your entire portfolio against live market data and proposes a comprehensive action plan:
-          which trades to <strong>unwind</strong> (close positions that no longer make sense),
-          which to <strong>roll</strong> (move to a better expiry/strike), and what
-          <strong>new positions</strong> to open. The optimizer minimizes daily portfolio risk
-          while keeping transaction costs under control.
-        </p>
-        <div class="pf-toolbar" style="flex-wrap:wrap;gap:1.25rem;align-items:flex-start">
-          <div style="min-width:10rem">
-            <label class="pf-filter-label" style="display:flex;flex-direction:column;gap:.2rem">
-              <span>Risk Aversion (&#955;)</span>
-              <input type="number" id="hol-risk-aversion" value="1.0" step="0.1" min="0" max="10" style="width:5rem">
-            </label>
-            <div style="font-size:.66rem;color:var(--muted);margin-top:.25rem;line-height:1.4">
-              How aggressively to reduce risk.<br>
-              <strong>0.1&ndash;0.5</strong> Conservative &mdash; only cheap improvements<br>
-              <strong>0.5&ndash;2.0</strong> Balanced &mdash; good cost/risk tradeoff<br>
-              <strong>2.0&ndash;10</strong> Aggressive &mdash; maximize risk reduction
-            </div>
-          </div>
-          <div style="min-width:10rem">
-            <label class="pf-filter-label" style="display:flex;flex-direction:column;gap:.2rem">
-              <span>Txn Cost (%)</span>
-              <input type="number" id="hol-txn-cost" value="5" step="0.5" min="0" max="20" style="width:5rem">
-            </label>
-            <div style="font-size:.66rem;color:var(--muted);margin-top:.25rem;line-height:1.4">
-              Assumed cost per trade (% of notional).<br>
-              <strong>1&ndash;3%</strong> Liquid markets / tight spreads<br>
-              <strong>3&ndash;7%</strong> OTC / moderate spreads<br>
-              <strong>7&ndash;15%</strong> Illiquid / wide spreads
-            </div>
-          </div>
-          <div style="min-width:10rem">
-            <label class="pf-filter-label" style="display:flex;flex-direction:column;gap:.2rem">
-              <span>Max Collateral ($)</span>
-              <input type="number" id="hol-max-collateral" value="4000000" step="100000" min="0" style="width:8rem">
-            </label>
-            <div style="font-size:.66rem;color:var(--muted);margin-top:.25rem;line-height:1.4">
-              Capital limit per single instrument.<br>
-              Caps the notional of any one trade.<br>
-              Set to your available margin.
-            </div>
-          </div>
-          <div style="min-width:8rem">
-            <label class="pf-filter-label" style="display:flex;flex-direction:column;gap:.2rem">
-              <span>Min DTE</span>
-              <input type="number" id="hol-min-dte" value="14" step="1" min="1" style="width:5rem">
-            </label>
-            <div style="font-size:.66rem;color:var(--muted);margin-top:.25rem;line-height:1.4">
-              Ignore options expiring sooner than this.<br>
-              <strong>7&ndash;14</strong> short-term focus<br>
-              <strong>30&ndash;90</strong> medium/long-term only
-            </div>
-          </div>
-          <div style="min-width:8rem">
-            <label class="pf-filter-label" style="display:flex;flex-direction:column;gap:.2rem">
-              <span>Min Qty</span>
-              <input type="number" id="hol-min-qty" value="50" step="10" min="1" style="width:5rem">
-            </label>
-            <div style="font-size:.66rem;color:var(--muted);margin-top:.25rem;line-height:1.4">
-              Filter out noise trades below this size.<br>
-              <strong>10&ndash;50</strong> for smaller books<br>
-              <strong>100&ndash;500</strong> for large portfolios
-            </div>
-          </div>
-          <div style="flex:1"></div>
-          <div style="align-self:center">
-            <button id="btn-hol-run" class="btn-primary" style="width:auto;padding:.65rem 2rem;font-size:1rem;white-space:nowrap">
-              Run Full Optimization
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Progress indicator -->
-      <section class="card" id="hol-progress" style="display:none;margin-top:1rem">
-        <div style="text-align:center;padding:2rem">
-          <div id="hol-progress-text" style="font-size:1rem;margin-bottom:.5rem">Computing optimal portfolio...</div>
-          <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden">
-            <div id="hol-progress-bar" style="height:100%;width:0%;background:var(--accent);transition:width .5s"></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Executive Summary -->
-      <section class="card" id="hol-summary-section" style="display:none;margin-top:1rem">
-        <h2>Executive Summary</h2>
-        <div id="hol-summary-text" style="font-size:.92rem;line-height:1.65;padding:.5rem 0"></div>
-      </section>
-
-      <!-- Before/After Greeks — matching optv2-result-section -->
-      <section class="card" id="hol-greeks-section" style="display:none;margin-top:1rem">
-        <h2>Optimization Result
-          <span id="hol-eth-spot" style="float:right;font-size:.85rem;opacity:.7"></span>
-        </h2>
-
-        <!-- Before / After comparison -->
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
-          <div>
-            <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">Before</h3>
-            <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
-              <div><div class="greek-label">Delta</div><div class="greek-value" id="hol-before-delta">--</div></div>
-              <div><div class="greek-label">Gamma</div><div class="greek-value" id="hol-before-gamma">--</div></div>
-              <div><div class="greek-label">Theta</div><div class="greek-value" id="hol-before-theta">--</div></div>
-              <div><div class="greek-label">Vega</div><div class="greek-value" id="hol-before-vega">--</div></div>
-              <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="hol-before-risk">--</div></div>
-            </div>
-          </div>
-          <div>
-            <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">After</h3>
-            <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
-              <div><div class="greek-label">Delta</div><div class="greek-value" id="hol-after-delta">--</div></div>
-              <div><div class="greek-label">Gamma</div><div class="greek-value" id="hol-after-gamma">--</div></div>
-              <div><div class="greek-label">Theta</div><div class="greek-value" id="hol-after-theta">--</div></div>
-              <div><div class="greek-label">Vega</div><div class="greek-value" id="hol-after-vega">--</div></div>
-              <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="hol-after-risk">--</div></div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Summary stats — matching optv2 style -->
-        <div class="greek-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;text-align:center;margin-bottom:1rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
-          <div><div class="greek-label">Trade Cost</div><div class="greek-value" id="hol-stat-cost">--</div></div>
-          <div><div class="greek-label">Risk Reduction</div><div class="greek-value" id="hol-stat-risk-red">--</div></div>
-          <div><div class="greek-label">Utility Gain</div><div class="greek-value" id="hol-stat-utility">--</div></div>
-          <div><div class="greek-label">Candidates</div><div class="greek-value"><span id="hol-stat-candidates">--</span> <span id="hol-stat-converged" style="font-size:.75rem"></span></div></div>
-        </div>
-      </section>
-
-      <!-- Payoff Chart -->
-      <section class="card" id="hol-payoff-section" style="display:none;margin-top:1rem">
-        <h2>Payoff Profile &mdash; Before vs After</h2>
-        <div id="hol-payoff-chart" style="width:100%;min-height:500px"></div>
-      </section>
-
-      <!-- Categorized Actions -->
-      <section class="card" id="hol-actions-section" style="display:none;margin-top:1rem">
-        <h2>Recommended Actions <small id="hol-actions-total" style="font-weight:400;color:var(--muted)"></small></h2>
-        <div id="hol-action-tabs" style="display:flex;gap:.3rem;margin-bottom:.75rem">
-          <button class="btn-secondary hol-tab-btn active" data-hol-tab="unwinds" style="width:auto;margin:0;font-size:.78rem;padding:.35rem .75rem;border-radius:16px">Unwinds <span id="hol-count-unwinds" class="nav-badge" style="display:none"></span></button>
-          <button class="btn-secondary hol-tab-btn" data-hol-tab="rolls" style="width:auto;margin:0;font-size:.78rem;padding:.35rem .75rem;border-radius:16px">Rolls <span id="hol-count-rolls" class="nav-badge" style="display:none"></span></button>
-          <button class="btn-secondary hol-tab-btn" data-hol-tab="new" style="width:auto;margin:0;font-size:.78rem;padding:.35rem .75rem;border-radius:16px">New Positions <span id="hol-count-new" class="nav-badge" style="display:none"></span></button>
-        </div>
-
-        <!-- Unwinds pane -->
-        <div id="hol-tab-unwinds" class="hol-action-pane">
-          <div class="chain-wrapper" style="max-height:400px">
-            <table class="pf-table">
-              <thead><tr>
-                <th>Instrument</th><th>Side</th><th>Qty</th><th>Strike</th><th>Type</th>
-                <th>DTE</th><th>IV %</th><th>Price ($)</th><th>Notional ($)</th>
-                <th>Cost ($)</th><th>&Delta; Contrib</th><th>&Gamma; Contrib</th><th>Vega Contrib</th>
-              </tr></thead>
-              <tbody id="hol-tbody-unwinds"></tbody>
-            </table>
-          </div>
-          <div id="hol-empty-unwinds" style="display:none;text-align:center;padding:2rem;color:var(--muted);font-size:.85rem">No unwinds proposed &mdash; all current positions contribute positively to the portfolio.</div>
-        </div>
-
-        <!-- Rolls pane -->
-        <div id="hol-tab-rolls" class="hol-action-pane" style="display:none">
-          <div class="chain-wrapper" style="max-height:400px">
-            <table class="pf-table">
-              <thead><tr>
-                <th style="width:50px">Action</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Strike</th>
-                <th>Type</th><th>DTE</th><th>IV %</th><th>Price ($)</th><th>Net Cost ($)</th>
-              </tr></thead>
-              <tbody id="hol-tbody-rolls"></tbody>
-            </table>
-          </div>
-          <div id="hol-empty-rolls" style="display:none;text-align:center;padding:2rem;color:var(--muted);font-size:.85rem">No rolls proposed &mdash; current expiries appear optimal.</div>
-        </div>
-
-        <!-- New Positions pane -->
-        <div id="hol-tab-new" class="hol-action-pane" style="display:none">
-          <div class="chain-wrapper" style="max-height:400px">
-            <table class="pf-table">
-              <thead><tr>
-                <th>Instrument</th><th>Side</th><th>Qty</th><th>Strike</th><th>Type</th>
-                <th>DTE</th><th>IV %</th><th>Price ($)</th><th>Notional ($)</th>
-                <th>Cost ($)</th><th>&Delta; Contrib</th><th>&Gamma; Contrib</th><th>Vega Contrib</th>
-              </tr></thead>
-              <tbody id="hol-tbody-new"></tbody>
-            </table>
-          </div>
-          <div id="hol-empty-new" style="display:none;text-align:center;padding:2rem;color:var(--muted);font-size:.85rem">No new positions proposed.</div>
-        </div>
-      </section>
-
-      <!-- Workbench — live-priced trades ready for execution -->
-      <section class="card" id="hol-workbench-section" style="display:none;margin-top:1rem">
-        <h2>Trade Workbench <small id="hol-wb-count" style="font-weight:400;color:var(--muted)"></small></h2>
-        <p style="margin:0 0 .75rem;font-size:.78rem;color:var(--muted)">
-          These are the optimizer's proposed trades, re-priced with live Deribit market data.
-          Review, edit quantities, then add to your portfolio scenario.
-        </p>
-        <div class="chain-wrapper" style="max-height:400px">
-          <table class="pf-table">
-            <thead><tr>
-              <th style="width:24px"></th>
-              <th>Instrument</th><th>Action</th><th>Side</th><th>Qty</th><th>Strike</th>
-              <th>Type</th><th>DTE</th><th>Bid ($)</th><th>Ask ($)</th><th>Spread</th>
-              <th>IV%</th><th>Cost ($)</th>
-            </tr></thead>
-            <tbody id="hol-wb-body"></tbody>
-            <tfoot><tr>
-              <td colspan="12" style="text-align:right;font-weight:700">Total Cost:</td>
-              <td id="hol-wb-total" style="font-weight:700;font-family:monospace">--</td>
-            </tr></tfoot>
-          </table>
-        </div>
-        <div class="risk-grid" style="margin:.75rem 0">
-          <div class="risk-metric"><span class="risk-label">Net Cost</span><span class="risk-value" id="hol-wb-cost">--</span></div>
-          <div class="risk-metric"><span class="risk-label">P&amp;L at Spot</span><span class="risk-value" id="hol-wb-pnl-spot">--</span></div>
-          <div class="risk-metric"><span class="risk-label">New Worst</span><span class="risk-value" id="hol-wb-new-worst">--</span></div>
-          <div class="risk-metric"><span class="risk-label">New BE</span><span class="risk-value" id="hol-wb-new-be">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Floor Chg</span><span class="risk-value" id="hol-wb-floor-imp">--</span></div>
-          <div class="risk-metric"><span class="risk-label">BE Chg</span><span class="risk-value" id="hol-wb-be-imp">--</span></div>
-        </div>
-        <div style="display:flex;gap:.5rem;flex-wrap:wrap">
-          <button id="btn-hol-calc" class="btn-primary" style="width:auto">Calculate (Live Pricing)</button>
-          <button id="btn-hol-clear-wb" class="btn-secondary" style="width:auto;margin:0">Clear</button>
-          <div class="pf-toolbar-spacer" style="flex:1"></div>
-          <button id="btn-hol-add-to-portfolio" class="btn-primary" style="width:auto">Add to Scenario</button>
-        </div>
-      </section>
-
-      <!-- P&L Matrix -->
-      <section class="card" id="hol-matrix-section" style="display:none;margin-top:1rem">
-        <h2>P&amp;L Matrix &mdash; Before vs After (T+90d)</h2>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem" id="hol-matrix-grid">
-          <div>
-            <h3 style="font-size:.85rem;color:var(--muted);margin:0 0 .5rem">Before</h3>
-            <div class="chain-wrapper" style="max-height:300px">
-              <table class="pf-table" style="width:100%">
-                <thead id="hol-matrix-before-thead"></thead>
-                <tbody id="hol-matrix-before-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-          <div>
-            <h3 style="font-size:.85rem;color:var(--muted);margin:0 0 .5rem">After</h3>
-            <div class="chain-wrapper" style="max-height:300px">
-              <table class="pf-table" style="width:100%">
-                <thead id="hol-matrix-after-thead"></thead>
-                <tbody id="hol-matrix-after-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </section>
-
-    </div>
 
   </div>
 

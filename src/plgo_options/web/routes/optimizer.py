@@ -860,6 +860,34 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     if drawn_mask.sum() < 5:
         return "Target profile range too narrow.", None
 
+    # ── Analyze each existing position against the target ──
+    # For each position: would REMOVING it bring us closer to the target?
+    position_analysis = []
+    current_gap_mse = float(np.mean(gap[drawn_mask] ** 2))
+    for i, p in enumerate(positions):
+        T = max(p["dte"], 0) / 365.25
+        pos_payoff = _bs_payoff_vec(spot_arr, p["strike"], p["opt"], p["net_qty"], T, p["sigma"])
+        without_payoff = current_payoff - pos_payoff
+        without_gap = target_interp - without_payoff
+        without_mse = float(np.mean(without_gap[drawn_mask] ** 2))
+        improvement_pct = (current_gap_mse - without_mse) / max(current_gap_mse, 1.0) * 100
+        side_label = "Long" if p["net_qty"] > 0 else "Short"
+        opt_label = "Call" if p["opt"] == "C" else "Put"
+        action = "KEEP"
+        if improvement_pct > 5:
+            action = "CLOSE"
+        elif improvement_pct < -20:
+            action = "ESSENTIAL"
+        if p["dte"] < 60 and action != "CLOSE":
+            action = "ROLL"
+        position_analysis.append({
+            "side": side_label, "opt": opt_label,
+            "strike": p["strike"], "dte": p["dte"],
+            "qty": abs(p["net_qty"]),
+            "action": action, "impact": round(improvement_pct, 1),
+            "counterparty": p.get("counterparty", ""),
+        })
+
     # ── Fetch tradeable instruments ──
     try:
         summaries = await client._get("get_book_summary_by_currency", {
@@ -919,23 +947,22 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
         if zm.sum() < 3:
             return []
 
-        # Filter candidates relevant to this zone
+        # Filter candidates strictly by zone — no mixing
         cand_idxs = []
         for j, c in enumerate(candidates):
-            # For downside: prefer puts + calls with strike < spot
-            # For upside: prefer calls + puts with strike > spot
             if prefer_opt == "P":
-                # Downside: include all puts + calls with strike <= spot * 1.3
-                if c["opt"] == "P" or c["strike"] <= spot * 1.3:
+                # Downside zone: ONLY puts (any strike) — no calls
+                if c["opt"] == "P":
                     cand_idxs.append(j)
             elif prefer_opt == "C":
-                # Upside: include all calls + puts with strike >= spot * 0.7
-                if c["opt"] == "C" or c["strike"] >= spot * 0.7:
+                # Upside zone: ONLY calls (any strike) — no puts
+                if c["opt"] == "C":
                     cand_idxs.append(j)
             else:
                 cand_idxs.append(j)
 
         if len(cand_idxs) < 2:
+            # Fallback: include all if zone filter is too restrictive
             cand_idxs = list(range(len(candidates)))
 
         pm = full_payoff[np.ix_(np.where(zm)[0], cand_idxs)]
@@ -1030,14 +1057,38 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     up_weights = _solve_zone(upside_mask, "Upside", prefer_opt="C", min_legs=2, max_legs=8)
 
     # ── Convert weights to legs ──
+    # Scale quantities to match portfolio size
+    avg_pos_qty = max(np.mean([abs(p["net_qty"]) for p in positions]), 100) if positions else 1000
+    MIN_LEG_QTY = max(round(avg_pos_qty * 0.1 / 100) * 100, 100)  # at least 10% of avg position, min 100
+    MAX_LEG_QTY = max(round(avg_pos_qty * 3 / 100) * 100, 1000)   # at most 3x avg position, min 1000
+
     def _weights_to_legs(weights_list):
+        if not weights_list:
+            return []
+
+        # Get raw absolute weights
+        raw_abs = [abs(w) for _, w in weights_list]
+        max_w = max(raw_abs)
+        min_w = min(raw_abs)
+
+        # Scale: ensure smallest leg >= MIN_LEG_QTY and largest <= MAX_LEG_QTY
+        if max_w < 1e-6:
+            return []
+        # First scale up so the smallest leg hits MIN_LEG_QTY
+        scale_up = MIN_LEG_QTY / min_w if min_w > 0 else 1.0
+        # Then cap so largest doesn't exceed MAX_LEG_QTY
+        if max_w * scale_up > MAX_LEG_QTY:
+            scale_up = MAX_LEG_QTY / max_w
+        # Final check: ensure minimum is still reasonable
+        scale = max(scale_up, MIN_LEG_QTY / max_w)
+
         legs = []
         for cand_idx, w_val in weights_list:
             c = candidates[cand_idx]
-            qty = round(abs(w_val) / 10) * 10
-            if qty < 10:
-                qty = round(abs(w_val))
-            if qty < 1:
+            scaled_w = abs(w_val) * scale
+            # Round to nearest 50, minimum MIN_LEG_QTY
+            qty = max(round(scaled_w / 50) * 50, 50)
+            if qty < 50:
                 continue
             side = "buy" if w_val > 0 else "sell"
             legs.append({
@@ -1059,7 +1110,8 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     combined_legs = _weights_to_legs(down_weights + up_weights)
 
     # ── Compute payoff and cost for a set of legs ──
-    def _compute_strategy(legs_list, name_label):
+    # zone_mask: score ONLY on the zone where this strategy operates
+    def _compute_strategy(legs_list, name_label, zone_mask=None):
         if not legs_list:
             return None
         net_cost = 0.0
@@ -1074,9 +1126,17 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
             s = 1.0 if l["side"] == "buy" else -1.0
             new_pf += s * l["qty"] * _bs_vec(spot_arr, l["strike"], T, 0.0, sigma_l, l["opt"])
 
-        new_gap = np.abs(new_pf[drawn_mask] - target_interp[drawn_mask])
-        old_gap = np.abs(current_payoff[drawn_mask] - target_interp[drawn_mask])
-        tgt_range = max(float(np.ptp(target_interp[drawn_mask])), 1.0)
+        # Score on the relevant zone only (not the full curve)
+        if zone_mask is not None:
+            score_mask = drawn_mask & zone_mask
+        else:
+            score_mask = drawn_mask
+        if score_mask.sum() < 2:
+            score_mask = drawn_mask
+
+        new_gap = np.abs(new_pf[score_mask] - target_interp[score_mask])
+        old_gap = np.abs(current_payoff[score_mask] - target_interp[score_mask])
+        tgt_range = max(float(np.ptp(target_interp[score_mask])), 1.0)
         match_pct = max(0.0, 100.0 * (1.0 - float(np.mean(new_gap)) / tgt_range))
         improvement_pct = max(0.0, 100.0 * (1.0 - float(np.mean(new_gap)) / max(float(np.mean(old_gap)), 1.0)))
         new_min = float(new_pf.min())
@@ -1106,10 +1166,42 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
             "new_pf": new_pf,
         }
 
-    # Build all three strategies
-    strat_down = _compute_strategy(down_legs, "Downside Protection")
-    strat_up = _compute_strategy(up_legs, "Upside Shaping")
-    strat_combined = _compute_strategy(combined_legs, "Combined Target Match")
+    # ── Build descriptive strategy names from legs ──
+    def _describe_legs(legs_list, zone_label):
+        """Generate a descriptive strategy name from legs like 'Downside: Put Spread 2400/2200'."""
+        if not legs_list:
+            return zone_label
+        strikes = sorted(set(l["strike"] for l in legs_list))
+        types = set(l["opt"] for l in legs_list)
+        sides = set(l["side"] for l in legs_list)
+        expiry = legs_list[0].get("expiry_code", "")
+
+        if len(legs_list) == 2 and len(types) == 1 and len(sides) == 2:
+            # Spread: buy + sell same type, different strikes
+            t = "Put" if "P" in types else "Call"
+            return f"{zone_label}: {t} Spread {int(min(strikes))}/{int(max(strikes))} {expiry}"
+        elif len(legs_list) == 2 and types == {"C", "P"} and len(sides) == 1:
+            # Strangle or straddle
+            if len(strikes) == 1:
+                return f"{zone_label}: Straddle {int(strikes[0])} {expiry}"
+            return f"{zone_label}: Strangle {int(min(strikes))}/{int(max(strikes))} {expiry}"
+        elif len(legs_list) == 1:
+            l = legs_list[0]
+            t = "Put" if l["opt"] == "P" else "Call"
+            s = "Long" if l["side"] == "buy" else "Short"
+            return f"{zone_label}: {s} {t} {int(l['strike'])} {expiry}"
+        else:
+            strike_str = "/".join(str(int(s)) for s in strikes[:4])
+            return f"{zone_label}: {len(legs_list)}-leg {strike_str} {expiry}"
+
+    down_name = _describe_legs(down_legs, "Downside Protection")
+    up_name = _describe_legs(up_legs, "Upside Shaping")
+    combined_name = _describe_legs(combined_legs, "Combined Target Match")
+
+    # Build all three strategies — score each on its OWN zone
+    strat_down = _compute_strategy(down_legs, down_name, zone_mask=downside_mask)
+    strat_up = _compute_strategy(up_legs, up_name, zone_mask=upside_mask)
+    strat_combined = _compute_strategy(combined_legs, combined_name, zone_mask=None)  # full curve
 
     suggestions = []
     summary_parts = []
@@ -1138,19 +1230,62 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     if not suggestions:
         return "Could not find strategies matching the target profile.", None
 
+    # ── Build position analysis summary ──
+    close_positions = [p for p in position_analysis if p["action"] == "CLOSE"]
+    roll_positions = [p for p in position_analysis if p["action"] == "ROLL"]
+    essential_positions = [p for p in position_analysis if p["action"] == "ESSENTIAL"]
+
+    pos_analysis_text = "\n=== EXISTING POSITION ANALYSIS vs TARGET ===\n"
+    if close_positions:
+        pos_analysis_text += "POSITIONS TO CLOSE (removing them improves target match):\n"
+        for p in close_positions:
+            pos_analysis_text += f"  CLOSE: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing improves match by {p['impact']:+.1f}%\n"
+    if roll_positions:
+        pos_analysis_text += "POSITIONS TO ROLL (close to expiry, should extend):\n"
+        for p in roll_positions:
+            pos_analysis_text += f"  ROLL: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — DTE too short\n"
+    if essential_positions:
+        pos_analysis_text += "ESSENTIAL POSITIONS (keep — removing them worsens match significantly):\n"
+        for p in essential_positions:
+            pos_analysis_text += f"  KEEP: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing worsens match by {abs(p['impact']):.1f}%\n"
+    if not close_positions and not roll_positions:
+        pos_analysis_text += "All existing positions are helping the target match. No closures or rolls recommended.\n"
+
     summary = (
-        f"=== TARGET MATCH — 3 STRATEGIES ===\n"
+        f"=== TARGET MATCH ANALYSIS ===\n"
+        + pos_analysis_text
+        + f"\n=== NEW TRADE STRATEGIES (3 options) ===\n"
         + "\n".join(summary_parts)
-        + "\nIMPORTANT: Report these exact costs to the user. All 3 strategies are in the Suggestions table.\n"
-        f"Recommend the COMBINED strategy for best overall match, but note the user can add DOWNSIDE and UPSIDE separately."
+        + "\nIMPORTANT: Present the COMPLETE plan to the user: which positions to CLOSE, which to ROLL, and which NEW trades to add."
+        + "\nReport exact costs from the data above. The user can add Downside and Upside strategies separately."
+        + "\nIf there are positions to ROLL, call `suggest_rolls` to get priced roll suggestions."
     )
+
+    spot_idx_local = int(np.argmin(np.abs(spot_arr - spot)))
+    pnl_at_spot_local = float(current_payoff[spot_idx_local]) if len(current_payoff) > 0 else 0
+    worst_local = float(current_payoff.min()) if len(current_payoff) > 0 else 0
+    worst_at_local = float(spot_arr[np.argmin(current_payoff)]) if len(current_payoff) > 0 else 0
+    best_local = float(current_payoff.max()) if len(current_payoff) > 0 else 0
+    best_at_local = float(spot_arr[np.argmax(current_payoff)]) if len(current_payoff) > 0 else 0
+    breakeven_local = _find_breakeven(spot_arr, current_payoff)
 
     result = {
         "suggestions": suggestions,
         "num_suggestions": len(suggestions),
         "spot_ladder": spot_arr.tolist(),
         "current_payoff": np.round(current_payoff, 2).tolist(),
+        "current_profile": {
+            "at_spot": pnl_at_spot_local, "min": worst_local, "min_at": worst_at_local,
+            "max": best_local, "max_at": best_at_local, "breakeven": breakeven_local,
+        },
+        "positions": [{"side": "Long" if p["net_qty"] > 0 else "Short",
+                        "type": "Call" if p["opt"] == "C" else "Put",
+                        "strike": p["strike"], "qty": abs(p["net_qty"]),
+                        "net_qty": p["net_qty"], "dte": p["dte"]}
+                       for p in positions],
         "spot": spot,
+        "available_expiries": sorted(set(c["expiry_code"] for c in candidates),
+                                      key=lambda x: datetime.strptime(x, "%d%b%y")),
     }
 
     return summary, result
@@ -1217,17 +1352,123 @@ async def chat(req: ChatRequest):
                               "expiry": expiry_str, "counterparty": t.get("counterparty", ""),
                               "dte": dte, "sigma": sigma})
             side_label = "Long" if sign > 0 else "Short"
+            # Compute mark-to-market value at current spot
+            entry_premium = _safe_float(t.get("premium_usd"))
+            T_mtm = max(dte, 0) / 365.25
+            if spot > 0 and T_mtm > 0 and sigma > 0:
+                current_price_per = bs_price(spot, strike, T_mtm, 0.0, sigma, opt)
+                current_value = sign * current_price_per * qty  # positive = asset value for longs
+                mtm_pnl = current_value - (sign * entry_premium)  # P&L = current value - cost paid
+            else:
+                current_value = 0.0
+                mtm_pnl = 0.0
             positions_detail.append({
                 "id": t["id"], "counterparty": t.get("counterparty", ""),
                 "side": side_label, "type": "Call" if opt == "C" else "Put",
                 "strike": strike, "qty": qty, "net_qty": sign * qty,
                 "expiry": exp_short, "dte": dte,
-                "premium_usd": _safe_float(t.get("premium_usd")),
+                "premium_usd": entry_premium,
+                "current_value_usd": round(current_value, 2),
+                "mtm_pnl_usd": round(mtm_pnl, 2),
             })
         expiry_groups[exp_short] = expiry_groups.get(exp_short, 0) + 1
 
     net_calls = sum(p["net_qty"] for p in positions if p["opt"] == "C")
     net_puts = sum(p["net_qty"] for p in positions if p["opt"] == "P")
+
+    # ── Detect portfolio structures (spreads, condors, collars, etc.) ──
+    from collections import defaultdict as _defaultdict
+    _struct_groups: dict[tuple, list[dict]] = _defaultdict(list)
+    for pd in positions_detail:
+        _sk = (pd["counterparty"], pd["expiry"], pd["qty"])
+        _struct_groups[_sk].append(pd)
+
+    portfolio_structures = []
+    _used_struct_ids: set[int] = set()
+
+    def _detect_struct(stype, slegs):
+        for sl in slegs:
+            _used_struct_ids.add(sl["id"])
+        strikes_desc = "/".join(str(int(sl["strike"])) for sl in sorted(slegs, key=lambda x: x["strike"]))
+        sides_desc = " + ".join(f"{sl['side']} {sl['type']} {int(sl['strike'])}" for sl in sorted(slegs, key=lambda x: x["strike"]))
+        ids_str = ", ".join(f"#{sl['id']}" for sl in slegs)
+        struct_mtm = sum(sl.get("mtm_pnl_usd", 0) for sl in slegs)
+        struct_value = sum(sl.get("current_value_usd", 0) for sl in slegs)
+        mtm_tag = f"MTM P&L: ${struct_mtm:+,.0f}" if struct_mtm != 0 else "MTM P&L: $0"
+        if struct_mtm > 1000:
+            mtm_tag += " [PROFITABLE — harvest candidate]"
+        elif struct_mtm < -1000:
+            mtm_tag += " [UNDERWATER]"
+        portfolio_structures.append(
+            f"  {stype.replace('_', ' ').upper()} [{ids_str}]: {sides_desc} | exp {slegs[0]['expiry']} ({slegs[0]['dte']}d) | qty {slegs[0]['qty']} ETH | {mtm_tag}"
+        )
+
+    for _sk, _pool in _struct_groups.items():
+        _avail = [l for l in _pool if l["id"] not in _used_struct_ids]
+        _bp = sorted([l for l in _avail if l["type"] == "Put" and l["side"] == "Long"], key=lambda x: x["strike"])
+        _sp = sorted([l for l in _avail if l["type"] == "Put" and l["side"] == "Short"], key=lambda x: x["strike"])
+        _bc = sorted([l for l in _avail if l["type"] == "Call" and l["side"] == "Long"], key=lambda x: x["strike"])
+        _sc = sorted([l for l in _avail if l["type"] == "Call" and l["side"] == "Short"], key=lambda x: x["strike"])
+        # Iron Condors
+        while _bp and _sp and _sc and _bc and all(l["id"] not in _used_struct_ids for l in [_bp[0], _sp[0], _sc[0], _bc[-1]]):
+            _detect_struct("iron_condor", [_bp.pop(0), _sp.pop(0), _sc.pop(0), _bc.pop(-1)])
+        # Put spreads
+        _bp2 = [l for l in _bp if l["id"] not in _used_struct_ids]
+        _sp2 = [l for l in _sp if l["id"] not in _used_struct_ids]
+        while _bp2 and _sp2:
+            _b = _bp2.pop(0)
+            _best_i = min(range(len(_sp2)), key=lambda i: abs(_sp2[i]["strike"] - _b["strike"]))
+            _detect_struct("put_spread", [_b, _sp2.pop(_best_i)])
+        # Call spreads
+        _bc2 = [l for l in _bc if l["id"] not in _used_struct_ids]
+        _sc2 = [l for l in _sc if l["id"] not in _used_struct_ids]
+        while _bc2 and _sc2:
+            _b = _bc2.pop(0)
+            _best_i = min(range(len(_sc2)), key=lambda i: abs(_sc2[i]["strike"] - _b["strike"]))
+            _detect_struct("call_spread", [_b, _sc2.pop(_best_i)])
+        # Collars (long put + short call)
+        _bp3 = [l for l in _avail if l["type"] == "Put" and l["side"] == "Long" and l["id"] not in _used_struct_ids]
+        _sc3 = [l for l in _avail if l["type"] == "Call" and l["side"] == "Short" and l["id"] not in _used_struct_ids]
+        while _bp3 and _sc3:
+            _detect_struct("collar", [_bp3.pop(0), _sc3.pop(0)])
+        # Risk reversals (short put + long call)
+        _sp3 = [l for l in _avail if l["type"] == "Put" and l["side"] == "Short" and l["id"] not in _used_struct_ids]
+        _bc3 = [l for l in _avail if l["type"] == "Call" and l["side"] == "Long" and l["id"] not in _used_struct_ids]
+        while _sp3 and _bc3:
+            _detect_struct("risk_reversal", [_bc3.pop(0), _sp3.pop(0)])
+
+    # Remaining naked legs
+    for pd in positions_detail:
+        if pd["id"] not in _used_struct_ids:
+            mtm = pd.get("mtm_pnl_usd", 0)
+            mtm_tag = f"MTM P&L: ${mtm:+,.0f}"
+            if mtm > 1000:
+                mtm_tag += " [PROFITABLE — harvest candidate]"
+            elif mtm < -1000:
+                mtm_tag += " [UNDERWATER]"
+            portfolio_structures.append(
+                f"  NAKED [#{pd['id']}]: {pd['side']} {pd['type']} {int(pd['strike'])} | exp {pd['expiry']} ({pd['dte']}d) | qty {pd['qty']} ETH | {mtm_tag}"
+            )
+
+    # Compute total harvestable profit
+    _total_mtm = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail)
+    _harvestable = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail if pd.get("mtm_pnl_usd", 0) > 0)
+    _underwater = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail if pd.get("mtm_pnl_usd", 0) < 0)
+    portfolio_structures.append(f"\n  TOTAL PORTFOLIO MTM P&L: ${_total_mtm:+,.0f}")
+    portfolio_structures.append(f"  HARVESTABLE PROFIT (close profitable positions): ${_harvestable:+,.0f}")
+    portfolio_structures.append(f"  UNDERWATER POSITIONS: ${_underwater:+,.0f}")
+
+    # Add DTE warnings
+    _dte_warnings = []
+    for pd in positions_detail:
+        if pd["dte"] < 30:
+            _dte_warnings.append(f"  WARNING: Trade #{pd['id']} ({pd['side']} {pd['type']} {int(pd['strike'])}) expires in {pd['dte']}d — ROLL CANDIDATE")
+        elif pd["dte"] < 60:
+            _dte_warnings.append(f"  WATCH: Trade #{pd['id']} ({pd['side']} {pd['type']} {int(pd['strike'])}) expires in {pd['dte']}d — consider rolling")
+
+    structures_text = "\n".join(portfolio_structures) if portfolio_structures else "No structures detected."
+    if _dte_warnings:
+        structures_text += "\n\n=== EXPIRY ALERTS ===\n" + "\n".join(_dte_warnings)
 
     lo = max(500, int(spot * 0.2)) if spot > 0 else 500
     hi = int(spot * 3.5) if spot > 0 else 8000
@@ -1518,6 +1759,14 @@ P&L ladder: {fmt_ladder}
 
 === ALL POSITIONS ===
 {fmt_positions}
+
+=== PORTFOLIO STRUCTURES (trades are paired — NEVER split these) ===
+{structures_text}
+
+IMPORTANT: When suggesting rolls, cost reductions, or closing trades, ALWAYS operate on entire structures.
+A put spread (Long Put + Short Put) must be rolled/closed as a UNIT — never close just one leg.
+An iron condor has 4 legs — roll all 4 together. Reference structures by their trade IDs.
+When analyzing risk or suggesting improvements, describe what each STRUCTURE does, not individual legs.
 """
 
     if wb_legs:
@@ -1564,23 +1813,57 @@ Answer any specific questions the user asked about these trades.
 - `scan_trades(query, filters)`: Search Deribit broadly. Results go to Suggestions table.
 - `suggest_rolls(objective)`: Analyze which existing positions to roll. Returns priced roll suggestions (close existing + open at new expiry/strike). Use when user mentions "roll", "extend", "adjust expiry", "restructure existing", or when near-term positions are expiring. Results appear as Roll Cards in the Suggestions table with category "roll".
 
+=== STRATEGY NAMING ===
+Every strategy you create via build_strategy MUST have a descriptive name that includes:
+1. The ZONE it addresses: "Downside:", "Upside:", or "Cost Reduction:" prefix
+2. The STRUCTURE type: "Put Spread", "Call Spread", "Collar", "Butterfly", "Roll", etc.
+3. KEY STRIKES and EXPIRY: e.g. "2400/2200 27JUN25"
+Examples: "Downside: Put Spread 2400/2200 27JUN25", "Upside: Call Spread 3200/3800 26SEP25", "Cost Reduction: Sell Call 4000 27JUN25"
+This naming lets the user identify each trade block in the workbench at a glance.
+
+=== PROACTIVE PORTFOLIO ANALYSIS ===
+CRITICAL: When analyzing the portfolio or suggesting improvements, you MUST consider ALL of these actions, not just new trades:
+
+1. **ROLL existing structures** — Call `suggest_rolls` PROACTIVELY when:
+   - Any structure has DTE < 60 days (getting close to expiry)
+   - Strikes are far from current spot (deeply ITM or OTM structures losing effectiveness)
+   - The user asks to improve the portfolio, reduce cost, or match a target
+   - Rolling can reduce cost (e.g., rolling to farther expiry collects more premium)
+   Think: "Before adding new trades, can I improve the portfolio by rolling what already exists?"
+
+2. **CLOSE existing structures** — Recommend closing when:
+   - A structure is at max profit (short options near zero value)
+   - A structure has positive MTM P&L marked [PROFITABLE — harvest candidate] in the structures list
+   - A structure is working against the target shape
+   - Closing frees up margin or reduces risk for cheaper restructuring
+   CRITICAL: Always close ENTIRE structures, never individual legs.
+   - A "Call Spread [#39, #38]" must be closed by reversing BOTH legs.
+   - Always reference the trade IDs: "Close Call Spread [#39, #38] 3700/5700"
+   - Use build_strategy with the reverse legs (sell what's long, buy what's short) so it appears as an executable step.
+
+3. **NEW trades** — Add new structures only when rolling/closing isn't sufficient.
+
+The BEST analysis combines all three: "Roll structure [#12,#13] to extend duration, close [#15,#16] since it conflicts with the target, and add a new put spread to fill the gap."
+
 === ROLL WORKFLOW ===
-When the user asks about rolling or closing/restructuring positions:
+When rolling or closing/restructuring positions:
 1. Use `suggest_rolls` with the appropriate objective
 2. Explain which positions you recommend rolling and WHY (DTE risk, cost efficiency, strike adjustment)
-3. After presenting the analysis, ASK: "Would you like me to put these roll suggestions on the workbench so you can review the numbers in detail?"
+3. Show the roll suggestions so the user can click "+" to add them to the workbench
 4. The roll suggestions show: original trade (counterparty, ID, strike, expiry) -> close leg + open leg at new expiry
 5. The user can then click Calculate to get live prices and see the net roll cost
 
 === RESPONSE STYLE ===
 When analyzing/optimizing:
-1. DIAGNOSE — reference problem positions by ID
-2. CALL TOOL FIRST — call build_strategy / scan_trades / suggest_rolls BEFORE writing your analysis. You need the tool results to know the real costs.
-3. STRATEGY — present the strategy using ONLY the cost and impact numbers returned by your tools. Quote them exactly.
-4. IMPACT TABLE — ONLY include P&L figures from tool results. If the tool did not return a P&L ladder, do NOT make one up.
-5. GREEKS — brief delta/theta/vega impact (qualitative is fine)
+1. DIAGNOSE — reference problem STRUCTURES by their trade IDs (e.g., "Put Spread [#12, #13] at 2400/2200")
+2. EVALUATE EXISTING — for each structure, state: keep as-is, roll, or close? Why?
+3. CALL TOOLS — call suggest_rolls for structures that should be rolled, build_strategy for new trades, BEFORE writing analysis
+4. STRATEGY — present using ONLY the cost and impact numbers returned by your tools. Quote them exactly.
+5. IMPACT TABLE — ONLY include P&L figures from tool results. If the tool did not return a P&L ladder, do NOT make one up.
+6. GREEKS — brief delta/theta/vega impact (qualitative is fine)
 
 IMPORTANT: The order is TOOL FIRST, THEN ANALYSIS. Never write cost estimates before calling the tool. The user trusts your numbers — wrong costs erode trust.
+IMPORTANT: NEVER suggest only new trades without first evaluating whether existing structures should be rolled or closed. The user expects a complete portfolio management view.
 
 Use **bold** for key numbers. Use markdown tables. Reference positions by ID. Be structured and actionable.
 """
@@ -1597,15 +1880,33 @@ The user has drawn a target payoff curve on the chart.
 Target points (Spot Price -> Desired P&L):
 {chr(10).join(target_lines)}
 
-The system has ALREADY run target matching optimization and added results to the Suggestions table.
+The system has ALREADY run target matching optimization and added NEW TRADE strategies to the Suggestions table.
+It has ALSO analyzed every existing position to determine which ones HELP vs HURT the target match.
+
 {target_match_summary or "Target matching is processing."}
 
-YOUR JOB:
-1. Do NOT call any tools — the matching has already been done automatically. The strategies are in the Suggestions table.
-2. ANALYZE the results: explain the match quality, which legs do what, and the cost.
-3. If there are 3 strategies (Downside, Upside, Combined), explain each and recommend which to use.
-4. Compare the strategies' new payoff against the drawn target at key spot levels.
-5. If the match is poor, explain which parts of the target are hard to achieve and suggest the user adjust their drawing.
+YOUR JOB — COMPLETE PORTFOLIO PLAN (follow this order):
+
+**STEP 1 — EXISTING POSITIONS:** The analysis above tells you which positions to CLOSE, ROLL, or KEEP.
+- For CLOSE candidates: explain WHY closing them improves the target match. These are positions working AGAINST the desired curve shape.
+- For ROLL candidates: call `suggest_rolls` to get priced roll suggestions. These have short DTE and need to be extended.
+- For ESSENTIAL positions: briefly note they are helping and should be kept.
+You MUST call `suggest_rolls` if there are any ROLL candidates in the analysis. Do NOT skip this step.
+
+**STEP 2 — BELOW SPOT (Downside):** Analyze the curve BELOW current spot. What does the user want on the downside? Explain the Downside new-trade strategy: legs, cost, match quality.
+
+**STEP 3 — ABOVE SPOT (Upside):** Analyze the curve ABOVE current spot. Explain the Upside new-trade strategy: legs, cost, match quality.
+
+**STEP 4 — COMPLETE ACTION PLAN:** Present the FULL plan as a numbered list:
+  1. Close positions: [list with IDs]
+  2. Roll positions: [list with IDs and target expiry]
+  3. New trades - Downside: [strategy name and cost]
+  4. New trades - Upside: [strategy name and cost]
+  5. Total estimated cost of the full restructuring
+
+Present each action as a distinct **named trade block** so the user can add them individually to the workbench.
+Do NOT call build_strategy or scan_trades — the new trade strategies are already in the Suggestions table.
+You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
 """
 
     # ── Build messages ──
@@ -2333,9 +2634,18 @@ YOUR JOB:
             if dte <= 0:
                 return f"Rejected: {inst_name} is expired (DTE={dte}). Use a future expiry.", None
 
-            # Reject instruments with no market data
+            # Fallback to BS pricing when no market data (OTC positions, illiquid strikes)
             if bid <= 0 and ask <= 0:
-                return f"Rejected: {inst_name} has no market data (bid/ask=$0). This instrument may not exist on Deribit.", None
+                T_fb = max(dte, 1) / 365.25
+                sigma_fb = _get_sigma(strike, exp_code, smiles, expiry_code=exp_code) if smiles else DEFAULT_IV
+                if spot > 0 and T_fb > 0:
+                    bs_px = bs_price(spot, strike, T_fb, 0.0, sigma_fb, opt_type)
+                    price_eth = bs_px / spot if spot > 0 else 0
+                    bid = price_eth * 0.95  # estimate bid/ask from BS
+                    ask = price_eth * 1.05
+                    mark_iv = sigma_fb * 100
+                else:
+                    return f"Rejected: {inst_name} has no market data and cannot be priced.", None
 
             sign = 1.0 if side == "buy" else -1.0
             leg_cost = sign * price_eth * qty * spot
@@ -2488,23 +2798,30 @@ YOUR JOB:
                     "type": "tool_result", "tool_use_id": tb.id, "content": bs_text
                 })
             elif tb.name == "match_target":
-                try:
-                    mt_text, mt_data = await _handle_match_target(tb.input, req.target_payoff or [])
-                except Exception as e:
-                    import traceback
-                    tb_str = traceback.format_exc()
-                    print(f"match_target error:\n{tb_str}")
-                    mt_text = f"Error in match_target: {e}"
-                    mt_data = None
-                if mt_data:
-                    if result_data and "suggestions" in result_data:
-                        result_data["suggestions"].extend(mt_data.get("suggestions", []))
-                        result_data["num_suggestions"] += mt_data.get("num_suggestions", 0)
-                    else:
-                        result_data = mt_data
-                tool_results_content.append({
-                    "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
-                })
+                # If target match was already auto-run, don't duplicate
+                if target_match_summary and result_data and result_data.get("suggestions"):
+                    mt_text = "Target matching was already performed automatically. The strategies are already in the Suggestions table — do NOT add more."
+                    tool_results_content.append({
+                        "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
+                    })
+                else:
+                    try:
+                        mt_text, mt_data = await _handle_match_target(tb.input, req.target_payoff or [])
+                    except Exception as e:
+                        import traceback
+                        tb_str = traceback.format_exc()
+                        print(f"match_target error:\n{tb_str}")
+                        mt_text = f"Error in match_target: {e}"
+                        mt_data = None
+                    if mt_data:
+                        if result_data and "suggestions" in result_data:
+                            result_data["suggestions"].extend(mt_data.get("suggestions", []))
+                            result_data["num_suggestions"] += mt_data.get("num_suggestions", 0)
+                        else:
+                            result_data = mt_data
+                    tool_results_content.append({
+                        "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
+                    })
             else:
                 tool_results_content.append({
                     "type": "tool_result", "tool_use_id": tb.id, "content": "Unknown tool."
@@ -2533,10 +2850,46 @@ YOUR JOB:
     elif not text:
         text = "I ran out of processing steps. Try a simpler request."
 
-    resp_type = "suggestions" if result_data else "question"
-    resp = {"type": resp_type, "text": text, "context": context}
-    if result_data:
-        resp["data"] = result_data
+    # Always include base portfolio data so the frontend can load portfolio on any message (incl. "hello")
+    # Build available_expiries from portfolio expiries + Deribit if possible
+    _fallback_expiries = sorted(set(expiry_groups.keys()))
+    try:
+        _fb_summaries = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
+        _fb_exp_set = set()
+        _today_fb = date.today()
+        for _fbs in _fb_summaries:
+            _fbp = _fbs.get("instrument_name", "").split("-")
+            if len(_fbp) == 4 and _fbp[0] == "ETH":
+                try:
+                    _fbd = datetime.strptime(_fbp[1], "%d%b%y").date()
+                    if (_fbd - _today_fb).days >= 7:
+                        _fb_exp_set.add(_fbp[1])
+                except ValueError:
+                    pass
+        if _fb_exp_set:
+            _fallback_expiries = sorted(_fb_exp_set, key=lambda x: datetime.strptime(x, "%d%b%y"))
+    except Exception:
+        pass
+
+    if not result_data:
+        result_data = {
+            "suggestions": [],
+            "num_suggestions": 0,
+            "spot_ladder": spot_arr.tolist(),
+            "current_payoff": np.round(current_payoff, 2).tolist(),
+            "current_profile": {
+                "at_spot": pnl_at_spot, "min": worst, "min_at": worst_at,
+                "max": best, "max_at": float(spot_arr[np.argmax(current_payoff)]) if len(current_payoff) > 0 else 0,
+                "breakeven": breakeven,
+            },
+            "positions": positions_detail,
+            "spot": spot,
+            "available_expiries": _fallback_expiries,
+        }
+    # Ensure available_expiries exists on all response paths
+    if "available_expiries" not in result_data:
+        result_data["available_expiries"] = _fallback_expiries
+    resp = {"type": "suggestions", "text": text, "context": context, "data": result_data}
     return resp
 
 

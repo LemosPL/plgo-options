@@ -46,10 +46,59 @@ const get  = (path) => api("GET", path);
 const post = (path, body) => api("POST", path, body);
 
 // ─── Vol surface helpers (for pricer) ────────────────────────
-function lookupSmileIv(expiryCode, strike) {
-  if (!volSurface || !volSurface.smiles) return null;
-  const smile = volSurface.smiles.find(s => s.expiry_code === expiryCode);
-  if (!smile) return null;
+// Parse expiry code to Date
+function _parseExpiryCode(code) {
+  // "13APR26" -> Date
+  const months = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
+  const m = code.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+  if (!m) return null;
+  const d = parseInt(m[1]), mon = months[m[2]], y = 2000 + parseInt(m[3]);
+  if (mon === undefined) return null;
+  return new Date(y, mon, d);
+}
+
+// Compute DTE from expiry code
+function _expiryCodeToDte(code) {
+  const d = _parseExpiryCode(code);
+  if (!d) return null;
+  return Math.max(0, Math.round((d - new Date()) / 86400000));
+}
+
+// Interpolate IV between two smile surfaces for a non-standard expiry
+function _interpolateSmileIv(expiryCode, strike) {
+  if (!volSurface || !volSurface.smiles || volSurface.smiles.length < 2) return null;
+  const targetDte = _expiryCodeToDte(expiryCode);
+  if (targetDte == null) return null;
+
+  // Sort smiles by DTE
+  const sorted = [...volSurface.smiles].sort((a, b) => a.dte - b.dte);
+
+  // Find bracketing smiles
+  let before = null, after = null;
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].dte <= targetDte) before = sorted[i];
+    if (sorted[i].dte >= targetDte && !after) after = sorted[i];
+  }
+
+  if (!before && !after) return null;
+  if (!before) before = after;
+  if (!after) after = before;
+  if (before === after) {
+    // Only one smile available, use it directly
+    return _lookupIvInSmile(before, strike);
+  }
+
+  // Linear interpolation in DTE between the two smiles
+  const range = after.dte - before.dte;
+  const w = range > 0 ? (targetDte - before.dte) / range : 0.5;
+  const ivBefore = _lookupIvInSmile(before, strike);
+  const ivAfter = _lookupIvInSmile(after, strike);
+  if (ivBefore == null || ivAfter == null) return ivBefore || ivAfter;
+  return ivBefore * (1 - w) + ivAfter * w;
+}
+
+// Lookup IV in a single smile (strike interpolation)
+function _lookupIvInSmile(smile, strike) {
   const { strikes, ivs } = smile;
   if (!strikes || strikes.length === 0) return null;
   if (strike <= strikes[0]) return ivs[0];
@@ -63,9 +112,28 @@ function lookupSmileIv(expiryCode, strike) {
   return ivs[ivs.length - 1];
 }
 
+function lookupSmileIv(expiryCode, strike) {
+  if (!volSurface || !volSurface.smiles) return null;
+  const smile = volSurface.smiles.find(s => s.expiry_code === expiryCode);
+  if (smile) return _lookupIvInSmile(smile, strike);
+  // No exact match — interpolate between nearest expiries
+  return _interpolateSmileIv(expiryCode, strike);
+}
+
 function getSmileForExpiry(expiryCode) {
   if (!volSurface || !volSurface.smiles) return null;
-  return volSurface.smiles.find(s => s.expiry_code === expiryCode) || null;
+  const exact = volSurface.smiles.find(s => s.expiry_code === expiryCode);
+  if (exact) return exact;
+  // Build a synthetic smile for non-standard expiries via interpolation
+  const targetDte = _expiryCodeToDte(expiryCode);
+  if (targetDte == null) return null;
+  // Use the nearest smile's strikes as reference points
+  const sorted = [...volSurface.smiles].sort((a, b) => Math.abs(a.dte - targetDte) - Math.abs(b.dte - targetDte));
+  const ref = sorted[0];
+  if (!ref) return null;
+  const syntheticIvs = ref.strikes.map(k => _interpolateSmileIv(expiryCode, k));
+  if (syntheticIvs.some(v => v == null)) return null;
+  return { expiry_code: expiryCode, dte: targetDte, strikes: [...ref.strikes], ivs: syntheticIvs, _synthetic: true };
 }
 
 // Simple BS for the pricer (reusing the one from portfolio section causes ordering issues)
@@ -258,9 +326,12 @@ function removeLeg(idx) {
 
 function renderLegs() {
   $legsBody.innerHTML = "";
-  const expiryOptions = volSurface && volSurface.smiles
+  const vsExpiries = volSurface && volSurface.smiles
     ? volSurface.smiles.map(s => s.expiry_code)
     : [];
+  // Include custom expiries from legs that aren't in the vol surface (e.g., OTC dates)
+  const legExpiries = legs.map(l => l.expiry).filter(e => e && !vsExpiries.includes(e));
+  const expiryOptions = [...vsExpiries, ...new Set(legExpiries)];
 
   legs.forEach((leg, i) => {
     const expOpts = expiryOptions.map(e =>
@@ -437,10 +508,17 @@ function replicateStrategy() {
   }
   if (!volSurface) { alert("Vol surface not loaded yet — wait for page init."); return; }
 
-  // Validate all expiries have smile data
+  // Validate all expiries have smile data (exact or interpolated)
   const uniqueExpiries = [...new Set(legs.map(l => l.expiry))];
   for (const exp of uniqueExpiries) {
-    if (!getSmileForExpiry(exp)) { alert(`No vol smile data for expiry ${exp}.`); return; }
+    const smile = getSmileForExpiry(exp);
+    if (!smile) {
+      alert(`Cannot price expiry ${exp} — no vol smile data available and cannot interpolate. Need at least 2 Deribit expiries to bracket this date.`);
+      return;
+    }
+    if (smile._synthetic) {
+      console.log(`Using interpolated vol smile for ${exp} (DTE ${smile.dte}d) — no exact Deribit match`);
+    }
   }
 
   const spot = ethSpot;
@@ -497,9 +575,11 @@ function replicateStrategy() {
       }
     }
 
+    const isSynthetic = !!(smile && smile._synthetic);
     legDetails.push({
       expiry: l.expiry, dte, strike: K, type: l.type, side: l.side, quantity: qty,
       iv_pct: ivPct, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
+      _synthetic: isSynthetic,
     });
   }
 
@@ -524,6 +604,24 @@ function replicateStrategy() {
   const rcvColor = totalReceive > 0 ? "var(--green)" : "var(--muted)";
   const netLabel = net >= 0 ? "Rcv" : "Pay";
   const netColor = net >= 0 ? "var(--green)" : "var(--red)";
+  // Determine pricing source
+  const hasSynthetic = legDetails.some(d => d._synthetic);
+  const allSynthetic = legDetails.every(d => d._synthetic);
+  let sourceNote = "";
+  if (allSynthetic) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.3">` +
+      `Prices: <strong>BS model with interpolated vol surface</strong> — no exact Deribit expiry match. ` +
+      `These are theoretical fair values, not live market quotes. Execution prices (bid/ask) will differ.</div>`;
+  } else if (hasSynthetic) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.3">` +
+      `Some expiries use <strong>interpolated vol</strong> (marked with *). ` +
+      `These are theoretical BS values — execution prices from the Workbench (live Deribit) are more accurate.</div>`;
+  } else {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:var(--muted);line-height:1.3">` +
+      `Prices: <strong>BS model with Deribit vol surface</strong> — theoretical fair values. ` +
+      `For execution prices, use the Optimizer Workbench (live bid/ask).</div>`;
+  }
+
   const $summary = document.getElementById("repl-summary");
   $summary.innerHTML =
     `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">` +
@@ -532,7 +630,7 @@ function replicateStrategy() {
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
     `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
-    `</span></div>`;
+    `</span></div>` + sourceNote;
 
   // Per-leg table
   const $body = document.getElementById("repl-body");
@@ -541,6 +639,9 @@ function replicateStrategy() {
     const tr = document.createElement("tr");
     const sideColor = d.side === "buy" ? "var(--accent)" : "var(--orange)";
     const typeColor = d.type === "C" ? "var(--green)" : "var(--red)";
+    const srcLabel = d._synthetic
+      ? `<span style="color:#f0883e;font-weight:600" title="Vol interpolated between nearest Deribit expiries — theoretical, not live">Interpolated*</span>`
+      : `<span style="color:var(--muted)" title="Vol from Deribit vol surface — theoretical BS fair value">Vol Surface</span>`;
     tr.innerHTML = `
       <td style="font-size:.75rem">${d.expiry}</td>
       <td style="color:${sideColor}">${d.side.toUpperCase()}</td>
@@ -550,6 +651,7 @@ function replicateStrategy() {
       <td>${d.iv_pct.toFixed(1)}%</td>
       <td style="font-family:monospace">${d.bs_premium_eth.toFixed(6)}</td>
       <td style="font-family:monospace">$${d.bs_premium_usd.toFixed(2)}</td>
+      <td style="font-size:.68rem">${srcLabel}</td>
     `;
     $body.appendChild(tr);
   }
@@ -3607,8 +3709,82 @@ function opt2AddMsg(type, html) {
   $log.scrollTop = $log.scrollHeight;
 }
 
-async function opt2Run() {
+// Progress phases for the status bar
+const OPT2_PHASES = [
+  { at: 0,  pct: 5,   text: "Loading portfolio..." },
+  { at: 1,  pct: 15,  text: "Fetching live prices from Deribit..." },
+  { at: 3,  pct: 30,  text: "Computing payoff curves..." },
+  { at: 5,  pct: 45,  text: "Analyzing structures & MTM..." },
+  { at: 8,  pct: 55,  text: "Running AI analysis..." },
+  { at: 12, pct: 65,  text: "AI is evaluating strategies..." },
+  { at: 18, pct: 75,  text: "Pricing suggestions on Deribit..." },
+  { at: 25, pct: 82,  text: "Building roll recommendations..." },
+  { at: 35, pct: 88,  text: "Finalizing response..." },
+  { at: 50, pct: 92,  text: "Still working — complex analysis..." },
+  { at: 70, pct: 95,  text: "Almost done..." },
+];
+
+let _opt2StatusTimer = null;
+let _opt2StatusStart = 0;
+
+function opt2StartProgress() {
   const $status = document.getElementById("opt2-status");
+  const $text = document.getElementById("opt2-status-text");
+  const $elapsed = document.getElementById("opt2-status-elapsed");
+  const $bar = document.getElementById("opt2-status-bar");
+  $status.style.display = "block";
+  $text.textContent = OPT2_PHASES[0].text;
+  $bar.style.width = "5%";
+  $elapsed.textContent = "0s";
+  _opt2StatusStart = Date.now();
+
+  // Add typing indicator in chat
+  const $log = document.getElementById("opt2-chat-log");
+  const typingDiv = document.createElement("div");
+  typingDiv.id = "opt2-typing";
+  typingDiv.className = "opt2-msg opt2-msg-bot";
+  typingDiv.innerHTML = `<div class="opt2-msg-bubble" style="display:inline-flex;gap:4px;padding:8px 16px">` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out infinite"></span>` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out .15s infinite"></span>` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out .3s infinite"></span>` +
+    `</div>`;
+  $log.appendChild(typingDiv);
+  $log.scrollTop = $log.scrollHeight;
+
+  // Add bounce animation if not yet present
+  if (!document.getElementById("opt2-bounce-style")) {
+    const style = document.createElement("style");
+    style.id = "opt2-bounce-style";
+    style.textContent = `@keyframes opt2bounce{0%,100%{opacity:.3;transform:translateY(0)}50%{opacity:1;transform:translateY(-4px)}}`;
+    document.head.appendChild(style);
+  }
+
+  _opt2StatusTimer = setInterval(() => {
+    const elapsed = (Date.now() - _opt2StatusStart) / 1000;
+    $elapsed.textContent = `${Math.floor(elapsed)}s`;
+    // Find current phase
+    for (let i = OPT2_PHASES.length - 1; i >= 0; i--) {
+      if (elapsed >= OPT2_PHASES[i].at) {
+        $text.textContent = OPT2_PHASES[i].text;
+        $bar.style.width = OPT2_PHASES[i].pct + "%";
+        break;
+      }
+    }
+  }, 500);
+}
+
+function opt2StopProgress() {
+  const $status = document.getElementById("opt2-status");
+  const $bar = document.getElementById("opt2-status-bar");
+  $bar.style.width = "100%";
+  if (_opt2StatusTimer) { clearInterval(_opt2StatusTimer); _opt2StatusTimer = null; }
+  setTimeout(() => { $status.style.display = "none"; $bar.style.width = "0%"; }, 400);
+  // Remove typing indicator
+  const typing = document.getElementById("opt2-typing");
+  if (typing) typing.remove();
+}
+
+async function opt2Run() {
   const $btn = document.getElementById("btn-opt2-run");
   const queryText = document.getElementById("opt2-ask").value.trim();
   if (!queryText) return;
@@ -3619,7 +3795,7 @@ async function opt2Run() {
 
   $btn.disabled = true;
   $btn.textContent = "...";
-  $status.style.display = "block";
+  opt2StartProgress();
 
   try {
     // Include drawn target profile if available
@@ -3643,7 +3819,7 @@ async function opt2Run() {
       target_payoff: drawnTarget,
     });
 
-    $status.style.display = "none";
+    opt2StopProgress();
     $btn.disabled = false;
     $btn.textContent = "Send";
 
@@ -3671,7 +3847,7 @@ async function opt2Run() {
 
   } catch (e) {
     opt2AddMsg("bot", `<span style="color:var(--red)">Error: ${e.message}</span>`);
-    $status.style.display = "none";
+    opt2StopProgress();
     $btn.disabled = false;
     $btn.textContent = "Send";
   }
@@ -3687,7 +3863,8 @@ let opt2PortSortAsc = true;
 
 function opt2RenderPortfolio() {
   if (!opt2Data) return;
-  const p = opt2Data.current_profile;
+  const p = opt2Data.current_profile || {};
+  if (!p.at_spot && p.at_spot !== 0) return;  // no profile data yet
   const pos = opt2Data.positions || [];
   const $s = (id, v) => { document.getElementById(id).textContent = v; };
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
@@ -3874,9 +4051,9 @@ function opt2ApplyFilter() {
   if (catF) list = list.filter(s => s.category === catF);
   const sort = document.getElementById("opt2-sort").value;
   if (sort === "cost_asc") list.sort((a, b) => Math.abs(a.net_cost_usd) - Math.abs(b.net_cost_usd));
-  else if (sort === "downside") list.sort((a, b) => b.impact.downside - a.impact.downside);
-  else if (sort === "upside") list.sort((a, b) => b.impact.upside - a.impact.upside);
-  else if (sort === "floor") list.sort((a, b) => b.impact.min_improvement - a.impact.min_improvement);
+  else if (sort === "downside") list.sort((a, b) => (b.impact?.downside || 0) - (a.impact?.downside || 0));
+  else if (sort === "upside") list.sort((a, b) => (b.impact?.upside || 0) - (a.impact?.upside || 0));
+  else if (sort === "floor") list.sort((a, b) => (b.impact?.min_improvement || 0) - (a.impact?.min_improvement || 0));
   opt2Filtered = list;
 
   const cats = [...new Set(opt2Data.suggestions.map(s => s.category))].sort();
@@ -3919,7 +4096,39 @@ function opt2RenderResults() {
 
   const $tbody = document.getElementById("opt2-results-body");
   $tbody.innerHTML = "";
+
+  // Detect step-based plan: suggestions named "Step N: ..."
+  const hasSteps = opt2Filtered.some(s => /^step\s+\d/i.test(s.name));
+  let lastPhase = "";
+
   opt2Filtered.forEach((s, idx) => {
+    // Insert phase header rows for step-based plans
+    if (hasSteps) {
+      const stepMatch = s.name.match(/^step\s+(\d+)/i);
+      let phase = "";
+      if (stepMatch) {
+        // Detect phase from name: "Close" = harvest, "Open" = deploy
+        const nameLower = s.name.toLowerCase();
+        if (nameLower.includes("close") || nameLower.includes("harvest") || nameLower.includes("sell")) {
+          phase = "PHASE 1: CLOSE & HARVEST";
+        } else if (nameLower.includes("open") || nameLower.includes("buy") || nameLower.includes("downside") || nameLower.includes("upside") || nameLower.includes("protection")) {
+          phase = "PHASE 2: OPEN NEW TRADES";
+        } else {
+          phase = "RESTRUCTURING PLAN";
+        }
+      } else {
+        phase = "OTHER SUGGESTIONS";
+      }
+      if (phase !== lastPhase) {
+        lastPhase = phase;
+        const phaseColor = phase.includes("CLOSE") ? "#f0883e" : phase.includes("OPEN") ? "#3fb950" : "#d2a8ff";
+        const headerTr = document.createElement("tr");
+        headerTr.style.cssText = `background:rgba(${phaseColor === "#f0883e" ? "240,136,62" : phaseColor === "#3fb950" ? "63,185,80" : "210,168,255"},0.1);border-left:3px solid ${phaseColor}`;
+        headerTr.innerHTML = `<td colspan="11" style="text-align:left;font-size:.72rem;font-weight:700;padding:6px 8px;color:${phaseColor};letter-spacing:.5px">${phase}</td>`;
+        $tbody.appendChild(headerTr);
+      }
+    }
+
     const costR = Math.round(s.net_cost_usd);
     const isHl = idx === opt2HighlightIdx;
     const tr = document.createElement("tr");
@@ -3927,17 +4136,21 @@ function opt2RenderResults() {
     if (isHl) tr.classList.add("roll-row-selected");
     const catColor = catColors[s.category] || "var(--muted)";
     const costCls = Math.abs(costR) < 500 ? "" : costR > 0 ? "mtm-neg" : "mtm-pos";
+    // For step-based plans, show step number instead of index
+    const stepMatch = s.name.match(/^step\s+(\d+)/i);
+    const displayNum = stepMatch ? stepMatch[1] : (idx + 1);
+    const displayName = stepMatch ? s.name.replace(/^step\s+\d+:\s*/i, "") : s.name;
     tr.innerHTML =
       `<td><button class="btn-primary opt2-add-to-wb" data-idx="${idx}" style="width:22px;height:20px;padding:0;margin:0;font-size:.75rem;line-height:1;border-radius:3px" title="Add to workbench">+</button></td>` +
-      `<td>${idx + 1}</td>` +
-      `<td style="text-align:left;font-size:.76rem">${s.name}</td>` +
+      `<td>${displayNum}</td>` +
+      `<td style="text-align:left;font-size:.76rem">${stepMatch ? `<strong>Step ${stepMatch[1]}:</strong> ` : ""}${displayName}</td>` +
       `<td style="text-align:left"><span style="color:${catColor};font-weight:600;font-size:.72rem">${catLabels[s.category] || s.category}</span></td>` +
       `<td>${s.dte}d</td>` +
       `<td class="${costCls}">${costR >= 0 ? "" : "-"}$${Math.abs(costR).toLocaleString()}</td>` +
-      `<td>${fmtImp(s.impact.at_spot)}</td>` +
-      `<td>${fmtImp(s.impact.downside)}</td>` +
-      `<td>${fmtImp(s.impact.upside)}</td>` +
-      `<td>${fmtImp(s.impact.min_improvement)}</td>` +
+      `<td>${fmtImp(s.impact?.at_spot || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.downside || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.upside || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.min_improvement || 0)}</td>` +
       `<td style="font-weight:700">${Math.round(s.score).toLocaleString()}${s.target_match_pct != null ? `<br><span style="font-size:.65rem;color:#f0883e;font-weight:400">${s.target_match_pct.toFixed(0)}% match</span>` : ''}</td>`;
     $tbody.appendChild(tr);
 
@@ -3973,13 +4186,15 @@ function opt2OpenWorkbench(s) {
   opt2WbName = s.name;
   document.getElementById("opt2-wb-name").textContent = s.name;
   opt2RenderWorkbench();
-  opt2ShowWbImpact(s.net_cost_usd, s.impact, s.new_payoff);
+  opt2ShowWbImpact(s.net_cost_usd, s.impact || {}, s.new_payoff);
   document.getElementById("opt2-workbench-section").style.display = "block";
 }
 
 function opt2AddToWorkbench(s) {
   // Accumulate — add legs from this suggestion to existing workbench
-  for (const l of s.legs) opt2WbLegs.push({ ...l });
+  // Tag each leg with the strategy name so we can group them visually
+  const stratName = s.name || "Strategy";
+  for (const l of s.legs) opt2WbLegs.push({ ...l, _strategyName: stratName });
   opt2WbName = opt2WbLegs.length <= s.legs.length ? s.name : "Combined (" + opt2WbLegs.length + " legs)";
   document.getElementById("opt2-wb-name").textContent = opt2WbName;
   opt2RenderWorkbench();
@@ -4023,7 +4238,25 @@ function opt2RenderWorkbench() {
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
 
   const renderedRollHeaders = new Set();  // track which original trade IDs have had their header rendered
+  const renderedStratHeaders = new Set();  // track strategy name headers
   opt2WbLegs.forEach((leg, idx) => {
+    // Strategy block header row (non-roll): show strategy name when legs are grouped
+    if (!leg._isRollClose && !leg._isRollOpen && leg._strategyName && !renderedStratHeaders.has(leg._strategyName)) {
+      renderedStratHeaders.add(leg._strategyName);
+      const stratTr = document.createElement("tr");
+      // Color-code by zone: orange for downside, green for upside, purple for combined/other
+      let headerColor = "#d2a8ff";
+      const nameLower = leg._strategyName.toLowerCase();
+      if (nameLower.startsWith("downside")) headerColor = "#f0883e";
+      else if (nameLower.startsWith("upside")) headerColor = "#3fb950";
+      else if (nameLower.startsWith("cost reduction")) headerColor = "#58a6ff";
+      stratTr.style.cssText = `background:rgba(${headerColor === "#f0883e" ? "240,136,62" : headerColor === "#3fb950" ? "63,185,80" : headerColor === "#58a6ff" ? "88,166,255" : "210,168,255"},0.08);border-left:3px solid ${headerColor}`;
+      stratTr.innerHTML =
+        `<td colspan="12" style="text-align:left;font-size:.74rem;padding:.4rem .6rem">` +
+        `<strong style="color:${headerColor}">${leg._strategyName}</strong>` +
+        `</td>`;
+      $tbody.appendChild(stratTr);
+    }
     // Roll header row: show original trade info before close/open pair
     if (leg._isRollClose && leg._rollOriginalTrade && !renderedRollHeaders.has(leg._rollOriginalTradeId)) {
       renderedRollHeaders.add(leg._rollOriginalTradeId);
@@ -4161,6 +4394,7 @@ function opt2RenderWorkbench() {
 }
 
 function opt2ShowWbImpact(cost, impact, newPayoff) {
+  const imp = impact || {};
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
   const setV = (id, v, cls) => {
     const el = document.getElementById(id);
@@ -4168,13 +4402,13 @@ function opt2ShowWbImpact(cost, impact, newPayoff) {
     if (cls !== undefined) el.className = `risk-value ${cls}`;
   };
 
-  const cr = Math.round(cost);
-  setV("opt2-wb-cost", cost, Math.abs(cr) < 500 ? "" : cr > 0 ? "mtm-neg" : "mtm-pos");
-  setV("opt2-wb-pnl-spot", impact.at_spot || 0, (impact.at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  setV("opt2-wb-new-worst", impact.new_min || 0, (impact.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  setV("opt2-wb-new-be", impact.new_breakeven ? `$${Math.round(impact.new_breakeven).toLocaleString()}` : "N/A", "");
-  setV("opt2-wb-floor-imp", impact.min_improvement || 0, (impact.min_improvement || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  const beImp = impact.breakeven_improvement || 0;
+  const cr = Math.round(cost || 0);
+  setV("opt2-wb-cost", cost || 0, Math.abs(cr) < 500 ? "" : cr > 0 ? "mtm-neg" : "mtm-pos");
+  setV("opt2-wb-pnl-spot", imp.at_spot || 0, (imp.at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-worst", imp.new_min || 0, (imp.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-be", imp.new_breakeven ? `$${Math.round(imp.new_breakeven).toLocaleString()}` : "N/A", "");
+  setV("opt2-wb-floor-imp", imp.min_improvement || 0, (imp.min_improvement || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  const beImp = imp.breakeven_improvement || 0;
   setV("opt2-wb-be-imp", beImp || "--", beImp > 0 ? "mtm-pos" : beImp < 0 ? "mtm-neg" : "");
 
   // Store for chart
@@ -4205,7 +4439,7 @@ async function opt2Calculate() {
     }
     opt2RenderWorkbench();
     opt2ShowWbImpact(result.total_cost, {
-      at_spot: result.pnl_at_spot - opt2Data.current_profile.at_spot,
+      at_spot: result.pnl_at_spot - (opt2Data.current_profile?.at_spot || 0),
       new_min: result.new_min,
       min_improvement: result.floor_change,
       new_breakeven: result.new_breakeven,
@@ -4464,23 +4698,34 @@ function opt2DrawChart() {
     });
   }
 
-  // Add target profile trace if we have drawn points
+  // Add target profile trace if we have drawn points (smoothed + raw markers)
   const clearBtn = document.getElementById("btn-opt2-clear-target");
   if (opt2TargetPoints.length >= 1) {
+    // Raw markers — show exactly where user clicked
     const sorted = [...opt2TargetPoints].sort((a, b) => a.x - b.x);
-    const tgtX = sorted.map(p => p.x);
-    const tgtY = sorted.map(p => p.y);
     traces.push({
-      x: tgtX, y: tgtY, type: "scatter",
-      mode: opt2TargetPoints.length >= 2 ? "lines+markers" : "markers",
-      name: "Target Profile",
-      line: { color: "#f0883e", width: 2.5, dash: "dash" },
-      marker: { color: "#f0883e", size: 8, symbol: "circle" },
+      x: sorted.map(p => p.x), y: sorted.map(p => p.y), type: "scatter",
+      mode: "markers", name: "Drawn Points",
+      marker: { color: "#f0883e", size: 8, symbol: "circle", line: { color: "#fff", width: 1 } },
+      showlegend: false,
     });
+    // Smoothed curve — interpolated spline
+    if (opt2TargetPoints.length >= 2) {
+      const smooth = opt2SmoothCurve(opt2TargetPoints, 80);
+      traces.push({
+        x: smooth.xs, y: smooth.ys, type: "scatter", mode: "lines",
+        name: "Target Profile (smoothed)",
+        line: { color: "#f0883e", width: 2.5, dash: "dash" },
+      });
+    }
     if (clearBtn) clearBtn.style.display = "";
   } else {
     if (clearBtn) clearBtn.style.display = "none";
   }
+
+  // Add saved/displayed curve traces (multi-overlay)
+  const curveTraces = opt2GetDisplayedCurveTraces();
+  traces.push(...curveTraces);
 
   const allY = traces.flatMap(t => t.y);
   const yMin = Math.min(...allY);
@@ -4507,12 +4752,115 @@ function opt2DrawChart() {
   opt2RenderMatrix();
 }
 
+// ── Monotone Cubic Spline Interpolation (Fritsch-Carlson) ──
+
+function opt2SmoothCurve(points, numOut = 80) {
+  // Takes sparse drawn points, returns a smooth curve with numOut points
+  if (points.length < 2) return { xs: points.map(p => p.x), ys: points.map(p => p.y) };
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  const xs = sorted.map(p => p.x);
+  const ys = sorted.map(p => p.y);
+  const n = xs.length;
+
+  if (n === 2) {
+    // Linear interpolation for 2 points — extend to numOut
+    const outX = [], outY = [];
+    for (let i = 0; i < numOut; i++) {
+      const t = i / (numOut - 1);
+      outX.push(xs[0] + t * (xs[1] - xs[0]));
+      outY.push(ys[0] + t * (ys[1] - ys[0]));
+    }
+    return { xs: outX, ys: outY };
+  }
+
+  // Compute slopes (Fritsch-Carlson monotone cubic)
+  const dx = [], dy = [], m = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(xs[i + 1] - xs[i]);
+    dy.push(ys[i + 1] - ys[i]);
+    m.push(dy[i] / dx[i]);
+  }
+
+  // Tangents
+  const tg = [m[0]];
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] * m[i] <= 0) {
+      tg.push(0);
+    } else {
+      tg.push(3 * (dx[i - 1] + dx[i]) / ((2 * dx[i] + dx[i - 1]) / m[i - 1] + (dx[i] + 2 * dx[i - 1]) / m[i]));
+    }
+  }
+  tg.push(m[n - 2]);
+
+  // Evaluate spline at numOut evenly-spaced x values
+  const xMin = xs[0], xMax = xs[n - 1];
+  const outX = [], outY = [];
+  for (let i = 0; i < numOut; i++) {
+    const x = xMin + (i / (numOut - 1)) * (xMax - xMin);
+    // Find interval
+    let k = 0;
+    for (k = 0; k < n - 2; k++) { if (x < xs[k + 1]) break; }
+    const h = dx[k], t = (x - xs[k]) / h;
+    const t2 = t * t, t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    outX.push(Math.round(x));
+    outY.push(Math.round(h00 * ys[k] + h10 * h * tg[k] + h01 * ys[k + 1] + h11 * h * tg[k + 1]));
+  }
+  return { xs: outX, ys: outY };
+}
+
 // ── Draw Target Profile ──────────────────────────────────
 
 let opt2DrawMode = false;
 let opt2TargetPoints = [];  // [{x: spot, y: payoff}, ...]
 
 document.getElementById("btn-opt2-draw").addEventListener("click", opt2EnterDrawMode);
+document.getElementById("btn-opt2-reduce-cost").addEventListener("click", () => {
+  if (!opt2Data) {
+    alert("Load portfolio data first (type 'hello' in chat)");
+    return;
+  }
+  document.getElementById("opt2-ask").value =
+    "Analyze my existing structures and find ways to reduce their cost. " +
+    "For each structure, suggest rolls, adjustments, or overlays that lower the net premium spent " +
+    "while preserving as much of the protective profile as possible. " +
+    "Present each cost-reduction trade as a named strategy block I can add to the workbench.";
+  opt2Run();
+});
+document.getElementById("btn-opt2-price-move").addEventListener("click", () => {
+  if (!opt2Data) {
+    alert("Load portfolio data first (type 'hello' in chat)");
+    return;
+  }
+  document.getElementById("opt2-ask").value =
+    "PRICE MOVEMENT OPTIMIZATION.\n\n" +
+    "CONCEPT: Find positions that are now NEARLY WORTHLESS (far OTM after the price move) " +
+    "and recycle them into better-positioned protection.\n\n" +
+    "WHAT TO RECYCLE — ONLY positions where ALL of these are true:\n" +
+    "- The position is far out-of-the-money at current spot (strike is far from spot)\n" +
+    "- The position has LOST most of its value (marked [PROFITABLE — harvest candidate] in the structures list)\n" +
+    "- Closing it is CHEAP — the current market value is small, near zero\n" +
+    "- It is a LONG position we can sell, or a SHORT position that is nearly worthless to buy back\n\n" +
+    "WHAT TO NEVER RECYCLE:\n" +
+    "- Deep ITM positions — these are EXPENSIVE to close, not cheap. Skip them entirely.\n" +
+    "- Positions that are still providing active protection at current spot levels\n" +
+    "- Short options with high intrinsic value — buying these back costs real money, defeats the purpose\n\n" +
+    "THE RECYCLE:\n" +
+    "For each cheap-to-close position, reopen the SAME type of protection at strikes closer to current spot.\n" +
+    "Example: Long Put at 1200 is worthless (spot is 2000). Close it for pennies. Open Long Put at 1800. " +
+    "Downside protection improved, cost nearly zero.\n\n" +
+    "HARD RULES:\n" +
+    "- If closing a structure costs more than $50K, DO NOT recycle it. It is not cheap enough.\n" +
+    "- Net cost of each roll step should be under $30K. If more, skip that structure.\n" +
+    "- Total plan cost should be near zero or a small credit.\n" +
+    "- Close/reopen ENTIRE structures (spreads = all legs). Include trade IDs.\n" +
+    "- build_strategy only (not scan_trades). Name: 'Step N: Roll [type] [#IDs] [old] -> [new]'\n" +
+    "- If NO positions qualify (nothing is cheap to close), say so. Do not force bad trades.";
+  opt2Run();
+});
 document.getElementById("btn-opt2-clear-target").addEventListener("click", () => {
   opt2TargetPoints = [];
   document.getElementById("btn-opt2-clear-target").style.display = "none";
@@ -4604,25 +4952,237 @@ function opt2SendDrawnTarget() {
     return;
   }
 
-  // Sort by spot
-  const sorted = [...opt2TargetPoints].sort((a, b) => a.x - b.x);
+  // Smooth the curve before sending — gives the AI a proper curve to work with
+  const smooth = opt2SmoothCurve(opt2TargetPoints, 40);
+  const smoothedPoints = smooth.xs.map((x, i) => ({ x, y: smooth.ys[i] }));
 
-  // Build a human-readable summary + store the data
+  // Build a human-readable summary from KEY points (raw + a few interpolated)
+  const sorted = [...opt2TargetPoints].sort((a, b) => a.x - b.x);
   const lines = sorted.map(p =>
     `  $${p.x.toLocaleString()} -> $${p.y.toLocaleString()}`
   );
-  const msgText = `Match this target payoff profile:\n${lines.join("\n")}`;
+  const msgText = `Match this target payoff profile (smoothed from my drawing):\n${lines.join("\n")}`;
 
   // Put into the chat input and send
   document.getElementById("opt2-ask").value = msgText;
   opt2ExitDrawMode();
 
-  // Store target data globally so it gets sent with the chat message
-  window._opt2DrawnTarget = sorted;
+  // Store the SMOOTHED target data so it gets sent with the chat message
+  window._opt2DrawnTarget = smoothedPoints;
+
+  // Also update the drawn points to include smoothed version for display
+  // (keep originals for marker display, smoothed goes to backend)
 
   // Trigger send
   opt2Run();
 }
+
+// ── Saved Curves (localStorage + multi-display) ─────────
+
+const OPT2_CURVES_KEY = "opt2_saved_curves";
+let opt2DisplayedCurves = new Set();  // indices of curves shown on chart
+let opt2SendCurveIdx = -1;            // index of curve selected to send
+
+// Curve colors for multi-display (up to 8)
+const OPT2_CURVE_COLORS = ["#f0883e", "#58a6ff", "#d2a8ff", "#3fb950", "#f85149", "#e3b341", "#79c0ff", "#ff7b72"];
+
+const OPT2_DEFAULT_CURVES = [
+  {
+    name: "Current Target",
+    color: "#f0883e",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-6e6},
+      {x:800,y:-8e6},{x:1000,y:-10e6},{x:1200,y:-12e6},{x:1400,y:-14e6},
+      {x:1600,y:-16e6},{x:1800,y:-18e6},{x:2000,y:-20e6},{x:2200,y:-18e6},
+      {x:2400,y:-16e6},{x:2600,y:-14e6},{x:2800,y:-12e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 1",
+    color: "#58a6ff",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-7e6},{x:1000,y:-9e6},{x:1200,y:-11e6},{x:1400,y:-13e6},
+      {x:1600,y:-15e6},{x:1800,y:-17e6},{x:2000,y:-19e6},{x:2200,y:-17e6},
+      {x:2400,y:-15e6},{x:2600,y:-13e6},{x:2800,y:-11e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 2",
+    color: "#d2a8ff",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-5e6},{x:1000,y:-6e6},{x:1200,y:-8e6},{x:1400,y:-10e6},
+      {x:1600,y:-12e6},{x:1800,y:-14e6},{x:2000,y:-16e6},{x:2200,y:-18e6},
+      {x:2400,y:-16e6},{x:2600,y:-14e6},{x:2800,y:-12e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 3",
+    color: "#3fb950",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-7e6},{x:1000,y:-9e6},{x:1200,y:-11e6},{x:1400,y:-13e6},
+      {x:1600,y:-15e6},{x:1800,y:-17e6},{x:2000,y:-15e6},{x:2200,y:-13e6},
+      {x:2400,y:-11e6},{x:2600,y:-10e6},{x:2800,y:-10e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+];
+
+function opt2LoadSavedCurves() {
+  try {
+    const raw = localStorage.getItem(OPT2_CURVES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function opt2SaveCurvesToStorage(curves) {
+  localStorage.setItem(OPT2_CURVES_KEY, JSON.stringify(curves));
+}
+
+function opt2GetAllCurves() {
+  const saved = opt2LoadSavedCurves();
+  const names = new Set(saved.map(c => c.name));
+  const all = [...saved];
+  for (const d of OPT2_DEFAULT_CURVES) {
+    if (!names.has(d.name)) all.push(d);
+  }
+  return all;
+}
+
+function opt2RefreshCurvesList() {
+  const $list = document.getElementById("opt2-curves-list");
+  const curves = opt2GetAllCurves();
+  $list.innerHTML = "";
+
+  curves.forEach((c, i) => {
+    const color = c.color || OPT2_CURVE_COLORS[i % OPT2_CURVE_COLORS.length];
+    const isDisplayed = opt2DisplayedCurves.has(i);
+    const isSend = opt2SendCurveIdx === i;
+
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:.5rem;padding:4px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--border)";
+    if (isSend) row.style.borderColor = color;
+
+    row.innerHTML =
+      `<input type="checkbox" class="opt2-curve-display" data-idx="${i}" ${isDisplayed ? "checked" : ""} ` +
+        `style="accent-color:${color};cursor:pointer" title="Show on chart">` +
+      `<input type="radio" name="opt2-curve-send" class="opt2-curve-radio" data-idx="${i}" ${isSend ? "checked" : ""} ` +
+        `style="accent-color:${color};cursor:pointer" title="Select to send to chat">` +
+      `<span style="width:12px;height:12px;border-radius:2px;background:${color};flex-shrink:0"></span>` +
+      `<span style="flex:1;font-size:.78rem;font-weight:${isSend ? 700 : 400};color:${isDisplayed ? 'var(--text)' : 'var(--muted)'}">${c.name}</span>` +
+      `<span style="font-size:.65rem;color:var(--muted)">${c.points.length} pts</span>`;
+
+    $list.appendChild(row);
+  });
+
+  // Wire checkbox (display) events
+  $list.querySelectorAll(".opt2-curve-display").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.idx);
+      if (cb.checked) opt2DisplayedCurves.add(idx);
+      else opt2DisplayedCurves.delete(idx);
+      opt2RefreshCurvesList();
+      opt2DrawChart();
+      // Show chart
+      const $w = document.getElementById("opt2-chart-wrapper");
+      if ($w && opt2DisplayedCurves.size > 0) $w.style.display = "block";
+    });
+  });
+
+  // Wire radio (send) events
+  $list.querySelectorAll(".opt2-curve-radio").forEach(rb => {
+    rb.addEventListener("change", () => {
+      opt2SendCurveIdx = parseInt(rb.dataset.idx);
+      // Also display it
+      opt2DisplayedCurves.add(opt2SendCurveIdx);
+      opt2RefreshCurvesList();
+      opt2DrawChart();
+      const $w = document.getElementById("opt2-chart-wrapper");
+      if ($w) $w.style.display = "block";
+    });
+  });
+}
+
+// Get displayed curves for chart overlay
+function opt2GetDisplayedCurveTraces() {
+  const curves = opt2GetAllCurves();
+  const traces = [];
+  for (const i of opt2DisplayedCurves) {
+    const c = curves[i];
+    if (!c) continue;
+    const color = c.color || OPT2_CURVE_COLORS[i % OPT2_CURVE_COLORS.length];
+    const isSend = i === opt2SendCurveIdx;
+    const sorted = [...c.points].sort((a, b) => a.x - b.x);
+    // Smooth the curve
+    const smooth = opt2SmoothCurve(sorted, 60);
+    traces.push({
+      x: smooth.xs, y: smooth.ys, type: "scatter", mode: "lines",
+      name: c.name + (isSend ? " [SEND]" : ""),
+      line: { color, width: isSend ? 3 : 2, dash: isSend ? "solid" : "dash" },
+    });
+  }
+  return traces;
+}
+
+// Send selected curve to chat
+document.getElementById("btn-opt2-curve-send").addEventListener("click", () => {
+  const curves = opt2GetAllCurves();
+  if (opt2SendCurveIdx < 0 || !curves[opt2SendCurveIdx]) {
+    alert("Select a curve to send (use the radio button)");
+    return;
+  }
+  const c = curves[opt2SendCurveIdx];
+  opt2TargetPoints = c.points.map(p => ({ ...p }));
+  opt2DrawChart();
+  opt2SendDrawnTarget();
+});
+
+// Save current drawn curve
+document.getElementById("btn-opt2-curve-save").addEventListener("click", () => {
+  if (opt2TargetPoints.length < 2) {
+    alert("Draw at least 2 points on the chart first");
+    return;
+  }
+  const name = prompt("Name this curve:", `Custom Curve ${new Date().toLocaleDateString()}`);
+  if (!name) return;
+  const curves = opt2LoadSavedCurves();
+  const existing = curves.findIndex(c => c.name === name);
+  const entry = { name, points: [...opt2TargetPoints].sort((a, b) => a.x - b.x), savedAt: new Date().toISOString() };
+  if (existing >= 0) curves[existing] = entry;
+  else curves.push(entry);
+  opt2SaveCurvesToStorage(curves);
+  opt2RefreshCurvesList();
+});
+
+// Delete selected curve
+document.getElementById("btn-opt2-curve-delete").addEventListener("click", () => {
+  const curves = opt2GetAllCurves();
+  if (opt2SendCurveIdx < 0 || !curves[opt2SendCurveIdx]) { alert("Select a curve first (radio button)"); return; }
+  const name = curves[opt2SendCurveIdx].name;
+  if (!confirm(`Delete curve "${name}"?`)) return;
+  const saved = opt2LoadSavedCurves().filter(c => c.name !== name);
+  opt2SaveCurvesToStorage(saved);
+  opt2DisplayedCurves.delete(opt2SendCurveIdx);
+  opt2SendCurveIdx = -1;
+  opt2RefreshCurvesList();
+  opt2DrawChart();
+});
+
+// Initialize
+opt2RefreshCurvesList();
 
 // ── Baseline vs Current comparison matrix ────────────────
 
@@ -4692,6 +5252,59 @@ function opt2RenderMatrix() {
 document.getElementById("btn-opt2-run").addEventListener("click", opt2Run);
 document.getElementById("btn-opt2-calc").addEventListener("click", opt2Calculate);
 document.getElementById("btn-opt2-add-to-portfolio").addEventListener("click", opt2AddToPortfolio);
+
+// Send workbench trades to Pricing screen (leg by leg)
+document.getElementById("btn-opt2-send-to-exec").addEventListener("click", () => {
+  if (opt2WbLegs.length === 0) { alert("No legs in workbench"); return; }
+
+  // Clear existing legs on the Pricing screen
+  legs.length = 0;
+
+  // Add each workbench leg to the Pricing screen's legs array
+  for (const l of opt2WbLegs) {
+    const premium = l.price_usd ? String(Math.round(l.price_usd * 100) / 100) : "0";
+    // Extract expiry_code from leg or from instrument name (ETH-13APR26-3600-P)
+    let expCode = l.expiry_code;
+    if (!expCode && l.instrument) {
+      const parts = l.instrument.split("-");
+      if (parts.length >= 3) expCode = parts[1];
+    }
+    addLeg(l.side, l.opt, String(l.strike), premium, String(l.qty), expCode || null);
+  }
+
+  // Add custom expiries to the main expiry dropdown if missing
+  const existingExpOpts = new Set([...$expSel.options].map(o => o.value));
+  for (const l of opt2WbLegs) {
+    let ec = l.expiry_code;
+    if (!ec && l.instrument) { const p = l.instrument.split("-"); if (p.length >= 3) ec = p[1]; }
+    if (ec && !existingExpOpts.has(ec)) {
+      const dte = _expiryCodeToDte(ec);
+      const opt = document.createElement("option");
+      opt.value = ec;
+      opt.textContent = `${ec} (${dte != null ? dte + 'd' : '?'}) [interpolated]`;
+      $expSel.appendChild(opt);
+      existingExpOpts.add(ec);
+    }
+  }
+
+  // Switch to the Pricing page
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  const pricingBtn = document.querySelector('.nav-btn[data-page="pricing"]');
+  if (pricingBtn) pricingBtn.classList.add("active");
+  document.getElementById("page-pricing").classList.add("active");
+
+  // Auto-trigger pricing via vol surface
+  setTimeout(() => {
+    const priceBtn = document.getElementById("btn-replicate");
+    if (priceBtn) priceBtn.click();
+  }, 300);
+
+  opt2AddMsg("bot",
+    `<strong style="color:#58a6ff">${opt2WbLegs.length} leg(s) sent to Pricing screen.</strong> ` +
+    `Switched to Pricing — review legs and run pricing.`
+  );
+});
 
 // Refresh button — re-fetch portfolio data and reset chat state
 document.getElementById("btn-opt2-refresh").addEventListener("click", async () => {
@@ -6896,603 +7509,4 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   });
 }
 
-// ══════════════════════════════════════════════════════════════
-// HOLISTIC OPTIMIZER (Full Portfolio Optimizer)
-// ══════════════════════════════════════════════════════════════
-
-let holData = null;
-
-// ── Run ──────────────────────────────────────────────────────
-
-document.getElementById("btn-hol-run").addEventListener("click", holRun);
-
-async function holRun() {
-  const $btn = document.getElementById("btn-hol-run");
-  const $progress = document.getElementById("hol-progress");
-  const $bar = document.getElementById("hol-progress-bar");
-  const $text = document.getElementById("hol-progress-text");
-
-  // Hide previous results
-  ["hol-summary-section", "hol-greeks-section", "hol-payoff-section",
-   "hol-actions-section", "hol-matrix-section"].forEach(id => {
-    document.getElementById(id).style.display = "none";
-  });
-
-  $btn.disabled = true;
-  $btn.textContent = "Running...";
-  $progress.style.display = "";
-  $bar.style.width = "10%";
-  $text.textContent = "Phase 1: Computing optimal portfolio...";
-
-  // Animate progress
-  const progressTimer = setInterval(() => {
-    const w = parseFloat($bar.style.width);
-    if (w < 55) $bar.style.width = (w + 2) + "%";
-    else if (w < 85) {
-      $bar.style.width = (w + 0.5) + "%";
-      $text.textContent = "Phase 2: Analyzing trades & generating summary...";
-    }
-  }, 300);
-
-  try {
-    const readNum = (id, fallback) => {
-      const v = parseFloat(document.getElementById(id).value);
-      return Number.isNaN(v) ? fallback : v;
-    };
-    const readInt = (id, fallback) => {
-      const v = parseInt(document.getElementById(id).value);
-      return Number.isNaN(v) ? fallback : v;
-    };
-
-    holData = await post("/api/holistic/run", {
-      risk_aversion: readNum("hol-risk-aversion", 1.0),
-      txn_cost_pct: readNum("hol-txn-cost", 5.0),
-      max_collateral: readNum("hol-max-collateral", 4000000),
-      min_qty: readInt("hol-min-qty", 50),
-      min_dte: readInt("hol-min-dte", 14),
-    });
-
-    $bar.style.width = "100%";
-    $text.textContent = "Done!";
-
-    if (holData.status === "ok") {
-      setTimeout(() => {
-        $progress.style.display = "none";
-        holRenderResults(holData);
-      }, 400);
-    } else {
-      $progress.style.display = "none";
-      alert(holData.message || "Optimization returned no results.");
-    }
-  } catch (e) {
-    $progress.style.display = "none";
-    alert("Optimization failed: " + e.message);
-  } finally {
-    clearInterval(progressTimer);
-    $btn.disabled = false;
-    $btn.textContent = "Run Full Optimization";
-  }
-}
-
-// ── Master render ────────────────────────────────────────────
-
-function holRenderResults(data) {
-  holRenderSummary(data);
-  holRenderGreeks(data);
-  holRenderPayoff(data);
-  holRenderActions(data);
-  holPopulateWorkbench(data);
-  holRenderMatrix(data);
-}
-
-// ── Executive Summary ────────────────────────────────────────
-
-function holRenderSummary(data) {
-  const $s = document.getElementById("hol-summary-section");
-  const $t = document.getElementById("hol-summary-text");
-  if (!data.executive_summary) { $s.style.display = "none"; return; }
-  $t.innerHTML = data.executive_summary
-    .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\n/g, "<br>");
-  $s.style.display = "";
-}
-
-// ── Greeks comparison ────────────────────────────────────────
-
-function holRenderGreeks(data) {
-  const $s = document.getElementById("hol-greeks-section");
-  $s.style.display = "";
-
-  // Spot
-  const $spot = document.getElementById("hol-eth-spot");
-  if ($spot) $spot.textContent = `ETH $${data.eth_spot.toLocaleString(undefined, {maximumFractionDigits: 2})}`;
-
-  const fmt = (v, d) => v != null ? Number(v).toFixed(d) : "--";
-  const fmtM = v => v != null ? "$" + Math.round(Math.abs(v)).toLocaleString() : "--";
-
-  // Before
-  document.getElementById("hol-before-delta").textContent = fmt(data.before.delta, 2);
-  document.getElementById("hol-before-gamma").textContent = fmt(data.before.gamma, 4);
-  document.getElementById("hol-before-theta").textContent = fmt(data.before.theta, 2);
-  document.getElementById("hol-before-vega").textContent = fmt(data.before.vega, 2);
-  document.getElementById("hol-before-risk").textContent = fmtM(data.before.daily_risk);
-
-  // After — color improvements green
-  const setGreek = (id, val, digits, beforeVal) => {
-    const el = document.getElementById(id);
-    el.textContent = fmt(val, digits);
-    if (Math.abs(val) < Math.abs(beforeVal)) el.style.color = "#4fc3f7";
-    else el.style.color = "";
-  };
-  setGreek("hol-after-delta", data.after.delta, 2, data.before.delta);
-  setGreek("hol-after-gamma", data.after.gamma, 4, data.before.gamma);
-  setGreek("hol-after-theta", data.after.theta, 2, data.before.theta);
-  setGreek("hol-after-vega", data.after.vega, 2, data.before.vega);
-  const $afterRisk = document.getElementById("hol-after-risk");
-  $afterRisk.textContent = fmtM(data.after.daily_risk);
-  $afterRisk.style.color = data.after.daily_risk < data.before.daily_risk ? "#66bb6a" : "";
-
-  // Stats — matching optv2 style
-  document.getElementById("hol-stat-cost").textContent = "$" + Math.round(data.total_trade_cost).toLocaleString();
-  const $rr = document.getElementById("hol-stat-risk-red");
-  $rr.textContent = "$" + Math.round(data.risk_reduction).toLocaleString();
-  $rr.style.color = data.risk_reduction > 0 ? "#66bb6a" : "";
-  const $util = document.getElementById("hol-stat-utility");
-  $util.textContent = "$" + Math.round(data.utility_improvement).toLocaleString();
-  $util.style.color = data.utility_improvement > 0 ? "#66bb6a" : "#ef5350";
-  document.getElementById("hol-stat-candidates").textContent = data.candidates_evaluated.toLocaleString();
-  const $conv = document.getElementById("hol-stat-converged");
-  $conv.textContent = data.optimizer_converged ? "(Converged)" : "(Did not converge)";
-  $conv.style.color = data.optimizer_converged ? "#66bb6a" : "#ef5350";
-}
-
-// ── Payoff chart ─────────────────────────────────────────────
-
-function holRenderPayoff(data) {
-  const $s = document.getElementById("hol-payoff-section");
-  $s.style.display = "";
-
-  const spots = data.spot_ladder;
-  const S0 = data.eth_spot;
-  const cc = chartColors();
-  const traces = [];
-
-  // Use T+90d curves if available, else T+0
-  const horizon = data.chart_horizons.includes(90) ? "90" : "0";
-
-  const beforeCurve = data.before.payoff_by_horizon[horizon];
-  if (beforeCurve) {
-    traces.push({
-      x: spots, y: beforeCurve, mode: "lines",
-      name: `Before (T+${horizon}d)`,
-      line: { color: "#e57373", width: 2, dash: "dash" },
-    });
-  }
-
-  const afterCurve = data.after.payoff_by_horizon[horizon];
-  if (afterCurve) {
-    traces.push({
-      x: spots, y: afterCurve, mode: "lines",
-      name: `After (T+${horizon}d)`,
-      line: { color: "#4fc3f7", width: 3 },
-    });
-  }
-
-  // Current spot marker
-  if (beforeCurve) {
-    const allY = [...beforeCurve, ...(afterCurve || [])];
-    traces.push({
-      x: [S0, S0],
-      y: [Math.min(...allY), Math.max(...allY)],
-      mode: "lines", name: `Spot $${S0.toLocaleString()}`,
-      line: { color: "#f0883e", width: 1.5, dash: "dashdot" },
-    });
-  }
-
-  Plotly.react("hol-payoff-chart", traces, {
-    title: { text: "Portfolio Payoff — Before vs After Optimization", font: { color: cc.text, size: 14 } },
-    paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot (USD)", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
-    yaxis: { title: "Portfolio P&L at Expiry (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
-    margin: { t: 50, r: 30, b: 50, l: 90 },
-    showlegend: true,
-    legend: { font: { color: cc.muted, size: 11 }, bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
-  }, { responsive: true });
-}
-
-// ── Actions (categorized trade tables) ───────────────────────
-
-function holRenderActions(data) {
-  const actions = data.actions;
-  const $s = document.getElementById("hol-actions-section");
-
-  const nU = actions.unwinds?.length || 0;
-  const nR = actions.rolls?.length || 0;
-  const nN = actions.new_positions?.length || 0;
-  const totalActions = nU + nR + nN;
-  if (totalActions === 0) { $s.style.display = "none"; return; }
-  $s.style.display = "";
-
-  document.getElementById("hol-actions-total").textContent = `(${totalActions} trades)`;
-
-  // Badge counts
-  _holBadge("hol-count-unwinds", nU);
-  _holBadge("hol-count-rolls", nR);
-  _holBadge("hol-count-new", nN);
-
-  // Render each table
-  _holRenderTradeTable("hol-tbody-unwinds", "hol-empty-unwinds", actions.unwinds || []);
-  _holRenderRollsTable("hol-tbody-rolls", "hol-empty-rolls", actions.rolls || []);
-  _holRenderTradeTable("hol-tbody-new", "hol-empty-new", actions.new_positions || []);
-
-  // Wire tab switching — use onclick with stopPropagation to avoid parent subtab interference
-  document.querySelectorAll("#hol-action-tabs .hol-tab-btn").forEach(btn => {
-    btn.onclick = (e) => {
-      e.stopPropagation();
-      document.querySelectorAll("#hol-action-tabs .hol-tab-btn").forEach(b => b.classList.remove("active"));
-      document.querySelectorAll(".hol-action-pane").forEach(p => p.style.display = "none");
-      btn.classList.add("active");
-      const tab = btn.dataset.holTab;
-      document.getElementById(`hol-tab-${tab}`).style.display = "";
-    };
-  });
-
-  // Show first non-empty tab
-  const tabs = ["unwinds", "rolls", "new"];
-  const counts = { unwinds: nU, rolls: nR, new: nN };
-  const firstNonEmpty = tabs.find(t => counts[t] > 0) || "unwinds";
-  document.querySelectorAll("#hol-action-tabs .hol-tab-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.holTab === firstNonEmpty);
-  });
-  document.querySelectorAll(".hol-action-pane").forEach(p => p.style.display = "none");
-  document.getElementById(`hol-tab-${firstNonEmpty}`).style.display = "";
-}
-
-function _holBadge(id, count) {
-  const el = document.getElementById(id);
-  if (count > 0) { el.textContent = count; el.style.display = ""; }
-  else { el.style.display = "none"; }
-}
-
-function _holRenderTradeTable(tbodyId, emptyId, trades) {
-  const $tbody = document.getElementById(tbodyId);
-  const $empty = document.getElementById(emptyId);
-  $tbody.innerHTML = "";
-
-  if (trades.length === 0) { $empty.style.display = ""; return; }
-  $empty.style.display = "none";
-
-  for (const t of trades) {
-    const sideColor = t.side === "Buy" ? "#66bb6a" : "#ef5350";
-    const optLabel = t.opt === "C" ? "Call" : t.opt === "P" ? "Put" : "Perp";
-    const notional = Math.round(t.notional || (Math.abs(t.qty) * (t.bs_price_usd || 0)));
-    const dc = t.delta_contribution || 0;
-    const gc = t.gamma_contribution || 0;
-    const vc = t.vega_contribution || 0;
-    const fmtG = (v, d) => v >= 0 ? `+${v.toFixed(d)}` : v.toFixed(d);
-    $tbody.innerHTML += `<tr>
-      <td style="text-align:left;font-size:.82rem;font-weight:500">${t.instrument}</td>
-      <td style="text-align:center;color:${sideColor};font-weight:600">${t.side}</td>
-      <td style="text-align:right;font-family:monospace;font-weight:600">${Math.abs(t.qty).toLocaleString()}</td>
-      <td style="text-align:right;font-family:monospace">${Number(t.strike).toLocaleString()}</td>
-      <td style="text-align:center">${optLabel}</td>
-      <td style="text-align:center">${t.dte || "--"}</td>
-      <td style="text-align:center">${t.iv_pct ? t.iv_pct.toFixed(1) : "--"}</td>
-      <td style="text-align:right;font-family:monospace">${Number(t.bs_price_usd || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
-      <td style="text-align:right;font-family:monospace">${notional.toLocaleString()}</td>
-      <td style="text-align:right;font-family:monospace">${Math.round(t.trade_cost || 0).toLocaleString()}</td>
-      <td style="text-align:right;font-family:monospace;color:${dc >= 0 ? '#66bb6a' : '#ef5350'}">${fmtG(dc, 2)}</td>
-      <td style="text-align:right;font-family:monospace;color:${gc >= 0 ? '#66bb6a' : '#ef5350'}">${fmtG(gc, 4)}</td>
-      <td style="text-align:right;font-family:monospace;color:${vc >= 0 ? '#66bb6a' : '#ef5350'}">${fmtG(vc, 2)}</td>
-    </tr>`;
-  }
-}
-
-function _holRenderRollsTable(tbodyId, emptyId, rolls) {
-  const $tbody = document.getElementById(tbodyId);
-  const $empty = document.getElementById(emptyId);
-  $tbody.innerHTML = "";
-
-  if (rolls.length === 0) { $empty.style.display = ""; return; }
-  $empty.style.display = "none";
-
-  const cs = "text-align:center";
-  for (const r of rolls) {
-    const c = r.close;
-    const o = r.open;
-    const cSideColor = c.side === "Buy" ? "#66bb6a" : "#ef5350";
-    const oSideColor = o.side === "Buy" ? "#66bb6a" : "#ef5350";
-    const cOpt = c.opt === "C" ? "Call" : c.opt === "P" ? "Put" : "Perp";
-    const oOpt = o.opt === "C" ? "Call" : o.opt === "P" ? "Put" : "Perp";
-
-    // Close leg
-    $tbody.innerHTML += `<tr style="border-left:3px solid #ef5350">
-      <td style="${cs};font-weight:700;color:#ef5350;font-size:.72rem;text-transform:uppercase">Close</td>
-      <td style="text-align:left;font-size:.82rem;font-weight:500">${c.instrument}</td>
-      <td style="${cs};color:${cSideColor};font-weight:600">${c.side}</td>
-      <td style="${cs};font-family:monospace;font-weight:600">${Math.abs(c.qty).toLocaleString()}</td>
-      <td style="${cs};font-family:monospace">$${Number(c.strike).toLocaleString()}</td>
-      <td style="${cs}">${cOpt}</td>
-      <td style="${cs}">${c.dte || "--"}</td>
-      <td style="${cs}">${c.iv_pct ? c.iv_pct.toFixed(1) + "%" : "--"}</td>
-      <td style="${cs};font-family:monospace">$${Number(c.bs_price_usd || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
-      <td rowspan="2" style="${cs};font-family:monospace;vertical-align:middle;font-weight:700;font-size:.95rem">$${Math.round(r.net_cost).toLocaleString()}</td>
-    </tr>`;
-
-    // Open leg
-    $tbody.innerHTML += `<tr style="border-left:3px solid #66bb6a;border-bottom:2px solid var(--border)">
-      <td style="${cs};font-weight:700;color:#66bb6a;font-size:.72rem;text-transform:uppercase">Open</td>
-      <td style="text-align:left;font-size:.82rem;font-weight:500">${o.instrument}</td>
-      <td style="${cs};color:${oSideColor};font-weight:600">${o.side}</td>
-      <td style="${cs};font-family:monospace;font-weight:600">${Math.abs(o.qty).toLocaleString()}</td>
-      <td style="${cs};font-family:monospace">$${Number(o.strike).toLocaleString()}</td>
-      <td style="${cs}">${oOpt}</td>
-      <td style="${cs}">${o.dte || "--"}</td>
-      <td style="${cs}">${o.iv_pct ? o.iv_pct.toFixed(1) + "%" : "--"}</td>
-      <td style="${cs};font-family:monospace">$${Number(o.bs_price_usd || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
-    </tr>`;
-  }
-}
-
-// ── Workbench (live-priced trades) ───────────────────────────
-
-let holWbLegs = [];
-
-function holPopulateWorkbench(data) {
-  const actions = data.actions;
-  holWbLegs = [];
-
-  // Convert all categorized trades into workbench legs
-  for (const t of (actions.unwinds || [])) {
-    holWbLegs.push({
-      instrument: t.instrument, side: t.side === "Buy" ? "buy" : "sell",
-      qty: Math.abs(t.qty), strike: t.strike, opt: t.opt,
-      expiry_code: _holExtractExpiry(t.instrument), dte: t.dte || 0,
-      bid_usd: t.bs_price_usd * 0.995, ask_usd: t.bs_price_usd * 1.005,
-      price_usd: t.bs_price_usd || 0, spread_pct: 1.0, mark_iv: t.iv_pct || 0,
-      _action: "unwind",
-    });
-  }
-  for (const r of (actions.rolls || [])) {
-    holWbLegs.push({
-      instrument: r.close.instrument, side: r.close.side === "Buy" ? "buy" : "sell",
-      qty: Math.abs(r.close.qty), strike: r.close.strike, opt: r.close.opt,
-      expiry_code: _holExtractExpiry(r.close.instrument), dte: r.close.dte || 0,
-      bid_usd: r.close.bs_price_usd * 0.995, ask_usd: r.close.bs_price_usd * 1.005,
-      price_usd: r.close.bs_price_usd || 0, spread_pct: 1.0, mark_iv: r.close.iv_pct || 0,
-      _action: "roll-close",
-    });
-    holWbLegs.push({
-      instrument: r.open.instrument, side: r.open.side === "Buy" ? "buy" : "sell",
-      qty: Math.abs(r.open.qty), strike: r.open.strike, opt: r.open.opt,
-      expiry_code: _holExtractExpiry(r.open.instrument), dte: r.open.dte || 0,
-      bid_usd: r.open.bs_price_usd * 0.995, ask_usd: r.open.bs_price_usd * 1.005,
-      price_usd: r.open.bs_price_usd || 0, spread_pct: 1.0, mark_iv: r.open.iv_pct || 0,
-      _action: "roll-open",
-    });
-  }
-  for (const t of (actions.new_positions || [])) {
-    holWbLegs.push({
-      instrument: t.instrument, side: t.side === "Buy" ? "buy" : "sell",
-      qty: Math.abs(t.qty), strike: t.strike, opt: t.opt,
-      expiry_code: _holExtractExpiry(t.instrument), dte: t.dte || 0,
-      bid_usd: t.bs_price_usd * 0.995, ask_usd: t.bs_price_usd * 1.005,
-      price_usd: t.bs_price_usd || 0, spread_pct: 1.0, mark_iv: t.iv_pct || 0,
-      _action: "new",
-    });
-  }
-
-  if (holWbLegs.length === 0) {
-    document.getElementById("hol-workbench-section").style.display = "none";
-    return;
-  }
-  document.getElementById("hol-workbench-section").style.display = "";
-  holRenderWorkbench();
-}
-
-function _holExtractExpiry(instrument) {
-  // "ETH-29MAY26-3200-C" -> "29MAY26"
-  const parts = (instrument || "").split("-");
-  return parts.length >= 3 ? parts[1] : "";
-}
-
-function holRenderWorkbench() {
-  const $tbody = document.getElementById("hol-wb-body");
-  $tbody.innerHTML = "";
-  const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
-  document.getElementById("hol-wb-count").textContent = `(${holWbLegs.length} legs)`;
-
-  const actionLabels = {
-    "unwind": { text: "UNWIND", color: "#f0883e" },
-    "roll-close": { text: "CLOSE", color: "#ef5350" },
-    "roll-open": { text: "OPEN", color: "#66bb6a" },
-    "new": { text: "NEW", color: "#58a6ff" },
-  };
-
-  holWbLegs.forEach((leg, idx) => {
-    const sideColor = leg.side === "buy" ? "#66bb6a" : "#ef5350";
-    const execPrice = leg.side === "buy" ? leg.ask_usd : leg.bid_usd;
-    const legCost = (leg.side === "buy" ? -1 : 1) * execPrice * leg.qty;
-    const act = actionLabels[leg._action] || { text: "?", color: "var(--muted)" };
-    const borderColor = leg._action.startsWith("roll") ? "#d2a8ff" : act.color;
-
-    $tbody.innerHTML += `<tr style="border-left:3px solid ${borderColor}">
-      <td><button class="hol-wb-remove" data-idx="${idx}" style="width:20px;height:20px;padding:0;margin:0;font-size:.65rem;line-height:1;border-radius:3px;color:var(--red);background:transparent;border:1px solid var(--border);cursor:pointer">x</button></td>
-      <td style="text-align:left;font-size:.78rem;font-weight:500">${leg.instrument}</td>
-      <td style="text-align:center;font-size:.7rem;font-weight:700;color:${act.color}">${act.text}</td>
-      <td style="text-align:center;color:${sideColor};font-weight:600;text-transform:uppercase">${leg.side}</td>
-      <td style="text-align:right"><input type="number" class="hol-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:70px;font-size:.78rem;text-align:right"></td>
-      <td style="text-align:right;font-family:monospace">${Number(leg.strike).toLocaleString()}</td>
-      <td style="text-align:center">${leg.opt === "C" ? "Call" : "Put"}</td>
-      <td style="text-align:center">${leg.dte || "--"}</td>
-      <td style="text-align:right;font-family:monospace;font-size:.78rem">$${leg.bid_usd.toFixed(2)}</td>
-      <td style="text-align:right;font-family:monospace;font-size:.78rem">$${leg.ask_usd.toFixed(2)}</td>
-      <td style="text-align:center;font-size:.78rem">${leg.spread_pct.toFixed(1)}%</td>
-      <td style="text-align:center">${leg.mark_iv ? leg.mark_iv.toFixed(1) + "%" : "--"}</td>
-      <td style="text-align:right;font-family:monospace;font-weight:600">${fmtM(legCost)}</td>
-    </tr>`;
-  });
-
-  // Wire remove buttons
-  $tbody.querySelectorAll(".hol-wb-remove").forEach(btn => {
-    btn.addEventListener("click", () => {
-      holWbLegs.splice(parseInt(btn.dataset.idx), 1);
-      holRenderWorkbench();
-    });
-  });
-
-  // Wire qty edits
-  $tbody.querySelectorAll(".hol-wb-qty").forEach(inp => {
-    inp.addEventListener("change", () => {
-      holWbLegs[parseInt(inp.dataset.idx)].qty = Math.max(1, parseInt(inp.value) || 1);
-      holRenderWorkbench();
-    });
-  });
-
-  // Total
-  let total = 0;
-  for (const l of holWbLegs) {
-    const ep = l.side === "buy" ? l.ask_usd : l.bid_usd;
-    total += (l.side === "buy" ? -1 : 1) * ep * l.qty;
-  }
-  const $total = document.getElementById("hol-wb-total");
-  $total.innerHTML = `<span style="color:${total >= 0 ? '#66bb6a' : '#ef5350'}">${total >= 0 ? "+" : "-"}$${Math.abs(Math.round(total)).toLocaleString()}</span>`;
-}
-
-// ── Calculate with live Deribit pricing ──────────────────────
-
-document.getElementById("btn-hol-calc").addEventListener("click", holCalculate);
-
-async function holCalculate() {
-  if (holWbLegs.length === 0) return;
-  const $btn = document.getElementById("btn-hol-calc");
-  $btn.disabled = true; $btn.textContent = "Pricing...";
-
-  const legs = holWbLegs.map(l => ({
-    instrument: l.instrument, side: l.side, qty: l.qty,
-    strike: l.strike, opt: l.opt, expiry_code: l.expiry_code,
-  }));
-
-  try {
-    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: [] });
-
-    // Update legs with live pricing
-    for (let i = 0; i < holWbLegs.length && i < result.leg_costs.length; i++) {
-      const lc = result.leg_costs[i];
-      holWbLegs[i].bid_usd = lc.bid_usd;
-      holWbLegs[i].ask_usd = lc.ask_usd;
-      holWbLegs[i].price_usd = lc.price_usd;
-      holWbLegs[i].spread_pct = lc.spread_pct;
-      if (lc.mark_iv) holWbLegs[i].mark_iv = lc.mark_iv;
-    }
-
-    holRenderWorkbench();
-
-    // Show impact metrics
-    const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
-    const setV = (id, v, cls) => {
-      const el = document.getElementById(id);
-      el.textContent = typeof v === "string" ? v : fmtM(v);
-      if (cls !== undefined) el.className = `risk-value ${cls}`;
-    };
-    setV("hol-wb-cost", result.total_cost, Math.abs(Math.round(result.total_cost)) < 500 ? "" : result.total_cost > 0 ? "mtm-neg" : "mtm-pos");
-    setV("hol-wb-pnl-spot", result.pnl_at_spot || 0, (result.pnl_at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-    setV("hol-wb-new-worst", result.new_min || 0, (result.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-    setV("hol-wb-new-be", result.new_breakeven ? `$${Math.round(result.new_breakeven).toLocaleString()}` : "N/A", "");
-    setV("hol-wb-floor-imp", result.floor_change || 0, (result.floor_change || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-    const beImp = result.be_change || 0;
-    setV("hol-wb-be-imp", beImp || "--", beImp > 0 ? "mtm-pos" : beImp < 0 ? "mtm-neg" : "");
-  } catch (e) {
-    alert("Pricing error: " + e.message);
-  }
-  $btn.disabled = false; $btn.textContent = "Calculate (Live Pricing)";
-}
-
-// ── Add to scenario (same as optimizer) ─────────────────────
-
-document.getElementById("btn-hol-add-to-portfolio").addEventListener("click", holAddToScenario);
-
-async function holAddToScenario() {
-  if (holWbLegs.length === 0) { alert("No legs in workbench"); return; }
-  const $btn = document.getElementById("btn-hol-add-to-portfolio");
-  $btn.disabled = true; $btn.textContent = "Adding...";
-
-  for (const leg of holWbLegs) {
-    const sideLabel = leg.side === "buy" ? "Long" : "Short";
-    opt2ScenarioTrades.push({
-      _scenarioId: `hol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      _type: leg._action.startsWith("roll") ? "roll" : "added",
-      id: leg._action.startsWith("roll") ? "R" : "S",
-      counterparty: "Full Optimizer",
-      side: sideLabel,
-      opt: leg.opt,
-      strike: leg.strike,
-      qty: leg.qty,
-      net_qty: (leg.side === "buy" ? 1 : -1) * leg.qty,
-      expiry: leg.expiry_code || "",
-      premium_usd: (leg.side === "buy" ? leg.ask_usd : leg.bid_usd) * leg.qty * (leg.side === "buy" ? -1 : 1),
-      price_usd: leg.side === "buy" ? leg.ask_usd : leg.bid_usd,
-      expiry_code: leg.expiry_code || "",
-      dte: leg.dte || 0,
-      instrument: leg.instrument || "",
-    });
-  }
-
-  holWbLegs = [];
-  document.getElementById("hol-workbench-section").style.display = "none";
-  $btn.disabled = false; $btn.textContent = "Add to Scenario";
-  alert(`Trades added to scenario. Switch to the Optimizer tab to see them in Scenario Trades.`);
-}
-
-document.getElementById("btn-hol-clear-wb").addEventListener("click", () => {
-  holWbLegs = [];
-  document.getElementById("hol-workbench-section").style.display = "none";
-});
-
-// ── P&L Matrix ───────────────────────────────────────────────
-
-function holRenderMatrix(data) {
-  const $s = document.getElementById("hol-matrix-section");
-  const spots = data.spot_ladder;
-  const S0 = data.eth_spot;
-
-  const horizon = data.chart_horizons.includes(90) ? "90" : "0";
-  const beforeCurve = data.before.payoff_by_horizon[horizon];
-  const afterCurve = data.after.payoff_by_horizon[horizon];
-
-  if (!beforeCurve || !afterCurve) { $s.style.display = "none"; return; }
-  $s.style.display = "";
-
-  // Sample ~15 spot points for readability
-  const step = Math.max(1, Math.floor(spots.length / 15));
-  const indices = [];
-  for (let i = 0; i < spots.length; i += step) indices.push(i);
-  // Ensure spot-nearest is included
-  const nearestIdx = spots.reduce((best, s, i) => Math.abs(s - S0) < Math.abs(spots[best] - S0) ? i : best, 0);
-  if (!indices.includes(nearestIdx)) indices.push(nearestIdx);
-  indices.sort((a, b) => a - b);
-
-  _holFillMatrixPanel("hol-matrix-before-thead", "hol-matrix-before-tbody", spots, beforeCurve, indices, S0);
-  _holFillMatrixPanel("hol-matrix-after-thead", "hol-matrix-after-tbody", spots, afterCurve, indices, S0);
-}
-
-function _holFillMatrixPanel(theadId, tbodyId, spots, curve, indices, S0) {
-  const $thead = document.getElementById(theadId);
-  const $tbody = document.getElementById(tbodyId);
-
-  $thead.innerHTML = "<tr><th>Spot</th><th>P&L</th></tr>";
-  $tbody.innerHTML = "";
-
-  for (const i of indices) {
-    const spot = spots[i];
-    const pnl = curve[i] || 0;
-    const isNear = Math.abs(spot - S0) / S0 < 0.02;
-    const color = pnl > 0 ? "#66bb6a" : pnl < 0 ? "#ef5350" : "";
-    const weight = isNear ? "font-weight:700;" : "";
-
-    $tbody.innerHTML += `<tr style="${weight}">
-      <td style="font-family:monospace;text-align:right">$${Math.round(spot).toLocaleString()}</td>
-      <td style="font-family:monospace;text-align:right;color:${color}">${Math.round(pnl).toLocaleString()}</td>
-    </tr>`;
-  }
-}
+// (Full Optimizer tab removed)
