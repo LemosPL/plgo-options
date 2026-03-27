@@ -1395,10 +1395,37 @@ async def chat(req: ChatRequest):
         struct_mtm = sum(sl.get("mtm_pnl_usd", 0) for sl in slegs)
         struct_value = sum(sl.get("current_value_usd", 0) for sl in slegs)
         mtm_tag = f"MTM P&L: ${struct_mtm:+,.0f}" if struct_mtm != 0 else "MTM P&L: $0"
-        if struct_mtm > 1000:
-            mtm_tag += " [PROFITABLE — harvest candidate]"
+
+        # Smart labeling: consider what the structure DOES for the portfolio
+        # Long puts = downside protection. NEVER label as "harvest candidate".
+        # Short puts deep ITM = expensive to close. NEVER label as "harvest candidate".
+        # Long calls near/at spot = active exposure. Don't harvest unless far OTM.
+        has_long_puts = any(sl["type"] == "Put" and sl["side"] == "Long" for sl in slegs)
+        has_short_puts_itm = any(sl["type"] == "Put" and sl["side"] == "Short" and sl["strike"] > spot * 1.2 for sl in slegs)
+        is_protection = has_long_puts or stype in ("put_spread", "collar")
+        is_expensive_to_close = abs(struct_value) > 100000 and has_short_puts_itm
+        # For calls: only "harvest candidate" if all legs are far OTM (> 50% above spot)
+        all_legs_far_otm = all(
+            (sl["type"] == "Call" and sl["strike"] > spot * 1.5) or
+            (sl["type"] == "Put" and sl["strike"] < spot * 0.5)
+            for sl in slegs
+        )
+        close_cost_cheap = abs(struct_value) < 50000  # cheap to close
+
+        if is_protection:
+            if struct_mtm > 1000:
+                mtm_tag += " [PROFITABLE — PROTECTION, do NOT close — provides downside hedge]"
+            elif struct_mtm < -1000:
+                mtm_tag += " [UNDERWATER — PROTECTION, consider rolling to better strikes]"
+        elif is_expensive_to_close:
+            mtm_tag += " [DEEP ITM — EXPENSIVE to close, do NOT harvest]"
+        elif struct_mtm > 1000 and all_legs_far_otm and close_cost_cheap:
+            mtm_tag += " [PROFITABLE — harvest candidate, cheap to close]"
+        elif struct_mtm > 1000:
+            mtm_tag += " [PROFITABLE — but closing costs ${:,.0f}, evaluate carefully]".format(abs(struct_value))
         elif struct_mtm < -1000:
             mtm_tag += " [UNDERWATER]"
+
         portfolio_structures.append(
             f"  {stype.replace('_', ' ').upper()} [{ids_str}]: {sides_desc} | exp {slegs[0]['expiry']} ({slegs[0]['dte']}d) | qty {slegs[0]['qty']} ETH | {mtm_tag}"
         )
@@ -1441,11 +1468,31 @@ async def chat(req: ChatRequest):
     for pd in positions_detail:
         if pd["id"] not in _used_struct_ids:
             mtm = pd.get("mtm_pnl_usd", 0)
+            val = abs(pd.get("current_value_usd", 0))
             mtm_tag = f"MTM P&L: ${mtm:+,.0f}"
-            if mtm > 1000:
-                mtm_tag += " [PROFITABLE — harvest candidate]"
+
+            # Protection logic for naked positions
+            is_long_put = pd["side"] == "Long" and pd["type"] == "Put"
+            is_short_put_itm = pd["side"] == "Short" and pd["type"] == "Put" and pd["strike"] > spot * 1.2
+            is_far_otm = (pd["type"] == "Call" and pd["strike"] > spot * 1.5) or (pd["type"] == "Put" and pd["strike"] < spot * 0.5)
+            is_cheap = val < 50000
+
+            if is_long_put:
+                if mtm > 1000:
+                    mtm_tag += " [PROFITABLE — PROTECTION, do NOT close — provides downside hedge]"
+                elif mtm < -1000:
+                    mtm_tag += " [UNDERWATER — PROTECTION, consider rolling to better strikes]"
+                else:
+                    mtm_tag += " [PROTECTION — downside hedge]"
+            elif is_short_put_itm:
+                mtm_tag += " [DEEP ITM SHORT PUT — EXPENSIVE to close, do NOT harvest]"
+            elif mtm > 1000 and is_far_otm and is_cheap:
+                mtm_tag += " [PROFITABLE — harvest candidate, far OTM and cheap to close]"
+            elif mtm > 1000:
+                mtm_tag += " [PROFITABLE — but closing costs ${:,.0f}, evaluate carefully]".format(val)
             elif mtm < -1000:
                 mtm_tag += " [UNDERWATER]"
+
             portfolio_structures.append(
                 f"  NAKED [#{pd['id']}]: {pd['side']} {pd['type']} {int(pd['strike'])} | exp {pd['expiry']} ({pd['dte']}d) | qty {pd['qty']} ETH | {mtm_tag}"
             )
@@ -1831,11 +1878,12 @@ CRITICAL: When analyzing the portfolio or suggesting improvements, you MUST cons
    - Rolling can reduce cost (e.g., rolling to farther expiry collects more premium)
    Think: "Before adding new trades, can I improve the portfolio by rolling what already exists?"
 
-2. **CLOSE existing structures** — Recommend closing when:
-   - A structure is at max profit (short options near zero value)
-   - A structure has positive MTM P&L marked [PROFITABLE — harvest candidate] in the structures list
+2. **CLOSE existing structures** — ONLY recommend closing when:
+   - A structure is marked [harvest candidate] in the structures list — these are CHEAP to close and far OTM
    - A structure is working against the target shape
-   - Closing frees up margin or reduces risk for cheaper restructuring
+   NEVER close structures marked [PROTECTION] — these provide downside/upside hedging.
+   NEVER close structures marked [EXPENSIVE to close] — the cost defeats the purpose.
+   NEVER close structures marked [evaluate carefully] without explaining the cost trade-off.
    CRITICAL: Always close ENTIRE structures, never individual legs.
    - A "Call Spread [#39, #38]" must be closed by reversing BOTH legs.
    - Always reference the trade IDs: "Close Call Spread [#39, #38] 3700/5700"
@@ -2365,13 +2413,22 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
 
         roll_suggestions = []
 
+        # Strike adjustment levels: each structure gets up to 3 variants
+        STRIKE_MODES = [
+            ("same", "Same strikes"),           # baseline: just change expiry
+            ("tighten", "Tightened strikes"),    # move far OTM legs closer to spot
+            ("aggressive", "Best strikes"),      # aggressively tighten for max improvement
+        ]
+
         for struct in to_roll[:8]:
             orig_exp_code = _iso_to_exp_code(struct["expiry"])
             if not orig_exp_code:
                 continue
 
             for tgt_exp in roll_target_codes:
-                tgt_dte = avail_expiries[tgt_exp]
+              tgt_dte = avail_expiries[tgt_exp]
+
+              for strike_mode, mode_label in STRIKE_MODES:
                 close_legs = []
                 open_legs = []
                 total_close_cost = 0.0
@@ -2389,15 +2446,26 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                         skip = True
                         break
 
-                    # New strike: keep structure shape by default, adjust only per objective
+                    # STRIKE IMPROVEMENT based on mode
                     new_strike = leg["strike"]
-                    if objective == "adjust_strikes":
-                        # Shift proportionally toward ATM
-                        ratio = leg["strike"] / spot
-                        if ratio < 0.5:
-                            new_strike = round(max(leg["strike"], spot * 0.6) / 100) * 100
-                        elif ratio > 2.0:
-                            new_strike = round(min(leg["strike"], spot * 1.8) / 100) * 100
+                    ratio = leg["strike"] / spot if spot > 0 else 1.0
+
+                    if strike_mode == "tighten":
+                        if leg["opt"] == "C":
+                            if ratio > 2.5: new_strike = round(spot * 2.0 / 100) * 100
+                            elif ratio > 1.8: new_strike = round(spot * 1.6 / 100) * 100
+                        elif leg["opt"] == "P":
+                            if ratio < 0.4: new_strike = round(spot * 0.65 / 100) * 100
+                            elif ratio < 0.6: new_strike = round(spot * 0.7 / 100) * 100
+                    elif strike_mode == "aggressive":
+                        if leg["opt"] == "C":
+                            if ratio > 2.0: new_strike = round(spot * 1.5 / 100) * 100
+                            elif ratio > 1.5: new_strike = round(spot * 1.3 / 100) * 100
+                            elif ratio > 1.2: new_strike = round(spot * 1.15 / 100) * 100
+                        elif leg["opt"] == "P":
+                            if ratio < 0.5: new_strike = round(spot * 0.75 / 100) * 100
+                            elif ratio < 0.7: new_strike = round(spot * 0.8 / 100) * 100
+                            elif ratio < 0.85: new_strike = round(spot * 0.9 / 100) * 100
 
                     ol = _price_leg(new_strike, leg["opt"], tgt_exp, new_side, leg["qty"], tgt_dte)
                     if ol is None:
@@ -2436,7 +2504,6 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                 spot_imp = float(new_payoff_roll[spot_idx_roll] - current_payoff[spot_idx_roll])
                 be_imp = (breakeven - new_be_roll) if breakeven and new_be_roll else 0.0
 
-                # Penalize rolls that worsen the floor
                 if objective == "raise_floor":
                     score = 0.50 * floor_imp + 0.30 * spot_imp + 0.20 * be_imp
                 elif objective == "lower_breakeven":
@@ -2448,21 +2515,23 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
 
                 # Build combined legs list for workbench
                 all_close_open = [{"_leg_type": "close", **cl} for cl in close_legs] + [{"_leg_type": "open", **ol} for ol in open_legs]
-                # Remove cost field (internal)
                 for l in all_close_open:
                     l.pop("cost", None)
                     l.pop("_leg_type", None)
 
-                # Structure name
+                # Structure name — include strike mode and new strikes
                 struct_label = struct["type"].replace("_", " ").title()
-                strikes_str = "/".join(str(int(l["strike"])) for l in sorted(struct["legs"], key=lambda x: x["strike"]))
-                sug_name = f"Roll {struct_label} {strikes_str} ({orig_exp_code} -> {tgt_exp})"
+                old_strikes = "/".join(str(int(l["strike"])) for l in sorted(struct["legs"], key=lambda x: x["strike"]))
+                new_strikes = "/".join(str(int(ol["strike"])) for ol in sorted(open_legs, key=lambda x: x["strike"]))
+                if strike_mode == "same":
+                    sug_name = f"Roll {struct_label} {old_strikes} ({orig_exp_code} -> {tgt_exp})"
+                else:
+                    sug_name = f"Roll {struct_label} {old_strikes} -> {new_strikes} ({orig_exp_code} -> {tgt_exp}) [{mode_label}]"
                 if struct["counterparty"]:
                     sug_name += f" [{struct['counterparty']}]"
 
-                # Original trade info shows the full structure
                 orig_trade_info = {
-                    "id": struct["ids"][0],  # primary ID
+                    "id": struct["ids"][0],
                     "all_ids": struct["ids"],
                     "counterparty": struct["counterparty"],
                     "structure_type": struct["type"],
@@ -2485,6 +2554,7 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                     "name": sug_name,
                     "category": "roll",
                     "is_roll": True,
+                    "strike_mode": strike_mode,
                     "original_trade_id": struct["ids"][0],
                     "original_trade_ids": struct["ids"],
                     "original_trade": orig_trade_info,
