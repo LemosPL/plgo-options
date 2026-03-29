@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from plgo_options.optimization.optimizer import OptimizerV2
+from plgo_options.optimization.optimizer_v3 import OptimizerV3
+from plgo_options.optimization.snapshot import load_snapshot_dict
 
 
 @dataclass
@@ -84,10 +86,15 @@ class OptimizerUseCase:
         filename = f"{ts}_{expiry}.json"
         return self.save(directory / filename)
 
-    def build_optimizer(self) -> OptimizerV2:
+    def build_optimizer(self) -> OptimizerV3:#OptimizerV2:
+        return OptimizerV3.from_snapshot_dict(self.optimizer_input)
         return OptimizerV2.from_snapshot_dict(self.optimizer_input)
 
     def run(self) -> dict[str, Any]:
         optimizer = self.build_optimizer()
+        self.run_params.lambda_delta = 1.
+        self.run_params.lambda_gamma = 0.
+        self.run_params.lambda_vega = 0.
+        self.run_params.max_collateral = 400_000_000.0
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result

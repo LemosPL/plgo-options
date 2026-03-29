@@ -1,41 +1,18 @@
-"""Optimizer v2 — loads snapshot and runs portfolio optimization.
-
-Objective: maximize U = -cost - λ·risk
-  cost = txn_cost_pct/100 × Σ|notional_i| for new trades
-  risk = daily portfolio P&L standard deviation (greeks-based)
-
-Risk model (greeks-based, 1-day horizon):
-  Var(P&L) ≈ (Δ_port · S · σ_daily)²
-           + (½ · Γ_port · S² · σ_daily²)²      [gamma P&L variance]
-           + (Vega_port · σ_vol_daily)²           [vega P&L variance]
-           + θ_port²                              [deterministic but included]
-
-  σ_daily   = ATM_IV / √252
-  σ_vol_daily estimated from vol surface term structure
-"""
-
 from __future__ import annotations
 
-import json
 import math
-from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime
-
 import numpy as np
 from scipy.optimize import minimize
-from scipy.stats import norm
 
-from .base_optimizer import BaseOptimizer
-#from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
+from .base_optimizer import BaseOptimizer, RiskMode
 from .models import Position, Candidate
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num
-#from .portfolio import load_positions
 
 
-class OptimizerV2(BaseOptimizer):
+class OptimizerV3(BaseOptimizer):
     """Holds all data needed for portfolio optimization."""
 
     def __init__(
@@ -50,24 +27,8 @@ class OptimizerV2(BaseOptimizer):
         snapshot_path: Path,
     ):
         super().__init__(eth_spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals, snapshot_path)
-
-    @classmethod
-    def from_snapshot_dict(cls, data: dict) -> "OptimizerV2":
-        snapshot_data, positions = load_snapshot_dict(data)
-        return cls(
-            eth_spot=snapshot_data["eth_spot"],
-            spot_ladder=snapshot_data["spot_ladder"],
-            matrix_horizons=snapshot_data["matrix_horizons"],
-            chart_horizons=snapshot_data["chart_horizons"],
-            vol_surface=snapshot_data["vol_surface"],
-            positions=positions,
-            totals=snapshot_data["totals"],
-            snapshot_path=Path(snapshot_data.get("snapshot_path", "")),
-        )
-
-    # ------------------------------------------------------------------
-    # Run optimization
-    # ------------------------------------------------------------------
+        self.cost = None
+        self.risk_reduction = None
 
     def run(
         self,
@@ -85,16 +46,16 @@ class OptimizerV2(BaseOptimizer):
     ) -> dict:
         """Run the optimization and return proposed trades.
 
-        Parameters
-        ----------
-        unwind_discount : float
-            Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
-        new_position_penalty : float
-            Extra cost per dollar notional for trades in instruments not already held.
-        vega_cross_expiry_corr : float
-            Correlation of vol shocks across expiries. Lower means less cross-expiry
-            vega netting; higher means more shared vega risk.
-        """
+                Parameters
+                ----------
+                unwind_discount : float
+                    Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
+                new_position_penalty : float
+                    Extra cost per dollar notional for trades in instruments not already held.
+                vega_cross_expiry_corr : float
+                    Correlation of vol shocks across expiries. Lower means less cross-expiry
+                    vega netting; higher means more shared vega risk.
+                """
         print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
         spot = self.eth_spot
         candidates = self._build_candidates(target_expiry=target_expiry)
@@ -246,66 +207,6 @@ class OptimizerV2(BaseOptimizer):
             vega_cross_expiry_corr=vega_cross_expiry_corr,
         )
 
-        def objective(x: np.ndarray) -> float:
-            """Negative utility: cost − λ·risk_reduction.
-
-                        At x=0 (no trades), this returns exactly 0.
-                        A trade is only proposed if λ·risk_reduction > cost.
-                        """
-            # New portfolio greeks = current + sum(x_i * candidate_greeks_i)
-            new_delta = port_delta + np.dot(x, c_delta)
-            new_gamma = port_gamma + np.dot(x, c_gamma)
-            new_theta = port_theta + np.dot(x, c_theta)
-            new_vega = port_vega + np.dot(x, c_vega)
-            new_vega_by_expiry = {
-                exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(x, c_vega_by_expiry[exp_code])
-                for exp_code in expiry_codes
-            }
-
-            risk = self._compute_risk(
-                new_delta, new_gamma, new_theta, new_vega,
-                sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
-                port_vega_by_expiry=new_vega_by_expiry,
-                vega_cross_expiry_corr=vega_cross_expiry_corr,
-            )
-
-            # Risk reduction relative to doing nothing
-            risk_reduction = risk_before - risk
-
-            # ----------------------------------------------------------
-            # Split each trade into "unwind" and "new" portions.
-            #
-            # For a held position with qty H and optimizer trade x:
-            #   - If x goes in the opposite direction of H (reducing exposure),
-            #     that part is an unwind → cheaper cost.
-            #   - Any remainder is a new position → higher cost.
-            #
-            # unwind_qty = min(|x|, |H|) when sign(x) != sign(H)
-            # new_qty    = |x| - unwind_qty
-            # ----------------------------------------------------------
-            # Unwind portion: x opposes held qty
-            opposite = (x * c_held_qty) < 0  # True where trade closes position
-            unwind_abs = np.where(
-                opposite,
-                np.minimum(np.abs(x), np.abs(c_held_qty)),
-                0.0,
-            )
-            new_abs = np.abs(x) - unwind_abs
-
-            # Cost for unwind portion (discounted)
-            cost_unwind = np.sum(
-                c_cost_rate * unwind_discount * unwind_abs * c_price
-            )
-            # Cost for new portion (full rate + penalty for non-held instruments)
-            cost_new = np.sum(
-                (c_cost_rate + new_position_penalty * (1.0 - c_is_held))
-                * new_abs * c_price
-            )
-
-            cost = cost_unwind + cost_new
-
-            return cost - risk_aversion * risk_reduction
-
         # Bounds: unwind-only
         bounds = []
         for c, held_qty, price in zip(candidates, c_held_qty, c_price):
@@ -327,13 +228,21 @@ class OptimizerV2(BaseOptimizer):
         # Start from zero (no trades)
         x0 = np.zeros(n)
 
+        obj = lambda x:self.objective(x,
+                                      port_delta, port_gamma, port_theta, port_vega,
+                                      c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry, c_held_qty, c_is_held, c_price, c_cost_rate,
+                                      sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+                                      port_vega_by_expiry, vega_cross_expiry_corr, expiry_codes,
+                                      risk_aversion, risk_before, unwind_discount, new_position_penalty,
+                                      risk_mode=RiskMode.GAMMA_VEGA)
         result = minimize(
-            objective,
+            obj,
             x0,
             method="SLSQP",
             bounds=bounds,
             options={"maxiter": 2000, "ftol": 1e-10},
         )
+        self.print_summary()
 
         # Extract proposed trades (filter out tiny quantities)
         trades = []
@@ -367,8 +276,8 @@ class OptimizerV2(BaseOptimizer):
             is_new_instrument = abs(held_qty) == 0
             cost_unwind_part = cost_rate * unwind_discount * unwind_notional
             cost_new_part = (
-                cost_rate + (new_position_penalty if is_new_instrument else 0.0)
-            ) * new_notional
+                                    cost_rate + (new_position_penalty if is_new_instrument else 0.0)
+                            ) * new_notional
 
             instrument_name = (
                 "ETH-PERPETUAL" if c.opt == "F"
@@ -527,3 +436,71 @@ class OptimizerV2(BaseOptimizer):
             "candidates_evaluated": n,
             "optimizer_converged": result.success,
         }
+
+    def objective(self, x: np.ndarray,
+                  port_delta, port_gamma, port_theta, port_vega,
+                  c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry, c_held_qty, c_is_held, c_price, c_cost_rate,
+                  sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+                  port_vega_by_expiry, vega_cross_expiry_corr, expiry_codes,
+                  risk_aversion, risk_before, unwind_discount, new_position_penalty,
+                  risk_mode) -> float:
+        """Negative utility: cost − λ·risk_reduction.
+
+                                At x=0 (no trades), this returns exactly 0.
+                                A trade is only proposed if λ·risk_reduction > cost.
+                                """
+        # New portfolio greeks = current + sum(x_i * candidate_greeks_i)
+        new_delta = port_delta + np.dot(x, c_delta)
+        new_gamma = port_gamma + np.dot(x, c_gamma)
+        new_theta = port_theta + np.dot(x, c_theta)
+        new_vega = port_vega + np.dot(x, c_vega)
+        new_vega_by_expiry = {
+            exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(x, c_vega_by_expiry[exp_code])
+            for exp_code in expiry_codes
+        }
+
+
+        risk = self._compute_risk(
+            new_delta, new_gamma, new_theta, new_vega,
+            sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
+            port_vega_by_expiry=new_vega_by_expiry,
+            vega_cross_expiry_corr=vega_cross_expiry_corr, risk_mode=risk_mode,
+        )
+
+        # Risk reduction relative to doing nothing
+        risk_reduction = risk_before - risk
+
+        # ----------------------------------------------------------
+        # Split each trade into "unwind" and "new" portions.
+        #
+        # For a held position with qty H and optimizer trade x:
+        #   - If x goes in the opposite direction of H (reducing exposure),
+        #     that part is an unwind → cheaper cost.
+        #   - Any remainder is a new position → higher cost.
+        #
+        # unwind_qty = min(|x|, |H|) when sign(x) != sign(H)
+        # new_qty    = |x| - unwind_qty
+        # ----------------------------------------------------------
+        # Unwind portion: x opposes held qty
+        opposite = (x * c_held_qty) < 0  # True where trade closes position
+        unwind_abs = np.where(
+            opposite,
+            np.minimum(np.abs(x), np.abs(c_held_qty)),
+            0.0,
+        )
+        new_abs = np.abs(x) - unwind_abs
+
+        # Cost for unwind portion (discounted)
+        cost_unwind = np.sum(c_cost_rate * unwind_discount * unwind_abs * c_price)
+        # Cost for new portion (full rate + penalty for non-held instruments)
+        cost_new = np.sum((c_cost_rate + new_position_penalty * (1.0 - c_is_held)) * new_abs * c_price)
+
+        cost = cost_unwind + cost_new
+
+        self.cost = cost
+        self.risk_reduction = risk_reduction
+        return cost - risk_aversion * risk_reduction
+
+    def print_summary(self):
+        print(f"cost: {self.cost:.2f}, risk_reduction: {self.risk_reduction:.2f}")
+
