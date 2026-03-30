@@ -46,10 +46,59 @@ const get  = (path) => api("GET", path);
 const post = (path, body) => api("POST", path, body);
 
 // ─── Vol surface helpers (for pricer) ────────────────────────
-function lookupSmileIv(expiryCode, strike) {
-  if (!volSurface || !volSurface.smiles) return null;
-  const smile = volSurface.smiles.find(s => s.expiry_code === expiryCode);
-  if (!smile) return null;
+// Parse expiry code to Date
+function _parseExpiryCode(code) {
+  // "13APR26" -> Date
+  const months = { JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11 };
+  const m = code.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+  if (!m) return null;
+  const d = parseInt(m[1]), mon = months[m[2]], y = 2000 + parseInt(m[3]);
+  if (mon === undefined) return null;
+  return new Date(y, mon, d);
+}
+
+// Compute DTE from expiry code
+function _expiryCodeToDte(code) {
+  const d = _parseExpiryCode(code);
+  if (!d) return null;
+  return Math.max(0, Math.round((d - new Date()) / 86400000));
+}
+
+// Interpolate IV between two smile surfaces for a non-standard expiry
+function _interpolateSmileIv(expiryCode, strike) {
+  if (!volSurface || !volSurface.smiles || volSurface.smiles.length < 2) return null;
+  const targetDte = _expiryCodeToDte(expiryCode);
+  if (targetDte == null) return null;
+
+  // Sort smiles by DTE
+  const sorted = [...volSurface.smiles].sort((a, b) => a.dte - b.dte);
+
+  // Find bracketing smiles
+  let before = null, after = null;
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].dte <= targetDte) before = sorted[i];
+    if (sorted[i].dte >= targetDte && !after) after = sorted[i];
+  }
+
+  if (!before && !after) return null;
+  if (!before) before = after;
+  if (!after) after = before;
+  if (before === after) {
+    // Only one smile available, use it directly
+    return _lookupIvInSmile(before, strike);
+  }
+
+  // Linear interpolation in DTE between the two smiles
+  const range = after.dte - before.dte;
+  const w = range > 0 ? (targetDte - before.dte) / range : 0.5;
+  const ivBefore = _lookupIvInSmile(before, strike);
+  const ivAfter = _lookupIvInSmile(after, strike);
+  if (ivBefore == null || ivAfter == null) return ivBefore || ivAfter;
+  return ivBefore * (1 - w) + ivAfter * w;
+}
+
+// Lookup IV in a single smile (strike interpolation)
+function _lookupIvInSmile(smile, strike) {
   const { strikes, ivs } = smile;
   if (!strikes || strikes.length === 0) return null;
   if (strike <= strikes[0]) return ivs[0];
@@ -63,9 +112,28 @@ function lookupSmileIv(expiryCode, strike) {
   return ivs[ivs.length - 1];
 }
 
+function lookupSmileIv(expiryCode, strike) {
+  if (!volSurface || !volSurface.smiles) return null;
+  const smile = volSurface.smiles.find(s => s.expiry_code === expiryCode);
+  if (smile) return _lookupIvInSmile(smile, strike);
+  // No exact match — interpolate between nearest expiries
+  return _interpolateSmileIv(expiryCode, strike);
+}
+
 function getSmileForExpiry(expiryCode) {
   if (!volSurface || !volSurface.smiles) return null;
-  return volSurface.smiles.find(s => s.expiry_code === expiryCode) || null;
+  const exact = volSurface.smiles.find(s => s.expiry_code === expiryCode);
+  if (exact) return exact;
+  // Build a synthetic smile for non-standard expiries via interpolation
+  const targetDte = _expiryCodeToDte(expiryCode);
+  if (targetDte == null) return null;
+  // Use the nearest smile's strikes as reference points
+  const sorted = [...volSurface.smiles].sort((a, b) => Math.abs(a.dte - targetDte) - Math.abs(b.dte - targetDte));
+  const ref = sorted[0];
+  if (!ref) return null;
+  const syntheticIvs = ref.strikes.map(k => _interpolateSmileIv(expiryCode, k));
+  if (syntheticIvs.some(v => v == null)) return null;
+  return { expiry_code: expiryCode, dte: targetDte, strikes: [...ref.strikes], ivs: syntheticIvs, _synthetic: true };
 }
 
 // Simple BS for the pricer (reusing the one from portfolio section causes ordering issues)
@@ -258,9 +326,12 @@ function removeLeg(idx) {
 
 function renderLegs() {
   $legsBody.innerHTML = "";
-  const expiryOptions = volSurface && volSurface.smiles
+  const vsExpiries = volSurface && volSurface.smiles
     ? volSurface.smiles.map(s => s.expiry_code)
     : [];
+  // Include custom expiries from legs that aren't in the vol surface (e.g., OTC dates)
+  const legExpiries = legs.map(l => l.expiry).filter(e => e && !vsExpiries.includes(e));
+  const expiryOptions = [...vsExpiries, ...new Set(legExpiries)];
 
   legs.forEach((leg, i) => {
     const expOpts = expiryOptions.map(e =>
@@ -437,10 +508,17 @@ function replicateStrategy() {
   }
   if (!volSurface) { alert("Vol surface not loaded yet — wait for page init."); return; }
 
-  // Validate all expiries have smile data
+  // Validate all expiries have smile data (exact or interpolated)
   const uniqueExpiries = [...new Set(legs.map(l => l.expiry))];
   for (const exp of uniqueExpiries) {
-    if (!getSmileForExpiry(exp)) { alert(`No vol smile data for expiry ${exp}.`); return; }
+    const smile = getSmileForExpiry(exp);
+    if (!smile) {
+      alert(`Cannot price expiry ${exp} — no vol smile data available and cannot interpolate. Need at least 2 Deribit expiries to bracket this date.`);
+      return;
+    }
+    if (smile._synthetic) {
+      console.log(`Using interpolated vol smile for ${exp} (DTE ${smile.dte}d) — no exact Deribit match`);
+    }
   }
 
   const spot = ethSpot;
@@ -497,9 +575,11 @@ function replicateStrategy() {
       }
     }
 
+    const isSynthetic = !!(smile && smile._synthetic);
     legDetails.push({
       expiry: l.expiry, dte, strike: K, type: l.type, side: l.side, quantity: qty,
       iv_pct: ivPct, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
+      _synthetic: isSynthetic,
     });
   }
 
@@ -524,6 +604,24 @@ function replicateStrategy() {
   const rcvColor = totalReceive > 0 ? "var(--green)" : "var(--muted)";
   const netLabel = net >= 0 ? "Rcv" : "Pay";
   const netColor = net >= 0 ? "var(--green)" : "var(--red)";
+  // Determine pricing source
+  const hasSynthetic = legDetails.some(d => d._synthetic);
+  const allSynthetic = legDetails.every(d => d._synthetic);
+  let sourceNote = "";
+  if (allSynthetic) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.3">` +
+      `Prices: <strong>BS model with interpolated vol surface</strong> — no exact Deribit expiry match. ` +
+      `These are theoretical fair values, not live market quotes. Execution prices (bid/ask) will differ.</div>`;
+  } else if (hasSynthetic) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.3">` +
+      `Some expiries use <strong>interpolated vol</strong> (marked with *). ` +
+      `These are theoretical BS values — execution prices from the Workbench (live Deribit) are more accurate.</div>`;
+  } else {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:var(--muted);line-height:1.3">` +
+      `Prices: <strong>BS model with Deribit vol surface</strong> — theoretical fair values. ` +
+      `For execution prices, use the Optimizer Workbench (live bid/ask).</div>`;
+  }
+
   const $summary = document.getElementById("repl-summary");
   $summary.innerHTML =
     `<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">` +
@@ -532,7 +630,7 @@ function replicateStrategy() {
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
     `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
-    `</span></div>`;
+    `</span></div>` + sourceNote;
 
   // Per-leg table
   const $body = document.getElementById("repl-body");
@@ -541,6 +639,9 @@ function replicateStrategy() {
     const tr = document.createElement("tr");
     const sideColor = d.side === "buy" ? "var(--accent)" : "var(--orange)";
     const typeColor = d.type === "C" ? "var(--green)" : "var(--red)";
+    const srcLabel = d._synthetic
+      ? `<span style="color:#f0883e;font-weight:600" title="Vol interpolated between nearest Deribit expiries — theoretical, not live">Interpolated*</span>`
+      : `<span style="color:var(--muted)" title="Vol from Deribit vol surface — theoretical BS fair value">Vol Surface</span>`;
     tr.innerHTML = `
       <td style="font-size:.75rem">${d.expiry}</td>
       <td style="color:${sideColor}">${d.side.toUpperCase()}</td>
@@ -550,6 +651,7 @@ function replicateStrategy() {
       <td>${d.iv_pct.toFixed(1)}%</td>
       <td style="font-family:monospace">${d.bs_premium_eth.toFixed(6)}</td>
       <td style="font-family:monospace">$${d.bs_premium_usd.toFixed(2)}</td>
+      <td style="font-size:.68rem">${srcLabel}</td>
     `;
     $body.appendChild(tr);
   }
@@ -776,6 +878,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
     if (pg === "roll" && !rollLoaded && !isFil) rollInit();
     if (pg === "structurer" && !sbLoaded) sbInit();
+    // execution is now a subtab inside structurer, not a standalone page
   });
 });
 
@@ -791,6 +894,10 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
 
     // Lazy-load optimizer
     if (btn.dataset.subtab === "optimizer" && !opt2Loaded) opt2Init();
+    if (btn.dataset.subtab === "optimizer") {
+      setTimeout(() => { const el = document.getElementById("opt2-ask"); if (el) el.focus(); }, 100);
+    }
+    if (btn.dataset.subtab === "sb-execution" && !execLoaded) execInit();
   });
 });
 
@@ -3567,8 +3674,14 @@ let opt2Loaded = false;
 let opt2Data = null;
 let opt2HighlightIdx = -1;
 let opt2Filtered = [];
-let opt2WbLegs = [];  // editable workbench legs
+let opt2WbLegs = [];
 let opt2WbName = "";
+let opt2AddedTrades = [];
+let opt2Baseline = null; // {spot_ladder, payoff, profile, spot} — frozen at first load
+let opt2ChatHistory = [];  // {role: "user"|"bot", text: "..."}
+let opt2ClosedTradeIds = [];  // trade IDs "closed" in the optimizer working portfolio (rolls)
+let opt2RollMeta = new Map();  // Map<wbLegIndex, {originalTradeId, originalTrade, type: 'close'|'open'}>
+let opt2ScenarioTrades = [];  // locally-tracked scenario trades (roll open legs, etc.) — NOT in real DB
 
 async function opt2Init() {
   try {
@@ -3587,52 +3700,177 @@ async function opt2Init() {
 
 // ── Run suggestion engine ────────────────────────────────
 
-async function opt2Run() {
-  const $status = document.getElementById("opt2-status");
-  const $btn = document.getElementById("btn-opt2-run");
-  $btn.disabled = true;
-  $btn.textContent = "Scanning...";
-  $status.style.display = "block";
-
-  ["opt2-portfolio-section", "opt2-payoff-chart", "opt2-results-section", "opt2-workbench-section"]
-    .forEach(id => { document.getElementById(id).style.display = "none"; });
-
-  const body = {
-    query: document.getElementById("opt2-ask").value,
-    budget: parseFloat(document.getElementById("opt2-budget").value) || 15000,
-    target_expiry: document.getElementById("opt2-expiry").value || null,
-  };
-
-  try {
-    opt2Data = await post("/api/optimizer/suggest", body);
-  } catch (e) {
-    alert("Optimizer error: " + e.message);
-    $status.style.display = "none";
-    $btn.disabled = false;
-    $btn.textContent = "Suggest Trades";
-    return;
-  }
-
-  $status.style.display = "none";
-  $btn.disabled = false;
-  $btn.textContent = "Suggest Trades";
-
-  opt2RenderPortfolio();
-  opt2ApplyFilter();
-  opt2DrawChart();
+function opt2AddMsg(type, html) {
+  const $log = document.getElementById("opt2-chat-log");
+  const div = document.createElement("div");
+  div.className = `opt2-msg opt2-msg-${type}`;
+  div.innerHTML = `<div class="opt2-msg-bubble">${html}</div>`;
+  $log.appendChild(div);
+  $log.scrollTop = $log.scrollHeight;
 }
 
-// ── Portfolio table ──────────────────────────────────────
+// Progress phases for the status bar
+const OPT2_PHASES = [
+  { at: 0,  pct: 5,   text: "Loading portfolio..." },
+  { at: 1,  pct: 15,  text: "Fetching live prices from Deribit..." },
+  { at: 3,  pct: 30,  text: "Computing payoff curves..." },
+  { at: 5,  pct: 45,  text: "Analyzing structures & MTM..." },
+  { at: 8,  pct: 55,  text: "Running AI analysis..." },
+  { at: 12, pct: 65,  text: "AI is evaluating strategies..." },
+  { at: 18, pct: 75,  text: "Pricing suggestions on Deribit..." },
+  { at: 25, pct: 82,  text: "Building roll recommendations..." },
+  { at: 35, pct: 88,  text: "Finalizing response..." },
+  { at: 50, pct: 92,  text: "Still working — complex analysis..." },
+  { at: 70, pct: 95,  text: "Almost done..." },
+];
+
+let _opt2StatusTimer = null;
+let _opt2StatusStart = 0;
+
+function opt2StartProgress() {
+  const $status = document.getElementById("opt2-status");
+  const $text = document.getElementById("opt2-status-text");
+  const $elapsed = document.getElementById("opt2-status-elapsed");
+  const $bar = document.getElementById("opt2-status-bar");
+  $status.style.display = "block";
+  $text.textContent = OPT2_PHASES[0].text;
+  $bar.style.width = "5%";
+  $elapsed.textContent = "0s";
+  _opt2StatusStart = Date.now();
+
+  // Add typing indicator in chat
+  const $log = document.getElementById("opt2-chat-log");
+  const typingDiv = document.createElement("div");
+  typingDiv.id = "opt2-typing";
+  typingDiv.className = "opt2-msg opt2-msg-bot";
+  typingDiv.innerHTML = `<div class="opt2-msg-bubble" style="display:inline-flex;gap:4px;padding:8px 16px">` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out infinite"></span>` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out .15s infinite"></span>` +
+    `<span class="opt2-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);animation:opt2bounce .6s ease-in-out .3s infinite"></span>` +
+    `</div>`;
+  $log.appendChild(typingDiv);
+  $log.scrollTop = $log.scrollHeight;
+
+  // Add bounce animation if not yet present
+  if (!document.getElementById("opt2-bounce-style")) {
+    const style = document.createElement("style");
+    style.id = "opt2-bounce-style";
+    style.textContent = `@keyframes opt2bounce{0%,100%{opacity:.3;transform:translateY(0)}50%{opacity:1;transform:translateY(-4px)}}`;
+    document.head.appendChild(style);
+  }
+
+  _opt2StatusTimer = setInterval(() => {
+    const elapsed = (Date.now() - _opt2StatusStart) / 1000;
+    $elapsed.textContent = `${Math.floor(elapsed)}s`;
+    // Find current phase
+    for (let i = OPT2_PHASES.length - 1; i >= 0; i--) {
+      if (elapsed >= OPT2_PHASES[i].at) {
+        $text.textContent = OPT2_PHASES[i].text;
+        $bar.style.width = OPT2_PHASES[i].pct + "%";
+        break;
+      }
+    }
+  }, 500);
+}
+
+function opt2StopProgress() {
+  const $status = document.getElementById("opt2-status");
+  const $bar = document.getElementById("opt2-status-bar");
+  $bar.style.width = "100%";
+  if (_opt2StatusTimer) { clearInterval(_opt2StatusTimer); _opt2StatusTimer = null; }
+  setTimeout(() => { $status.style.display = "none"; $bar.style.width = "0%"; }, 400);
+  // Remove typing indicator
+  const typing = document.getElementById("opt2-typing");
+  if (typing) typing.remove();
+}
+
+async function opt2Run() {
+  const $btn = document.getElementById("btn-opt2-run");
+  const queryText = document.getElementById("opt2-ask").value.trim();
+  if (!queryText) return;
+
+  opt2AddMsg("user", queryText);
+  opt2ChatHistory.push({ role: "user", text: queryText });
+  document.getElementById("opt2-ask").value = "";
+
+  $btn.disabled = true;
+  $btn.textContent = "...";
+  opt2StartProgress();
+
+  try {
+    // Include drawn target profile if available
+    const drawnTarget = window._opt2DrawnTarget || null;
+    window._opt2DrawnTarget = null;  // consume once
+
+    const result = await post("/api/optimizer/chat", {
+      message: queryText,
+      history: opt2ChatHistory,
+      workbench_legs: opt2WbLegs.map(l => ({
+        instrument: l.instrument, side: l.side, qty: l.qty,
+        strike: l.strike, opt: l.opt, expiry_code: l.expiry_code,
+        price_usd: l.price_usd, bid_usd: l.bid_usd, ask_usd: l.ask_usd,
+        spread_pct: l.spread_pct, mark_iv: l.mark_iv, dte: l.dte,
+      })),
+      added_trades: opt2AddedTrades.map(t => ({
+        id: t.id, instrument: t.instrument, side: t.side,
+        opt: t.opt, strike: t.strike, qty: t.qty, premium_usd: t.premium_usd,
+      })),
+      closed_trade_ids: opt2ClosedTradeIds,
+      target_payoff: drawnTarget,
+    });
+
+    opt2StopProgress();
+    $btn.disabled = false;
+    $btn.textContent = "Send";
+
+    // Render bot response as markdown-ish
+    const text = (result.text || "").replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+    opt2AddMsg("bot", text);
+    opt2ChatHistory.push({ role: "bot", text: result.text || "" });
+
+    // If we got suggestions, populate the data and show tables
+    if (result.type === "suggestions" && result.data) {
+      // Freeze baseline on first load — never overwrite
+      if (!opt2Baseline) {
+        opt2Baseline = {
+          spot_ladder: [...result.data.spot_ladder],
+          payoff: [...result.data.current_payoff],
+          profile: { ...result.data.current_profile },
+          spot: result.data.spot,
+        };
+      }
+      opt2Data = result.data;
+      opt2RenderPortfolio();
+      opt2ApplyFilter();
+      opt2DrawChart();
+    }
+
+  } catch (e) {
+    opt2AddMsg("bot", `<span style="color:var(--red)">Error: ${e.message}</span>`);
+    opt2StopProgress();
+    $btn.disabled = false;
+    $btn.textContent = "Send";
+  }
+
+  // Focus back on input
+  setTimeout(() => document.getElementById("opt2-ask").focus(), 100);
+}
+
+// ── Scenario Trades table ─────────────────────────────────
+
+let opt2PortSortCol = "dte";
+let opt2PortSortAsc = true;
 
 function opt2RenderPortfolio() {
   if (!opt2Data) return;
-  const p = opt2Data.current_profile;
+  const p = opt2Data.current_profile || {};
+  if (!p.at_spot && p.at_spot !== 0) return;  // no profile data yet
   const pos = opt2Data.positions || [];
   const $s = (id, v) => { document.getElementById(id).textContent = v; };
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
+  const cs = "text-align:center";
 
   $s("opt2-spot-val", `$${opt2Data.spot.toLocaleString(undefined, {maximumFractionDigits: 2})}`);
-  $s("opt2-port-count", `(${pos.length} legs)`);
 
   const $pnl = document.getElementById("opt2-pnl-spot");
   $pnl.textContent = fmtM(p.at_spot);
@@ -3649,25 +3887,158 @@ function opt2RenderPortfolio() {
   $best.textContent = fmtM(p.max);
   $best.className = "risk-value mtm-pos";
 
+  // Populate counterparty filter dropdown (include scenario trades)
+  const allForCpty = [...pos, ...opt2ScenarioTrades];
+  const cptys = [...new Set(allForCpty.map(r => r.counterparty || "").filter(Boolean))].sort();
+  const $cptySel = document.getElementById("opt2-port-filter-cpty");
+  const curCpty = $cptySel.value;
+  $cptySel.innerHTML = '<option value="">All</option>';
+  for (const c of cptys) {
+    const o = document.createElement("option");
+    o.value = c; o.textContent = c;
+    if (c === curCpty) o.selected = true;
+    $cptySel.appendChild(o);
+  }
+
+  // Merge DB positions + local scenario trades; mark closed ones
+  const closedSet = new Set(opt2ClosedTradeIds);
+  const showClosed = document.getElementById("opt2-port-show-closed").checked;
+  const allPos = [];
+  for (const r of pos) {
+    const isClosed = closedSet.has(r.id);
+    if (isClosed && !showClosed) continue;
+    allPos.push({ ...r, _source: "portfolio", _closed: isClosed });
+  }
+  for (const st of opt2ScenarioTrades) {
+    allPos.push({ ...st, _source: st._type || "scenario", _closed: false });
+  }
+
+  // Apply filters
+  const filterCpty = document.getElementById("opt2-port-filter-cpty").value;
+  const filterType = document.getElementById("opt2-port-filter-type").value;
+  const filterSide = document.getElementById("opt2-port-filter-side").value;
+
+  let filtered = allPos.map(r => {
+    const exp = (r.expiry || "")?.split("T")[0] || r.expiry_code || "";
+    const dte = r._source !== "portfolio" && r.dte ? r.dte : Math.max(0, Math.round((new Date(exp) - new Date()) / 86400000));
+    return { ...r, _exp: exp, _dte: dte, _notional: (r.qty || 0) * opt2Data.spot, _prem: r.premium_usd || 0 };
+  });
+
+  if (filterCpty) filtered = filtered.filter(r => r.counterparty === filterCpty);
+  if (filterType) filtered = filtered.filter(r => r.opt === filterType);
+  if (filterSide === "long") filtered = filtered.filter(r => r.net_qty > 0);
+  else if (filterSide === "short") filtered = filtered.filter(r => r.net_qty < 0);
+
+  // Sort by clickable column header
+  const col = opt2PortSortCol;
+  const dir = opt2PortSortAsc ? 1 : -1;
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (col === "id") { va = a.id; vb = b.id; }
+    else if (col === "counterparty") { va = (a.counterparty || "").toLowerCase(); vb = (b.counterparty || "").toLowerCase(); return va < vb ? -dir : va > vb ? dir : 0; }
+    else if (col === "side") { va = a.side; vb = b.side; return va < vb ? -dir : va > vb ? dir : 0; }
+    else if (col === "opt") { va = a.opt; vb = b.opt; return va < vb ? -dir : va > vb ? dir : 0; }
+    else if (col === "strike") { va = a.strike; vb = b.strike; }
+    else if (col === "expiry") { va = a._exp; vb = b._exp; return va < vb ? -dir : va > vb ? dir : 0; }
+    else if (col === "dte") { va = a._dte; vb = b._dte; }
+    else if (col === "qty") { va = a.qty; vb = b.qty; }
+    else if (col === "net_qty") { va = a.net_qty; vb = b.net_qty; }
+    else if (col === "premium") { va = a._prem; vb = b._prem; }
+    else if (col === "notional") { va = a._notional; vb = b._notional; }
+    else { va = a._dte; vb = b._dte; }
+    return (va - vb) * dir;
+  });
+
+  // Update sort indicators on headers
+  document.querySelectorAll("#opt2-port-table th.sortable").forEach(h => {
+    h.classList.remove("sort-asc", "sort-desc");
+    if (h.dataset.col === opt2PortSortCol) h.classList.add(opt2PortSortAsc ? "sort-asc" : "sort-desc");
+  });
+
+  const totalCount = pos.length + opt2ScenarioTrades.length;
+  $s("opt2-port-count", `(${filtered.length} of ${totalCount} trades)`);
+
   const $tbody = document.getElementById("opt2-port-body");
   $tbody.innerHTML = "";
-  for (const r of pos) {
-    const sideColor = r.side.toLowerCase().includes("buy") ? "var(--green)" : "var(--red)";
-    const typeColor = r.opt === "C" ? "var(--green)" : "var(--red)";
-    const exp = r.expiry?.split("T")[0] || "";
-    const dte = Math.max(0, Math.round((new Date(exp) - new Date()) / 86400000));
-    const premFmt = r.premium_usd ? "$" + Math.round(r.premium_usd).toLocaleString() : "--";
-    const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td style="text-align:left;font-size:.72rem">${r.counterparty || ""}</td>` +
-      `<td style="color:${sideColor};font-size:.75rem">${r.side}</td>` +
-      `<td style="color:${typeColor}">${r.opt === "C" ? "Call" : "Put"}</td>` +
-      `<td style="font-family:monospace">$${r.strike.toLocaleString()}</td>` +
-      `<td>${exp}</td><td>${dte}d</td>` +
-      `<td style="font-family:monospace">${r.net_qty.toLocaleString()}</td>` +
-      `<td style="font-family:monospace;font-size:.72rem">${premFmt}</td>`;
-    $tbody.appendChild(tr);
+  let totalNetQty = 0, totalPrem = 0, totalNotional = 0;
+
+  const fmtMoney = v => v != null && v !== "" && v !== 0 ? `$${Number(v).toLocaleString(undefined, {maximumFractionDigits: 0})}` : "--";
+
+  for (const r of filtered) {
+    const isClosed = !!r._closed;
+    const isScenario = r._source === "roll" || r._source === "added" || r._source === "scenario";
+    const sideClass = r.side.toLowerCase().includes("buy") || r.side.toLowerCase().includes("long") ? "qty-long" : "qty-short";
+    if (!isClosed) {
+      totalNetQty += r.net_qty;
+      totalPrem += r._prem;
+      totalNotional += r._notional;
+    }
+
+    // Closed trades: show reopen button instead of X
+    const delBtn = isClosed
+      ? `<button class="btn-secondary opt2-port-reopen" data-tid="${r.id}" style="width:20px;height:20px;padding:0;margin:0;font-size:.65rem;line-height:1;border-radius:3px;color:var(--green)" title="Reopen in scenario">+</button>`
+      : `<button class="btn-secondary opt2-port-delete" data-tid="${r.id}" data-sid="${r._scenarioId || ''}" data-source="${r._source}" style="width:20px;height:20px;padding:0;margin:0;font-size:.65rem;line-height:1;border-radius:3px;color:var(--red)" title="${isScenario ? 'Remove from scenario' : 'Exclude from scenario'}">x</button>`;
+
+    // Row styling
+    const closedStyle = isClosed ? "opacity:0.4;text-decoration:line-through;" : "";
+    const borderStyle = isClosed ? "border-left:3px solid var(--red);" : isScenario && r._source === "roll" ? "border-left:3px solid #d2a8ff;" : isScenario ? "border-left:3px solid #58a6ff;" : "";
+    const rowStyle = closedStyle + borderStyle;
+    const idLabel = isClosed ? `<span style="color:var(--red);font-weight:600">X</span>` : r._source === "roll" ? `<span style="color:#d2a8ff;font-weight:600">R</span>` : r._source === "added" ? `<span style="color:#58a6ff;font-weight:600">S</span>` : `#${r.id}`;
+
+    $tbody.innerHTML += `<tr style="${rowStyle}">
+      <td style="${cs}">${delBtn}</td>
+      <td style="${cs};font-size:.68rem;color:var(--muted)">${idLabel}</td>
+      <td style="${cs}">${r.counterparty || ""}</td>
+      <td style="${cs}" class="${sideClass}">${r.side}</td>
+      <td style="${cs}">${r.opt === "C" ? "Call" : "Put"}</td>
+      <td style="${cs}">${r.strike.toLocaleString()}</td>
+      <td style="${cs}">${r._exp}</td>
+      <td style="${cs}">${r._dte}</td>
+      <td style="${cs}">${r.qty.toLocaleString()}</td>
+      <td style="${cs}" class="${r.net_qty >= 0 ? 'qty-long' : 'qty-short'}">${r.net_qty >= 0 ? "+" : ""}${r.net_qty.toLocaleString()}</td>
+      <td style="${cs}">${fmtMoney(r._prem)}</td>
+      <td style="${cs}">${fmtMoney(r._notional)}</td>
+    </tr>`;
   }
+
+  // Wire delete buttons (X = close/remove)
+  $tbody.querySelectorAll(".opt2-port-delete").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const tid = btn.dataset.tid;
+      const sid = btn.dataset.sid;
+      const source = btn.dataset.source;
+
+      if (source === "roll" || source === "added" || source === "scenario") {
+        opt2ScenarioTrades = opt2ScenarioTrades.filter(t => t._scenarioId !== sid);
+      } else if (source === "portfolio") {
+        const numTid = parseInt(tid);
+        if (!opt2ClosedTradeIds.includes(numTid)) {
+          opt2ClosedTradeIds.push(numTid);
+        }
+      }
+      opt2RenderPortfolio();
+      opt2DrawChart();
+    });
+  });
+
+  // Wire reopen buttons (+ = bring back closed trade)
+  $tbody.querySelectorAll(".opt2-port-reopen").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const numTid = parseInt(btn.dataset.tid);
+      opt2ClosedTradeIds = opt2ClosedTradeIds.filter(id => id !== numTid);
+      opt2RenderPortfolio();
+      opt2DrawChart();
+    });
+  });
+
+  const $tfoot = document.getElementById("opt2-port-foot");
+  $tfoot.innerHTML = `<tr style="font-weight:700">
+    <td colspan="9" style="text-align:right">TOTAL</td>
+    <td style="${cs}" class="${totalNetQty >= 0 ? 'qty-long' : 'qty-short'}">${totalNetQty >= 0 ? "+" : ""}${totalNetQty.toLocaleString()}</td>
+    <td style="${cs}">${fmtMoney(totalPrem)}</td>
+    <td style="${cs}">${fmtMoney(totalNotional)}</td>
+  </tr>`;
+
   document.getElementById("opt2-portfolio-section").style.display = "block";
 }
 
@@ -3680,9 +4051,9 @@ function opt2ApplyFilter() {
   if (catF) list = list.filter(s => s.category === catF);
   const sort = document.getElementById("opt2-sort").value;
   if (sort === "cost_asc") list.sort((a, b) => Math.abs(a.net_cost_usd) - Math.abs(b.net_cost_usd));
-  else if (sort === "downside") list.sort((a, b) => b.impact.downside - a.impact.downside);
-  else if (sort === "upside") list.sort((a, b) => b.impact.upside - a.impact.upside);
-  else if (sort === "floor") list.sort((a, b) => b.impact.min_improvement - a.impact.min_improvement);
+  else if (sort === "downside") list.sort((a, b) => (b.impact?.downside || 0) - (a.impact?.downside || 0));
+  else if (sort === "upside") list.sort((a, b) => (b.impact?.upside || 0) - (a.impact?.upside || 0));
+  else if (sort === "floor") list.sort((a, b) => (b.impact?.min_improvement || 0) - (a.impact?.min_improvement || 0));
   opt2Filtered = list;
 
   const cats = [...new Set(opt2Data.suggestions.map(s => s.category))].sort();
@@ -3715,38 +4086,95 @@ function opt2RenderResults() {
   const catLabels = {
     bull_call_spread: "Bull Call", bear_put_spread: "Bear Put", risk_reversal: "Risk Rev",
     put_protection: "Put Protect", collar: "Collar", put_ratio: "Put Ratio", bear_reversal: "Bear Rev",
+    roll: "Roll", custom: "Custom", target_match: "Target",
   };
   const catColors = {
     bull_call_spread: "#3fb950", bear_put_spread: "#f85149", risk_reversal: "#58a6ff",
     put_protection: "#d29922", collar: "#bc8cff", put_ratio: "#f0883e", bear_reversal: "#da3633",
+    roll: "#d2a8ff", custom: "#8b949e", target_match: "#f0883e",
   };
 
   const $tbody = document.getElementById("opt2-results-body");
   $tbody.innerHTML = "";
+
+  // Detect step-based plan: suggestions named "Step N: ..."
+  const hasSteps = opt2Filtered.some(s => /^step\s+\d/i.test(s.name));
+  let lastPhase = "";
+
   opt2Filtered.forEach((s, idx) => {
+    // Insert phase header rows for step-based plans
+    if (hasSteps) {
+      const stepMatch = s.name.match(/^step\s+(\d+)/i);
+      let phase = "";
+      if (stepMatch) {
+        // Detect phase from name: "Close" = harvest, "Open" = deploy
+        const nameLower = s.name.toLowerCase();
+        if (nameLower.includes("close") || nameLower.includes("harvest") || nameLower.includes("sell")) {
+          phase = "PHASE 1: CLOSE & HARVEST";
+        } else if (nameLower.includes("open") || nameLower.includes("buy") || nameLower.includes("downside") || nameLower.includes("upside") || nameLower.includes("protection")) {
+          phase = "PHASE 2: OPEN NEW TRADES";
+        } else {
+          phase = "RESTRUCTURING PLAN";
+        }
+      } else {
+        phase = "OTHER SUGGESTIONS";
+      }
+      if (phase !== lastPhase) {
+        lastPhase = phase;
+        const phaseColor = phase.includes("CLOSE") ? "#f0883e" : phase.includes("OPEN") ? "#3fb950" : "#d2a8ff";
+        const headerTr = document.createElement("tr");
+        headerTr.style.cssText = `background:rgba(${phaseColor === "#f0883e" ? "240,136,62" : phaseColor === "#3fb950" ? "63,185,80" : "210,168,255"},0.1);border-left:3px solid ${phaseColor}`;
+        headerTr.innerHTML = `<td colspan="11" style="text-align:left;font-size:.72rem;font-weight:700;padding:6px 8px;color:${phaseColor};letter-spacing:.5px">${phase}</td>`;
+        $tbody.appendChild(headerTr);
+      }
+    }
+
     const costR = Math.round(s.net_cost_usd);
     const isHl = idx === opt2HighlightIdx;
     const tr = document.createElement("tr");
     tr.style.cursor = "pointer";
     if (isHl) tr.classList.add("roll-row-selected");
     const catColor = catColors[s.category] || "var(--muted)";
+    const costCls = Math.abs(costR) < 500 ? "" : costR > 0 ? "mtm-neg" : "mtm-pos";
+    // For step-based plans, show step number instead of index
+    const stepMatch = s.name.match(/^step\s+(\d+)/i);
+    const displayNum = stepMatch ? stepMatch[1] : (idx + 1);
+    const displayName = stepMatch ? s.name.replace(/^step\s+\d+:\s*/i, "") : s.name;
     tr.innerHTML =
-      `<td>${idx + 1}</td>` +
-      `<td style="text-align:left;font-size:.78rem">${s.name}</td>` +
+      `<td><button class="btn-primary opt2-add-to-wb" data-idx="${idx}" style="width:22px;height:20px;padding:0;margin:0;font-size:.75rem;line-height:1;border-radius:3px" title="Add to workbench">+</button></td>` +
+      `<td>${displayNum}</td>` +
+      `<td style="text-align:left;font-size:.76rem">${stepMatch ? `<strong>Step ${stepMatch[1]}:</strong> ` : ""}${displayName}</td>` +
       `<td style="text-align:left"><span style="color:${catColor};font-weight:600;font-size:.72rem">${catLabels[s.category] || s.category}</span></td>` +
       `<td>${s.dte}d</td>` +
-      `<td><span class="${Math.abs(costR) < 500 ? '' : costR > 0 ? 'mtm-neg' : 'mtm-pos'}" style="font-family:monospace;font-weight:600">${costR >= 0 ? "" : "-"}$${Math.abs(costR).toLocaleString()}</span></td>` +
-      `<td>${fmtImp(s.impact.at_spot)}</td>` +
-      `<td>${fmtImp(s.impact.downside)}</td>` +
-      `<td>${fmtImp(s.impact.upside)}</td>` +
-      `<td>${fmtImp(s.impact.min_improvement)}</td>` +
-      `<td style="font-family:monospace;font-weight:700">${Math.round(s.score).toLocaleString()}</td>`;
+      `<td class="${costCls}">${costR >= 0 ? "" : "-"}$${Math.abs(costR).toLocaleString()}</td>` +
+      `<td>${fmtImp(s.impact?.at_spot || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.downside || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.upside || 0)}</td>` +
+      `<td>${fmtImp(s.impact?.min_improvement || 0)}</td>` +
+      `<td style="font-weight:700">${Math.round(s.score).toLocaleString()}${s.target_match_pct != null ? `<br><span style="font-size:.65rem;color:#f0883e;font-weight:400">${s.target_match_pct.toFixed(0)}% match</span>` : ''}</td>`;
     $tbody.appendChild(tr);
-    tr.addEventListener("click", () => {
+
+    // Click row to preview on chart
+    tr.addEventListener("click", (e) => {
+      if (e.target.closest(".opt2-add-to-wb")) return;
       opt2HighlightIdx = idx;
       opt2RenderResults();
-      opt2OpenWorkbench(s);
       opt2DrawChart();
+    });
+  });
+
+  // Wire + buttons to ADD legs to workbench (accumulate, don't replace)
+  $tbody.querySelectorAll(".opt2-add-to-wb").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const s = opt2Filtered[parseInt(btn.dataset.idx)];
+      if (s) {
+        if (s.is_roll) {
+          opt2AddRollToWorkbench(s);
+        } else {
+          opt2AddToWorkbench(s);
+        }
+      }
     });
   });
 }
@@ -3754,14 +4182,54 @@ function opt2RenderResults() {
 // ── Workbench (editable legs) ────────────────────────────
 
 function opt2OpenWorkbench(s) {
-  opt2WbLegs = s.legs.map(l => ({ ...l }));  // deep copy
+  opt2WbLegs = s.legs.map(l => ({ ...l }));
   opt2WbName = s.name;
   document.getElementById("opt2-wb-name").textContent = s.name;
   opt2RenderWorkbench();
-  // Show initial impact from the suggestion
-  opt2ShowWbImpact(s.net_cost_usd, s.impact, s.new_payoff);
+  opt2ShowWbImpact(s.net_cost_usd, s.impact || {}, s.new_payoff);
   document.getElementById("opt2-workbench-section").style.display = "block";
-  document.getElementById("opt2-workbench-section").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function opt2AddToWorkbench(s) {
+  // Accumulate — add legs from this suggestion to existing workbench
+  // Tag each leg with the strategy name so we can group them visually
+  const stratName = s.name || "Strategy";
+  for (const l of s.legs) opt2WbLegs.push({ ...l, _strategyName: stratName });
+  opt2WbName = opt2WbLegs.length <= s.legs.length ? s.name : "Combined (" + opt2WbLegs.length + " legs)";
+  document.getElementById("opt2-wb-name").textContent = opt2WbName;
+  opt2RenderWorkbench();
+  document.getElementById("opt2-workbench-section").style.display = "block";
+}
+
+function opt2AddRollToWorkbench(s) {
+  // Add roll suggestion: multi-leg structures (close_legs + open_legs arrays)
+  const rollId = s.original_trade_id;
+  const rollTrade = s.original_trade;
+
+  // Add close legs
+  const closeLegs = s.close_legs || (s.close_leg ? [s.close_leg] : []);
+  for (const cl of closeLegs) {
+    const idx = opt2WbLegs.length;
+    opt2WbLegs.push({ ...cl, _isRollClose: true, _rollOriginalTradeId: rollId, _rollOriginalTrade: rollTrade });
+    opt2RollMeta.set(idx, { originalTradeId: rollId, originalTrade: rollTrade, type: "close" });
+  }
+
+  // Add open legs
+  const openLegs = s.open_legs || (s.open_leg ? [s.open_leg] : []);
+  for (const ol of openLegs) {
+    const idx = opt2WbLegs.length;
+    opt2WbLegs.push({ ...ol, _isRollOpen: true, _rollOriginalTradeId: rollId, _rollOriginalTrade: rollTrade });
+    opt2RollMeta.set(idx, { originalTradeId: rollId, originalTrade: rollTrade, type: "open" });
+  }
+
+  // Store the original trade IDs on the legs so we can close them when user confirms
+  // Do NOT add to opt2ClosedTradeIds yet — only when "Add to Scenario" is clicked
+
+  const totalLegs = closeLegs.length + openLegs.length;
+  opt2WbName = opt2WbLegs.length <= totalLegs ? s.name : "Combined (" + opt2WbLegs.length + " legs)";
+  document.getElementById("opt2-wb-name").textContent = opt2WbName;
+  opt2RenderWorkbench();
+  document.getElementById("opt2-workbench-section").style.display = "block";
 }
 
 function opt2RenderWorkbench() {
@@ -3769,14 +4237,72 @@ function opt2RenderWorkbench() {
   $tbody.innerHTML = "";
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
 
+  const renderedRollHeaders = new Set();  // track which original trade IDs have had their header rendered
+  const renderedStratHeaders = new Set();  // track strategy name headers
   opt2WbLegs.forEach((leg, idx) => {
+    // Strategy block header row (non-roll): show strategy name when legs are grouped
+    if (!leg._isRollClose && !leg._isRollOpen && leg._strategyName && !renderedStratHeaders.has(leg._strategyName)) {
+      renderedStratHeaders.add(leg._strategyName);
+      const stratTr = document.createElement("tr");
+      // Color-code by zone: orange for downside, green for upside, purple for combined/other
+      let headerColor = "#d2a8ff";
+      const nameLower = leg._strategyName.toLowerCase();
+      if (nameLower.startsWith("downside")) headerColor = "#f0883e";
+      else if (nameLower.startsWith("upside")) headerColor = "#3fb950";
+      else if (nameLower.startsWith("cost reduction")) headerColor = "#58a6ff";
+      stratTr.style.cssText = `background:rgba(${headerColor === "#f0883e" ? "240,136,62" : headerColor === "#3fb950" ? "63,185,80" : headerColor === "#58a6ff" ? "88,166,255" : "210,168,255"},0.08);border-left:3px solid ${headerColor}`;
+      stratTr.innerHTML =
+        `<td colspan="12" style="text-align:left;font-size:.74rem;padding:.4rem .6rem">` +
+        `<strong style="color:${headerColor}">${leg._strategyName}</strong>` +
+        `</td>`;
+      $tbody.appendChild(stratTr);
+    }
+    // Roll header row: show original trade info before close/open pair
+    if (leg._isRollClose && leg._rollOriginalTrade && !renderedRollHeaders.has(leg._rollOriginalTradeId)) {
+      renderedRollHeaders.add(leg._rollOriginalTradeId);
+      const orig = leg._rollOriginalTrade;
+      const headerTr = document.createElement("tr");
+      headerTr.style.cssText = "background:rgba(210,168,255,0.08);border-left:3px solid #d2a8ff";
+      // Show structure-aware info
+      const structDesc = orig.description || `${orig.side} ${orig.opt} @ ${orig.strike}`;
+      const structType = orig.structure_type ? orig.structure_type.replace(/_/g, " ").toUpperCase() : "SINGLE";
+      const numLegs = orig.num_legs || 1;
+      const idsStr = orig.all_ids ? orig.all_ids.map(id => `#${id}`).join(", ") : `#${orig.id}`;
+      // Build per-leg detail with IDs
+      const legsDetail = orig.legs_detail || [];
+      const legsStr = legsDetail.length > 0
+        ? legsDetail.map(ld => {
+            const s = ld.net_qty > 0 ? "L" : "S";
+            return `<span style="color:${ld.net_qty > 0 ? 'var(--green)' : 'var(--red)'};font-weight:600">${s}</span> ${ld.opt} @${ld.strike.toLocaleString()} <span style="color:var(--muted)">#${ld.id}</span>`;
+          }).join(" &nbsp;|&nbsp; ")
+        : structDesc;
+      headerTr.innerHTML =
+        `<td colspan="12" style="text-align:left;font-size:.74rem;padding:.4rem .6rem">` +
+        `<strong style="color:#d2a8ff">ROLL ${structType}</strong> ` +
+        `<span style="color:var(--muted)">Cpty: ${orig.counterparty || "N/A"} | exp ${orig.expiry} (${orig.dte}d)</span><br>` +
+        `<span style="margin-left:1rem">${legsStr}</span>` +
+        `</td>`;
+      $tbody.appendChild(headerTr);
+    }
+
     const sideColor = leg.side === "buy" ? "var(--green)" : "var(--red)";
     const typeColor = leg.opt === "C" ? "var(--green)" : "var(--red)";
-    const legCost = leg.side === "buy" ? leg.price_usd * leg.qty : -leg.price_usd * leg.qty;
+    const execPr = leg.side === "buy" ? leg.ask_usd : leg.bid_usd;
+    const legCost = leg.side === "buy" ? execPr * leg.qty : -execPr * leg.qty;
+    const isRollLeg = leg._isRollClose || leg._isRollOpen;
+    // Show trade ID on close legs so user can reference the original
+    const closeId = leg._isRollClose && leg._rollOriginalTrade?.legs_detail
+      ? leg._rollOriginalTrade.legs_detail.find(ld => ld.opt === leg.opt && ld.strike === leg.strike)
+      : null;
+    const closeIdStr = closeId ? ` <span style="color:var(--muted);font-size:.62rem">#${closeId.id}</span>` : (leg._isRollClose && leg._rollOriginalTrade?.id ? ` <span style="color:var(--muted);font-size:.62rem">#${leg._rollOriginalTrade.id}</span>` : '');
+    const rollLabel = leg._isRollClose ? `<span style="color:#f85149;font-size:.65rem;font-weight:600">CLOSE</span>${closeIdStr} ` :
+                      leg._isRollOpen ? '<span style="color:#3fb950;font-size:.65rem;font-weight:600">OPEN</span> ' : '';
+    const rollBorder = isRollLeg ? "border-left:3px solid #d2a8ff;" : "";
     const tr = document.createElement("tr");
+    tr.style.cssText = rollBorder;
     tr.innerHTML =
       `<td><button class="btn-secondary opt2-wb-remove" data-idx="${idx}" style="width:22px;height:22px;padding:0;margin:0;font-size:.7rem;line-height:1;border-radius:3px" title="Remove leg">x</button></td>` +
-      `<td style="text-align:left;font-size:.72rem">${leg.instrument}</td>` +
+      `<td style="text-align:left;font-size:.72rem">${rollLabel}${leg.instrument}</td>` +
       `<td style="color:${sideColor};font-weight:600;text-transform:uppercase">` +
         `<select class="opt2-wb-side" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
         `<option value="buy" ${leg.side==="buy"?"selected":""}>Buy</option>` +
@@ -3784,7 +4310,9 @@ function opt2RenderWorkbench() {
       `<td style="color:${typeColor}">${leg.opt === "C" ? "Call" : "Put"}</td>` +
       `<td><input type="number" class="opt2-wb-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><input type="number" class="opt2-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
-      `<td style="font-size:.72rem">${leg.expiry_code} (${leg.dte}d)</td>` +
+      `<td><select class="opt2-wb-expiry" data-idx="${idx}" style="width:95px;font-size:.7rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
+        (opt2Data?.available_expiries || []).map(e => `<option value="${e}" ${e === leg.expiry_code ? "selected" : ""}>${e}</option>`).join("") +
+      `</select></td>` +
       `<td style="font-family:monospace;font-size:.72rem">$${leg.bid_usd.toFixed(2)}</td>` +
       `<td style="font-family:monospace;font-size:.72rem">$${leg.ask_usd.toFixed(2)}</td>` +
       `<td>${leg.spread_pct.toFixed(1)}%</td>` +
@@ -3796,7 +4324,31 @@ function opt2RenderWorkbench() {
   // Wire events
   $tbody.querySelectorAll(".opt2-wb-remove").forEach(btn => {
     btn.addEventListener("click", () => {
-      opt2WbLegs.splice(parseInt(btn.dataset.idx), 1);
+      const removeIdx = parseInt(btn.dataset.idx);
+      const removedLeg = opt2WbLegs[removeIdx];
+
+      // If removing a roll leg, also remove its pair and clean up closed trade IDs
+      if (removedLeg._rollOriginalTradeId) {
+        const rollId = removedLeg._rollOriginalTradeId;
+        // Get all original trade IDs for this structure
+        const allOrigIds = removedLeg._rollOriginalTrade?.all_ids || [rollId];
+        // Remove all legs for this roll
+        opt2WbLegs = opt2WbLegs.filter(l => l._rollOriginalTradeId !== rollId);
+        // Remove all structure IDs from closed IDs
+        opt2ClosedTradeIds = opt2ClosedTradeIds.filter(id => !allOrigIds.includes(id));
+        // Clean up roll meta
+        opt2RollMeta = new Map([...opt2RollMeta].filter(([k, v]) => v.originalTradeId !== rollId));
+      } else {
+        opt2WbLegs.splice(removeIdx, 1);
+      }
+      // Rebuild roll meta indices
+      const newMeta = new Map();
+      opt2WbLegs.forEach((l, i) => {
+        if (l._rollOriginalTradeId) {
+          newMeta.set(i, { originalTradeId: l._rollOriginalTradeId, originalTrade: l._rollOriginalTrade, type: l._isRollClose ? "close" : "open" });
+        }
+      });
+      opt2RollMeta = newMeta;
       opt2RenderWorkbench();
     });
   });
@@ -3804,22 +4356,45 @@ function opt2RenderWorkbench() {
     inp.addEventListener("change", () => { opt2WbLegs[parseInt(inp.dataset.idx)].qty = parseFloat(inp.value) || 0; });
   });
   $tbody.querySelectorAll(".opt2-wb-strike").forEach(inp => {
-    inp.addEventListener("change", () => { opt2WbLegs[parseInt(inp.dataset.idx)].strike = parseFloat(inp.value) || 0; });
+    inp.addEventListener("change", () => {
+      const idx = parseInt(inp.dataset.idx);
+      const l = opt2WbLegs[idx];
+      l.strike = parseFloat(inp.value) || 0;
+      // Rebuild instrument name to match new strike
+      const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
+      l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      // Update displayed instrument name in the row
+      const row = inp.closest("tr");
+      if (row) row.cells[1].textContent = l.instrument;
+    });
   });
   $tbody.querySelectorAll(".opt2-wb-side").forEach(sel => {
     sel.addEventListener("change", () => { opt2WbLegs[parseInt(sel.dataset.idx)].side = sel.value; });
+  });
+  $tbody.querySelectorAll(".opt2-wb-expiry").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const idx = parseInt(sel.dataset.idx);
+      const newExp = sel.value;
+      opt2WbLegs[idx].expiry_code = newExp;
+      // Update instrument name to match new expiry
+      const l = opt2WbLegs[idx];
+      const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
+      l.instrument = `ETH-${newExp}-${strikeStr}-${l.opt}`;
+    });
   });
 
   // Update total
   let total = 0;
   for (const l of opt2WbLegs) {
-    total += (l.side === "buy" ? 1 : -1) * l.price_usd * l.qty;
+    const eP = l.side === "buy" ? l.ask_usd : l.bid_usd;
+    total += (l.side === "buy" ? 1 : -1) * eP * l.qty;
   }
   const $t = document.getElementById("opt2-wb-total");
   $t.innerHTML = `<span class="${Math.abs(Math.round(total)) < 500 ? '' : total > 0 ? 'mtm-neg' : 'mtm-pos'}" style="font-family:monospace">${total >= 0 ? "" : "-"}$${Math.abs(Math.round(total)).toLocaleString()}</span>`;
 }
 
 function opt2ShowWbImpact(cost, impact, newPayoff) {
+  const imp = impact || {};
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
   const setV = (id, v, cls) => {
     const el = document.getElementById(id);
@@ -3827,13 +4402,13 @@ function opt2ShowWbImpact(cost, impact, newPayoff) {
     if (cls !== undefined) el.className = `risk-value ${cls}`;
   };
 
-  const cr = Math.round(cost);
-  setV("opt2-wb-cost", cost, Math.abs(cr) < 500 ? "" : cr > 0 ? "mtm-neg" : "mtm-pos");
-  setV("opt2-wb-pnl-spot", impact.at_spot || 0, (impact.at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  setV("opt2-wb-new-worst", impact.new_min || 0, (impact.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  setV("opt2-wb-new-be", impact.new_breakeven ? `$${Math.round(impact.new_breakeven).toLocaleString()}` : "N/A", "");
-  setV("opt2-wb-floor-imp", impact.min_improvement || 0, (impact.min_improvement || 0) >= 0 ? "mtm-pos" : "mtm-neg");
-  const beImp = impact.breakeven_improvement || 0;
+  const cr = Math.round(cost || 0);
+  setV("opt2-wb-cost", cost || 0, Math.abs(cr) < 500 ? "" : cr > 0 ? "mtm-neg" : "mtm-pos");
+  setV("opt2-wb-pnl-spot", imp.at_spot || 0, (imp.at_spot || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-worst", imp.new_min || 0, (imp.new_min || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  setV("opt2-wb-new-be", imp.new_breakeven ? `$${Math.round(imp.new_breakeven).toLocaleString()}` : "N/A", "");
+  setV("opt2-wb-floor-imp", imp.min_improvement || 0, (imp.min_improvement || 0) >= 0 ? "mtm-pos" : "mtm-neg");
+  const beImp = imp.breakeven_improvement || 0;
   setV("opt2-wb-be-imp", beImp || "--", beImp > 0 ? "mtm-pos" : beImp < 0 ? "mtm-neg" : "");
 
   // Store for chart
@@ -3852,7 +4427,7 @@ async function opt2Calculate() {
   $btn.disabled = true; $btn.textContent = "Calculating...";
 
   try {
-    const result = await post("/api/optimizer/calculate", { legs });
+    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: opt2ClosedTradeIds });
     // Update leg costs
     for (let i = 0; i < opt2WbLegs.length && i < result.leg_costs.length; i++) {
       const lc = result.leg_costs[i];
@@ -3864,7 +4439,7 @@ async function opt2Calculate() {
     }
     opt2RenderWorkbench();
     opt2ShowWbImpact(result.total_cost, {
-      at_spot: result.pnl_at_spot - opt2Data.current_profile.at_spot,
+      at_spot: result.pnl_at_spot - (opt2Data.current_profile?.at_spot || 0),
       new_min: result.new_min,
       min_improvement: result.floor_change,
       new_breakeven: result.new_breakeven,
@@ -3880,7 +4455,7 @@ async function opt2Calculate() {
   $btn.disabled = false; $btn.textContent = "Calculate";
 }
 
-// ── Add to Portfolio ─────────────────────────────────────
+// ── Add to Scenario (never touches real DB) ──────────────
 
 async function opt2AddToPortfolio() {
   if (opt2WbLegs.length === 0) { alert("No legs in workbench"); return; }
@@ -3888,82 +4463,229 @@ async function opt2AddToPortfolio() {
   const $btn = document.getElementById("btn-opt2-add-to-portfolio");
   $btn.disabled = true; $btn.textContent = "Adding...";
 
-  let added = 0;
-  for (const leg of opt2WbLegs) {
-    const parts = leg.instrument.split("-");
-    const expCode = parts[1] || "";
-    let expiryDate = "";
-    try {
-      const d = new Date(Date.UTC(
-        2000 + parseInt(expCode.slice(-2)),
-        "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC".indexOf(expCode.slice(-5, -2)) / 3,
-        parseInt(expCode.slice(0, -5) || expCode.slice(0, -5))
-      ));
-      // Parse properly
-      const dt = new Date(0);
-      const m = expCode.match(/^(\d+)([A-Z]{3})(\d{2})$/);
-      if (m) {
-        const months = {JAN:0,FEB:1,MAR:2,APR:3,MAY:4,JUN:5,JUL:6,AUG:7,SEP:8,OCT:9,NOV:10,DEC:11};
-        dt.setFullYear(2000 + parseInt(m[3]), months[m[2]], parseInt(m[1]));
-        expiryDate = dt.toISOString().split("T")[0];
-      }
-    } catch (e) { /* skip */ }
+  let addedCount = 0;
 
-    try {
-      await post("/api/trades/", {
-        asset: "ETH",
-        counterparty: "Optimizer",
-        side: leg.side === "buy" ? "Buy" : "Sell",
-        option_type: leg.opt === "C" ? "Call" : "Put",
-        instrument: leg.instrument,
-        expiry: expiryDate,
-        strike: leg.strike,
-        qty: leg.qty,
-        premium_per: leg.price_usd,
-        premium_usd: (leg.side === "buy" ? -1 : 1) * leg.price_usd * leg.qty,
-        ref_spot: opt2Data.spot,
-      });
-      added++;
-    } catch (e) {
-      console.error("Failed to add trade:", e);
+  // Close original trades for rolls NOW (on confirm, not on workbench add)
+  for (const leg of opt2WbLegs) {
+    if (leg._isRollClose) {
+      const allIds = leg._rollOriginalTrade?.all_ids || [leg._rollOriginalTradeId];
+      for (const tid of allIds) {
+        if (tid && !opt2ClosedTradeIds.includes(tid)) {
+          opt2ClosedTradeIds.push(tid);
+        }
+      }
     }
   }
 
-  $btn.disabled = false;
-  $btn.textContent = "Add Trades to Portfolio";
+  for (const leg of opt2WbLegs) {
+    // Skip close legs of rolls (they cancel out the original — handled via closed_trade_ids)
+    if (leg._isRollClose) continue;
 
-  if (added > 0) {
-    alert(`${added} trade(s) added to portfolio. Refresh Portfolio P&L to see the impact.`);
-    // Reset portfolio data so it reloads
-    pfData = null; portfolioLoaded = false;
-    opt2WbLegs = [];
-    document.getElementById("opt2-workbench-section").style.display = "none";
+    const sideLabel = leg.side === "buy" ? "Long" : "Short";
+    const isRollOpen = !!leg._isRollOpen;
+
+    opt2ScenarioTrades.push({
+      _scenarioId: `scen-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      _type: isRollOpen ? "roll" : "added",
+      _rollOriginalTradeId: leg._rollOriginalTradeId || null,
+      _rollOriginalTrade: leg._rollOriginalTrade || null,
+      id: isRollOpen ? "R" : "S",
+      counterparty: isRollOpen ? (leg._rollOriginalTrade?.counterparty || "Roll") : "Scenario",
+      side: sideLabel,
+      opt: leg.opt,
+      strike: leg.strike,
+      qty: leg.qty,
+      net_qty: (leg.side === "buy" ? 1 : -1) * leg.qty,
+      expiry: leg.expiry_code || "",
+      premium_usd: (leg.side === "buy" ? leg.ask_usd : leg.bid_usd) * leg.qty * (leg.side === "buy" ? -1 : 1),
+      price_usd: leg.side === "buy" ? leg.ask_usd : leg.bid_usd,
+      expiry_code: leg.expiry_code || "",
+      dte: leg.dte || 0,
+      instrument: leg.instrument || "",
+    });
+    addedCount++;
   }
+
+  // Count roll structures
+  const rollIds = new Set(opt2WbLegs.filter(l => l._isRollClose || l._isRollOpen).map(l => l._rollOriginalTradeId)).size;
+  const newLegs = opt2WbLegs.filter(l => !l._isRollClose && !l._isRollOpen).length;
+
+  let msg = "";
+  if (rollIds > 0) msg += `${rollIds} structure(s) rolled`;
+  if (newLegs > 0) msg += `${msg ? " + " : ""}${newLegs} trade(s) added`;
+  opt2AddMsg("bot",
+    `<strong style="color:#3fb950">Scenario updated</strong> — ${msg}. ` +
+    `<span style="color:var(--muted)">Simulation only — real trades not affected.</span>`
+  );
+
+  $btn.disabled = false;
+  $btn.textContent = "Add to Scenario";
+
+  // Clear workbench but keep roll state (closed_trade_ids)
+  const keepClosedIds = [...opt2ClosedTradeIds];
+  opt2WbLegs = [];
+  opt2RollMeta = new Map();
+  opt2ClosedTradeIds = keepClosedIds;
+  delete opt2Data?._wbPayoff;
+  delete opt2Data?._wbSpots;
+  document.getElementById("opt2-workbench-section").style.display = "none";
+
+  opt2RenderPortfolio();
+  opt2DrawChart();
 }
+
+function opt2RenderAdded() {
+  const $section = document.getElementById("opt2-added-section");
+  if (opt2AddedTrades.length === 0) { $section.style.display = "none"; return; }
+  $section.style.display = "block";
+
+  let totalCost = 0;
+  for (const t of opt2AddedTrades) totalCost += (t.premium || 0);
+
+  const costStr = (totalCost >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(totalCost)).toLocaleString();
+  const costCls = totalCost >= 0 ? "mtm-pos" : "mtm-neg";
+  document.getElementById("opt2-added-count").textContent = `(${opt2AddedTrades.length} trades | Net: `;
+  document.getElementById("opt2-added-count").innerHTML = `(${opt2AddedTrades.length} trades | Net cost: <span class="${costCls}" style="font-weight:700">${costStr}</span>)`;
+
+  const $tbody = document.getElementById("opt2-added-body");
+  $tbody.innerHTML = "";
+  for (const t of opt2AddedTrades) {
+    const sideColor = t.side === "Buy" ? "var(--green)" : "var(--red)";
+    const premStr = t.premium ? ((t.premium >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(t.premium)).toLocaleString()) : "--";
+    const premCls = t.premium >= 0 ? "mtm-pos" : "mtm-neg";
+    const priceStr = t.price_usd ? "$" + t.price_usd.toFixed(2) : "--";
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td><button class="btn-secondary opt2-remove-added" data-tid="${t.id}" style="width:22px;height:22px;padding:0;margin:0;font-size:.7rem;line-height:1;border-radius:3px;color:var(--red)" title="Remove from portfolio">x</button></td>` +
+      `<td style="text-align:left;font-size:.74rem">${t.instrument}</td>` +
+      `<td style="text-align:left;color:${sideColor};font-weight:600">${t.side}</td>` +
+      `<td style="text-align:left">${t.opt === "C" ? "Call" : t.opt === "P" ? "Put" : "Perp"}</td>` +
+      `<td style="font-family:monospace">$${t.strike.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${t.qty.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${priceStr}</td>` +
+      `<td style="font-family:monospace" class="${premCls}">${premStr}</td>` +
+      `<td style="font-size:.68rem;color:var(--muted)">#${t.id}</td>`;
+    $tbody.appendChild(tr);
+  }
+
+  $tbody.querySelectorAll(".opt2-remove-added").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const tid = parseInt(btn.dataset.tid);
+      try {
+        await api("DELETE", `/api/trades/${tid}`);
+        opt2AddedTrades = opt2AddedTrades.filter(t => t.id !== tid);
+        pfData = null; portfolioLoaded = false;
+        opt2RenderAdded();
+        await opt2RefreshChart();
+      } catch (e) {
+        alert("Failed to remove: " + e.message);
+      }
+    });
+  });
+}
+
+document.getElementById("btn-opt2-remove-all-added").addEventListener("click", async () => {
+  if (!confirm(`Remove all ${opt2AddedTrades.length} recently added trades?`)) return;
+  for (const t of opt2AddedTrades) {
+    try { await api("DELETE", `/api/trades/${t.id}`); } catch (e) { /* skip */ }
+  }
+  opt2AddedTrades = [];
+  pfData = null; portfolioLoaded = false;
+  opt2RenderAdded();
+  await opt2RefreshChart();
+});
+
+// ── Refresh chart after portfolio changes ────────────────
+
+async function opt2RefreshChart() {
+  if (!opt2Data) return;
+  try {
+    const result = await post("/api/optimizer/chat", {
+      message: "hello",
+      history: [],
+      workbench_legs: [],
+      added_trades: [],
+      closed_trade_ids: opt2ClosedTradeIds,
+    });
+    if (result.data) {
+      opt2Data.current_payoff = result.data.current_payoff;
+      opt2Data.spot_ladder = result.data.spot_ladder;
+      opt2Data.spot = result.data.spot;
+      opt2Data.current_profile = result.data.current_profile;
+      opt2Data.positions = result.data.positions;
+      opt2RenderPortfolio();
+    }
+  } catch (e) { /* silent */ }
+  opt2DrawChart();
+}
+
+// ── Refresh Chart button ─────────────────────────────────
+
+document.getElementById("btn-opt2-refresh-chart").addEventListener("click", async () => {
+  const $btn = document.getElementById("btn-opt2-refresh-chart");
+  $btn.disabled = true; $btn.textContent = "Refreshing...";
+
+  // Clear any drawn target
+  opt2TargetPoints = [];
+  const clearBtn = document.getElementById("btn-opt2-clear-target");
+  if (clearBtn) clearBtn.style.display = "none";
+
+  // Exit drawing mode if active
+  if (opt2DrawMode) opt2ExitDrawMode();
+
+  await opt2RefreshChart();
+
+  // Recalculate workbench payoff if there are legs
+  if (opt2WbLegs.length > 0) {
+    try { await opt2RecalculateWorkbench(); } catch (e) { /* silent */ }
+  }
+
+  $btn.disabled = false; $btn.textContent = "\u21bb Refresh Chart";
+});
 
 // ── Chart ────────────────────────────────────────────────
 
 function opt2DrawChart() {
   if (!opt2Data) return;
+  const $wrapper = document.getElementById("opt2-chart-wrapper");
+  if ($wrapper) $wrapper.style.display = "block";
   const $chart = document.getElementById("opt2-payoff-chart");
-  $chart.style.display = "block";
 
   const spots = opt2Data.spot_ladder;
   const spot = opt2Data.spot;
   const traces = [];
 
-  traces.push({
-    x: spots, y: opt2Data.current_payoff, type: "scatter", mode: "lines",
-    name: "Current Portfolio", line: { color: "#484f58", width: 2.5, dash: "dot" },
-  });
+  // 1. EXISTING PORTFOLIO — GREEN SOLID, never moves
+  if (opt2Baseline) {
+    traces.push({
+      x: opt2Baseline.spot_ladder, y: opt2Baseline.payoff, type: "scatter", mode: "lines",
+      name: "Existing Portfolio", line: { color: "#3fb950", width: 2.5 },
+    });
+  } else {
+    // No baseline yet — show current as the green line
+    traces.push({
+      x: spots, y: opt2Data.current_payoff, type: "scatter", mode: "lines",
+      name: "Existing Portfolio", line: { color: "#3fb950", width: 2.5 },
+    });
+  }
 
-  // Workbench payoff (if calculated)
+  // 2. SCENARIO — portfolio with added trades/rolls — DOTTED
+  const hasScenarioChanges = opt2AddedTrades.length > 0 || opt2ScenarioTrades.length > 0 || opt2ClosedTradeIds.length > 0;
+  if (hasScenarioChanges && opt2Baseline) {
+    traces.push({
+      x: spots, y: opt2Data.current_payoff, type: "scatter", mode: "lines",
+      name: "Scenario (with adds/rolls)",
+      line: { color: "#58a6ff", width: 2.5, dash: "dot" },
+    });
+  }
+
+  // 3. WORKBENCH PREVIEW — trades being considered (not yet confirmed) — DOTTED different color
   if (opt2Data._wbPayoff) {
     const wbSpots = opt2Data._wbSpots || spots;
     traces.push({
       x: wbSpots, y: opt2Data._wbPayoff, type: "scatter", mode: "lines",
       name: "With Workbench Trades",
-      line: { color: "#3fb950", width: 3 },
+      line: { color: "#d2a8ff", width: 2.5, dash: "dot" },
     });
   }
   // Or preview from clicked suggestion
@@ -3972,9 +4694,38 @@ function opt2DrawChart() {
     traces.push({
       x: spots, y: s.new_payoff, type: "scatter", mode: "lines",
       name: `Preview: ${s.name}`,
-      line: { color: "#58a6ff", width: 2.5 },
+      line: { color: "#d2a8ff", width: 2.5, dash: "dot" },
     });
   }
+
+  // Add target profile trace if we have drawn points (smoothed + raw markers)
+  const clearBtn = document.getElementById("btn-opt2-clear-target");
+  if (opt2TargetPoints.length >= 1) {
+    // Raw markers — show exactly where user clicked
+    const sorted = [...opt2TargetPoints].sort((a, b) => a.x - b.x);
+    traces.push({
+      x: sorted.map(p => p.x), y: sorted.map(p => p.y), type: "scatter",
+      mode: "markers", name: "Drawn Points",
+      marker: { color: "#f0883e", size: 8, symbol: "circle", line: { color: "#fff", width: 1 } },
+      showlegend: false,
+    });
+    // Smoothed curve — interpolated spline
+    if (opt2TargetPoints.length >= 2) {
+      const smooth = opt2SmoothCurve(opt2TargetPoints, 80);
+      traces.push({
+        x: smooth.xs, y: smooth.ys, type: "scatter", mode: "lines",
+        name: "Target Profile (smoothed)",
+        line: { color: "#f0883e", width: 2.5, dash: "dash" },
+      });
+    }
+    if (clearBtn) clearBtn.style.display = "";
+  } else {
+    if (clearBtn) clearBtn.style.display = "none";
+  }
+
+  // Add saved/displayed curve traces (multi-overlay)
+  const curveTraces = opt2GetDisplayedCurveTraces();
+  traces.push(...curveTraces);
 
   const allY = traces.flatMap(t => t.y);
   const yMin = Math.min(...allY);
@@ -3982,15 +4733,12 @@ function opt2DrawChart() {
   traces.push({
     x: [spot, spot], y: [yMin, yMax], type: "scatter", mode: "lines",
     name: `Spot $${spot.toLocaleString(undefined, {maximumFractionDigits: 0})}`,
-    line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
+    line: { color: "#f0883e", width: 1.5, dash: "dashdot" },
   });
 
   const cc = chartColors();
-  const title = opt2Data.parsed_query?.description
-    ? `Optimizer: ${opt2Data.parsed_query.description} | Budget: $${opt2Data.budget.toLocaleString()}`
-    : `Portfolio Payoff | Budget: $${opt2Data.budget.toLocaleString()}`;
   Plotly.react("opt2-payoff-chart", traces, {
-    title: { text: title, font: { color: cc.text, size: 14 } },
+    title: { text: "Portfolio Payoff — Baseline vs Current vs Proposed", font: { color: cc.text, size: 14 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: "ETH Spot (USD)", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio Payoff at Expiry (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
@@ -3999,6 +4747,504 @@ function opt2DrawChart() {
     legend: { font: { color: cc.muted, size: 10 }, orientation: "v", x: 1.02, y: 1,
       xanchor: "left", yanchor: "top", bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
   }, { responsive: true });
+
+  // Render comparison matrix
+  opt2RenderMatrix();
+}
+
+// ── Monotone Cubic Spline Interpolation (Fritsch-Carlson) ──
+
+function opt2SmoothCurve(points, numOut = 80) {
+  // Takes sparse drawn points, returns a smooth curve with numOut points
+  if (points.length < 2) return { xs: points.map(p => p.x), ys: points.map(p => p.y) };
+  const sorted = [...points].sort((a, b) => a.x - b.x);
+  const xs = sorted.map(p => p.x);
+  const ys = sorted.map(p => p.y);
+  const n = xs.length;
+
+  if (n === 2) {
+    // Linear interpolation for 2 points — extend to numOut
+    const outX = [], outY = [];
+    for (let i = 0; i < numOut; i++) {
+      const t = i / (numOut - 1);
+      outX.push(xs[0] + t * (xs[1] - xs[0]));
+      outY.push(ys[0] + t * (ys[1] - ys[0]));
+    }
+    return { xs: outX, ys: outY };
+  }
+
+  // Compute slopes (Fritsch-Carlson monotone cubic)
+  const dx = [], dy = [], m = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(xs[i + 1] - xs[i]);
+    dy.push(ys[i + 1] - ys[i]);
+    m.push(dy[i] / dx[i]);
+  }
+
+  // Tangents
+  const tg = [m[0]];
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] * m[i] <= 0) {
+      tg.push(0);
+    } else {
+      tg.push(3 * (dx[i - 1] + dx[i]) / ((2 * dx[i] + dx[i - 1]) / m[i - 1] + (dx[i] + 2 * dx[i - 1]) / m[i]));
+    }
+  }
+  tg.push(m[n - 2]);
+
+  // Evaluate spline at numOut evenly-spaced x values
+  const xMin = xs[0], xMax = xs[n - 1];
+  const outX = [], outY = [];
+  for (let i = 0; i < numOut; i++) {
+    const x = xMin + (i / (numOut - 1)) * (xMax - xMin);
+    // Find interval
+    let k = 0;
+    for (k = 0; k < n - 2; k++) { if (x < xs[k + 1]) break; }
+    const h = dx[k], t = (x - xs[k]) / h;
+    const t2 = t * t, t3 = t2 * t;
+    const h00 = 2 * t3 - 3 * t2 + 1;
+    const h10 = t3 - 2 * t2 + t;
+    const h01 = -2 * t3 + 3 * t2;
+    const h11 = t3 - t2;
+    outX.push(Math.round(x));
+    outY.push(Math.round(h00 * ys[k] + h10 * h * tg[k] + h01 * ys[k + 1] + h11 * h * tg[k + 1]));
+  }
+  return { xs: outX, ys: outY };
+}
+
+// ── Draw Target Profile ──────────────────────────────────
+
+let opt2DrawMode = false;
+let opt2TargetPoints = [];  // [{x: spot, y: payoff}, ...]
+
+document.getElementById("btn-opt2-draw").addEventListener("click", opt2EnterDrawMode);
+document.getElementById("btn-opt2-reduce-cost").addEventListener("click", () => {
+  if (!opt2Data) {
+    alert("Load portfolio data first (type 'hello' in chat)");
+    return;
+  }
+  document.getElementById("opt2-ask").value =
+    "Analyze my existing structures and find ways to reduce their cost. " +
+    "For each structure, suggest rolls, adjustments, or overlays that lower the net premium spent " +
+    "while preserving as much of the protective profile as possible. " +
+    "Present each cost-reduction trade as a named strategy block I can add to the workbench.";
+  opt2Run();
+});
+document.getElementById("btn-opt2-price-move").addEventListener("click", () => {
+  if (!opt2Data) {
+    alert("Load portfolio data first (type 'hello' in chat)");
+    return;
+  }
+  document.getElementById("opt2-ask").value =
+    "PRICE MOVEMENT OPTIMIZATION.\n\n" +
+    "CONCEPT: Find positions that are now NEARLY WORTHLESS (far OTM after the price move) " +
+    "and recycle them into better-positioned protection.\n\n" +
+    "WHAT TO RECYCLE — ONLY positions where ALL of these are true:\n" +
+    "- The position is far out-of-the-money at current spot (strike is far from spot)\n" +
+    "- The position has LOST most of its value (marked [PROFITABLE — harvest candidate] in the structures list)\n" +
+    "- Closing it is CHEAP — the current market value is small, near zero\n" +
+    "- It is a LONG position we can sell, or a SHORT position that is nearly worthless to buy back\n\n" +
+    "WHAT TO NEVER RECYCLE:\n" +
+    "- Deep ITM positions — these are EXPENSIVE to close, not cheap. Skip them entirely.\n" +
+    "- Positions that are still providing active protection at current spot levels\n" +
+    "- Short options with high intrinsic value — buying these back costs real money, defeats the purpose\n\n" +
+    "THE RECYCLE:\n" +
+    "For each cheap-to-close position, reopen the SAME type of protection at strikes closer to current spot.\n" +
+    "Example: Long Put at 1200 is worthless (spot is 2000). Close it for pennies. Open Long Put at 1800. " +
+    "Downside protection improved, cost nearly zero.\n\n" +
+    "HARD RULES:\n" +
+    "- If closing a structure costs more than $50K, DO NOT recycle it. It is not cheap enough.\n" +
+    "- Net cost of each roll step should be under $30K. If more, skip that structure.\n" +
+    "- Total plan cost should be near zero or a small credit.\n" +
+    "- Close/reopen ENTIRE structures (spreads = all legs). Include trade IDs.\n" +
+    "- build_strategy only (not scan_trades). Name: 'Step N: Roll [type] [#IDs] [old] -> [new]'\n" +
+    "- If NO positions qualify (nothing is cheap to close), say so. Do not force bad trades.";
+  opt2Run();
+});
+document.getElementById("btn-opt2-clear-target").addEventListener("click", () => {
+  opt2TargetPoints = [];
+  document.getElementById("btn-opt2-clear-target").style.display = "none";
+  opt2DrawChart();
+});
+document.getElementById("btn-opt2-draw-undo").addEventListener("click", () => {
+  opt2TargetPoints.pop();
+  opt2DrawChart();
+});
+document.getElementById("btn-opt2-draw-clear").addEventListener("click", () => {
+  opt2TargetPoints = [];
+  opt2DrawChart();
+});
+document.getElementById("btn-opt2-draw-done").addEventListener("click", opt2SendDrawnTarget);
+document.getElementById("btn-opt2-draw-cancel").addEventListener("click", opt2ExitDrawMode);
+
+function opt2EnterDrawMode() {
+  if (!opt2Data) {
+    alert("Load portfolio data first (type 'hello' in chat)");
+    return;
+  }
+  opt2DrawMode = true;
+  opt2TargetPoints = [];
+  document.getElementById("opt2-draw-banner").style.display = "block";
+  document.getElementById("btn-opt2-draw").style.background = "#f0883e";
+  document.getElementById("btn-opt2-draw").style.color = "#fff";
+  document.getElementById("btn-opt2-draw").textContent = "Drawing...";
+
+  // Scroll to chart
+  const chartEl = document.getElementById("opt2-chart-wrapper");
+  if (chartEl) chartEl.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  // Use native click on the chart div — works anywhere on the plot area
+  const $chart = document.getElementById("opt2-payoff-chart");
+  $chart.addEventListener("click", opt2HandleChartClick);
+  // Change cursor to crosshair over the plot area
+  $chart.style.cursor = "crosshair";
+
+  // Redraw to clear any old target
+  opt2DrawChart();
+}
+
+function opt2ExitDrawMode() {
+  opt2DrawMode = false;
+  document.getElementById("opt2-draw-banner").style.display = "none";
+  document.getElementById("btn-opt2-draw").style.background = "";
+  document.getElementById("btn-opt2-draw").style.color = "#f0883e";
+  document.getElementById("btn-opt2-draw").textContent = "Draw";
+
+  // Remove click handler and reset cursor
+  const $chart = document.getElementById("opt2-payoff-chart");
+  $chart.removeEventListener("click", opt2HandleChartClick);
+  $chart.style.cursor = "";
+}
+
+function opt2HandleChartClick(event) {
+  if (!opt2DrawMode) return;
+
+  const $chart = document.getElementById("opt2-payoff-chart");
+  // Find the plot area element (Plotly's drag layer covers the data area)
+  const plotArea = $chart.querySelector(".nsewdrag");
+  if (!plotArea) return;
+
+  const rect = plotArea.getBoundingClientRect();
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
+
+  // Ignore clicks outside the plot area
+  if (px < 0 || py < 0 || px > rect.width || py > rect.height) return;
+
+  // Convert pixel coordinates to data coordinates using Plotly's axis objects
+  const xaxis = $chart._fullLayout.xaxis;
+  const yaxis = $chart._fullLayout.yaxis;
+
+  // p2l: pixel to linear (for log axis, returns log10 value)
+  // l2d: linear to data (for log axis, returns 10^value)
+  const xData = xaxis.l2d(xaxis.p2l(px));
+  const yData = yaxis.l2d(yaxis.p2l(py));
+
+  if (!isFinite(xData) || !isFinite(yData)) return;
+
+  opt2TargetPoints.push({ x: Math.round(xData), y: Math.round(yData) });
+  opt2DrawChart();
+}
+
+function opt2SendDrawnTarget() {
+  if (opt2TargetPoints.length < 2) {
+    alert("Place at least 2 points on the chart");
+    return;
+  }
+
+  // Smooth the curve before sending — gives the AI a proper curve to work with
+  const smooth = opt2SmoothCurve(opt2TargetPoints, 40);
+  const smoothedPoints = smooth.xs.map((x, i) => ({ x, y: smooth.ys[i] }));
+
+  // Build a human-readable summary from KEY points (raw + a few interpolated)
+  const sorted = [...opt2TargetPoints].sort((a, b) => a.x - b.x);
+  const lines = sorted.map(p =>
+    `  $${p.x.toLocaleString()} -> $${p.y.toLocaleString()}`
+  );
+  const msgText = `Match this target payoff profile (smoothed from my drawing):\n${lines.join("\n")}`;
+
+  // Put into the chat input and send
+  document.getElementById("opt2-ask").value = msgText;
+  opt2ExitDrawMode();
+
+  // Store the SMOOTHED target data so it gets sent with the chat message
+  window._opt2DrawnTarget = smoothedPoints;
+
+  // Also update the drawn points to include smoothed version for display
+  // (keep originals for marker display, smoothed goes to backend)
+
+  // Trigger send
+  opt2Run();
+}
+
+// ── Saved Curves (localStorage + multi-display) ─────────
+
+const OPT2_CURVES_KEY = "opt2_saved_curves";
+let opt2DisplayedCurves = new Set();  // indices of curves shown on chart
+let opt2SendCurveIdx = -1;            // index of curve selected to send
+
+// Curve colors for multi-display (up to 8)
+const OPT2_CURVE_COLORS = ["#f0883e", "#58a6ff", "#d2a8ff", "#3fb950", "#f85149", "#e3b341", "#79c0ff", "#ff7b72"];
+
+const OPT2_DEFAULT_CURVES = [
+  {
+    name: "Current Target",
+    color: "#f0883e",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-6e6},
+      {x:800,y:-8e6},{x:1000,y:-10e6},{x:1200,y:-12e6},{x:1400,y:-14e6},
+      {x:1600,y:-16e6},{x:1800,y:-18e6},{x:2000,y:-20e6},{x:2200,y:-18e6},
+      {x:2400,y:-16e6},{x:2600,y:-14e6},{x:2800,y:-12e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 1",
+    color: "#58a6ff",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-7e6},{x:1000,y:-9e6},{x:1200,y:-11e6},{x:1400,y:-13e6},
+      {x:1600,y:-15e6},{x:1800,y:-17e6},{x:2000,y:-19e6},{x:2200,y:-17e6},
+      {x:2400,y:-15e6},{x:2600,y:-13e6},{x:2800,y:-11e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 2",
+    color: "#d2a8ff",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-5e6},{x:1000,y:-6e6},{x:1200,y:-8e6},{x:1400,y:-10e6},
+      {x:1600,y:-12e6},{x:1800,y:-14e6},{x:2000,y:-16e6},{x:2200,y:-18e6},
+      {x:2400,y:-16e6},{x:2600,y:-14e6},{x:2800,y:-12e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+  {
+    name: "Migration Step 3",
+    color: "#3fb950",
+    points: [
+      {x:0,y:-5e6},{x:200,y:-5e6},{x:400,y:-5e6},{x:600,y:-5e6},
+      {x:800,y:-7e6},{x:1000,y:-9e6},{x:1200,y:-11e6},{x:1400,y:-13e6},
+      {x:1600,y:-15e6},{x:1800,y:-17e6},{x:2000,y:-15e6},{x:2200,y:-13e6},
+      {x:2400,y:-11e6},{x:2600,y:-10e6},{x:2800,y:-10e6},{x:3000,y:-10e6},
+      {x:3200,y:-10e6},{x:3400,y:-10e6},{x:3600,y:-10e6},{x:3800,y:-10e6},
+      {x:4000,y:-10e6},{x:4200,y:-10e6},{x:4400,y:-10e6},{x:4600,y:-10e6},
+      {x:4800,y:-10e6},{x:5000,y:-10e6},
+    ],
+  },
+];
+
+function opt2LoadSavedCurves() {
+  try {
+    const raw = localStorage.getItem(OPT2_CURVES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function opt2SaveCurvesToStorage(curves) {
+  localStorage.setItem(OPT2_CURVES_KEY, JSON.stringify(curves));
+}
+
+function opt2GetAllCurves() {
+  const saved = opt2LoadSavedCurves();
+  const names = new Set(saved.map(c => c.name));
+  const all = [...saved];
+  for (const d of OPT2_DEFAULT_CURVES) {
+    if (!names.has(d.name)) all.push(d);
+  }
+  return all;
+}
+
+function opt2RefreshCurvesList() {
+  const $list = document.getElementById("opt2-curves-list");
+  const curves = opt2GetAllCurves();
+  $list.innerHTML = "";
+
+  curves.forEach((c, i) => {
+    const color = c.color || OPT2_CURVE_COLORS[i % OPT2_CURVE_COLORS.length];
+    const isDisplayed = opt2DisplayedCurves.has(i);
+    const isSend = opt2SendCurveIdx === i;
+
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:.5rem;padding:4px 8px;border-radius:6px;background:var(--surface);border:1px solid var(--border)";
+    if (isSend) row.style.borderColor = color;
+
+    row.innerHTML =
+      `<input type="checkbox" class="opt2-curve-display" data-idx="${i}" ${isDisplayed ? "checked" : ""} ` +
+        `style="accent-color:${color};cursor:pointer" title="Show on chart">` +
+      `<input type="radio" name="opt2-curve-send" class="opt2-curve-radio" data-idx="${i}" ${isSend ? "checked" : ""} ` +
+        `style="accent-color:${color};cursor:pointer" title="Select to send to chat">` +
+      `<span style="width:12px;height:12px;border-radius:2px;background:${color};flex-shrink:0"></span>` +
+      `<span style="flex:1;font-size:.78rem;font-weight:${isSend ? 700 : 400};color:${isDisplayed ? 'var(--text)' : 'var(--muted)'}">${c.name}</span>` +
+      `<span style="font-size:.65rem;color:var(--muted)">${c.points.length} pts</span>`;
+
+    $list.appendChild(row);
+  });
+
+  // Wire checkbox (display) events
+  $list.querySelectorAll(".opt2-curve-display").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.idx);
+      if (cb.checked) opt2DisplayedCurves.add(idx);
+      else opt2DisplayedCurves.delete(idx);
+      opt2RefreshCurvesList();
+      opt2DrawChart();
+      // Show chart
+      const $w = document.getElementById("opt2-chart-wrapper");
+      if ($w && opt2DisplayedCurves.size > 0) $w.style.display = "block";
+    });
+  });
+
+  // Wire radio (send) events
+  $list.querySelectorAll(".opt2-curve-radio").forEach(rb => {
+    rb.addEventListener("change", () => {
+      opt2SendCurveIdx = parseInt(rb.dataset.idx);
+      // Also display it
+      opt2DisplayedCurves.add(opt2SendCurveIdx);
+      opt2RefreshCurvesList();
+      opt2DrawChart();
+      const $w = document.getElementById("opt2-chart-wrapper");
+      if ($w) $w.style.display = "block";
+    });
+  });
+}
+
+// Get displayed curves for chart overlay
+function opt2GetDisplayedCurveTraces() {
+  const curves = opt2GetAllCurves();
+  const traces = [];
+  for (const i of opt2DisplayedCurves) {
+    const c = curves[i];
+    if (!c) continue;
+    const color = c.color || OPT2_CURVE_COLORS[i % OPT2_CURVE_COLORS.length];
+    const isSend = i === opt2SendCurveIdx;
+    const sorted = [...c.points].sort((a, b) => a.x - b.x);
+    // Smooth the curve
+    const smooth = opt2SmoothCurve(sorted, 60);
+    traces.push({
+      x: smooth.xs, y: smooth.ys, type: "scatter", mode: "lines",
+      name: c.name + (isSend ? " [SEND]" : ""),
+      line: { color, width: isSend ? 3 : 2, dash: isSend ? "solid" : "dash" },
+    });
+  }
+  return traces;
+}
+
+// Send selected curve to chat
+document.getElementById("btn-opt2-curve-send").addEventListener("click", () => {
+  const curves = opt2GetAllCurves();
+  if (opt2SendCurveIdx < 0 || !curves[opt2SendCurveIdx]) {
+    alert("Select a curve to send (use the radio button)");
+    return;
+  }
+  const c = curves[opt2SendCurveIdx];
+  opt2TargetPoints = c.points.map(p => ({ ...p }));
+  opt2DrawChart();
+  opt2SendDrawnTarget();
+});
+
+// Save current drawn curve
+document.getElementById("btn-opt2-curve-save").addEventListener("click", () => {
+  if (opt2TargetPoints.length < 2) {
+    alert("Draw at least 2 points on the chart first");
+    return;
+  }
+  const name = prompt("Name this curve:", `Custom Curve ${new Date().toLocaleDateString()}`);
+  if (!name) return;
+  const curves = opt2LoadSavedCurves();
+  const existing = curves.findIndex(c => c.name === name);
+  const entry = { name, points: [...opt2TargetPoints].sort((a, b) => a.x - b.x), savedAt: new Date().toISOString() };
+  if (existing >= 0) curves[existing] = entry;
+  else curves.push(entry);
+  opt2SaveCurvesToStorage(curves);
+  opt2RefreshCurvesList();
+});
+
+// Delete selected curve
+document.getElementById("btn-opt2-curve-delete").addEventListener("click", () => {
+  const curves = opt2GetAllCurves();
+  if (opt2SendCurveIdx < 0 || !curves[opt2SendCurveIdx]) { alert("Select a curve first (radio button)"); return; }
+  const name = curves[opt2SendCurveIdx].name;
+  if (!confirm(`Delete curve "${name}"?`)) return;
+  const saved = opt2LoadSavedCurves().filter(c => c.name !== name);
+  opt2SaveCurvesToStorage(saved);
+  opt2DisplayedCurves.delete(opt2SendCurveIdx);
+  opt2SendCurveIdx = -1;
+  opt2RefreshCurvesList();
+  opt2DrawChart();
+});
+
+// Initialize
+opt2RefreshCurvesList();
+
+// ── Baseline vs Current comparison matrix ────────────────
+
+function opt2RenderMatrix() {
+  const $section = document.getElementById("opt2-matrix-section");
+  if (!$section) return;
+  if (!opt2Baseline || !opt2Data) { $section.style.display = "none"; return; }
+
+  // Only show if portfolio has changed from baseline
+  const hasChanges = opt2AddedTrades.length > 0 || opt2Data._wbPayoff;
+  if (!hasChanges) { $section.style.display = "none"; return; }
+
+  $section.style.display = "block";
+  const spots = opt2Data.spot_ladder;
+  const spot = opt2Data.spot;
+  const baseSpots = opt2Baseline.spot_ladder;
+  const basePnl = opt2Baseline.payoff;
+  const curPnl = opt2Data.current_payoff;
+  const wbPnl = opt2Data._wbPayoff || null;
+
+  // Pick key spot levels
+  const multipliers = [0.3, 0.5, 0.7, 0.85, 0.95, 1.0, 1.05, 1.15, 1.3, 1.5, 2.0, 3.0];
+  const keySpots = multipliers.map(m => Math.round(spot * m / 50) * 50);
+
+  const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
+  const fmtCls = v => v >= 0 ? "mtm-pos" : "mtm-neg";
+
+  const $thead = document.getElementById("opt2-matrix-thead");
+  const thStyle = 'style="text-align:center"';
+  let hdr = `<tr><th ${thStyle}>ETH Spot</th><th ${thStyle}>Baseline P&L</th><th ${thStyle}>Current P&L</th><th ${thStyle}>Change</th>`;
+  if (wbPnl) hdr += `<th ${thStyle}>With Workbench</th><th ${thStyle}>WB vs Baseline</th>`;
+  hdr += "</tr>";
+  $thead.innerHTML = hdr;
+
+  const $tbody = document.getElementById("opt2-matrix-tbody");
+  $tbody.innerHTML = "";
+
+  for (const ks of keySpots) {
+    const bIdx = baseSpots.reduce((best, s, i) => Math.abs(s - ks) < Math.abs(baseSpots[best] - ks) ? i : best, 0);
+    const cIdx = spots.reduce((best, s, i) => Math.abs(s - ks) < Math.abs(spots[best] - ks) ? i : best, 0);
+
+    const bVal = basePnl[bIdx] || 0;
+    const cVal = curPnl[cIdx] || 0;
+    const diff = cVal - bVal;
+    const isSpot = Math.abs(ks - spot) < 100;
+
+    const cs = "font-family:monospace;text-align:center";
+    let row = `<tr${isSpot ? ' style="background:rgba(88,166,255,0.08);font-weight:600"' : ""}>`;
+    row += `<td style="${cs}">$${ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
+    row += `<td style="${cs}" class="${fmtCls(bVal)}">${fmtM(bVal)}</td>`;
+    row += `<td style="${cs}" class="${fmtCls(cVal)}">${fmtM(cVal)}</td>`;
+    row += `<td style="${cs}" class="${fmtCls(diff)}">${fmtM(diff)}</td>`;
+
+    if (wbPnl) {
+      const wVal = wbPnl[cIdx] || 0;
+      const wDiff = wVal - bVal;
+      row += `<td style="${cs}" class="${fmtCls(wVal)}">${fmtM(wVal)}</td>`;
+      row += `<td style="${cs}" class="${fmtCls(wDiff)}">${fmtM(wDiff)}</td>`;
+    }
+    row += "</tr>";
+    $tbody.innerHTML += row;
+  }
 }
 
 // ── Event wiring ─────────────────────────────────────────
@@ -4006,6 +5252,114 @@ function opt2DrawChart() {
 document.getElementById("btn-opt2-run").addEventListener("click", opt2Run);
 document.getElementById("btn-opt2-calc").addEventListener("click", opt2Calculate);
 document.getElementById("btn-opt2-add-to-portfolio").addEventListener("click", opt2AddToPortfolio);
+
+// Send workbench trades to Pricing screen (leg by leg)
+document.getElementById("btn-opt2-send-to-exec").addEventListener("click", () => {
+  if (opt2WbLegs.length === 0) { alert("No legs in workbench"); return; }
+
+  // Clear existing legs on the Pricing screen
+  legs.length = 0;
+
+  // Add each workbench leg to the Pricing screen's legs array
+  for (const l of opt2WbLegs) {
+    const premium = l.price_usd ? String(Math.round(l.price_usd * 100) / 100) : "0";
+    // Extract expiry_code from leg or from instrument name (ETH-13APR26-3600-P)
+    let expCode = l.expiry_code;
+    if (!expCode && l.instrument) {
+      const parts = l.instrument.split("-");
+      if (parts.length >= 3) expCode = parts[1];
+    }
+    addLeg(l.side, l.opt, String(l.strike), premium, String(l.qty), expCode || null);
+  }
+
+  // Add custom expiries to the main expiry dropdown if missing
+  const existingExpOpts = new Set([...$expSel.options].map(o => o.value));
+  for (const l of opt2WbLegs) {
+    let ec = l.expiry_code;
+    if (!ec && l.instrument) { const p = l.instrument.split("-"); if (p.length >= 3) ec = p[1]; }
+    if (ec && !existingExpOpts.has(ec)) {
+      const dte = _expiryCodeToDte(ec);
+      const opt = document.createElement("option");
+      opt.value = ec;
+      opt.textContent = `${ec} (${dte != null ? dte + 'd' : '?'}) [interpolated]`;
+      $expSel.appendChild(opt);
+      existingExpOpts.add(ec);
+    }
+  }
+
+  // Switch to the Pricing page
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  const pricingBtn = document.querySelector('.nav-btn[data-page="pricing"]');
+  if (pricingBtn) pricingBtn.classList.add("active");
+  document.getElementById("page-pricing").classList.add("active");
+
+  // Auto-trigger pricing via vol surface
+  setTimeout(() => {
+    const priceBtn = document.getElementById("btn-replicate");
+    if (priceBtn) priceBtn.click();
+  }, 300);
+
+  opt2AddMsg("bot",
+    `<strong style="color:#58a6ff">${opt2WbLegs.length} leg(s) sent to Pricing screen.</strong> ` +
+    `Switched to Pricing — review legs and run pricing.`
+  );
+});
+
+// Refresh button — re-fetch portfolio data and reset chat state
+document.getElementById("btn-opt2-refresh").addEventListener("click", async () => {
+  opt2Data = null;
+  opt2WbLegs = [];
+  opt2WbName = "";
+  opt2ClosedTradeIds = [];
+  opt2RollMeta = new Map();
+  opt2ScenarioTrades = [];
+  document.getElementById("opt2-workbench-section").style.display = "none";
+  document.getElementById("opt2-results-section").style.display = "none";
+  document.getElementById("opt2-portfolio-section").style.display = "none";
+  document.getElementById("opt2-payoff-chart").style.display = "none";
+  // Re-trigger a greeting to reload portfolio context
+  document.getElementById("opt2-ask").value = "hello";
+  await opt2Run();
+});
+
+// Delete all optimizer-added trades, clear workbench, clear chat
+document.getElementById("btn-opt2-delete-all").addEventListener("click", async () => {
+  const total = opt2AddedTrades.length + opt2WbLegs.length;
+  if (total === 0 && opt2ChatHistory.length <= 1) {
+    alert("Nothing to reset.");
+    return;
+  }
+  if (!confirm("This will clear all scenario trades, workbench, and reset the chat. Continue?")) return;
+
+  // Clear scenario state (no DB changes)
+  opt2AddedTrades = [];
+  opt2ScenarioTrades = [];
+
+  // Clear workbench + roll state
+  opt2WbLegs = [];
+  opt2WbName = "";
+  opt2ClosedTradeIds = [];
+  opt2RollMeta = new Map();
+  opt2ScenarioTrades = [];
+  document.getElementById("opt2-workbench-section").style.display = "none";
+
+  // Clear suggestions and baseline
+  opt2Data = null;
+  opt2Baseline = null;
+  document.getElementById("opt2-results-section").style.display = "none";
+  document.getElementById("opt2-portfolio-section").style.display = "none";
+  document.getElementById("opt2-payoff-chart").style.display = "none";
+  const $matrix = document.getElementById("opt2-matrix-section");
+  if ($matrix) $matrix.style.display = "none";
+
+  // Reset chat
+  opt2ChatHistory = [];
+  const $log = document.getElementById("opt2-chat-log");
+  $log.innerHTML = `<div class="opt2-msg opt2-msg-bot"><div class="opt2-msg-bubble"><strong>Optimizer</strong><br>Reset complete. What would you like to work on?</div></div>`;
+
+  pfData = null; portfolioLoaded = false;
+});
 
 // Preset buttons
 document.querySelectorAll(".opt2-preset").forEach(btn => {
@@ -4031,10 +5385,43 @@ document.getElementById("btn-opt2-add-leg").addEventListener("click", () => {
   opt2RenderWorkbench();
 });
 
+document.getElementById("btn-opt2-clear-wb").addEventListener("click", () => {
+  opt2WbLegs = [];
+  opt2WbName = "";
+  opt2ClosedTradeIds = [];
+  opt2RollMeta = new Map();
+  opt2ScenarioTrades = [];
+  document.getElementById("opt2-wb-name").textContent = "--";
+  opt2RenderWorkbench();
+  delete opt2Data?._wbPayoff;
+  opt2DrawChart();
+});
+
 ["opt2-filter-cat", "opt2-sort"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => {
     if (opt2Data) { opt2HighlightIdx = -1; opt2ApplyFilter(); opt2DrawChart(); }
   });
+});
+
+// Scenario Trades filter controls
+["opt2-port-filter-cpty", "opt2-port-filter-type", "opt2-port-filter-side", "opt2-port-show-closed"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => {
+    if (opt2Data) opt2RenderPortfolio();
+  });
+});
+
+// Scenario Trades clickable column header sorting
+document.getElementById("opt2-port-table").addEventListener("click", e => {
+  const th = e.target.closest("th.sortable");
+  if (!th) return;
+  const col = th.dataset.col;
+  if (opt2PortSortCol === col) {
+    opt2PortSortAsc = !opt2PortSortAsc;
+  } else {
+    opt2PortSortCol = col;
+    opt2PortSortAsc = true;
+  }
+  opt2RenderPortfolio();
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -4454,24 +5841,28 @@ function sbRenderLegs() {
   const expiryOpts = smiles.map(s => `<option value="${s.expiry_code}">${s.expiry_code} (${s.dte}d)</option>`).join("");
 
   sbLegs.forEach((leg, idx) => {
+    const isPerp = leg.type === "PERP";
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td><select class="sb-leg-expiry" data-idx="${idx}" style="font-size:.75rem;width:100%;margin:0">${expiryOpts}</select></td>` +
+      `<td>${isPerp ? '<span style="color:var(--muted);font-size:.75rem">N/A</span>' : `<select class="sb-leg-expiry" data-idx="${idx}" style="font-size:.75rem;width:100%;margin:0">${expiryOpts}</select>`}</td>` +
       `<td style="white-space:nowrap">` +
         `<select class="sb-leg-side" data-idx="${idx}" style="font-size:.75rem;width:55px;margin:0">` +
           `<option value="buy" ${leg.side === "buy" ? "selected" : ""}>Buy</option>` +
           `<option value="sell" ${leg.side === "sell" ? "selected" : ""}>Sell</option></select> ` +
-        `<select class="sb-leg-type" data-idx="${idx}" style="font-size:.75rem;width:55px;margin:0">` +
+        `<select class="sb-leg-type" data-idx="${idx}" style="font-size:.75rem;width:65px;margin:0">` +
           `<option value="C" ${leg.type === "C" ? "selected" : ""}>Call</option>` +
-          `<option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option></select>` +
+          `<option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option>` +
+          `<option value="PERP" ${leg.type === "PERP" ? "selected" : ""}>Perp</option></select>` +
       `</td>` +
-      `<td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="any" style="width:80px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
+      `<td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="any" style="width:80px;font-size:.75rem;padding:.2rem .3rem;text-align:center" ${isPerp ? 'title="Entry price for perpetual"' : ""}></td>` +
       `<td><input type="number" class="sb-leg-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:70px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
       `<td><button class="sb-leg-remove btn-secondary" data-idx="${idx}" style="padding:.15rem .4rem;font-size:.7rem;margin:0;width:auto">✕</button></td>`;
     $tbody.appendChild(tr);
-    // Set expiry value after append
-    const expSel = tr.querySelector(".sb-leg-expiry");
-    if (expSel) expSel.value = leg.expiry;
+    // Set expiry value after append (only for options, not perps)
+    if (!isPerp) {
+      const expSel = tr.querySelector(".sb-leg-expiry");
+      if (expSel) expSel.value = leg.expiry;
+    }
   });
 
   // Wire changes
@@ -4508,6 +5899,10 @@ function sbApplyTemplate(name) {
       sbLegs.push({ side: "sell", type: "P", strike: K - 200, qty: 1000, expiry: exp });
       sbLegs.push({ side: "sell", type: "C", strike: K + 200, qty: 1000, expiry: exp });
       sbLegs.push({ side: "buy", type: "C", strike: K + 500, qty: 1000, expiry: exp }); break;
+    case "long_perp":
+      sbLegs.push({ side: "buy", type: "PERP", strike: spot, qty: 1000, expiry: "" }); break;
+    case "short_perp":
+      sbLegs.push({ side: "sell", type: "PERP", strike: spot, qty: 1000, expiry: "" }); break;
   }
   document.querySelectorAll(".sb-template").forEach(b => b.classList.remove("active"));
   const btn = document.querySelector(`.sb-template[data-strategy="${name}"]`);
@@ -4515,6 +5910,7 @@ function sbApplyTemplate(name) {
   sbRenderLegs();
   document.getElementById("sb-pricing-results").style.display = "none";
   document.getElementById("btn-sb-add-to-portfolio").style.display = "none";
+  document.getElementById("btn-sb-send-to-exec").style.display = "none";
   sbLegsPriced = [];
   sbStructureCurves = null;
   sbDrawStructureChart();
@@ -4551,6 +5947,18 @@ function sbPriceStructure() {
   let totalPay = 0, totalReceive = 0;
 
   for (const leg of sbLegs) {
+    const dir = leg.side === "buy" ? 1 : -1;
+
+    if (leg.type === "PERP") {
+      // Perpetual: no premium, linear P&L from entry price (strike field = entry price)
+      const entryPrice = leg.strike || spot;
+      sbLegsPriced.push({
+        ...leg, strike: entryPrice, dte: 0, ivPct: 0, sigma: 0,
+        bsPremEth: 0, bsPremUsd: 0, dir, totalCost: 0,
+      });
+      continue;
+    }
+
     const entry = pfData.vol_surface.find(s => s.expiry_code === leg.expiry);
     if (!entry) { alert(`No vol surface data for expiry ${leg.expiry}`); return; }
     const dte = entry.dte;
@@ -4559,8 +5967,7 @@ function sbPriceStructure() {
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${leg.strike} at ${leg.expiry}`); return; }
     const sigma = ivPct / 100;
     const bsPremEth = bsPrice(spot, leg.strike, T, 0, sigma, leg.type);
-    const bsPremUsd = bsPremEth;  // bsPrice already returns USD value per contract
-    const dir = leg.side === "buy" ? 1 : -1;
+    const bsPremUsd = bsPremEth;
     const legCost = dir * leg.qty * bsPremUsd;
     if (legCost > 0) totalPay += legCost; else totalReceive += Math.abs(legCost);
 
@@ -4582,17 +5989,19 @@ function sbPriceStructure() {
   const $tbody = document.getElementById("sb-premiums-body");
   $tbody.innerHTML = "";
   for (const lp of sbLegsPriced) {
+    const isPerp = lp.type === "PERP";
+    const typeLabel = isPerp ? "Perp" : (lp.type === "C" ? "Call" : "Put");
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td style="text-align:left">${lp.expiry}</td>` +
+      `<td style="text-align:left">${isPerp ? "--" : lp.expiry}</td>` +
       `<td style="text-align:left;color:${lp.side === "buy" ? "var(--green)" : "var(--red)"}">${lp.side}</td>` +
-      `<td>${lp.type === "C" ? "Call" : "Put"}</td>` +
-      `<td style="font-family:monospace">${lp.strike.toLocaleString()}</td>` +
+      `<td>${typeLabel}</td>` +
+      `<td style="font-family:monospace">${isPerp ? "$" + lp.strike.toLocaleString() : lp.strike.toLocaleString()}</td>` +
       `<td style="font-family:monospace">${lp.qty.toLocaleString()}</td>` +
-      `<td>${lp.dte}d</td>` +
-      `<td>${lp.ivPct.toFixed(1)}%</td>` +
-      `<td style="font-family:monospace">${lp.bsPremEth.toFixed(4)}</td>` +
-      `<td style="font-family:monospace">$${lp.bsPremUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>`;
+      `<td>${isPerp ? "--" : lp.dte + "d"}</td>` +
+      `<td>${isPerp ? "--" : lp.ivPct.toFixed(1) + "%"}</td>` +
+      `<td style="font-family:monospace">${isPerp ? "--" : lp.bsPremEth.toFixed(4)}</td>` +
+      `<td style="font-family:monospace">${isPerp ? "$0" : "$" + lp.bsPremUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>`;
     $tbody.appendChild(tr);
   }
 
@@ -4605,6 +6014,7 @@ function sbPriceStructure() {
 
   // Show Add to Portfolio button
   document.getElementById("btn-sb-add-to-portfolio").style.display = "block";
+  document.getElementById("btn-sb-send-to-exec").style.display = "block";
 
   // Draw standalone structure chart only — net payoff & matrix update on "Add to Portfolio"
   sbDrawStructureChart();
@@ -4616,10 +6026,18 @@ function sbComputeStructureCurve(spots, horizon) {
   const result = new Array(spots.length).fill(0);
   if (!sbLegsPriced || sbLegsPriced.length === 0) return result;
   for (const lp of sbLegsPriced) {
-    const T = Math.max(lp.dte - horizon, 0) / 365.25;
-    for (let i = 0; i < spots.length; i++) {
-      const val = bsPrice(spots[i], lp.strike, T, 0, lp.sigma, lp.type);
-      result[i] += lp.dir * lp.qty * val;
+    if (lp.type === "PERP") {
+      // Perpetual: linear P&L = direction * qty * (spot - entry_price)
+      // No time decay, no expiry — same payoff at all horizons
+      for (let i = 0; i < spots.length; i++) {
+        result[i] += lp.dir * lp.qty * (spots[i] - lp.strike);
+      }
+    } else {
+      const T = Math.max(lp.dte - horizon, 0) / 365.25;
+      for (let i = 0; i < spots.length; i++) {
+        const val = bsPrice(spots[i], lp.strike, T, 0, lp.sigma, lp.type);
+        result[i] += lp.dir * lp.qty * val;
+      }
     }
   }
   // Subtract entry cost to show P&L not mark value
@@ -4639,25 +6057,69 @@ async function sbAddToPortfolio() {
 
   try {
     for (const lp of sbLegsPriced) {
+      const sign = lp.side === "sell" ? -1 : 1;
+      const signedQty = sign * lp.qty;
+      const spots = pfData.spot_ladder;
+      const allHorizons = pfData.all_horizons;
+
+      if (lp.type === "PERP") {
+        // Perpetual position: linear payoff at all horizons
+        const entryPrice = lp.strike;
+        const payoff = {};
+        for (const h of allHorizons) {
+          payoff[String(h)] = spots.map(s => Math.round(signedQty * (s - entryPrice) * 100) / 100);
+        }
+        const markUsd = pfData.eth_spot - entryPrice;  // current unrealized P&L per unit
+
+        const newPos = {
+          id: pfNextId++,
+          counterparty: "Structure",
+          trade_id: null,
+          trade_date: new Date().toISOString().split("T")[0],
+          side_raw: lp.side === "sell" ? "Sell" : "Buy",
+          option_type: "Perpetual",
+          instrument: "ETH-PERPETUAL",
+          expiry: "",
+          days_remaining: 0,
+          strike: entryPrice,
+          pct_otm_entry: 0,
+          qty: lp.qty,
+          notional_mm: 0,
+          premium_per: 0,
+          premium_usd: 0,
+          opt: "PERP",
+          side: sign > 0 ? "Long" : "Short",
+          net_qty: signedQty,
+          pct_otm_live: 0,
+          iv_pct: 0,
+          delta: sign, gamma: 0, theta: 0, vega: 0,
+          mark_price_usd: Math.abs(markUsd),
+          current_mtm: Math.round(signedQty * markUsd * 100) / 100,
+          notional_live: Math.round(lp.qty * pfData.eth_spot * 100) / 100,
+          payoff_by_horizon: payoff,
+        };
+
+        pfData.positions.push(newPos);
+        pfSelected.add(newPos.id);
+        sbIncluded.add(newPos.id);
+        continue;
+      }
+
+      // Options leg
       const instrument = `ETH-${lp.expiry}-${lp.strike}-${lp.type}`;
       let tk;
       try {
         tk = await get(`/api/portfolio/ticker/${encodeURIComponent(instrument)}`);
       } catch (e) {
-        // If ticker fetch fails, use our computed values
         tk = { mark_price_usd: lp.bsPremUsd, mark_iv: lp.ivPct, opt: lp.type, strike: lp.strike,
           days_remaining: lp.dte, expiry: "", delta: null, gamma: null, theta: null, vega: null };
       }
 
-      const sign = lp.side === "sell" ? -1 : 1;
-      const signedQty = sign * lp.qty;
       const markUsd = tk.mark_price_usd || lp.bsPremUsd;
       const sigma = (tk.mark_iv || lp.ivPct) / 100;
       const opt = tk.opt || lp.type;
       const strike = tk.strike || lp.strike;
       const dte = tk.days_remaining || lp.dte;
-      const spots = pfData.spot_ladder;
-      const allHorizons = pfData.all_horizons;
       const payoff = {};
       for (const h of allHorizons) {
         const T = Math.max(dte - h, 0) / 365.25;
@@ -5094,6 +6556,7 @@ document.getElementById("btn-sb-refresh").addEventListener("click", async () => 
   document.getElementById("sb-roll-results-section").style.display = "none";
   document.getElementById("sb-pricing-results").style.display = "none";
   document.getElementById("btn-sb-add-to-portfolio").style.display = "none";
+  document.getElementById("btn-sb-send-to-exec").style.display = "none";
   await sbInit();
 });
 
@@ -5225,6 +6688,328 @@ document.getElementById("btn-sb-export-xlsx").addEventListener("click", () => {
   const dateStr = new Date().toISOString().split("T")[0];
   XLSX.writeFile(wb, `PLGO_Strategy_Builder_${dateStr}.xlsx`);
 });
+
+// ═══════════════════════════════════════════════════════════
+// ═══  EXECUTION PAGE  ═════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+
+let execOrders = [];    // orders staged for execution
+let execLog = [];       // execution history
+let execSelected = new Set();
+let execLoaded = false;
+
+async function execInit() {
+  if (execLoaded) return;
+  execLoaded = true;
+  await execCheckStatus();
+  execRenderOrders();
+}
+
+async function execCheckStatus() {
+  try {
+    const status = await get("/api/execution/status");
+    const $env = document.getElementById("exec-env");
+    $env.textContent = status.environment;
+    $env.style.color = status.environment === "PRODUCTION" ? "var(--red)" : "var(--green)";
+
+    const $auth = document.getElementById("exec-auth-status");
+    if (status.authenticated) {
+      $auth.textContent = "Connected";
+      $auth.className = "risk-value mtm-pos";
+      if (status.account) {
+        document.getElementById("exec-balance").textContent = (status.account.balance || 0).toFixed(4);
+        document.getElementById("exec-equity").textContent = (status.account.equity || 0).toFixed(4);
+        document.getElementById("exec-available").textContent = (status.account.available_funds || 0).toFixed(4);
+      }
+      document.getElementById("exec-auth-error").style.display = "none";
+    } else {
+      $auth.textContent = "Not Connected";
+      $auth.className = "risk-value mtm-neg";
+      const $err = document.getElementById("exec-auth-error");
+      $err.textContent = status.error || "Not configured";
+      $err.style.display = "block";
+    }
+  } catch (e) {
+    document.getElementById("exec-auth-status").textContent = "Error";
+    document.getElementById("exec-auth-status").className = "risk-value mtm-neg";
+  }
+}
+
+// Send priced legs from Strategy Builder to Execution
+function execSendFromBuilder(pricedLegs) {
+  for (const lp of pricedLegs) {
+    const instrument = lp.type === "PERP" ? "ETH-PERPETUAL" : `ETH-${lp.expiry}-${lp.strike}-${lp.type}`;
+    execOrders.push({
+      id: Date.now() + Math.random(),
+      instrument: instrument,
+      side: lp.side,
+      opt: lp.type,
+      strike: lp.strike,
+      qty: lp.qty,
+      order_type: "limit",
+      price: null,  // will be filled from order book
+      best_bid: null,
+      best_ask: null,
+      mark: null,
+      status: "pending",
+      order_id: null,
+    });
+  }
+  execRenderOrders();
+  // Switch to Execution sub-tab within Strategy Builder
+  const parent = document.getElementById("page-structurer");
+  parent.querySelectorAll(".sub-tab-btn").forEach(b => b.classList.remove("active"));
+  parent.querySelectorAll(".sub-tab-pane").forEach(p => p.classList.remove("active"));
+  const execBtn = parent.querySelector('.sub-tab-btn[data-subtab="sb-execution"]');
+  if (execBtn) execBtn.classList.add("active");
+  document.getElementById("subtab-sb-execution").classList.add("active");
+  execCheckStatus();
+  execRefreshBooks();
+}
+
+async function execRefreshBooks() {
+  for (const order of execOrders) {
+    if (order.status !== "pending") continue;
+    try {
+      const book = await get(`/api/execution/orderbook/${encodeURIComponent(order.instrument)}`);
+      order.best_bid = book.best_bid;
+      order.best_ask = book.best_ask;
+      order.mark = book.mark_price;
+      // Auto-set limit price: buy at ask, sell at bid
+      if (!order.price) {
+        order.price = order.side === "buy" ? book.best_ask : book.best_bid;
+      }
+    } catch (e) {
+      // ignore — will show as '--'
+    }
+  }
+  execRenderOrders();
+}
+
+function execRenderOrders() {
+  document.getElementById("exec-order-count").textContent = `(${execOrders.length})`;
+  const $tbody = document.getElementById("exec-orders-body");
+  $tbody.innerHTML = "";
+
+  const allChecked = execOrders.length > 0 && execOrders.filter(o => o.status === "pending").every(o => execSelected.has(o.id));
+  document.getElementById("exec-check-all").checked = allChecked;
+
+  let totalCost = 0;
+  for (const order of execOrders) {
+    const isSelected = execSelected.has(order.id);
+    const isPending = order.status === "pending";
+    const sideColor = order.side === "buy" ? "var(--green)" : "var(--red)";
+    const typeLabel = order.opt === "PERP" ? "Perp" : (order.opt === "C" ? "Call" : "Put");
+
+    const spotPrice = order.price || 0;
+    if (isPending && spotPrice > 0) {
+      totalCost += (order.side === "buy" ? 1 : -1) * spotPrice * order.qty;
+    }
+
+    const statusCls = order.status === "filled" ? "mtm-pos" : order.status === "failed" ? "mtm-neg" : "";
+    const tr = document.createElement("tr");
+    if (isSelected) tr.classList.add("roll-row-selected");
+    tr.innerHTML =
+      `<td><input type="checkbox" class="exec-check" data-id="${order.id}" ${isSelected ? "checked" : ""} ${!isPending ? "disabled" : ""}></td>` +
+      `<td style="text-align:left;font-size:.74rem">${order.instrument}</td>` +
+      `<td style="color:${sideColor};font-weight:600;text-transform:uppercase">${order.side}</td>` +
+      `<td>${typeLabel}</td>` +
+      `<td style="font-family:monospace">$${order.strike.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${order.qty.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${order.best_bid != null ? order.best_bid.toFixed(4) : "--"}</td>` +
+      `<td style="font-family:monospace">${order.best_ask != null ? order.best_ask.toFixed(4) : "--"}</td>` +
+      `<td style="font-family:monospace">${order.mark != null ? order.mark.toFixed(4) : "--"}</td>` +
+      `<td>${isPending ? `<select class="exec-order-type" data-id="${order.id}" style="font-size:.72rem;width:70px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
+        `<option value="limit" ${order.order_type === "limit" ? "selected" : ""}>Limit</option>` +
+        `<option value="market" ${order.order_type === "market" ? "selected" : ""}>Market</option></select>` : order.order_type}</td>` +
+      `<td>${isPending ? `<input type="number" class="exec-price" data-id="${order.id}" value="${order.price || ""}" step="0.0001" style="width:80px;font-size:.72rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)">` : (order.price ? order.price.toFixed(4) : "--")}</td>` +
+      `<td class="${statusCls}" style="font-weight:600;font-size:.74rem">${order.status.toUpperCase()}</td>`;
+    $tbody.appendChild(tr);
+  }
+
+  document.getElementById("exec-total-summary").textContent =
+    execOrders.filter(o => o.status === "pending").length + " pending";
+
+  // Wire events
+  $tbody.querySelectorAll(".exec-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const id = parseFloat(cb.dataset.id);
+      if (cb.checked) execSelected.add(id); else execSelected.delete(id);
+      cb.closest("tr").classList.toggle("roll-row-selected", cb.checked);
+    });
+  });
+  $tbody.querySelectorAll(".exec-order-type").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const order = execOrders.find(o => o.id === parseFloat(sel.dataset.id));
+      if (order) order.order_type = sel.value;
+    });
+  });
+  $tbody.querySelectorAll(".exec-price").forEach(inp => {
+    inp.addEventListener("change", () => {
+      const order = execOrders.find(o => o.id === parseFloat(inp.dataset.id));
+      if (order) order.price = parseFloat(inp.value) || null;
+    });
+  });
+}
+
+async function execExecuteSelected() {
+  const toExecute = execOrders.filter(o => execSelected.has(o.id) && o.status === "pending");
+  if (toExecute.length === 0) { alert("Select orders to execute."); return; }
+
+  const env = document.getElementById("exec-env").textContent;
+  if (!confirm(`Execute ${toExecute.length} order(s) on ${env}?\n\nThis will place real orders on Deribit.`)) return;
+
+  const $btn = document.getElementById("btn-exec-selected");
+  $btn.disabled = true;
+  $btn.textContent = "Executing...";
+
+  for (const order of toExecute) {
+    try {
+      const body = {
+        instrument_name: order.instrument,
+        side: order.side,
+        amount: order.qty,
+        order_type: order.order_type,
+        label: "plgo",
+      };
+      if (order.order_type === "limit" && order.price) {
+        body.price = order.price;
+      }
+      const result = await post("/api/execution/order", body);
+      order.status = result.order_state || "open";
+      order.order_id = result.order_id;
+      order.filled = result.filled_amount || 0;
+      order.avg_price = result.average_price;
+
+      execLog.unshift({
+        time: new Date().toLocaleTimeString(),
+        instrument: order.instrument,
+        side: order.side,
+        qty: order.qty,
+        type: order.order_type,
+        price: order.price,
+        state: result.order_state,
+        filled: result.filled_amount,
+        avg_price: result.average_price,
+        order_id: result.order_id,
+      });
+    } catch (e) {
+      order.status = "failed";
+      execLog.unshift({
+        time: new Date().toLocaleTimeString(),
+        instrument: order.instrument,
+        side: order.side,
+        qty: order.qty,
+        type: order.order_type,
+        price: order.price,
+        state: "FAILED",
+        filled: 0,
+        avg_price: null,
+        order_id: e.message,
+      });
+    }
+  }
+
+  execSelected.clear();
+  $btn.disabled = false;
+  $btn.textContent = "Execute Selected";
+  execRenderOrders();
+  execRenderLog();
+  await execCheckStatus();  // refresh balance
+}
+
+function execRenderLog() {
+  if (execLog.length === 0) return;
+  document.getElementById("exec-log-section").style.display = "block";
+  const $tbody = document.getElementById("exec-log-body");
+  $tbody.innerHTML = "";
+  for (const entry of execLog) {
+    const sideColor = entry.side === "buy" ? "var(--green)" : "var(--red)";
+    const stateCls = entry.state === "filled" ? "mtm-pos" : entry.state === "FAILED" ? "mtm-neg" : "";
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${entry.time}</td>` +
+      `<td style="text-align:left;font-size:.74rem">${entry.instrument}</td>` +
+      `<td style="color:${sideColor};font-weight:600">${entry.side.toUpperCase()}</td>` +
+      `<td style="font-family:monospace">${entry.qty.toLocaleString()}</td>` +
+      `<td>${entry.type}</td>` +
+      `<td style="font-family:monospace">${entry.price ? entry.price.toFixed(4) : "--"}</td>` +
+      `<td class="${stateCls}" style="font-weight:600">${(entry.state || "--").toUpperCase()}</td>` +
+      `<td style="font-family:monospace">${entry.filled || 0}</td>` +
+      `<td style="font-family:monospace">${entry.avg_price ? entry.avg_price.toFixed(4) : "--"}</td>` +
+      `<td style="text-align:left;font-size:.68rem;color:var(--muted)">${entry.order_id || "--"}</td>`;
+    $tbody.appendChild(tr);
+  }
+}
+
+async function execRefreshOpenOrders() {
+  try {
+    const result = await get("/api/execution/open-orders");
+    const orders = result.orders || [];
+    document.getElementById("exec-open-section").style.display = "block";
+    const $tbody = document.getElementById("exec-open-body");
+    $tbody.innerHTML = "";
+    for (const o of orders) {
+      const sideColor = o.direction === "buy" ? "var(--green)" : "var(--red)";
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td style="text-align:left;font-size:.74rem">${o.instrument_name}</td>` +
+        `<td style="color:${sideColor};font-weight:600">${(o.direction || "").toUpperCase()}</td>` +
+        `<td style="font-family:monospace">${o.amount}</td>` +
+        `<td style="font-family:monospace">${o.filled_amount || 0}</td>` +
+        `<td style="font-family:monospace">${o.price ? o.price.toFixed(4) : "MKT"}</td>` +
+        `<td style="font-weight:600">${(o.order_state || "").toUpperCase()}</td>` +
+        `<td style="text-align:left;font-size:.68rem;color:var(--muted)">${o.order_id || ""}</td>` +
+        `<td><button class="btn-secondary exec-cancel-btn" data-oid="${o.order_id}" style="width:auto;margin:0;padding:.15rem .4rem;font-size:.68rem">Cancel</button></td>`;
+      $tbody.appendChild(tr);
+    }
+    $tbody.querySelectorAll(".exec-cancel-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await post("/api/execution/cancel", { order_id: btn.dataset.oid });
+          btn.textContent = "Cancelled";
+          btn.disabled = true;
+          await execRefreshOpenOrders();
+        } catch (e) { alert("Cancel failed: " + e.message); }
+      });
+    });
+    if (orders.length === 0) {
+      $tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted)">No open orders</td></tr>';
+    }
+  } catch (e) {
+    alert("Failed to fetch open orders: " + e.message);
+  }
+}
+
+// ── Execution page wiring ────────────────────────────────
+
+document.getElementById("exec-check-all").addEventListener("change", (e) => {
+  execOrders.filter(o => o.status === "pending").forEach(o => {
+    if (e.target.checked) execSelected.add(o.id); else execSelected.delete(o.id);
+  });
+  execRenderOrders();
+});
+
+document.getElementById("btn-exec-refresh-books").addEventListener("click", execRefreshBooks);
+
+document.getElementById("btn-exec-clear").addEventListener("click", () => {
+  execOrders = execOrders.filter(o => o.status !== "pending");
+  execSelected.clear();
+  execRenderOrders();
+});
+
+document.getElementById("btn-exec-selected").addEventListener("click", execExecuteSelected);
+document.getElementById("btn-exec-refresh-open").addEventListener("click", execRefreshOpenOrders);
+
+// ── Send from Strategy Builder button ────────────────────
+
+document.getElementById("btn-sb-send-to-exec").addEventListener("click", () => {
+  if (!sbLegsPriced || sbLegsPriced.length === 0) { alert("Price the structure first."); return; }
+  execSendFromBuilder(sbLegsPriced);
+});
+
+// ── Nav handler for execution page ───────────────────────
+// (needs to trigger init when page is first shown)
 
 // ─── Go! ────────────────────────────────────────────────────
 init();
@@ -5723,3 +7508,5 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
     $tbody.appendChild(tr);
   });
 }
+
+// (Full Optimizer tab removed)

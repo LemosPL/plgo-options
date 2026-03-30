@@ -402,6 +402,8 @@ select { margin-bottom: .5rem; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   min-height: 480px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* ── Result box ────────────────────────────────────────────── */
@@ -962,3 +964,23 @@ select { margin-bottom: .5rem; }
 #mtm-matrix-table td { text-align: right; padding: .35rem .5rem; border-bottom: 1px solid var(--row-border); font-family: 'SF Mono', 'Fira Code', monospace; font-size: .72rem; white-space: nowrap; }
 #mtm-matrix-table tr:hover { background: var(--hover-bg); }
 #mtm-matrix-table tfoot td { font-weight: 700; border-top: 2px solid var(--border); }
+
+/* Optimizer chat */
+#opt2-ask { cursor: text !important; pointer-events: auto !important; }
+#opt2-ask:focus { border-color: var(--accent) !important; box-shadow: 0 0 0 3px rgba(88,166,255,.3) !important; }
+.opt2-msg { display: flex; }
+.opt2-msg-bot { justify-content: flex-start; }
+.opt2-msg-user { justify-content: flex-end; }
+.opt2-msg-bubble { max-width: 85%; padding: .5rem .75rem; border-radius: 12px; font-size: .82rem; line-height: 1.45; }
+.opt2-msg-bot .opt2-msg-bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.opt2-msg-user .opt2-msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.opt2-msg-suggestion { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: .5rem .75rem; margin-top: .3rem; cursor: pointer; transition: border-color .15s, background .15s; }
+.opt2-msg-suggestion:hover { border-color: var(--accent); background: var(--surface); }
+
+/* Optimizer tables — dark card style */
+#subtab-optimizer .card { background: var(--surface); border: 1px solid var(--border); }
+#subtab-optimizer table { border-collapse: collapse; width: 100%; }
+#subtab-optimizer table th { background: var(--bg); color: var(--muted); font-weight: 600; font-size: .74rem; text-transform: uppercase; letter-spacing: .03em; padding: .45rem .5rem; border-bottom: 2px solid var(--border); white-space: nowrap; }
+#subtab-optimizer table td { padding: .4rem .5rem; border-bottom: 1px solid var(--row-border); font-size: .78rem; white-space: nowrap; }
+#subtab-optimizer table tr:hover { background: var(--hover-bg); }
+#subtab-optimizer table tfoot td { font-weight: 700; border-top: 2px solid var(--border); background: var(--bg); }

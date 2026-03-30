@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Any
 
 import httpx
@@ -11,6 +12,20 @@ import numpy as np
 
 from plgo_options.config import DERIBIT_BASE_URL, DEFAULT_CURRENCY, REQUEST_TIMEOUT
 from plgo_options.market_data.schemas import OptionTicker, PerpetualTicker
+
+# ---------------------------------------------------------------------------
+# Simple TTL cache for expensive Deribit calls
+# ---------------------------------------------------------------------------
+_cache: dict[str, tuple[float, Any]] = {}  # key → (expiry_ts, data)
+_cache_lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
+
+CACHE_TTL_SECONDS = 10  # cache responses for 10 seconds
+
+
+def _cache_key(method: str, params: dict | None) -> str:
+    """Build a hashable cache key from method + sorted params."""
+    p = tuple(sorted((params or {}).items()))
+    return f"{method}|{p}"
 
 
 class DeribitClient:
@@ -22,14 +37,46 @@ class DeribitClient:
     # -- low-level --------------------------------------------------------
 
     async def _get(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        # Check cache first
+        key = _cache_key(method, params)
+        now = time.monotonic()
+        if key in _cache:
+            expiry_ts, cached_data = _cache[key]
+            if now < expiry_ts:
+                return cached_data
+
         url = f"{self.base_url}/public/{method}"
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            if "error" in data:
-                raise RuntimeError(f"Deribit API error: {data['error']}")
-            return data["result"]
+
+        # Retry with exponential backoff on 429 (rate limit)
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                    resp = await client.get(url, params=params)
+                    if resp.status_code == 429:
+                        if attempt < max_retries:
+                            wait = 1.0 * (2 ** attempt)  # 1s, 2s, 4s
+                            await asyncio.sleep(wait)
+                            continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if "error" in data:
+                        raise RuntimeError(f"Deribit API error: {data['error']}")
+                    result = data["result"]
+
+                    # Cache the result
+                    _cache[key] = (now + CACHE_TTL_SECONDS, result)
+                    return result
+            except httpx.HTTPStatusError:
+                raise
+            except httpx.TimeoutException:
+                if attempt < max_retries:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+
+        # Should not reach here, but just in case
+        raise RuntimeError(f"Deribit API request failed after {max_retries} retries")
 
     # -- instruments ------------------------------------------------------
 
