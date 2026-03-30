@@ -220,6 +220,22 @@ class OptimizerV2(BaseOptimizer):
         perp_cost_bps = 2.0  # 5 basis points = 0.05%
         c_cost_rate = self.compute_costs(spot, candidates, perp_cost_bps, brokerage_txn_cost_pct, deribit_txn_cost_pct)
 
+        # DTE-based cost penalty: near-expiry options have wider spreads
+        # and are harder to trade.  Scale cost up for DTE < 30.
+        # At 30+ DTE: 1x (no penalty).  At 7 DTE: ~4x.  At 1 DTE: ~30x.
+        DTE_PENALTY_THRESHOLD = 30
+        c_dte_float = np.array([float(max(c.dte, 1)) for c in candidates])
+        c_dte_penalty = np.where(
+            c_dte_float < DTE_PENALTY_THRESHOLD,
+            DTE_PENALTY_THRESHOLD / c_dte_float,
+            1.0,
+        )
+        # Don't penalise the perpetual
+        for i, c in enumerate(candidates):
+            if c.opt == "F":
+                c_dte_penalty[i] = 1.0
+        c_cost_rate = c_cost_rate * c_dte_penalty
+
         # ------------------------------------------------------------------
         # Per-candidate: existing position qty and "is_held" flag
         # ------------------------------------------------------------------
