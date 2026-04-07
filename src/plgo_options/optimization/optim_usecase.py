@@ -28,6 +28,7 @@ class OptimizerRunParams:
 
 @dataclass
 class OptimizerUseCase:
+    today: datetime
     optimizer_input: dict[str, Any]
     run_params: OptimizerRunParams
     result: dict[str, Any] | None = None
@@ -39,6 +40,7 @@ class OptimizerUseCase:
         run_params: OptimizerRunParams,
     ) -> "OptimizerUseCase":
         return cls(
+            today=datetime.today(),
             optimizer_input={
                 "eth_spot": portfolio_payload["eth_spot"],
                 "spot_ladder": portfolio_payload["spot_ladder"],
@@ -58,7 +60,10 @@ class OptimizerUseCase:
         with path.open() as f:
             data = json.load(f)
 
+        today_str = path.name.split('_')[0]
+        today = datetime.strptime(today_str, "%Y%m%d")
         return cls(
+            today=today,
             optimizer_input=data["optimizer_input"],
             run_params=OptimizerRunParams(**data["run_params"]),
             result=data.get("result"),
@@ -86,15 +91,20 @@ class OptimizerUseCase:
         filename = f"{ts}_{expiry}.json"
         return self.save(directory / filename)
 
-    def build_optimizer(self) -> OptimizerV3:#OptimizerV2:
-        return OptimizerV3.from_snapshot_dict(self.optimizer_input)
+    def build_optimizer(self, today=None) -> OptimizerV3:#OptimizerV2:
+        if today is None:
+            today = self.today
+        return OptimizerV3.from_snapshot_dict(self.optimizer_input, today)
         return OptimizerV2.from_snapshot_dict(self.optimizer_input)
 
     def run(self) -> dict[str, Any]:
-        optimizer = self.build_optimizer()
-        self.run_params.lambda_delta = 1.
-        self.run_params.lambda_gamma = 0.
-        self.run_params.lambda_vega = 0.
+        optimizer = self.build_optimizer(self.today)
+
+        return optimizer.run_lp()
+
+        self.run_params.lambda_delta = 0.
+        self.run_params.lambda_gamma = 1000000.
+        self.run_params.lambda_vega = 100000000.
         self.run_params.max_collateral = 400_000_000.0
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result

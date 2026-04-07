@@ -126,21 +126,10 @@ class OptimizerV2(BaseOptimizer):
         vov_daily = self._estimate_vol_of_vol_daily()
 
         # ------------------------------------------------------------------
-        # Build a map of existing positions keyed by (expiry_code, strike, opt)
-        # so we know which candidates correspond to held instruments.
         # A negative net_qty means we're short → buying unwinds.
         # A positive net_qty means we're long → selling unwinds.
         # ------------------------------------------------------------------
-        held_positions: dict[tuple[str, float, str], float] = {}
-        for p in self.positions:
-            # Extract expiry code from instrument name (e.g. "ETH-29MAY26-3000-C")
-            parts = p.instrument.split("-")
-            if len(parts) >= 4:
-                exp_code = parts[1]
-            else:
-                exp_code = ""
-            key = (exp_code, p.strike, p.opt)
-            held_positions[key] = held_positions.get(key, 0.0) + p.net_qty
+        held_positions = self.get_held_positions()
 
         # Pre-compute candidate greek arrays (per contract)
         n = len(candidates)

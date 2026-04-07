@@ -2,9 +2,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 from plgo_options.optimization.models import Position
 
+
+SNAPSHOT_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "optimization_snapshots"
+
+def save_snapshot(data: dict) -> Path:
+    """Write *data* to a timestamped JSON file and return the path."""
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    path = SNAPSHOT_DIR / f"snapshot_{ts}.json"
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+    return path
 
 def load_snapshot_dict(data: dict) -> tuple[dict, list[Position]]:
     positions = [
