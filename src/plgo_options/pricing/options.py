@@ -35,11 +35,13 @@ def payoff(
     is_long: bool = True,
 ) -> np.ndarray:
     """Compute P&L at expiry for a single option leg."""
+    direction = 1.0 if is_long else -1.0
+    if option_type == "PERP":
+        return direction * quantity * (spot_range - strike)
     if option_type == "C":
         intrinsic = np.maximum(spot_range - strike, 0.0)
     else:
         intrinsic = np.maximum(strike - spot_range, 0.0)
-    direction = 1.0 if is_long else -1.0
     return direction * quantity * (intrinsic - premium)
 
 

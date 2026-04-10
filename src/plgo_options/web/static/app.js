@@ -8,8 +8,27 @@ let legs = [];          // {side, type, strike, premium, quantity}
 let volSurface = null;  // cached Deribit vol surface {eth_spot, smiles: [{expiry_code, dte, strikes, ivs}]}
 
 // ─── Asset-aware formatting helpers ─────────────────────────
-const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(4) : Number(v).toFixed(0);
-const fmtStrike = (v) => currentAsset === "FIL" ? Number(v).toFixed(4) : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v).toFixed(0);
+const fmtStrike = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const fmtPrem = (v) => {
+  const n = Number(v);
+  if (currentAsset === "FIL") return n.toFixed(4);
+  return n < 0.01 ? n.toPrecision(2) : n.toFixed(2);
+};
+const fmtPremTotal = (v) => {
+  const d = currentAsset === "FIL" ? 4 : 2;
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+};
+
+function updateVolSpreadHint(inputId, hintId) {
+  const pts = parseFloat(document.getElementById(inputId).value) || 0;
+  const $hint = document.getElementById(hintId);
+  if (pts <= 0) {
+    $hint.textContent = "Mid pricing (no spread)";
+  } else {
+    $hint.innerHTML = `Buy @ mid+${pts} &nbsp;|&nbsp; Sell @ mid\u2212${pts}`;
+  }
+}
 
 // ─── DOM refs ───────────────────────────────────────────────
 const $spot       = document.getElementById("eth-spot");
@@ -167,10 +186,16 @@ async function init() {
   // Spot
   if (spotData) {
     ethSpot = spotData.eth_spot || spotData.fil_spot;
-    const fracDigits = currentAsset === "FIL" ? 4 : 2;
+    const fracDigits = currentAsset === "FIL" ? 2 : 2;
     $spot.textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: fracDigits })}`;
     $spotMin.value = currentAsset === "FIL" ? 0.2 : Math.round(ethSpot * 0.4);
     $spotMax.value = currentAsset === "FIL" ? 3.0 : Math.round(ethSpot * 2.0);
+    // Set default vol spread based on asset
+    const defaultSpread = currentAsset === "FIL" ? 3 : 1;
+    document.getElementById("pricing-vol-spread").value = defaultSpread;
+    document.getElementById("sb-vol-spread").value = defaultSpread;
+    updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
+    updateVolSpreadHint("sb-vol-spread", "sb-vol-spread-hint");
   } else {
     $spot.textContent = "Error";
   }
@@ -351,9 +376,10 @@ function renderLegs() {
         <select data-i="${i}" data-field="type" style="width:48%">
           <option value="C" ${leg.type === "C" ? "selected" : ""}>Call</option>
           <option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option>
+          <option value="PERP" ${leg.type === "PERP" ? "selected" : ""}>Perp</option>
         </select>
       </td>
-      <td><input type="number" data-i="${i}" data-field="strike" value="${leg.strike}" step="10"></td>
+      <td><input type="number" data-i="${i}" data-field="strike" value="${leg.strike}" step="10" ${leg.type === "PERP" ? 'title="Entry price"' : ""}></td>
       <td><input type="number" data-i="${i}" data-field="quantity" value="${leg.quantity}" step="1" min="1"></td>
       <td><button class="btn-remove" data-i="${i}">✕</button></td>
     `;
@@ -413,6 +439,12 @@ function applyTemplate(name) {
       addLeg("sell", "P", r(s - w),  "0");
       addLeg("sell", "C", r(s + w),  "0");
       addLeg("buy",  "C", r(s + ww), "0");
+      break;
+    case "long_perp":
+      addLeg("buy", "PERP", r(s), "0");
+      break;
+    case "short_perp":
+      addLeg("sell", "PERP", r(s), "0");
       break;
   }
   renderLegs();
@@ -491,7 +523,7 @@ function addFromChain(instrumentName) {
   const strike = parts[2];
   const type = parts[3];
   const premiumEth = opt.mark_price || 0;
-  const premiumUsd = ethSpot ? (premiumEth * ethSpot).toFixed(2) : premiumEth.toFixed(4);
+  const premiumUsd = ethSpot ? fmtPrem(premiumEth * ethSpot) : premiumEth.toFixed(4);
 
   addLeg("buy", type, strike, premiumUsd, "1", chainExpiry);
 }
@@ -540,6 +572,8 @@ function replicateStrategy() {
 
   const legDetails = [];
 
+  const volSpreadPts = parseFloat(document.getElementById("pricing-vol-spread").value) || 0;
+
   for (const l of legs) {
     const K = parseFloat(l.strike);
     const qty = parseFloat(l.quantity);
@@ -547,8 +581,12 @@ function replicateStrategy() {
     const smile = getSmileForExpiry(l.expiry);
     const dte = smile.dte;
     const T = Math.max(dte, 0) / 365.25;
-    const ivPct = lookupSmileIv(l.expiry, K);
+    let ivPct = lookupSmileIv(l.expiry, K);
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${K} on ${l.expiry}.`); return; }
+    // Apply bid/ask vol spread: buys at offer (mid + spread), sells at bid (mid - spread)
+    if (volSpreadPts > 0) {
+      ivPct = l.side === "buy" ? ivPct + volSpreadPts : Math.max(ivPct - volSpreadPts, 1);
+    }
     const sigma = ivPct / 100;
 
     const prem = pricerBs(spot, K, T, 0, sigma, l.type);
@@ -630,6 +668,7 @@ function replicateStrategy() {
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
     `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
+    (volSpreadPts > 0 ? `<span style="font-size:.7rem;color:var(--muted)">vol &plusmn;${volSpreadPts}pts</span>` : "") +
     `</span></div>` + sourceNote;
 
   // Per-leg table
@@ -649,8 +688,9 @@ function replicateStrategy() {
       <td>${d.strike}</td>
       <td>${d.dte}d</td>
       <td>${d.iv_pct.toFixed(1)}%</td>
-      <td style="font-family:monospace">${d.bs_premium_eth.toFixed(6)}</td>
-      <td style="font-family:monospace">$${d.bs_premium_usd.toFixed(2)}</td>
+      <td style="font-family:monospace">${d.quantity.toLocaleString()}</td>
+      <td style="font-family:monospace">$${fmtPrem(d.bs_premium_usd)}</td>
+      <td style="font-family:monospace;color:${d.side === 'sell' ? 'var(--green)' : 'var(--red)'}">$${fmtPremTotal(d.quantity * d.bs_premium_usd)}</td>
       <td style="font-size:.68rem">${srcLabel}</td>
     `;
     $body.appendChild(tr);
@@ -777,7 +817,7 @@ function drawSmileChart(smile, pricedLegs) {
 function applyReplPremiums() {
   if (lastReplPremiums.length !== legs.length) return;
   for (let i = 0; i < legs.length; i++) {
-    legs[i].premium = lastReplPremiums[i].toFixed(2);
+    legs[i].premium = fmtPrem(lastReplPremiums[i]);
   }
   renderLegs();
   document.getElementById("repl-results-section").style.display = "none";
@@ -787,6 +827,8 @@ function applyReplPremiums() {
 $btnAdd.addEventListener("click", () => addLeg());
 $btnCompute.addEventListener("click", computePayoff);
 $btnRepl.addEventListener("click", replicateStrategy);
+document.getElementById("pricing-vol-spread").addEventListener("input", () => updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint"));
+updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
 document.getElementById("btn-apply-repl").addEventListener("click", applyReplPremiums);
 $btnLoad.addEventListener("click", loadChain);
 
@@ -821,10 +863,16 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     ]).then(([spotData, volData]) => {
       if (spotData) {
         ethSpot = spotData.eth_spot || spotData.fil_spot;
-        document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: asset === "FIL" ? 4 : 2 })}`;
+        document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
         // Update pricer spot range for the asset
         $spotMin.value = asset === "FIL" ? 0.2 : Math.round(ethSpot * 0.4);
         $spotMax.value = asset === "FIL" ? 3.0 : Math.round(ethSpot * 2.0);
+        // Default vol spread: wider for FIL (illiquid OTC), tighter for ETH
+        const defaultSpread = asset === "FIL" ? 3 : 1;
+        document.getElementById("pricing-vol-spread").value = defaultSpread;
+        document.getElementById("sb-vol-spread").value = defaultSpread;
+        updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
+        updateVolSpreadHint("sb-vol-spread", "sb-vol-spread-hint");
       }
       if (volData) {
         volSurface = volData;
@@ -878,6 +926,13 @@ document.querySelectorAll(".nav-item").forEach(item => {
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
     if (pg === "roll" && !rollLoaded && !isFil) rollInit();
     if (pg === "structurer" && !sbLoaded) sbInit();
+    if (pg === "volcurve" && !vcLoaded) vcInit();
+    if (pg === "volcurve") {
+      setTimeout(() => {
+        const vc = document.getElementById("volcurve-chart");
+        if (vc && vc.data) Plotly.Plots.resize(vc);
+      }, 50);
+    }
     // execution is now a subtab inside structurer, not a standalone page
   });
 });
@@ -974,8 +1029,7 @@ async function tmLoad() {
       const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExp}`);
       enriched = pfData.positions || [];
       ethSpot = pfData.eth_spot;
-      const fracDigits = currentAsset === "FIL" ? 4 : 2;
-      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: fracDigits })}`;
+      document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
     } catch (e) {
       console.warn("Could not fetch enriched data:", e);
     }
@@ -1098,7 +1152,7 @@ function tmRenderTable() {
   document.getElementById("tm-table-count").textContent = `(${rows.length})`;
 
   const isFil = currentAsset === "FIL";
-  const priceDec = isFil ? 4 : 0;
+  const priceDec = isFil ? 2 : 0;
   const fmt = (v, d = 2) => v != null && v !== "" ? Number(v).toFixed(d) : "--";
   const fmtK = (v) => v != null && v !== "" ? Number(v).toLocaleString(undefined, { maximumFractionDigits: priceDec }) : "--";
   const fmtMoney = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: priceDec })}` : "--";
@@ -1898,6 +1952,16 @@ async function loadPortfolio() {
       }
     }
 
+    // Populate counterparty filter
+    const cptys = [...new Set(pfData.positions.map(p => p.counterparty || "").filter(Boolean))].sort();
+    const $cpF = document.getElementById("pf-filter-cpty");
+    $cpF.innerHTML = '<option value="">All</option>';
+    cptys.forEach(c => {
+      const opt = document.createElement("option");
+      opt.value = c; opt.textContent = c;
+      $cpF.appendChild(opt);
+    });
+
     // Populate expiry filter
     const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
     const $expF = document.getElementById("pf-filter-expiry");
@@ -1946,7 +2010,7 @@ function pfRenderSummary() {
   const sel = all.filter(p => pfSelected.has(p.id));
 
   document.getElementById("pf-spot").textContent =
-    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: currentAsset === "FIL" ? 4 : 0 })}`;
+    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: currentAsset === "FIL" ? 2 : 0 })}`;
   document.getElementById("pf-count").textContent = all.length;
   document.getElementById("pf-selected-count").textContent = sel.length;
 
@@ -2010,11 +2074,13 @@ function pfUpdateOldNewHeaders() {
 }
 
 function pfGetFilteredPositions() {
+  const fCpty = document.getElementById("pf-filter-cpty").value;
   const fExpiry = document.getElementById("pf-filter-expiry").value;
   const fType = document.getElementById("pf-filter-type").value;
   const fSide = document.getElementById("pf-filter-side").value;
 
   let list = [...pfData.positions];
+  if (fCpty) list = list.filter(p => (p.counterparty || "") === fCpty);
   if (fExpiry) list = list.filter(p => p.expiry.split("T")[0] === fExpiry);
   if (fType) list = list.filter(p => p.opt === fType);
   if (fSide) list = list.filter(p => p.side === fSide);
@@ -2061,6 +2127,7 @@ function pfRenderTable() {
     const isExpired = pos.db_status === "expired";
     const rowClass = (isExpired ? "pf-row-expired " : "") + (!checked ? "pf-row-excluded" : "") + (rolled ? " pf-row-rolled" : "");
     const rollDte = rolled ? pfRolled.get(pos.id).newDte : Math.round(pos.days_remaining + 90);
+    const _sd = currentAsset === "FIL" ? 2 : 0;
     const fmtNum = (v, d=0) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "—";
     const otmClass = pos.pct_otm_live > 0 ? "mtm-neg" : pos.pct_otm_live < 0 ? "mtm-pos" : "";
     const fmtGreek = (v, d) => v != null ? v.toFixed(d) : "—";
@@ -2104,7 +2171,7 @@ function pfRenderTable() {
       `<td style="text-align:left;font-size:.8rem">${pos.instrument}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.strike)}</td>` +
+      `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
       `<td class="${otmClass}">${pos.pct_otm_live}%</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.qty)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.premium_per, 2)}</td>` +
@@ -2258,7 +2325,7 @@ function pfInitCompareSets() {
 
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
-  const horizons = pfData.chart_horizons;
+  const allHorizons = pfData.chart_horizons;
 
   const oldColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166", "#bc8cff"];
   const newColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364", "#d2a8ff"];
@@ -2267,14 +2334,27 @@ function pfRenderPayoffChart() {
   const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
   const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
 
+  // Filter horizons: skip horizons beyond the max DTE of selected positions
+  // (otherwise they just duplicate the expiry curve and are misleading)
+  function relevantHorizons(positions) {
+    if (positions.length === 0) return allHorizons;
+    const maxDte = Math.max(...positions.map(p => p.days_remaining || 0));
+    // Always include h=0 (expiry/spot). Only include h>0 if at least one position lives past it.
+    return allHorizons.filter(h => h === 0 || h < maxDte);
+  }
+
+  function horizonLabel(prefix, h) {
+    return h === 0 ? `${prefix}: Spot (at expiry)` : `${prefix}: T+${h}d`;
+  }
+
   // Old portfolio curves (dotted)
   if (oldPositions.length > 0) {
-    horizons.forEach((h, i) => {
+    const oldH = relevantHorizons(oldPositions);
+    oldH.forEach((h, i) => {
       const curve = pfSumCurveForSet(pfOldSet, h);
-      const label = h === 0 ? "Old: Expiry" : `Old: T+${h}d`;
       traces.push({
         x: spots, y: curve, type: "scatter", mode: "lines",
-        name: label,
+        name: horizonLabel("Old", h),
         line: { color: oldColors[i % oldColors.length], width: 2, dash: "dot" },
         legendgroup: `old_h${h}`,
       });
@@ -2283,12 +2363,12 @@ function pfRenderPayoffChart() {
 
   // New portfolio curves (solid)
   if (newPositions.length > 0) {
-    horizons.forEach((h, i) => {
+    const newH = relevantHorizons(newPositions);
+    newH.forEach((h, i) => {
       const curve = pfSumCurves(pfNewSet, h);
-      const label = h === 0 ? "New: Expiry" : `New: T+${h}d`;
       traces.push({
         x: spots, y: curve, type: "scatter", mode: "lines",
-        name: label,
+        name: horizonLabel("New", h),
         line: { color: newColors[i % newColors.length], width: 2.5 },
         legendgroup: `new_h${h}`,
       });
@@ -2462,7 +2542,7 @@ document.getElementById("btn-pf-expiring-10d").addEventListener("click", () => {
   pfOnSelectionChange();
 });
 
-["pf-filter-expiry", "pf-filter-type", "pf-filter-side"].forEach(id => {
+["pf-filter-cpty", "pf-filter-expiry", "pf-filter-type", "pf-filter-side"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderTable(); });
 });
 
@@ -2878,6 +2958,7 @@ function rollRenderTable() {
   });
   document.getElementById("roll-include-all").checked = allVisibleIncl;
 
+  const _sd = currentAsset === "FIL" ? 2 : 0;
   const fmtNum = (v, d=0) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
   const spot = pfData.eth_spot;
   const $tbody = document.getElementById("roll-trades-body");
@@ -2917,7 +2998,7 @@ function rollRenderTable() {
       `<td style="text-align:left;font-size:.72rem">${pos.instrument}</td>` +
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
       `<td style="text-align:left;color:${typeColor}">${pos.opt === "C" ? "Call" : "Put"}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.strike)}</td>` +
+      `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.net_qty)}</td>` +
@@ -3098,6 +3179,7 @@ function rollRenderResults(results, totalCloseValue, totalOpenValue, totalRollCo
   hdr += `<th>Total Cost</th></tr>`;
   $thead.innerHTML = hdr;
 
+  const _sd = currentAsset === "FIL" ? 2 : 0;
   const fmtNum = (v, d=2) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
   const $tbody = document.getElementById("roll-results-body");
   $tbody.innerHTML = "";
@@ -3111,8 +3193,8 @@ function rollRenderResults(results, totalCloseValue, totalOpenValue, totalRollCo
     totalTypeImpact += r.typeImpact || 0;
     const sideClass = r.pos.side === "Long" ? "qty-long" : "qty-short";
     const strikeLabel = r.strikeChanged
-      ? `${fmtNum(r.pos.strike, 0)} → ${fmtNum(r.newStrike, 0)}`
-      : fmtNum(r.pos.strike, 0);
+      ? `${fmtNum(r.pos.strike, _sd)} → ${fmtNum(r.newStrike, _sd)}`
+      : fmtNum(r.pos.strike, _sd);
     const qtyLabel = r.qtyChanged
       ? `${fmtNum(r.pos.net_qty, 0)} → ${fmtNum(r.newNetQty, 0)}`
       : fmtNum(r.pos.net_qty, 0);
@@ -4182,7 +4264,12 @@ function opt2RenderResults() {
 // ── Workbench (editable legs) ────────────────────────────
 
 function opt2OpenWorkbench(s) {
-  opt2WbLegs = s.legs.map(l => ({ ...l }));
+  opt2WbLegs = s.legs.map(l => {
+    const leg = { ...l };
+    if (l.role === "close") { leg._isRollClose = true; }
+    else if (l.role === "open") { leg._isRollOpen = true; }
+    return leg;
+  });
   opt2WbName = s.name;
   document.getElementById("opt2-wb-name").textContent = s.name;
   opt2RenderWorkbench();
@@ -4194,7 +4281,12 @@ function opt2AddToWorkbench(s) {
   // Accumulate — add legs from this suggestion to existing workbench
   // Tag each leg with the strategy name so we can group them visually
   const stratName = s.name || "Strategy";
-  for (const l of s.legs) opt2WbLegs.push({ ...l, _strategyName: stratName });
+  for (const l of s.legs) {
+    const leg = { ...l, _strategyName: stratName };
+    if (l.role === "close") { leg._isRollClose = true; }
+    else if (l.role === "open") { leg._isRollOpen = true; }
+    opt2WbLegs.push(leg);
+  }
   opt2WbName = opt2WbLegs.length <= s.legs.length ? s.name : "Combined (" + opt2WbLegs.length + " legs)";
   document.getElementById("opt2-wb-name").textContent = opt2WbName;
   opt2RenderWorkbench();
@@ -4285,9 +4377,10 @@ function opt2RenderWorkbench() {
       $tbody.appendChild(headerTr);
     }
 
+    const isPerp = leg.opt === "PERP";
     const sideColor = leg.side === "buy" ? "var(--green)" : "var(--red)";
-    const typeColor = leg.opt === "C" ? "var(--green)" : "var(--red)";
-    const execPr = leg.side === "buy" ? leg.ask_usd : leg.bid_usd;
+    const typeColor = isPerp ? "var(--muted)" : (leg.opt === "C" ? "var(--green)" : "var(--red)");
+    const execPr = isPerp ? 0 : (leg.side === "buy" ? leg.ask_usd : leg.bid_usd);
     const legCost = leg.side === "buy" ? execPr * leg.qty : -execPr * leg.qty;
     const isRollLeg = leg._isRollClose || leg._isRollOpen;
     // Show trade ID on close legs so user can reference the original
@@ -4307,7 +4400,7 @@ function opt2RenderWorkbench() {
         `<select class="opt2-wb-side" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
         `<option value="buy" ${leg.side==="buy"?"selected":""}>Buy</option>` +
         `<option value="sell" ${leg.side==="sell"?"selected":""}>Sell</option></select></td>` +
-      `<td style="color:${typeColor}">${leg.opt === "C" ? "Call" : "Put"}</td>` +
+      `<td style="color:${typeColor}">${isPerp ? "Perp" : (leg.opt === "C" ? "Call" : "Put")}</td>` +
       `<td><input type="number" class="opt2-wb-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><input type="number" class="opt2-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><select class="opt2-wb-expiry" data-idx="${idx}" style="width:95px;font-size:.7rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
@@ -4360,6 +4453,7 @@ function opt2RenderWorkbench() {
       const idx = parseInt(inp.dataset.idx);
       const l = opt2WbLegs[idx];
       l.strike = parseFloat(inp.value) || 0;
+      if (l.opt === "PERP") return;  // perps don't rebuild instrument name
       // Rebuild instrument name to match new strike
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
       l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
@@ -4825,8 +4919,10 @@ document.getElementById("btn-opt2-reduce-cost").addEventListener("click", () => 
   }
   document.getElementById("opt2-ask").value =
     "Analyze my existing structures and find ways to reduce their cost. " +
-    "For each structure, suggest rolls, adjustments, or overlays that lower the net premium spent " +
-    "while preserving as much of the protective profile as possible. " +
+    "Use ROLLS (suggest_rolls with objective reduce_cost) or CLOSE+REOPEN at better strikes. " +
+    "Do NOT suggest pure overlays (selling extra calls/puts on top without closing anything) — overlays create hidden risk. " +
+    "Do NOT suggest closing positions without reopening equivalent protection. " +
+    "The goal is to maintain the same protective profile while spending less premium. " +
     "Present each cost-reduction trade as a named strategy block I can add to the workbench.";
   opt2Run();
 });
@@ -4837,28 +4933,33 @@ document.getElementById("btn-opt2-price-move").addEventListener("click", () => {
   }
   document.getElementById("opt2-ask").value =
     "PRICE MOVEMENT OPTIMIZATION.\n\n" +
-    "CONCEPT: Find positions that are now NEARLY WORTHLESS (far OTM after the price move) " +
-    "and recycle them into better-positioned protection.\n\n" +
-    "WHAT TO RECYCLE — ONLY positions where ALL of these are true:\n" +
-    "- The position is far out-of-the-money at current spot (strike is far from spot)\n" +
-    "- The position has LOST most of its value (marked [PROFITABLE — harvest candidate] in the structures list)\n" +
-    "- Closing it is CHEAP — the current market value is small, near zero\n" +
-    "- It is a LONG position we can sell, or a SHORT position that is nearly worthless to buy back\n\n" +
-    "WHAT TO NEVER RECYCLE:\n" +
-    "- Deep ITM positions — these are EXPENSIVE to close, not cheap. Skip them entirely.\n" +
-    "- Positions that are still providing active protection at current spot levels\n" +
-    "- Short options with high intrinsic value — buying these back costs real money, defeats the purpose\n\n" +
-    "THE RECYCLE:\n" +
-    "For each cheap-to-close position, reopen the SAME type of protection at strikes closer to current spot.\n" +
-    "Example: Long Put at 1200 is worthless (spot is 2000). Close it for pennies. Open Long Put at 1800. " +
-    "Downside protection improved, cost nearly zero.\n\n" +
+    "You have two jobs after a price move:\n\n" +
+    "JOB 1 — RECYCLE WORTHLESS POSITIONS (far OTM)\n" +
+    "Find positions that are now nearly worthless (far OTM) and cheap to close. " +
+    "Roll them into better-positioned protection closer to current spot. " +
+    "Close for pennies, reopen near spot.\n" +
+    "Example: Long Put at 1200 is worthless (spot is 2000). Close it for pennies. Open Long Put at 1800.\n\n" +
+    "JOB 2 — TIGHTEN ITM SPREADS\n" +
+    "Find spreads that are now deep ITM where both legs have significant intrinsic value. " +
+    "The max payout on these is already locked in — but the wide strike width ties up margin/capital for no extra benefit. " +
+    "Reduce the spread width by moving strikes closer together or closer to spot. This can:\n" +
+    "- Free up margin for new trades\n" +
+    "- Capture some locked-in value as cash\n" +
+    "- Improve the payoff profile at current spot levels\n" +
+    "Example: Put spread Long 1800 / Short 1400 with spot at 1200 — both deep ITM, max payout realized. " +
+    "Tighten to Long 1400 / Short 1200 — similar protection at current levels, narrower width, frees up the rest.\n\n" +
+    "WHAT TO ANALYZE:\n" +
+    "- For each structure, compute how deep ITM or OTM it is relative to current spot\n" +
+    "- For OTM structures: are they cheap to close and recycle? (Job 1)\n" +
+    "- For ITM spreads: can the width be reduced while maintaining protection at current levels? (Job 2)\n" +
+    "- For structures near the money: leave them alone, they are actively working\n\n" +
     "HARD RULES:\n" +
-    "- If closing a structure costs more than $50K, DO NOT recycle it. It is not cheap enough.\n" +
     "- Net cost of each roll step should be under $30K. If more, skip that structure.\n" +
     "- Total plan cost should be near zero or a small credit.\n" +
     "- Close/reopen ENTIRE structures (spreads = all legs). Include trade IDs.\n" +
     "- build_strategy only (not scan_trades). Name: 'Step N: Roll [type] [#IDs] [old] -> [new]'\n" +
-    "- If NO positions qualify (nothing is cheap to close), say so. Do not force bad trades.";
+    "- IMPORTANT: Tag each leg with role: 'close' (closing existing position) or 'open' (new position) so the UI shows which trades are closes vs opens.\n" +
+    "- If NO positions qualify, say so. Do not force bad trades.";
   opt2Run();
 });
 document.getElementById("btn-opt2-clear-target").addEventListener("click", () => {
@@ -5460,6 +5561,11 @@ async function sbInit() {
 }
 
 function sbPopulate() {
+  const cptys = [...new Set(pfData.positions.map(p => p.counterparty))].sort();
+  const $cpF = document.getElementById("sb-filter-counterparty");
+  $cpF.innerHTML = '<option value="">All</option>';
+  cptys.forEach(c => { const o = document.createElement("option"); o.value = c; o.textContent = c; $cpF.appendChild(o); });
+
   const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
   const $expF = document.getElementById("sb-filter-expiry");
   $expF.innerHTML = '<option value="">All</option>';
@@ -5493,10 +5599,12 @@ function sbPopulate() {
 // ── Filtering & sorting ──────────────────────────────────
 
 function sbGetFilteredPositions() {
+  const fCpty = document.getElementById("sb-filter-counterparty").value;
   const fExpiry = document.getElementById("sb-filter-expiry").value;
   const fType = document.getElementById("sb-filter-type").value;
   const fSide = document.getElementById("sb-filter-side").value;
   let list = [...pfData.positions];
+  if (fCpty) list = list.filter(p => p.counterparty === fCpty);
   if (fExpiry) list = list.filter(p => p.expiry.split("T")[0] === fExpiry);
   if (fType) list = list.filter(p => p.opt === fType);
   if (fSide) list = list.filter(p => p.side === fSide);
@@ -5537,6 +5645,7 @@ function sbRenderTable() {
     else if (secondarySort && th.dataset.col === secondarySort.col) th.classList.add("sort-secondary");
   });
 
+  const _sd = currentAsset === "FIL" ? 2 : 0;
   const fmtNum = (v, d=0) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
   const spot = pfData.eth_spot;
   const $tbody = document.getElementById("sb-trades-body");
@@ -5573,7 +5682,7 @@ function sbRenderTable() {
       `<td style="text-align:left;font-size:.72rem">${pos.instrument}</td>` +
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
       `<td style="text-align:left;color:${typeColor}">${pos.opt === "C" ? "Call" : "Put"}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.strike)}</td>` +
+      `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.net_qty)}</td>` +
@@ -5769,6 +5878,7 @@ function sbRenderRollResults(results, totalCloseValue, totalOpenValue, totalRoll
   hdr += `<th>Total Cost</th></tr>`;
   $thead.innerHTML = hdr;
 
+  const _sd = currentAsset === "FIL" ? 2 : 0;
   const fmtNum = (v, d=2) => v != null ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "---";
   const $tbody = document.getElementById("sb-results-body");
   $tbody.innerHTML = "";
@@ -5778,7 +5888,7 @@ function sbRenderRollResults(results, totalCloseValue, totalOpenValue, totalRoll
     totalDteImpact += r.dteImpact; totalStrikeImpact += r.strikeImpact;
     totalQtyImpact += r.qtyImpact; totalTypeImpact += r.typeImpact || 0;
     const sideClass = r.pos.side === "Long" ? "qty-long" : "qty-short";
-    const strikeLabel = r.strikeChanged ? `${fmtNum(r.pos.strike, 0)} → ${fmtNum(r.newStrike, 0)}` : fmtNum(r.pos.strike, 0);
+    const strikeLabel = r.strikeChanged ? `${fmtNum(r.pos.strike, _sd)} → ${fmtNum(r.newStrike, _sd)}` : fmtNum(r.pos.strike, _sd);
     const qtyLabel = r.qtyChanged ? `${fmtNum(r.pos.net_qty, 0)} → ${fmtNum(r.newNetQty, 0)}` : fmtNum(r.pos.net_qty, 0);
     const typeLabel = r.typeChanged ? `${r.pos.opt === "C" ? "Call" : "Put"} → ${r.newType === "C" ? "Call" : "Put"}` : (r.pos.opt === "C" ? "Call" : "Put");
     const typeColor = r.typeChanged ? "var(--accent)" : "inherit";
@@ -5822,7 +5932,8 @@ function sbRenderRollResults(results, totalCloseValue, totalOpenValue, totalRoll
 function sbAddLeg(side, type, strike, qty, expiry) {
   side = side || "buy";
   type = type || "C";
-  strike = strike || Math.round(pfData.eth_spot / 50) * 50;
+  const _step = pfData.eth_spot >= 100 ? 50 : pfData.eth_spot >= 10 ? 1 : 0.1;
+  strike = strike || Math.round(pfData.eth_spot / _step) * _step;
   qty = qty || 1000;
   expiry = expiry || sbGetTargetExpiry() || ((pfData.vol_surface || [])[0] || {}).expiry_code || "";
   sbLegs.push({ side, type, strike, qty, expiry });
@@ -5843,20 +5954,20 @@ function sbRenderLegs() {
   sbLegs.forEach((leg, idx) => {
     const isPerp = leg.type === "PERP";
     const tr = document.createElement("tr");
-    tr.innerHTML =
-      `<td>${isPerp ? '<span style="color:var(--muted);font-size:.75rem">N/A</span>' : `<select class="sb-leg-expiry" data-idx="${idx}" style="font-size:.75rem;width:100%;margin:0">${expiryOpts}</select>`}</td>` +
-      `<td style="white-space:nowrap">` +
-        `<select class="sb-leg-side" data-idx="${idx}" style="font-size:.75rem;width:55px;margin:0">` +
-          `<option value="buy" ${leg.side === "buy" ? "selected" : ""}>Buy</option>` +
-          `<option value="sell" ${leg.side === "sell" ? "selected" : ""}>Sell</option></select> ` +
-        `<select class="sb-leg-type" data-idx="${idx}" style="font-size:.75rem;width:65px;margin:0">` +
-          `<option value="C" ${leg.type === "C" ? "selected" : ""}>Call</option>` +
-          `<option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option>` +
-          `<option value="PERP" ${leg.type === "PERP" ? "selected" : ""}>Perp</option></select>` +
-      `</td>` +
-      `<td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="any" style="width:80px;font-size:.75rem;padding:.2rem .3rem;text-align:center" ${isPerp ? 'title="Entry price for perpetual"' : ""}></td>` +
-      `<td><input type="number" class="sb-leg-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:70px;font-size:.75rem;padding:.2rem .3rem;text-align:center"></td>` +
-      `<td><button class="sb-leg-remove btn-secondary" data-idx="${idx}" style="padding:.15rem .4rem;font-size:.7rem;margin:0;width:auto">✕</button></td>`;
+    tr.innerHTML = `
+      <td>${isPerp ? '<span style="color:var(--muted)">N/A</span>' : `<select class="sb-leg-expiry" data-idx="${idx}">${expiryOpts}</select>`}</td>
+      <td class="side-type-cell">
+        <select class="sb-leg-side" data-idx="${idx}" style="width:48%">
+          <option value="buy" ${leg.side === "buy" ? "selected" : ""}>Buy</option>
+          <option value="sell" ${leg.side === "sell" ? "selected" : ""}>Sell</option></select>
+        <select class="sb-leg-type" data-idx="${idx}" style="width:48%">
+          <option value="C" ${leg.type === "C" ? "selected" : ""}>Call</option>
+          <option value="P" ${leg.type === "P" ? "selected" : ""}>Put</option>
+          <option value="PERP" ${leg.type === "PERP" ? "selected" : ""}>Perp</option></select>
+      </td>
+      <td><input type="number" class="sb-leg-strike" data-idx="${idx}" value="${leg.strike}" step="any" ${isPerp ? 'title="Entry price for perpetual"' : ""}></td>
+      <td><input type="number" class="sb-leg-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1"></td>
+      <td><button class="btn-remove sb-leg-remove" data-idx="${idx}">✕</button></td>`;
     $tbody.appendChild(tr);
     // Set expiry value after append (only for options, not perps)
     if (!isPerp) {
@@ -5877,28 +5988,33 @@ function sbRenderLegs() {
 function sbApplyTemplate(name) {
   sbLegs = [];
   const spot = pfData ? pfData.eth_spot : 2500;
-  const K = Math.round(spot / 50) * 50;
+  // Adaptive rounding: use a step size proportional to spot price
+  const step = spot >= 100 ? 50 : spot >= 10 ? 1 : 0.1;
+  const K = Math.round(spot / step) * step;
+  const narrow = Math.round(spot * 0.08 / step) * step || step;  // ~8% offset
+  const wide   = Math.round(spot * 0.20 / step) * step || step;  // ~20% offset
+  const spread = Math.round(spot * 0.12 / step) * step || step;  // ~12% offset for strangle
   const exp = sbGetTargetExpiry() || ((pfData.vol_surface || [])[0] || {}).expiry_code || "";
   switch (name) {
     case "long_call":     sbLegs.push({ side: "buy", type: "C", strike: K, qty: 1000, expiry: exp }); break;
     case "long_put":      sbLegs.push({ side: "buy", type: "P", strike: K, qty: 1000, expiry: exp }); break;
     case "bull_call_spread":
       sbLegs.push({ side: "buy", type: "C", strike: K, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "sell", type: "C", strike: K + 500, qty: 1000, expiry: exp }); break;
+      sbLegs.push({ side: "sell", type: "C", strike: K + wide, qty: 1000, expiry: exp }); break;
     case "bear_put_spread":
       sbLegs.push({ side: "buy", type: "P", strike: K, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "sell", type: "P", strike: K - 500, qty: 1000, expiry: exp }); break;
+      sbLegs.push({ side: "sell", type: "P", strike: K - wide, qty: 1000, expiry: exp }); break;
     case "straddle":
       sbLegs.push({ side: "buy", type: "C", strike: K, qty: 1000, expiry: exp });
       sbLegs.push({ side: "buy", type: "P", strike: K, qty: 1000, expiry: exp }); break;
     case "strangle":
-      sbLegs.push({ side: "buy", type: "C", strike: K + 300, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "buy", type: "P", strike: K - 300, qty: 1000, expiry: exp }); break;
+      sbLegs.push({ side: "buy", type: "C", strike: K + spread, qty: 1000, expiry: exp });
+      sbLegs.push({ side: "buy", type: "P", strike: K - spread, qty: 1000, expiry: exp }); break;
     case "iron_condor":
-      sbLegs.push({ side: "buy", type: "P", strike: K - 500, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "sell", type: "P", strike: K - 200, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "sell", type: "C", strike: K + 200, qty: 1000, expiry: exp });
-      sbLegs.push({ side: "buy", type: "C", strike: K + 500, qty: 1000, expiry: exp }); break;
+      sbLegs.push({ side: "buy", type: "P", strike: K - wide, qty: 1000, expiry: exp });
+      sbLegs.push({ side: "sell", type: "P", strike: K - narrow, qty: 1000, expiry: exp });
+      sbLegs.push({ side: "sell", type: "C", strike: K + narrow, qty: 1000, expiry: exp });
+      sbLegs.push({ side: "buy", type: "C", strike: K + wide, qty: 1000, expiry: exp }); break;
     case "long_perp":
       sbLegs.push({ side: "buy", type: "PERP", strike: spot, qty: 1000, expiry: "" }); break;
     case "short_perp":
@@ -5943,6 +6059,7 @@ function sbPriceStructure() {
 
   const spot = pfData.eth_spot;
   const spots = pfData.spot_ladder;
+  const sbVolSpread = parseFloat(document.getElementById("sb-vol-spread").value) || 0;
   sbLegsPriced = [];
   let totalPay = 0, totalReceive = 0;
 
@@ -5963,11 +6080,16 @@ function sbPriceStructure() {
     if (!entry) { alert(`No vol surface data for expiry ${leg.expiry}`); return; }
     const dte = entry.dte;
     const T = Math.max(dte, 0) / 365.25;
-    const ivPct = sbLookupSmileIv(leg.expiry, leg.strike);
+    let ivPct = sbLookupSmileIv(leg.expiry, leg.strike);
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${leg.strike} at ${leg.expiry}`); return; }
+    // Apply bid/ask vol spread: buys at offer (mid + spread), sells at bid (mid - spread)
+    if (sbVolSpread > 0) {
+      ivPct = leg.side === "buy" ? ivPct + sbVolSpread : Math.max(ivPct - sbVolSpread, 1);
+    }
     const sigma = ivPct / 100;
     const bsPremEth = bsPrice(spot, leg.strike, T, 0, sigma, leg.type);
-    const bsPremUsd = bsPremEth;
+    if (isNaN(bsPremEth)) console.error("NaN from bsPrice:", { spot, strike: leg.strike, T, sigma, type: leg.type });
+    const bsPremUsd = isNaN(bsPremEth) ? 0 : bsPremEth;
     const legCost = dir * leg.qty * bsPremUsd;
     if (legCost > 0) totalPay += legCost; else totalReceive += Math.abs(legCost);
 
@@ -5981,10 +6103,11 @@ function sbPriceStructure() {
   const $results = document.getElementById("sb-pricing-results");
   $results.style.display = "block";
   const net = totalReceive - totalPay;
+  const sbSpreadNote = sbVolSpread > 0 ? ` &nbsp;|&nbsp; <span style="font-size:.7rem;color:var(--muted)">vol spread &plusmn;${sbVolSpread}pts</span>` : "";
   document.getElementById("sb-pricing-summary").innerHTML =
     `Pay <span class="mtm-neg" style="font-weight:600">$${Math.round(totalPay).toLocaleString()}</span> &nbsp;|&nbsp; ` +
     `Receive <span class="mtm-pos" style="font-weight:600">$${Math.round(totalReceive).toLocaleString()}</span> &nbsp;|&nbsp; ` +
-    `Net: <span class="${net >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-weight:600">${net >= 0 ? "Rcv" : "Pay"} $${Math.abs(Math.round(net)).toLocaleString()}</span>`;
+    `Net: <span class="${net >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-weight:600">${net >= 0 ? "Rcv" : "Pay"} $${Math.abs(Math.round(net)).toLocaleString()}</span>` + sbSpreadNote;
 
   const $tbody = document.getElementById("sb-premiums-body");
   $tbody.innerHTML = "";
@@ -5997,11 +6120,12 @@ function sbPriceStructure() {
       `<td style="text-align:left;color:${lp.side === "buy" ? "var(--green)" : "var(--red)"}">${lp.side}</td>` +
       `<td>${typeLabel}</td>` +
       `<td style="font-family:monospace">${isPerp ? "$" + lp.strike.toLocaleString() : lp.strike.toLocaleString()}</td>` +
-      `<td style="font-family:monospace">${lp.qty.toLocaleString()}</td>` +
       `<td>${isPerp ? "--" : lp.dte + "d"}</td>` +
       `<td>${isPerp ? "--" : lp.ivPct.toFixed(1) + "%"}</td>` +
-      `<td style="font-family:monospace">${isPerp ? "--" : lp.bsPremEth.toFixed(4)}</td>` +
-      `<td style="font-family:monospace">${isPerp ? "$0" : "$" + lp.bsPremUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>`;
+      `<td style="font-family:monospace">${lp.qty.toLocaleString()}</td>` +
+      `<td style="font-family:monospace">${isPerp ? "$0" : "$" + fmtPrem(lp.bsPremUsd)}</td>` +
+      `<td style="font-family:monospace;color:${lp.side === 'sell' ? 'var(--green)' : 'var(--red)'}">` +
+        `${isPerp ? "$0" : "$" + fmtPremTotal(lp.qty * lp.bsPremUsd)}</td>`;
     $tbody.appendChild(tr);
   }
 
@@ -6065,11 +6189,12 @@ async function sbAddToPortfolio() {
       if (lp.type === "PERP") {
         // Perpetual position: linear payoff at all horizons
         const entryPrice = lp.strike;
+        const spot = pfData.eth_spot;
         const payoff = {};
         for (const h of allHorizons) {
           payoff[String(h)] = spots.map(s => Math.round(signedQty * (s - entryPrice) * 100) / 100);
         }
-        const markUsd = pfData.eth_spot - entryPrice;  // current unrealized P&L per unit
+        const markUsd = spot - entryPrice;  // current unrealized P&L per unit
 
         const newPos = {
           id: pfNextId++,
@@ -6078,7 +6203,7 @@ async function sbAddToPortfolio() {
           trade_date: new Date().toISOString().split("T")[0],
           side_raw: lp.side === "sell" ? "Sell" : "Buy",
           option_type: "Perpetual",
-          instrument: "ETH-PERPETUAL",
+          instrument: `${currentAsset}-PERPETUAL`,
           expiry: "",
           days_remaining: 0,
           strike: entryPrice,
@@ -6095,7 +6220,7 @@ async function sbAddToPortfolio() {
           delta: sign, gamma: 0, theta: 0, vega: 0,
           mark_price_usd: Math.abs(markUsd),
           current_mtm: Math.round(signedQty * markUsd * 100) / 100,
-          notional_live: Math.round(lp.qty * pfData.eth_spot * 100) / 100,
+          notional_live: Math.round(lp.qty * spot * 100) / 100,
           payoff_by_horizon: payoff,
         };
 
@@ -6106,7 +6231,7 @@ async function sbAddToPortfolio() {
       }
 
       // Options leg
-      const instrument = `ETH-${lp.expiry}-${lp.strike}-${lp.type}`;
+      const instrument = `${currentAsset}-${lp.expiry}-${lp.strike}-${lp.type}`;
       let tk;
       try {
         tk = await get(`/api/portfolio/ticker/${encodeURIComponent(instrument)}`);
@@ -6517,7 +6642,7 @@ document.getElementById("btn-sb-expiring-10d").addEventListener("click", () => {
   sbRenderTable();
 });
 
-["sb-filter-expiry", "sb-filter-type", "sb-filter-side"].forEach(id => {
+["sb-filter-counterparty", "sb-filter-expiry", "sb-filter-type", "sb-filter-side"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => { if (pfData) sbRenderTable(); });
 });
 
@@ -6638,6 +6763,8 @@ document.getElementById("btn-sb-add-confirm").addEventListener("click", () => {
 // Structure builder
 document.getElementById("btn-sb-add-leg").addEventListener("click", () => sbAddLeg());
 document.getElementById("btn-sb-price-structure").addEventListener("click", sbPriceStructure);
+document.getElementById("sb-vol-spread").addEventListener("input", () => updateVolSpreadHint("sb-vol-spread", "sb-vol-spread-hint"));
+updateVolSpreadHint("sb-vol-spread", "sb-vol-spread-hint");
 document.getElementById("btn-sb-add-to-portfolio").addEventListener("click", sbAddToPortfolio);
 
 document.querySelectorAll(".sb-template").forEach(btn => {
@@ -7510,3 +7637,257 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
 }
 
 // (Full Optimizer tab removed)
+
+// ═══════════════════════════════════════════════════════════════
+// VOL SURFACE CURVE PAGE
+// ═══════════════════════════════════════════════════════════════
+let vcLoaded = false;
+
+async function vcInit() {
+  vcLoaded = true;
+  const $sel = document.getElementById("vc-expiry-select");
+  const $btn = document.getElementById("btn-vc-load");
+
+  // Populate expiry dropdown from vol surface cache or fetch expirations
+  if (volSurface && volSurface.smiles && volSurface.smiles.length > 0) {
+    $sel.innerHTML = "";
+    for (const s of volSurface.smiles) {
+      const opt = document.createElement("option");
+      opt.value = s.expiry_code;
+      opt.textContent = `${s.expiry_code} (${s.dte}d)`;
+      $sel.appendChild(opt);
+    }
+  } else {
+    try {
+      const expiries = await get("/api/market/expirations");
+      $sel.innerHTML = "";
+      for (const exp of expiries) {
+        const opt = document.createElement("option");
+        opt.value = exp;
+        opt.textContent = exp;
+        $sel.appendChild(opt);
+      }
+    } catch (e) {
+      $sel.innerHTML = '<option value="">Failed to load</option>';
+    }
+  }
+
+  $btn.addEventListener("click", vcLoadCurve);
+  $sel.addEventListener("change", vcLoadCurve);
+
+  // Draw empty chart
+  vcDrawEmpty();
+
+  // Auto-load first expiry
+  if ($sel.value) vcLoadCurve();
+}
+
+function vcDrawEmpty() {
+  const cc = chartColors();
+  const layout = {
+    title: { text: "Vol Surface Curve — Select an Expiry", font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper,
+    plot_bgcolor: cc.plot,
+    xaxis: { title: "Strike (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
+    yaxis: { title: "Cost / Income (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
+    margin: { t: 50, r: 30, b: 50, l: 70 },
+    showlegend: true,
+    legend: { font: { color: cc.muted }, bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
+  };
+  Plotly.newPlot("volcurve-chart", [], layout, { responsive: true });
+}
+
+async function vcLoadCurve() {
+  const expiry = document.getElementById("vc-expiry-select").value;
+  if (!expiry) return;
+
+  const $btn = document.getElementById("btn-vc-load");
+  $btn.classList.add("loading");
+  $btn.disabled = true;
+
+  try {
+    const data = await get(`/api/market/surface-curve?expiry=${expiry}`);
+    vcRenderCurve(data);
+  } catch (e) {
+    console.error("Vol curve load failed:", e);
+    alert("Failed to load curve: " + e.message);
+  } finally {
+    $btn.classList.remove("loading");
+    $btn.disabled = false;
+  }
+}
+
+function vcRenderCurve(data) {
+  const { spot, expiry, calls, puts } = data;
+  const notional = parseFloat(document.getElementById("vc-notional").value) || 1000;
+  const step = parseFloat(document.getElementById("vc-step").value) || 100;
+
+  // Build strike-indexed maps
+  const callMap = {};
+  for (const c of calls) callMap[c.strike] = c;
+  const putMap = {};
+  for (const p of puts) putMap[p.strike] = p;
+
+  // Collect ALL strikes that Deribit has listed for this expiry
+  const allStrikes = new Set();
+  for (const c of calls) allStrikes.add(c.strike);
+  for (const p of puts) allStrikes.add(p.strike);
+  const strikes = [...allStrikes].sort((a, b) => a - b);
+
+  // Build call mids and put mids across all strikes
+  const callStrikes = [], callMids = [], callIvs = [];
+  const putStrikes = [], putMids = [], putIvs = [];
+
+  for (const k of strikes) {
+    const c = callMap[k];
+    if (c) {
+      callStrikes.push(k);
+      callMids.push(c.mark_usd * notional);
+      callIvs.push(c.mark_iv);
+    }
+    const p = putMap[k];
+    if (p) {
+      putStrikes.push(k);
+      putMids.push(p.mark_usd * notional);
+      putIvs.push(p.mark_iv);
+    }
+  }
+
+  // Build traces
+  const cc = chartColors();
+  const traces = [];
+
+  // Call mids — green
+  if (callStrikes.length > 0) {
+    traces.push({
+      x: callStrikes,
+      y: callMids,
+      type: "scatter",
+      mode: "lines+markers",
+      name: `Calls mid (${notional.toLocaleString()} ETH)`,
+      line: { color: "#66bb6a", width: 2.5 },
+      marker: { size: 5 },
+      fill: "tozeroy",
+      fillcolor: "rgba(102,187,106,0.10)",
+      hovertemplate: "Strike: $%{x:,.0f}<br>Mid: $%{y:,.0f}<br>IV: %{customdata:.1f}%<extra>Call</extra>",
+      customdata: callIvs,
+    });
+  }
+
+  // Put mids — red/orange
+  if (putStrikes.length > 0) {
+    traces.push({
+      x: putStrikes,
+      y: putMids,
+      type: "scatter",
+      mode: "lines+markers",
+      name: `Puts mid (${notional.toLocaleString()} ETH)`,
+      line: { color: "#ef5350", width: 2.5 },
+      marker: { size: 5 },
+      fill: "tozeroy",
+      fillcolor: "rgba(239,83,80,0.10)",
+      hovertemplate: "Strike: $%{x:,.0f}<br>Mid: $%{y:,.0f}<br>IV: %{customdata:.1f}%<extra>Put</extra>",
+      customdata: putIvs,
+    });
+  }
+
+  // Spot vertical line
+  const allValues = callMids.concat(putMids);
+  const yMax = allValues.length > 0 ? Math.max(...allValues) * 1.05 : 1;
+  traces.push({
+    x: [spot, spot],
+    y: [0, yMax],
+    type: "scatter",
+    mode: "lines",
+    name: `Spot $${spot.toLocaleString(undefined, {maximumFractionDigits: 0})}`,
+    line: { color: "#ffa726", width: 2, dash: "dash" },
+    hoverinfo: "skip",
+  });
+
+  const layout = {
+    title: { text: `Vol Surface Curve — ${expiry}`, font: { color: cc.text, size: 16 } },
+    paper_bgcolor: cc.paper,
+    plot_bgcolor: cc.plot,
+    xaxis: {
+      title: "Strike (USD)",
+      color: cc.muted,
+      gridcolor: cc.grid,
+      zerolinecolor: cc.zeroline,
+      tickformat: "$,.0f",
+      range: [0, 7000],
+    },
+    yaxis: {
+      title: `Mid Premium per ${notional.toLocaleString()} ETH (USD)`,
+      color: cc.muted,
+      gridcolor: cc.grid,
+      zerolinecolor: cc.zeroline,
+      tickformat: "$,.0f",
+    },
+    margin: { t: 50, r: 30, b: 50, l: 80 },
+    showlegend: true,
+    legend: { font: { color: cc.muted }, bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1 },
+    annotations: [{
+      x: spot,
+      y: yMax * 0.95,
+      text: `Spot $${spot.toLocaleString(undefined, {maximumFractionDigits: 0})}`,
+      showarrow: true,
+      arrowhead: 2,
+      ax: 40,
+      ay: 20,
+      font: { color: "#ffa726", size: 12 },
+      arrowcolor: "#ffa726",
+    }],
+  };
+
+  Plotly.react("volcurve-chart", traces, layout, { responsive: true });
+
+  // Update spot label
+  document.getElementById("vc-spot-label").textContent =
+    `ETH Spot: $${spot.toLocaleString(undefined, {maximumFractionDigits: 2})} | Expiry: ${expiry} | Call & Put mid prices across all strikes`;
+
+  // Render table
+  vcRenderTable(callStrikes, callMids, callIvs, putStrikes, putMids, putIvs, notional, spot);
+}
+
+function vcRenderTable(callStrikes, callMids, callIvs, putStrikes, putMids, putIvs, notional, spot) {
+  const $section = document.getElementById("vc-table-section");
+  const $tbody = document.getElementById("vc-table-body");
+  $tbody.innerHTML = "";
+
+  // Build maps for easy lookup
+  const cMap = {};
+  for (let i = 0; i < callStrikes.length; i++) cMap[callStrikes[i]] = { mid: callMids[i], iv: callIvs[i] };
+  const pMap = {};
+  for (let i = 0; i < putStrikes.length; i++) pMap[putStrikes[i]] = { mid: putMids[i], iv: putIvs[i] };
+
+  // All strikes
+  const allK = [...new Set([...callStrikes, ...putStrikes])].sort((a, b) => a - b);
+
+  for (const k of allK) {
+    const c = cMap[k];
+    const p = pMap[k];
+    const tr = document.createElement("tr");
+
+    if (Math.abs(k - spot) < 50) tr.classList.add("row-highlight");
+
+    const callMidStr = c ? `$${Math.round(c.mid).toLocaleString()}` : "--";
+    const callIvStr = c && c.iv ? c.iv.toFixed(1) + "%" : "--";
+    const callPerUnit = c ? `$${(c.mid / notional).toFixed(2)}` : "--";
+    const putMidStr = p ? `$${Math.round(p.mid).toLocaleString()}` : "--";
+    const putIvStr = p && p.iv ? p.iv.toFixed(1) + "%" : "--";
+    const putPerUnit = p ? `$${(p.mid / notional).toFixed(2)}` : "--";
+
+    tr.innerHTML = `
+      <td style="font-weight:600">$${k.toLocaleString()}</td>
+      <td style="text-align:right;color:#66bb6a">${callPerUnit}</td>
+      <td style="text-align:right;color:#66bb6a">${callMidStr}</td>
+      <td style="text-align:right">${callIvStr}</td>
+      <td style="text-align:right;color:#ef5350">${putPerUnit}</td>
+      <td style="text-align:right;color:#ef5350">${putMidStr}</td>
+      <td style="text-align:right">${putIvStr}</td>
+    `;
+    $tbody.appendChild(tr);
+  }
+
+  $section.style.display = "";
+}

@@ -47,6 +47,60 @@ async def get_expirations() -> list[str]:
     return sorted(expiries)
 
 
+@router.get("/surface-curve")
+async def get_surface_curve(expiry: str) -> dict:
+    """Return option prices for a single expiry to build the protection/income curve.
+
+    For each strike, returns the mark price (in USD) for calls and puts.
+    Used by the Vol Surface Curve page.
+    """
+    spot = await client.get_eth_spot_price()
+
+    summaries = await client._get("get_book_summary_by_currency", {
+        "currency": "ETH",
+        "kind": "option",
+    })
+
+    calls: list[dict] = []  # {strike, mark_usd, mark_iv, bid_usd, ask_usd}
+    puts: list[dict] = []
+
+    for s in summaries:
+        name = s.get("instrument_name", "")
+        parts = name.split("-")
+        if len(parts) < 4:
+            continue
+        if parts[1] != expiry:
+            continue
+
+        strike = float(parts[2])
+        opt_type = parts[3]  # "C" or "P"
+        mark_price = s.get("mark_price")  # in ETH
+        mark_iv = s.get("mark_iv")
+        bid = s.get("bid_price")
+        ask = s.get("ask_price")
+
+        if mark_price is None or mark_price <= 0:
+            continue
+
+        entry = {
+            "strike": strike,
+            "mark_usd": mark_price * spot,
+            "mark_iv": mark_iv,
+            "bid_usd": (bid * spot) if bid and bid > 0 else None,
+            "ask_usd": (ask * spot) if ask and ask > 0 else None,
+        }
+
+        if opt_type == "C":
+            calls.append(entry)
+        else:
+            puts.append(entry)
+
+    calls.sort(key=lambda x: x["strike"])
+    puts.sort(key=lambda x: x["strike"])
+
+    return {"spot": spot, "expiry": expiry, "calls": calls, "puts": puts}
+
+
 @router.get("/vol-surface")
 async def get_vol_surface(asset: str = "ETH") -> dict:
     """Fetch vol surface. ETH from Deribit directly; FIL scaled from ETH by HV ratio."""
