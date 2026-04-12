@@ -121,11 +121,11 @@ async def init_db():
 
 
 async def _auto_expire_trades(db: aiosqlite.Connection):
-    """Mark active trades with expiry <= today as expired."""
+    """Mark active trades with expiry < today as expired (expire the day after expiry)."""
     from datetime import date
     today = date.today().isoformat()
     cursor = await db.execute(
-        "SELECT id FROM trades WHERE status = 'active' AND expiry <= ? AND expiry != ''",
+        "SELECT id FROM trades WHERE status = 'active' AND expiry < ? AND expiry != ''",
         (today,),
     )
     rows = await cursor.fetchall()
@@ -144,7 +144,7 @@ async def _auto_expire_trades(db: aiosqlite.Connection):
             (tid,),
         )
     await db.commit()
-    logger.info("Auto-expired %d trades (expiry <= %s)", len(ids), today)
+    logger.info("Auto-expired %d trades (expiry < %s)", len(ids), today)
 
 
 async def close_db():

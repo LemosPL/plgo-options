@@ -61,6 +61,8 @@ def _safe_float(v) -> float:
 
 def _payoff_vec(spot_arr, strike, opt, qty):
     """Intrinsic payoff at expiry — kept as fallback."""
+    if opt == "PERP":
+        return qty * (spot_arr - strike)
     if opt == "C":
         return qty * np.maximum(spot_arr - strike, 0.0)
     return qty * np.maximum(strike - spot_arr, 0.0)
@@ -79,6 +81,8 @@ def _bs_vec(spots, K, T, r, sigma, opt):
 
 def _bs_payoff_vec(spot_arr, strike, opt, qty, T, sigma):
     """BS-aware payoff for a position across spot ladder."""
+    if opt == "PERP":
+        return qty * (spot_arr - strike)
     if sigma is None or sigma <= 0 or T is None:
         return _payoff_vec(spot_arr, strike, opt, qty)
     return qty * _bs_vec(spot_arr, strike, T, 0.0, sigma, opt)
@@ -702,6 +706,18 @@ async def calculate_workbench(req: CalculateRequest):
         opt = leg.get("opt", "C")
         expiry_code = leg.get("expiry_code", "")
         sign = 1.0 if side == "buy" else -1.0
+
+        # Handle perpetual legs
+        if opt == "PERP":
+            if strike > 0 and qty > 0:
+                wb_payoff += _payoff_vec(spot_arr, strike, "PERP", sign * qty)
+            leg_costs.append({
+                "instrument": "ETH-PERPETUAL", "side": side, "qty": qty,
+                "strike": strike, "opt": "PERP",
+                "bid_usd": 0, "ask_usd": 0, "price_usd": 0,
+                "leg_cost": 0, "spread_pct": 0, "mark_iv": None,
+            })
+            continue
 
         # Rebuild instrument name from actual strike/expiry/opt (don't trust stale name)
         if strike > 0 and expiry_code:
@@ -1397,13 +1413,8 @@ async def chat(req: ChatRequest):
         mtm_tag = f"MTM P&L: ${struct_mtm:+,.0f}" if struct_mtm != 0 else "MTM P&L: $0"
 
         # Smart labeling: consider what the structure DOES for the portfolio
-        # Long puts = downside protection. NEVER label as "harvest candidate".
-        # Short puts deep ITM = expensive to close. NEVER label as "harvest candidate".
-        # Long calls near/at spot = active exposure. Don't harvest unless far OTM.
         has_long_puts = any(sl["type"] == "Put" and sl["side"] == "Long" for sl in slegs)
         has_short_puts_itm = any(sl["type"] == "Put" and sl["side"] == "Short" and sl["strike"] > spot * 1.2 for sl in slegs)
-        is_protection = has_long_puts or stype in ("put_spread", "collar")
-        is_expensive_to_close = abs(struct_value) > 100000 and has_short_puts_itm
         # For calls: only "harvest candidate" if all legs are far OTM (> 50% above spot)
         all_legs_far_otm = all(
             (sl["type"] == "Call" and sl["strike"] > spot * 1.5) or
@@ -1412,17 +1423,29 @@ async def chat(req: ChatRequest):
         )
         close_cost_cheap = abs(struct_value) < 50000  # cheap to close
 
-        if is_protection:
+        # Detect deep ITM spreads — candidates for width tightening
+        is_spread = stype in ("put_spread", "call_spread", "iron_condor")
+        all_legs_deep_itm = len(slegs) >= 2 and all(
+            (sl["type"] == "Call" and sl["strike"] < spot * 0.85) or
+            (sl["type"] == "Put" and sl["strike"] > spot * 1.15)
+            for sl in slegs
+        )
+        if is_spread and all_legs_deep_itm:
+            spread_width = max(sl["strike"] for sl in slegs) - min(sl["strike"] for sl in slegs)
+            mtm_tag += f" [DEEP ITM — TIGHTEN CANDIDATE, spread width ${spread_width:,.0f}, consider reducing width to free margin and improve payoff]"
+        elif all_legs_far_otm and close_cost_cheap and struct_mtm > 1000:
+            mtm_tag += " [PROFITABLE — recycle candidate, cheap to close and reopen at better strikes]"
+        elif all_legs_far_otm and close_cost_cheap:
+            mtm_tag += " [FAR OTM — recycle candidate, cheap to close and reopen at better strikes]"
+        elif has_long_puts and stype in ("put_spread", "collar"):
             if struct_mtm > 1000:
-                mtm_tag += " [PROFITABLE — PROTECTION, do NOT close — provides downside hedge]"
+                mtm_tag += " [PROFITABLE — PROTECTION, provides downside hedge]"
             elif struct_mtm < -1000:
                 mtm_tag += " [UNDERWATER — PROTECTION, consider rolling to better strikes]"
-        elif is_expensive_to_close:
-            mtm_tag += " [DEEP ITM — EXPENSIVE to close, do NOT harvest]"
-        elif struct_mtm > 1000 and all_legs_far_otm and close_cost_cheap:
-            mtm_tag += " [PROFITABLE — harvest candidate, cheap to close]"
+            else:
+                mtm_tag += " [PROTECTION — active downside hedge]"
         elif struct_mtm > 1000:
-            mtm_tag += " [PROFITABLE — but closing costs ${:,.0f}, evaluate carefully]".format(abs(struct_value))
+            mtm_tag += " [PROFITABLE — closing costs ${:,.0f}, evaluate carefully]".format(abs(struct_value))
         elif struct_mtm < -1000:
             mtm_tag += " [UNDERWATER]"
 
@@ -1471,25 +1494,25 @@ async def chat(req: ChatRequest):
             val = abs(pd.get("current_value_usd", 0))
             mtm_tag = f"MTM P&L: ${mtm:+,.0f}"
 
-            # Protection logic for naked positions
+            # Labeling for naked positions
             is_long_put = pd["side"] == "Long" and pd["type"] == "Put"
-            is_short_put_itm = pd["side"] == "Short" and pd["type"] == "Put" and pd["strike"] > spot * 1.2
+            is_deep_itm = (pd["type"] == "Call" and pd["strike"] < spot * 0.85) or (pd["type"] == "Put" and pd["strike"] > spot * 1.15)
             is_far_otm = (pd["type"] == "Call" and pd["strike"] > spot * 1.5) or (pd["type"] == "Put" and pd["strike"] < spot * 0.5)
             is_cheap = val < 50000
 
             if is_long_put:
                 if mtm > 1000:
-                    mtm_tag += " [PROFITABLE — PROTECTION, do NOT close — provides downside hedge]"
+                    mtm_tag += " [PROFITABLE — PROTECTION, provides downside hedge]"
                 elif mtm < -1000:
                     mtm_tag += " [UNDERWATER — PROTECTION, consider rolling to better strikes]"
                 else:
                     mtm_tag += " [PROTECTION — downside hedge]"
-            elif is_short_put_itm:
-                mtm_tag += " [DEEP ITM SHORT PUT — EXPENSIVE to close, do NOT harvest]"
+            elif is_deep_itm:
+                mtm_tag += " [DEEP ITM — current value ${:,.0f}, evaluate for strike adjustment]".format(val)
             elif mtm > 1000 and is_far_otm and is_cheap:
-                mtm_tag += " [PROFITABLE — harvest candidate, far OTM and cheap to close]"
+                mtm_tag += " [PROFITABLE — recycle candidate, far OTM and cheap to close and reopen at better strikes]"
             elif mtm > 1000:
-                mtm_tag += " [PROFITABLE — but closing costs ${:,.0f}, evaluate carefully]".format(val)
+                mtm_tag += " [PROFITABLE — closing costs ${:,.0f}, evaluate carefully]".format(val)
             elif mtm < -1000:
                 mtm_tag += " [UNDERWATER]"
 
@@ -1497,12 +1520,12 @@ async def chat(req: ChatRequest):
                 f"  NAKED [#{pd['id']}]: {pd['side']} {pd['type']} {int(pd['strike'])} | exp {pd['expiry']} ({pd['dte']}d) | qty {pd['qty']} ETH | {mtm_tag}"
             )
 
-    # Compute total harvestable profit
+    # Compute total portfolio MTM
     _total_mtm = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail)
-    _harvestable = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail if pd.get("mtm_pnl_usd", 0) > 0)
+    _profitable = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail if pd.get("mtm_pnl_usd", 0) > 0)
     _underwater = sum(pd.get("mtm_pnl_usd", 0) for pd in positions_detail if pd.get("mtm_pnl_usd", 0) < 0)
     portfolio_structures.append(f"\n  TOTAL PORTFOLIO MTM P&L: ${_total_mtm:+,.0f}")
-    portfolio_structures.append(f"  HARVESTABLE PROFIT (close profitable positions): ${_harvestable:+,.0f}")
+    portfolio_structures.append(f"  PROFITABLE STRUCTURES VALUE: ${_profitable:+,.0f} (NOTE: closing these removes their protection — see rules below)")
     portfolio_structures.append(f"  UNDERWATER POSITIONS: ${_underwater:+,.0f}")
 
     # Add DTE warnings
@@ -1786,6 +1809,30 @@ async def chat(req: ChatRequest):
 11. NEVER write P&L impact tables with made-up numbers. Only include P&L figures if they come directly from tool results (the "impact" field). If you don't have tool results yet, say "call build_strategy to get exact numbers" instead of guessing.
 12. If you want to propose multiple strategies, call build_strategy for EACH one separately so you get real costs for each. Do NOT describe strategies with cost estimates before calling the tool.
 
+=== CRITICAL: NEVER SUGGEST "TAKE PROFIT" WITHOUT REOPENING PROTECTION ===
+13. Closing a profitable position is NOT free money — it REMOVES the protection that position provides. If the market moves after closing, the portfolio is exposed.
+14. The ONLY valid way to suggest "harvesting profit" is: close the position AND simultaneously reopen equivalent protection at a lower cost. The real profit is the NET DIFFERENCE, not the full close value.
+15. If you cannot demonstrate a cheaper way to reopen the same protection shape, then there is NO profit to harvest — the position is doing exactly what it was designed to do.
+16. NEVER tell the user they can "take profit of $X" by closing positions. Instead say: "Close this structure ($X value), reopen equivalent protection for $Y, net real profit = $X - $Y".
+17. NEVER suggest pure overlays (adding short calls/puts on top of existing positions without closing anything). Overlays create hidden risk — selling calls caps upside, selling puts adds downside. Always use rolls or close+reopen instead.
+
+=== CRITICAL: CHALLENGE INCOMPLETE OR RISKY USER REQUESTS ===
+You are a senior advisor, not a yes-man. When a user request would damage the portfolio, you MUST push back and educate before executing. Specifically:
+
+18. If the user asks to CLOSE or "take profit" on positions WITHOUT mentioning reopening:
+   - FIRST quantify what protection they would lose: "These call spreads provide $X in upside protection above $Y. Closing them leaves the portfolio fully exposed above $Y."
+   - THEN offer the proper alternative: "I can find a way to reopen equivalent protection cheaper — you keep the hedge and capture the net difference as real profit."
+   - THEN ask: "Do you want me to (A) close AND reopen (recommended), or (B) close outright and accept the exposure?"
+   - Only proceed with option B if the user explicitly confirms they want to remove the protection.
+
+19. If the user asks for something vague like "improve my portfolio" or "reduce cost":
+   - Ask what direction they want to improve: downside protection? upside participation? lower breakeven? Tighter spreads?
+   - Do NOT guess — ask one focused follow-up question, then execute.
+
+20. If the user asks to add trades that would CONFLICT with existing structures (e.g., selling calls when they already have long call spreads):
+   - Flag the conflict: "You already have Long Call Spread [#X, #Y] at these strikes. Adding a short call here would partially cancel that protection."
+   - Ask: "Should I adjust the existing structure instead, or do you intentionally want to reduce that exposure?"
+
 When parsing pasted trades:
 - Instrument "ETH-26JUN26-2400-P" means expiry_code="26JUN26", strike=2400, opt="P"
 - Group into strategies: Long+Short puts at different strikes = "Put Spread"
@@ -1878,20 +1925,26 @@ CRITICAL: When analyzing the portfolio or suggesting improvements, you MUST cons
    - Rolling can reduce cost (e.g., rolling to farther expiry collects more premium)
    Think: "Before adding new trades, can I improve the portfolio by rolling what already exists?"
 
-2. **CLOSE existing structures** — ONLY recommend closing when:
-   - A structure is marked [harvest candidate] in the structures list — these are CHEAP to close and far OTM
-   - A structure is working against the target shape
-   NEVER close structures marked [PROTECTION] — these provide downside/upside hedging.
-   NEVER close structures marked [EXPENSIVE to close] — the cost defeats the purpose.
-   NEVER close structures marked [evaluate carefully] without explaining the cost trade-off.
+2. **CLOSE + REOPEN (NEVER close alone)** — CRITICAL RULE:
+   Closing a profitable position is NOT "taking profit" — it REMOVES protection from the portfolio.
+   You MUST NEVER suggest closing positions without simultaneously showing how to reopen equivalent protection.
+   The ONLY valid "profit harvest" is: close a structure, reopen equivalent protection cheaper, and the NET DIFFERENCE is the real profit.
+   Example: Close call spread worth $500K, reopen same protection at current strikes for $350K = real profit of $150K with protection maintained.
+   If you cannot show a cheaper way to reopen the same protection, then there is NO profit to take — the position is doing its job.
+
+   When closing IS justified (as part of close+reopen):
+   - A structure is marked [recycle candidate] — CHEAP to close and far OTM, reopen closer to spot
+   - A structure is marked [TIGHTEN CANDIDATE] — reduce width, reopen tighter
+   - A structure is working against the target shape — close and reopen in the right direction
+   NEVER close structures marked [PROTECTION] without reopening equivalent protection.
    CRITICAL: Always close ENTIRE structures, never individual legs.
    - A "Call Spread [#39, #38]" must be closed by reversing BOTH legs.
    - Always reference the trade IDs: "Close Call Spread [#39, #38] 3700/5700"
-   - Use build_strategy with the reverse legs (sell what's long, buy what's short) so it appears as an executable step.
+   - Use build_strategy with BOTH the close legs (role: "close") AND the reopen legs (role: "open") so the user sees the full picture.
 
 3. **NEW trades** — Add new structures only when rolling/closing isn't sufficient.
 
-The BEST analysis combines all three: "Roll structure [#12,#13] to extend duration, close [#15,#16] since it conflicts with the target, and add a new put spread to fill the gap."
+The BEST analysis combines all three: "Roll structure [#12,#13] to extend duration, close+reopen [#15,#16] at better strikes (net credit $50K), and add a new put spread to fill the gap."
 
 === ROLL WORKFLOW ===
 When rolling or closing/restructuring positions:
@@ -2046,7 +2099,7 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
         },
         {
             "name": "build_strategy",
-            "description": "Build a custom strategy from specific legs and add it to the Suggestions table. Use this when YOU recommend specific trades (strike, type, side, expiry) and want them to appear in the user's UI so they can add to workbench and test. This fetches live Deribit prices for each leg.",
+            "description": "Build a custom strategy from specific legs and add it to the Suggestions table. Use this when YOU recommend specific trades (strike, type, side, expiry) and want them to appear in the user's UI so they can add to workbench and test. This fetches live Deribit prices for each leg. For roll/recycle strategies, tag each leg with role='close' or role='open' so the UI visually distinguishes which legs close existing positions vs open new ones.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -2061,12 +2114,13 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                             "type": "object",
                             "properties": {
                                 "side": {"type": "string", "enum": ["buy", "sell"]},
-                                "opt": {"type": "string", "enum": ["C", "P"], "description": "C=Call, P=Put"},
-                                "strike": {"type": "number"},
-                                "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'"},
-                                "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."}
+                                "opt": {"type": "string", "enum": ["C", "P", "PERP"], "description": "C=Call, P=Put, PERP=Perpetual"},
+                                "strike": {"type": "number", "description": "Strike for options, entry price for perps"},
+                                "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'. Use 'PERP' for perpetuals."},
+                                "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."},
+                                "role": {"type": "string", "enum": ["close", "open"], "description": "Tag this leg as 'close' (closing an existing position) or 'open' (opening a new one). Use when building roll/recycle strategies so the UI shows which legs are closes vs opens."}
                             },
-                            "required": ["side", "opt", "strike", "expiry_code"]
+                            "required": ["side", "opt", "strike"]
                         }
                     }
                 },
@@ -2325,6 +2379,18 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
             )]
             if not to_roll:
                 to_roll = sorted(structures, key=lambda s: s["dte"])[:8]
+        elif objective == "lock_gains":
+            # Profitable structures: close and reopen at better strikes to capture net difference
+            # Compute MTM for each structure to find profitable ones
+            def _struct_mtm(s):
+                return sum(l.get("mtm_pnl_usd", 0) for l in s["legs"])
+            to_roll = sorted(
+                [s for s in structures if _struct_mtm(s) > 5000],
+                key=lambda s: -_struct_mtm(s),
+            )[:8]
+            if not to_roll:
+                # Fall back to all structures sorted by profitability
+                to_roll = sorted(structures, key=lambda s: -_struct_mtm(s))[:8]
 
         if not to_roll:
             return "No structures found matching the roll criteria.", None
@@ -2658,6 +2724,16 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
         if not legs_input:
             return "No legs provided.", None
 
+        # Validate: warn if only close legs with no open legs (removing protection without replacing it)
+        roles = [l.get("role") for l in legs_input if l.get("role")]
+        if roles and all(r == "close" for r in roles):
+            return (
+                "REJECTED: This strategy only contains CLOSE legs with no OPEN (reopen) legs. "
+                "Closing positions without reopening equivalent protection removes the portfolio's hedge. "
+                "You MUST include both close legs AND open legs that reopen equivalent protection at better strikes/cost. "
+                "The real profit is the NET DIFFERENCE between close proceeds and reopen cost, not the full close value."
+            ), None
+
         # Fetch live prices from Deribit
         try:
             summaries_raw = await client._get("get_book_summary_by_currency", {
@@ -2678,8 +2754,24 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
             strike = leg["strike"]
             opt_type = leg["opt"]
             side = leg["side"]
-            exp_code = leg["expiry_code"]
+            exp_code = leg.get("expiry_code", "PERP")
             qty = leg.get("qty", avg_qty)
+
+            # Handle perpetual legs — no Deribit lookup, linear payoff
+            if opt_type == "PERP":
+                entry_price = strike
+                leg_data = {
+                    "instrument": "ETH-PERPETUAL", "side": side, "qty": qty,
+                    "strike": entry_price, "opt": "PERP",
+                    "expiry_code": "PERP", "dte": 0,
+                    "price_eth": 0, "price_usd": 0,
+                    "bid_usd": 0, "ask_usd": 0,
+                    "spread_pct": 0, "mark_iv": None,
+                }
+                if leg.get("role") in ("close", "open"):
+                    leg_data["role"] = leg["role"]
+                formatted_legs.append(leg_data)
+                continue
 
             # Build instrument name
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
@@ -2723,14 +2815,18 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
 
             spread_pct = round((ask - bid) / ask * 100, 1) if ask > 0 else 0
 
-            formatted_legs.append({
+            leg_data = {
                 "instrument": inst_name, "side": side, "qty": qty,
                 "strike": strike, "opt": opt_type,
                 "expiry_code": exp_code, "dte": dte,
                 "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
                 "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
                 "spread_pct": spread_pct, "mark_iv": mark_iv,
-            })
+            }
+            # Pass through role tag (close/open) for roll/recycle strategies
+            if leg.get("role") in ("close", "open"):
+                leg_data["role"] = leg["role"]
+            formatted_legs.append(leg_data)
 
         # Compute payoff impact (BS-aware with market IV)
         lo_val = max(500, int(spot * 0.2))

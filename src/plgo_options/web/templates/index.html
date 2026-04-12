@@ -47,6 +47,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 01.5.5V6h4.5a.5.5 0 010 1H8.5v4.5a.5.5 0 01-1 0V7H3a.5.5 0 010-1h4.5V1.5A.5.5 0 018 1z"/><path d="M2 14.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z"/></svg>
       Optimizer v2
     </li>
+    <li class="nav-item" data-page="volcurve">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1.5a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13a.5.5 0 01-.5-.5zM1 14.5a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13a.5.5 0 01-.5-.5z"/><path d="M2 10c1.5-4 3-6 5-6s4 3 6 2" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      Vol Surface Curve
+    </li>
   </ul>
   <div class="sidebar-bottom">
     <button id="btn-theme-toggle" class="theme-toggle" title="Toggle light/dark theme">
@@ -250,6 +254,9 @@
     <!-- Filter toolbar + actions -->
     <section class="card">
       <div class="pf-toolbar">
+        <label class="pf-filter-label">Counterparty
+          <select id="pf-filter-cpty"><option value="">All</option></select>
+        </label>
         <label class="pf-filter-label">Expiry
           <select id="pf-filter-expiry"><option value="">All</option></select>
         </label>
@@ -370,6 +377,8 @@
               <button class="btn-template" data-strategy="straddle">Straddle</button>
               <button class="btn-template" data-strategy="strangle">Strangle</button>
               <button class="btn-template" data-strategy="iron_condor">Iron Condor</button>
+              <button class="btn-template" data-strategy="long_perp">Long Perp</button>
+              <button class="btn-template" data-strategy="short_perp">Short Perp</button>
             </div>
           </div>
           <!-- Legs table -->
@@ -393,6 +402,18 @@
             <tbody id="legs-body"></tbody>
           </table>
           <button id="btn-add-leg" class="btn-secondary" style="margin-top:.5rem">+ Add Leg</button>
+          <div style="margin-top:.5rem;display:flex;align-items:center;gap:.75rem;font-size:.75rem">
+            <span class="proxy-info-icon" title="OTC options don't trade at mid vol. Market makers quote a bid/ask spread around the mid IV.&#10;&#10;Buy = mid + spread (you pay more)&#10;Sell = mid - spread (you receive less)&#10;&#10;FIL: no liquid listed market, spreads are wide (3-5 pts typical).&#10;ETH: Deribit listed, tighter spreads (1-2 pts).&#10;&#10;Set to 0 for theoretical mid pricing."
+              style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(88,166,255,0.3);color:#58a6ff;font-size:.6rem;font-weight:700;cursor:help;flex-shrink:0">i</span>
+            <label style="display:flex;align-items:center;gap:.3rem;color:var(--muted)">
+              Vol Spread
+              <input type="number" id="pricing-vol-spread" value="0" min="0" max="20" step="0.5"
+                style="width:52px;font-size:.75rem;padding:.25rem .4rem"
+                title="Bid/ask vol spread in IV points">
+              <span style="color:var(--muted)">pts</span>
+            </label>
+            <span style="font-size:.65rem;color:var(--muted)" id="pricing-vol-spread-hint"></span>
+          </div>
           <!-- Spot range -->
           <div style="margin-top:.75rem">
             <div class="form-row" style="margin-bottom:.5rem">
@@ -407,7 +428,7 @@
               <thead>
                 <tr>
                   <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
-                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th><th>Source</th>
+                  <th>DTE</th><th>IV %</th><th>Qty</th><th>Price USD</th><th>Total USD</th><th>Source</th>
                 </tr>
               </thead>
               <tbody id="repl-body"></tbody>
@@ -466,6 +487,9 @@
     <!-- Structurer tools -->
     <section class="card">
       <div class="pf-toolbar">
+        <label class="pf-filter-label">Counterparty
+          <select id="sb-filter-counterparty"><option value="">All</option></select>
+        </label>
         <label class="pf-filter-label">Expiry
           <select id="sb-filter-expiry"><option value="">All</option></select>
         </label>
@@ -630,13 +654,25 @@
             <tbody id="sb-legs-body"></tbody>
           </table>
           <button id="btn-sb-add-leg" class="btn-secondary" style="margin-top:.5rem">+ Add Leg</button>
+          <div style="margin-top:.5rem;display:flex;align-items:center;gap:.75rem;font-size:.75rem">
+            <span class="proxy-info-icon" title="OTC options don't trade at mid vol. Market makers quote a bid/ask spread around the mid IV.&#10;&#10;Buy = mid + spread (you pay more)&#10;Sell = mid - spread (you receive less)&#10;&#10;FIL: no liquid listed market, spreads are wide (3-5 pts typical).&#10;ETH: Deribit listed, tighter spreads (1-2 pts).&#10;&#10;Set to 0 for theoretical mid pricing."
+              style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(88,166,255,0.3);color:#58a6ff;font-size:.6rem;font-weight:700;cursor:help;flex-shrink:0">i</span>
+            <label style="display:flex;align-items:center;gap:.3rem;color:var(--muted)">
+              Vol Spread
+              <input type="number" id="sb-vol-spread" value="0" min="0" max="20" step="0.5"
+                style="width:52px;font-size:.75rem;padding:.25rem .4rem"
+                title="Bid/ask vol spread in IV points">
+              <span style="color:var(--muted)">pts</span>
+            </label>
+            <span style="font-size:.65rem;color:var(--muted)" id="sb-vol-spread-hint"></span>
+          </div>
           <div id="sb-pricing-results" style="display:none;margin-top:.75rem">
             <div id="sb-pricing-summary" class="result-box">--</div>
             <table id="sb-premiums-table">
               <thead>
                 <tr>
                   <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
-                  <th>DTE</th><th>IV %</th><th>Prem ETH</th><th>Prem USD</th>
+                  <th>DTE</th><th>IV %</th><th>Qty</th><th>Price USD</th><th>Total USD</th>
                 </tr>
               </thead>
               <tbody id="sb-premiums-body"></tbody>
@@ -985,8 +1021,8 @@
               <div style="display:flex;gap:.25rem;flex-wrap:wrap;align-items:center;padding:3px 6px;border-radius:8px;background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.15)">
                 <span style="font-size:.6rem;font-weight:700;color:#3fb950;text-transform:uppercase;letter-spacing:.5px;margin-right:2px">Grow</span>
                 <button class="btn-secondary opt2-preset" data-q="add upside participation — I want to benefit if ETH rallies above 3500" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950" title="Add call spreads or long calls to capture gains if ETH rallies significantly">More upside</button>
-                <button class="btn-secondary opt2-preset" data-q="lock in current gains and protect the upside zone with collars or call spreads" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950" title="Sell calls or add collars to lock in existing upside gains before they reverse">Lock gains</button>
-                <button id="btn-opt2-price-move" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950;font-weight:600" title="ETH moved — close profitable positions and reinvest the proceeds to improve the curve at near-zero cost">Price move</button>
+                <button class="btn-secondary opt2-preset" data-q="Analyze my profitable structures and find ways to lock in gains by ROLLING or CLOSE+REOPEN at better strikes. Use suggest_rolls with objective lock_gains first. For each profitable structure, show: (1) current value, (2) cost to reopen equivalent protection, (3) net real profit captured. Do NOT suggest closing without reopening — that removes protection." style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950" title="Roll profitable structures to capture gains while maintaining equivalent protection">Lock gains</button>
+                <button id="btn-opt2-price-move" class="btn-secondary" style="width:auto;margin:0;font-size:.66rem;padding:.15rem .4rem;border-radius:10px;border-color:#3fb950;color:#3fb950;font-weight:600" title="ETH moved — recycle OTM positions and tighten ITM spreads (always close+reopen, never close alone)">Price move</button>
               </div>
               <!-- MANAGE — purple: restructure existing book -->
               <div style="display:flex;gap:.25rem;flex-wrap:wrap;align-items:center;padding:3px 6px;border-radius:8px;background:rgba(210,168,255,0.06);border:1px solid rgba(210,168,255,0.15)">
@@ -1352,6 +1388,56 @@
     </section>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Vol Surface Curve                                     -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-volcurve" class="page">
+    <section class="card">
+      <div class="pf-toolbar" style="gap:.75rem;align-items:center">
+        <h2 style="margin:0;font-size:1.1rem">Vol Surface Curve</h2>
+        <label class="pf-filter-label">Expiry
+          <select id="vc-expiry-select" style="width:10rem">
+            <option value="">Loading...</option>
+          </select>
+        </label>
+        <label class="pf-filter-label">Notional per strike
+          <input type="number" id="vc-notional" value="1000" step="100" min="100" style="width:6rem">
+          <span style="font-size:.75rem;opacity:.7">ETH</span>
+        </label>
+        <label class="pf-filter-label">Strike step
+          <input type="number" id="vc-step" value="100" step="50" min="50" style="width:5rem">
+          <span style="font-size:.75rem;opacity:.7">USD</span>
+        </label>
+        <button id="btn-vc-load" class="btn-primary" style="width:auto">Load Curve</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div id="vc-spot-label" style="font-size:.85rem;opacity:.7;margin-bottom:.5rem"></div>
+      <div id="volcurve-chart" style="width:100%;height:550px"></div>
+    </section>
+
+    <section class="card" id="vc-table-section" style="display:none">
+      <h2>Strike Ladder</h2>
+      <div class="chain-wrapper" style="max-height:400px">
+        <table class="pf-table">
+          <thead>
+            <tr>
+              <th>Strike</th>
+              <th style="color:#66bb6a">Call / Unit</th>
+              <th style="color:#66bb6a">Call Mid</th>
+              <th>Call IV</th>
+              <th style="color:#ef5350">Put / Unit</th>
+              <th style="color:#ef5350">Put Mid</th>
+              <th>Put IV</th>
+            </tr>
+          </thead>
+          <tbody id="vc-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
 </div><!-- end #app-content -->
 
 <!-- ============================================================ -->
@@ -1482,6 +1568,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=36"></script>
+<script src="/static/app.js?v=37"></script>
 </body>
 </html>

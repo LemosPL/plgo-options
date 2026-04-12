@@ -35,7 +35,7 @@ class BSRequest(BaseModel):
 
 class LegInput(BaseModel):
     strike: float
-    type: str  # "C" or "P"
+    type: str  # "C", "P", or "PERP"
     premium: float = 0.0
     quantity: float = 1.0
     is_long: bool = True
