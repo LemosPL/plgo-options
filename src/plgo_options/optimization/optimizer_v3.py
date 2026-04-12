@@ -101,7 +101,7 @@ class OptimizerV3(BaseOptimizer):
         port_delta, port_gamma, port_theta, port_vega = self._portfolio_greeks()
         port_vega_by_expiry = self._portfolio_vega_by_expiry()
 
-        qty = 00.
+        qty = 1500.
         condor_trades, x = self.solve_condor(qty, candidate_by_key, x)
         for trade in condor_trades:
             trades.append(trade)

@@ -23,8 +23,8 @@ from pathlib import Path
 from datetime import datetime
 
 import numpy as np
-from scipy.optimize import minimize
-from scipy.stats import norm
+#from scipy.optimize import minimize
+#from scipy.stats import norm
 
 from .base_optimizer import BaseOptimizer
 #from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase

@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+
 import openpyxl
 
 from plgo_options.optimization.optimizer_utils import _safe_int, _safe_float
