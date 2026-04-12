@@ -39,7 +39,7 @@ class OptimizerUseCase:
         portfolio_payload: dict[str, Any],
         run_params: OptimizerRunParams,
     ) -> "OptimizerUseCase":
-        return cls(
+        return_val = cls(
             today=datetime.today(),
             optimizer_input={
                 "eth_spot": portfolio_payload["eth_spot"],
@@ -53,6 +53,8 @@ class OptimizerUseCase:
             },
             run_params=run_params,
         )
+        #print(return_val)
+        return return_val
 
     @classmethod
     def load(cls, path: str | Path) -> "OptimizerUseCase":
@@ -62,12 +64,14 @@ class OptimizerUseCase:
 
         today_str = path.name.split('_')[0]
         today = datetime.strptime(today_str, "%Y%m%d")
-        return cls(
+        return_val = cls(
             today=today,
             optimizer_input=data["optimizer_input"],
             run_params=OptimizerRunParams(**data["run_params"]),
             result=data.get("result"),
         )
+        # print(return_val)
+        return return_val
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
@@ -100,7 +104,7 @@ class OptimizerUseCase:
     def run(self) -> dict[str, Any]:
         optimizer = self.build_optimizer(self.today)
 
-        return optimizer.run_lp()
+        return optimizer.run()
 
         self.run_params.lambda_delta = 0.
         self.run_params.lambda_gamma = 1000000.

@@ -3,6 +3,24 @@ from __future__ import annotations
 from datetime import datetime
 
 
+def _safe_int(v, default: int = 0) -> int:
+    if v is None or v == "":
+        return default
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v) -> float:
+    if v is None:
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def safe_num(value, default: float = 0.0) -> float:
     if value is None:
         return default

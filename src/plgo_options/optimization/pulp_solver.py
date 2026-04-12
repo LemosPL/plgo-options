@@ -12,7 +12,7 @@ class PulpSolver:
         # --- Decision variables: buy_j, sell_j for each leg j ---
         n = len(price_by_expiry)
         m = len(cost_by_counterparty)
-        x_vars = [None] * (2 * m)
+        x_vars = [None] * (n * m)
         buy_bound = 10000000
         k = 0
         for expiry, price in price_by_expiry.items():
@@ -37,9 +37,11 @@ class PulpSolver:
         prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=1))
         print(f"Status: {pulp.LpStatus[prob.status]}")
 
-        solution = np.zeros(2 * m)
-        for j in range(m):
-            solution[2 * j] = x_vars[2 * j].varValue if x_vars[2 * j].varValue is not None else 0
-            solution[2 * j + 1] = x_vars[2 * j + 1].varValue if x_vars[2 * j + 1].varValue is not None else 0
+        solution = np.zeros(n * m)
+        for i in range(n):
+            for j in range(m):
+                k =  (i-1) * m + j
+                solution[k] = x_vars[k].varValue if x_vars[k].varValue is not None else 0
+                solution[k + 1] = x_vars[k + 1].varValue if x_vars[k + 1].varValue is not None else 0
 
         return solution

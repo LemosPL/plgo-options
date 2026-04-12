@@ -18,21 +18,19 @@ from __future__ import annotations
 
 import json
 import math
+import numpy as np
 from enum import Enum
 from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
+from collections import defaultdict
 
-import numpy as np
-from scipy.optimize import minimize
-from scipy.stats import norm
-
-#from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
-from .models import Position, Candidate
+from .models import Position, Candidate, load_positions_from_latest_xlsx
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num
+
 #from .portfolio import load_positions
 
 Counterparties = ["Keyrock", "Flowdesk", "Deribit"]
@@ -57,7 +55,7 @@ class BaseOptimizer:
         positions: list[Position],
         totals: dict,
         snapshot_path: Path,
-        today: datetime.date,
+        today: date,
     ):
         self.eth_spot = eth_spot
         self.spot_ladder = spot_ladder
@@ -72,6 +70,10 @@ class BaseOptimizer:
     @classmethod
     def from_snapshot_dict(cls, data: dict, today: datetime.date) -> "BaseOptimizer":
         snapshot_data, positions = load_snapshot_dict(data)
+
+        latest_positions = load_positions_from_latest_xlsx()
+        if latest_positions:
+            positions = latest_positions
         return cls(
             eth_spot=snapshot_data["eth_spot"],
             spot_ladder=snapshot_data["spot_ladder"],
@@ -121,16 +123,11 @@ class BaseOptimizer:
                     matching_smiles.append(smile)
             else:
                 # ALL-expiries mode: only include expiries where we currently hold positions
-                if smile["expiry_code"] in held_expiry_codes:
+                if True:#smile["expiry_code"] in held_expiry_codes:
                     matching_smiles.append(smile)
 
-        option_smile = OptionSmile([
-            {
-                "expiry_code": smile["expiry_code"],
-                "expiry_date": smile["expiry_date"],
-                "strikes": smile["strikes"],
-                "ivs": [iv/100.0 for iv in smile["ivs"]],
-            }
+        option_smile = OptionSmile([{"expiry_code": smile["expiry_code"], "expiry_date": smile["expiry_date"],
+                                     "strikes": smile["strikes"], "ivs": [iv/100.0 for iv in smile["ivs"]],}
             for smile in matching_smiles
         ])
 
@@ -138,15 +135,22 @@ class BaseOptimizer:
         strike_lo = S * 0.25
         strike_hi = S * 4.00
 
-        tt = -1
+        candidate_by_key = {}
+
+
+        held_keys_by_expiry = defaultdict(set)
+        for exp_code, strike, opt, counterparty in held_option_keys:
+            held_keys_by_expiry[datetime.strptime(exp_code, "%d%b%y")].add((exp_code, strike, opt, counterparty))
+        held_keys_by_expiry = dict(sorted(held_keys_by_expiry.items(), key=lambda kv: kv[0]))
+
+        tt = 0
         for smile in matching_smiles:
-            tt += 1
             expiry_code = smile["expiry_code"]
             expiry_date = smile["expiry_date"]
             dte = (datetime.strptime(expiry_date, "%Y-%m-%d") - self.today).days
-            T = dte / 365.25
             strikes = smile["strikes"]
             ivs = smile["ivs"]
+            counterparty = "Deribit"
 
             for strike, iv_pct in zip(strikes, ivs):
                 if strike < strike_lo or strike > strike_hi:
@@ -156,30 +160,36 @@ class BaseOptimizer:
                     continue
 
                 for opt in ("C", "P"):
-                    counterparty = "Deribit"
-                    if opt == "C" and (strike < S or strike > S * 2):
+                    if opt == "C" and (strike < S or strike > strike_hi):
                         continue
-                    elif opt == "P" and (strike > S or strike < S * 0.5):
+                    elif opt == "P" and (strike > S or strike < strike_lo):
                         continue
-                    candidates.append(self.create_candidate(S, strike, T, 0.0, sigma, opt,
-                                                            expiry_code, expiry_date, dte, iv_pct, counterparty))
+                    c = self.create_candidate(S, strike, 0., sigma, opt, expiry_code, expiry_date, dte, counterparty)
+                    candidate_by_key[(c.expiry_code, c.strike, c.opt, c.counterparty)] = c
 
-            for option_key in held_option_keys:
-                if option_key[0] == expiry_code or (tt < 1 and target_expiry is None):
-                    expiry = datetime.strptime(option_key[0], "%d%b%y")
-                    strike = option_key[1]
-                    opt = option_key[2]
-                    counterparty = option_key[3]
-                    dte = (expiry - self.today).days
-                    sigma = option_smile.compute_vol(expiry, strike)
-                    candidates.append(self.create_candidate(S, strike, T, 0.0, sigma, opt,
-                                                            option_key[0], expiry, dte, sigma*100.0, counterparty))
+                    candidates.append(self.create_candidate(S, strike, 0.0, sigma, opt,
+                                                            expiry_code, expiry_date, dte, counterparty))
 
+            expiry = datetime.strptime(expiry_code, "%d%b%y")
+            while list(held_keys_by_expiry.keys())[tt] <= expiry and tt < len(held_keys_by_expiry.keys())-1:
+                held_option_keys = list(held_keys_by_expiry.values())[tt]
+                for option_key in held_option_keys:
+                    if option_key[0] == expiry_code or (tt < 1 and target_expiry is None):
+                        exp_code = option_key[0]
+                        expiry = datetime.strptime(exp_code, "%d%b%y")
+                        strike = option_key[1]
+                        opt = option_key[2]
+                        counterparty = option_key[3]
+                        dte = (expiry - self.today).days
+                        sigma = option_smile.compute_vol(expiry, strike)
+                        c = self.create_candidate(S, strike, 0., sigma, opt, exp_code, expiry, dte, counterparty)
+                        candidate_by_key[(c.expiry_code, c.strike, c.opt, c.counterparty)] = c
+                        candidates.append(c)
+                tt += 1
         # ETH perpetual future: delta=1, no gamma/theta/vega, price = spot
         if target_expiry is None:
-            candidates.append(self.create_candidate(S, strike=S, T=0., r=0.0, sigma=0., opt="F",
-                                                    expiry_code="PERP", expiry_date="", dte=0, iv_pct=0.,
-                                                    counterparty="Deribit"))
+            candidates.append(self.create_candidate(S, strike=S, r=0.0, sigma=0., opt="F",
+                                                    expiry_code="PERP", expiry_date="", dte=0, counterparty="Deribit"))
 
 
         return candidates
@@ -224,22 +234,26 @@ class BaseOptimizer:
 
     def _portfolio_greeks(self) -> tuple[float, float, float, float]:
         """Return (delta, gamma, theta, vega) of the current portfolio."""
-        delta = sum((p.delta or 0) * p.net_qty for p in self.positions)
-        gamma = sum((p.gamma or 0) * p.net_qty for p in self.positions)
-        theta = sum((p.theta or 0) * p.net_qty for p in self.positions)
-        vega = sum((p.vega or 0) * p.net_qty for p in self.positions)
+        delta = sum((p.delta or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
+        gamma = sum((p.gamma or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
+        theta = sum((p.theta or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
+        vega = sum((p.vega or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
         return delta, gamma, theta, vega
 
-    def _portfolio_vega_by_expiry(self) -> dict[str, float]:
+    def _portfolio_vega_by_expiry(self) -> dict[datetime, float]:
         """Return portfolio vega bucketed by expiry code."""
-        vega_by_expiry: dict[str, float] = {}
+        vega_by_expiry: dict[datetime, float] = {}
         for p in self.positions:
             parts = p.instrument.split("-")
             if len(parts) >= 4:
                 exp_code = parts[1]
             else:
                 exp_code = "UNKNOWN"
-            vega_by_expiry[exp_code] = vega_by_expiry.get(exp_code, 0.0) + (p.vega or 0.0) * p.net_qty
+            expiry = datetime.strptime(exp_code, "%d%b%y")
+            vega_by_expiry[expiry] = (vega_by_expiry.get(expiry, 0.0) + (p.vega or 0.0) * p.net_qty
+                                      * (1. if p.side=='Long' else -1.))
+        vega_by_expiry = dict(sorted(vega_by_expiry.items(), key=lambda item: item[0]))
+
         return vega_by_expiry
 
     def _active_position_expiry_codes(self) -> list[str]:
@@ -350,7 +364,7 @@ class BaseOptimizer:
             elif c.counterparty == "Deribit":
                 cost = spot * deribit_txn_cost_pct / 100.0
             elif c.counterparty == "FlowDesk" or c.counterparty == "KeyRock":
-                cost = spot * brokerage_txn_cost_pct / 100.0
+                cost = brokerage_txn_cost_pct / 100.0
             else:
                 cost = float('nan')
             c_cost_list.append(cost)
@@ -358,10 +372,10 @@ class BaseOptimizer:
 
         return c_cost_rate
 
-    def create_candidate(self, S, strike, T, r, sigma, opt,
-                         expiry_code, expiry_date, dte, iv_pct, counterparty):
+    def create_candidate(self, S, strike, r, sigma, opt,
+                         expiry_code, expiry_date, dte, counterparty):
         delta, gamma, theta, vega, price = bs_greeks(
-            S, strike, T, r, sigma, opt
+            S, strike, dte/365.25, r, sigma, opt
         )
         return Candidate(
             expiry_code=expiry_code,
@@ -369,7 +383,7 @@ class BaseOptimizer:
             dte=dte,
             strike=strike,
             opt=opt,
-            iv_pct=iv_pct,
+            iv_pct=sigma*100.,
             counterparty=counterparty,
             delta=delta,
             gamma=gamma,
@@ -391,5 +405,6 @@ class BaseOptimizer:
             else:
                 exp_code = ""
             key = (exp_code, p.strike, p.opt, p.counterparty)
-            held_positions[key] = held_positions.get(key, 0.0) + p.net_qty
+            mult = 1.0 if p.side == "Long" else -1.0
+            held_positions[key] = held_positions.get(key, 0.0) + mult*p.net_qty
         return held_positions

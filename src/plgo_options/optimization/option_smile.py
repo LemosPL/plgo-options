@@ -119,19 +119,25 @@ class OptionSmile:
         log_strike = log(float(strike))
         mats = self._maturities
 
+        def _eval_clamped(spline, x: float) -> float:
+            x_min = float(spline.x[0])
+            x_max = float(spline.x[-1])
+            x_clamped = min(max(x, x_min), x_max)
+            return float(spline(x_clamped))
+
         if maturity in self._maturity_to_spline:
-            return max(float(self._maturity_to_spline[maturity](log_strike)), 0.0)
+            return max(_eval_clamped(self._maturity_to_spline[maturity], log_strike), 0.0)
 
         if maturity <= mats[0]:
-            return max(float(self._maturity_to_spline[mats[0]](log_strike)), 0.0)
+            return max(_eval_clamped(self._maturity_to_spline[mats[0]], log_strike), 0.0)
         if maturity >= mats[-1]:
-            return max(float(self._maturity_to_spline[mats[-1]](log_strike)), 0.0)
+            return max(_eval_clamped(self._maturity_to_spline[mats[-1]], log_strike), 0.0)
 
         i = bisect_left(mats, maturity)
         m0, m1 = mats[i - 1], mats[i]
 
-        w0 = float(self._maturity_to_spline[m0](log_strike))
-        w1 = float(self._maturity_to_spline[m1](log_strike))
+        w0 = _eval_clamped(self._maturity_to_spline[m0], log_strike)
+        w1 = _eval_clamped(self._maturity_to_spline[m1], log_strike)
 
         T = self._year_fraction(maturity)
         T0 = self._year_fraction(m0)
