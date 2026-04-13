@@ -101,7 +101,14 @@ class OptimizerV3(BaseOptimizer):
         port_delta, port_gamma, port_theta, port_vega = self._portfolio_greeks()
         port_vega_by_expiry = self._portfolio_vega_by_expiry()
 
-        qty = 1500.
+        perp_candidate = candidates[-1]  # candidate_by_key[('PERP', 2210, 'F', 'Deribit')]
+        print(lambda_delta)
+        print(lambda_gamma)
+        perp_trade = self.add_perp_hedge(perp_candidate, -lambda_delta)
+        perp_trade['notional'] = -perp_trade['qty'] * perp_candidate.strike
+        trades.append(perp_trade)
+
+        qty = 1500.*lambda_gamma
         condor_trades, x = self.solve_condor(qty, candidate_by_key, x)
         for trade in condor_trades:
             trades.append(trade)
@@ -358,6 +365,30 @@ class OptimizerV3(BaseOptimizer):
 
         return before_payoff, after_payoff
 
+    def add_perp_hedge(self, perp_candidate, qty):
+        c = perp_candidate
+        instrument_name = ("ETH-PERPETUAL" if c.opt == "F" else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}")
+        cost_rate = 5./10000.
+
+        # Close the full held quantity: long position  -> sell to unwind, short position -> buy to unwind
+        unwind_signed = qty# * condor_mults[k]  # -int(round(held_qty))
+        unwind_qty = abs(unwind_signed)
+        unwind_notional = unwind_qty * 0
+        cost_unwind_part = cost_rate * 0 * unwind_notional
+
+        trade = {
+            "counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date if c else "",
+            "dte": c.dte if c else 0, "strike": c.strike if c else 0.0, "opt": c.opt, "qty": unwind_signed,
+            "side": "Buy" if unwind_signed > 0 else "Sell", "iv_pct": round(c.iv_pct, 1),
+            "bs_price_usd": round(c.bs_price_usd, 2), "notional": round(unwind_notional, 2),
+            "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_unwind_part, 2),
+            "delta_contribution": round(unwind_signed * float(c.delta), 4),
+            "gamma_contribution": round(unwind_signed * float(c.gamma), 6),
+            "vega_contribution": round(unwind_signed * c.vega, 4),
+            "is_unwind": True, "unwind_qty": unwind_qty, "new_qty": 0,
+        }
+        return trade
+
     def _pick_two_monthly_expiries(self, expiry_codes: list[str], min_dte: int = 29) -> list[tuple[str, int]]:
         today = date.today()
         valid: list[tuple[int, str]] = []
@@ -481,7 +512,7 @@ class OptimizerV3(BaseOptimizer):
             # Close the full held quantity: long position  -> sell to unwind, short position -> buy to unwind
             unwind_signed = condor_qty*condor_mults[k]  # -int(round(held_qty))
             unwind_qty = abs(unwind_signed)
-            unwind_notional = unwind_qty * 0
+            unwind_notional = unwind_qty * c.bs_price_usd
             cost_unwind_part = cost_rate * 0 * unwind_notional
             #x[i] = unwind_signed
 

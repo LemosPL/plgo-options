@@ -104,6 +104,8 @@ class OptimizerUseCase:
     def run(self) -> dict[str, Any]:
         optimizer = self.build_optimizer(self.today)
 
+        self.result = optimizer.run(**asdict(self.run_params))
+        return self.result
         return optimizer.run()
 
         self.run_params.lambda_delta = 0.
