@@ -7,7 +7,7 @@ import openpyxl
 def read_eth_trades() -> list[dict]:
     """Read trades from the 'Trades' tab of the ETH dashboard Excel file."""
     #file_path = Path(__file__).resolve().parent.parent / "data" / "ETH - Dashboard Risk+PnL Improvement Proposal.xlsx"
-    file_path = Path(__file__).resolve().parent.parent / "data" / "PLGO_Trades_2026-03-17.xlsx"
+    file_path = Path(__file__).resolve().parent.parent / "data" / "PLGO_Trades_2026-04-21.xlsx"
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     ws = wb["Trades"]

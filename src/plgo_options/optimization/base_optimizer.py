@@ -137,7 +137,6 @@ class BaseOptimizer:
 
         candidate_by_key = {}
 
-
         held_keys_by_expiry = defaultdict(set)
         for exp_code, strike, opt, counterparty in held_option_keys:
             held_keys_by_expiry[datetime.strptime(exp_code, "%d%b%y")].add((exp_code, strike, opt, counterparty))
@@ -188,9 +187,10 @@ class BaseOptimizer:
                 tt += 1
         # ETH perpetual future: delta=1, no gamma/theta/vega, price = spot
         if target_expiry is None:
-            candidates.append(self.create_candidate(S, strike=S, r=0.0, sigma=0., opt="F",
-                                                    expiry_code="PERP", expiry_date="", dte=0, counterparty="Deribit"))
-
+            perp_candidate = self.create_candidate(S, S, 0.0, 0.0, "F", "PERP", "",
+                                                   0, "Deribit")
+            perp_candidate.delta = 1
+            candidates.append(perp_candidate)
 
         return candidates
 
@@ -280,7 +280,7 @@ class BaseOptimizer:
             vov_daily: float,
             lambda_delta: float = 1.0,
             lambda_gamma: float = 1.0,
-            lambda_vega: float = 100.0,
+            lambda_vega: float = 1.0,
             port_vega_by_expiry: dict[str, float] | None = None,
             vega_cross_expiry_corr: float = 0.35,
             risk_mode: RiskMode = RiskMode.FULL,
@@ -314,16 +314,12 @@ class BaseOptimizer:
             var_vega = (port_vega * vov_daily) ** 2
 
         if risk_mode == RiskMode.DELTA_ONLY:
-            return math.sqrt(lambda_delta * var_delta)
+            return np.sign(lambda_delta) * math.sqrt(np.abs(lambda_delta) * var_delta)
         elif risk_mode == RiskMode.GAMMA_VEGA:
-            return math.sqrt(lambda_gamma * var_gamma + lambda_vega * var_vega)
+            return np.sign(lambda_gamma) * math.sqrt(np.abs(lambda_gamma) * var_gamma + lambda_vega * var_vega)
         else:
-            return math.sqrt(
-                lambda_delta * var_delta
-                + lambda_gamma * var_gamma
-                + lambda_vega * var_vega
-            )
-
+            lam_var = lambda_delta * var_delta + lambda_gamma * var_gamma + lambda_vega * var_vega
+            return np.sign(lam_var) * math.sqrt(np.abs(lam_var))
     # ------------------------------------------------------------------
     # Run optimization
     # ------------------------------------------------------------------
@@ -337,7 +333,7 @@ class BaseOptimizer:
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
         lambda_gamma: float = 1.0,
-        lambda_vega: float = 100.0,
+        lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
         vega_cross_expiry_corr: float = 0.0,

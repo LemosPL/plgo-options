@@ -25,7 +25,7 @@ class OptimizationParams(BaseModel):
     target_expiry: str | None = None
     lambda_delta: float = 1.0
     lambda_gamma: float = 1.0
-    lambda_vega: float = 100.0
+    lambda_vega: float = 1.0
     vega_cross_expiry_corr: float = 0.0
     save_usecase_snapshot: bool = False
 

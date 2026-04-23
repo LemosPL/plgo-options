@@ -78,7 +78,7 @@ class OptimizerV2(BaseOptimizer):
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
         lambda_gamma: float = 1.0,
-        lambda_vega: float = 100.0,
+        lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
         vega_cross_expiry_corr: float = 0.0,

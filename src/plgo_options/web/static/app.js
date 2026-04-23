@@ -7476,7 +7476,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       risk_aversion: readNum("optv2-risk-aversion", 1.0),
       lambda_delta: readNum("optv2-lambda-delta", 1.0),
       lambda_gamma: readNum("optv2-lambda-gamma", 1.0),
-      lambda_vega: readNum("optv2-lambda-vega", 100.0),
+      lambda_vega: readNum("optv2-lambda-vega", 1.0),
       brokerage_txn_cost_pct: readNum("optv2-brokerage-txn-cost", 5.0),
       deribit_txn_cost_pct: readNum("optv2-deribit-txn-cost", 0.15),
       max_collateral: readNum("optv2-max-collateral", 4000000),

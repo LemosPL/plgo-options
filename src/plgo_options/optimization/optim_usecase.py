@@ -20,7 +20,7 @@ class OptimizerRunParams:
     target_expiry: str | None = None
     lambda_delta: float = 001.0
     lambda_gamma: float = 1.0
-    lambda_vega: float = 100.0
+    lambda_vega: float = 1.0
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     vega_cross_expiry_corr: float = 0.8
@@ -104,6 +104,8 @@ class OptimizerUseCase:
     def run(self) -> dict[str, Any]:
         optimizer = self.build_optimizer(self.today)
 
+        #self.run_params.lambda_delta = -2500.
+        #self.run_params.lambda_gamma = -0.5
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
         return optimizer.run()

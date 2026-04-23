@@ -10,7 +10,7 @@ from .models import Position, Candidate
 from .math_utils import bs_vec
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
-from .optimizer_utils import expiry_sort_key, safe_num
+from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
 
 
 class OptimizerV3(BaseOptimizer):
@@ -45,7 +45,7 @@ class OptimizerV3(BaseOptimizer):
             target_expiry: str | None = None,
             lambda_delta: float = 1.0,
             lambda_gamma: float = 1.0,
-            lambda_vega: float = 100.0,
+            lambda_vega: float = 1.0,
             unwind_discount: float = 0.2,
             new_position_penalty: float = 0.04,
             vega_cross_expiry_corr: float = 0.0, ):
@@ -104,15 +104,20 @@ class OptimizerV3(BaseOptimizer):
         perp_candidate = candidates[-1]  # candidate_by_key[('PERP', 2210, 'F', 'Deribit')]
         print(lambda_delta)
         print(lambda_gamma)
-        perp_trade = self.add_perp_hedge(perp_candidate, -lambda_delta)
-        perp_trade['notional'] = -perp_trade['qty'] * perp_candidate.strike
+        perp_trade = self.add_perp_hedge(perp_candidate, lambda_delta)
+        perp_trade['notional'] = perp_trade['qty'] * perp_candidate.strike
+        x[-1] += perp_trade['qty']
         trades.append(perp_trade)
 
-        qty = 1500.*lambda_gamma
-        condor_trades, x = self.solve_condor(qty, candidate_by_key, x)
+        qty = 1000.*lambda_gamma
+        call_to_put_ratio = lambda_vega
+        condor_trades, x = self.solve_condor(qty, candidate_by_key, x, call_to_put_ratio)
         for trade in condor_trades:
             trades.append(trade)
-        #x *= 0.
+            expiry_code = get_expiry_code(trade['expiry'])
+            trade_key = (expiry_code, trade['strike'], trade['opt'], trade['counterparty'])
+            i = list(candidate_by_key.keys()).index(trade_key)
+            x[i] += trade['qty']
         #trades = []
 
         new_delta, new_gamma, new_theta, new_vega, new_vega_by_expiry = (
@@ -120,6 +125,9 @@ class OptimizerV3(BaseOptimizer):
 
         print(port_delta)
         print(new_delta)
+        print(port_gamma)
+        print(new_gamma)
+
         spot = self.eth_spot
         # Market parameters
         # ATM IV for daily spot vol
@@ -457,7 +465,7 @@ class OptimizerV3(BaseOptimizer):
             total += qty_sign * leg.bs_price_usd
         return total
 
-    def solve_condor(self, qty, candidate_by_key, x):
+    def solve_condor(self, qty, candidate_by_key, x, call_to_put_ratio=1.):
         # Build candidates for the target expiry range: 10% / ATM / 10% iron condors, and ETH-PERPETUAL
         expiry_codes = sorted(
             {s["expiry_code"] for s in self.vol_surface if s.get("dte", 0) > 0},
@@ -498,7 +506,7 @@ class OptimizerV3(BaseOptimizer):
 
         # Build trades
         condor_qty = qty
-        condor_mults = [-1., 1., 1., -1.]
+        condor_mults = [1., -1., -call_to_put_ratio, call_to_put_ratio]
         condor_trades = []
         for k in range(4):
             c = candidates[k] if k < len(candidates) else None
@@ -541,7 +549,7 @@ from scipy.optimize import minimize
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
         lambda_gamma: float = 1.0,
-        lambda_vega: float = 100.0,
+        lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
         vega_cross_expiry_corr: float = 0.0,

@@ -39,3 +39,7 @@ def expiry_sort_key(expiry_code: str) -> tuple[int, str]:
         return (expiry_date.toordinal(), expiry_code)
     except ValueError:
         return (10**9, expiry_code)
+
+def get_expiry_code(expiry_str) -> str:
+    expiry_code = datetime.strptime(expiry_str, "%Y-%m-%d").strftime("%d%b%y").upper()
+    return expiry_code
