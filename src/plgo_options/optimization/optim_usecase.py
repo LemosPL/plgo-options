@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import pandas as pd
+import numpy as np
 
 from plgo_options.optimization.optimizer import OptimizerV2
 from plgo_options.optimization.optimizer_v3 import OptimizerV3
@@ -116,3 +118,10 @@ class OptimizerUseCase:
         self.run_params.max_collateral = 400_000_000.0
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
+
+    def fit_target(self):
+        df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
+        optimizer = self.build_optimizer(self.today)
+        result = optimizer.run_test(target_expiry="26JUN26", target_profile=df_target)
+
+        k=1

@@ -38,7 +38,16 @@ def main() -> None:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
 
+    optimizer = usecase.build_optimizer(usecase.today)
+    spot_arr = np.array(optimizer.spot_ladder, dtype=float)
+    horizons = [90]  # sorted(set(self.chart_horizons + [0]))
+    trades = []
+    before_payoff, after_payoff = optimizer.build_payoffs(horizons, spot_arr, trades)
+
+    usecase.fit_target()
+
     result = usecase.run()
+
 
     #out_path = path.with_name(path.stem + "_replayed.json")
     #out_path.write_text(json.dumps(result, indent=2, default=_json_default))

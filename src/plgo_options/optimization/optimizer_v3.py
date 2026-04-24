@@ -12,6 +12,9 @@ from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
 
+from scipy.optimize import lsq_linear
+import matplotlib.pyplot as plt
+
 
 class OptimizerV3(BaseOptimizer):
     """Holds all data needed for portfolio optimization."""
@@ -36,6 +39,188 @@ class OptimizerV3(BaseOptimizer):
         self.lambda_delta = float('nan')
         self.lambda_gamma = float('nan')
         self.lambda_vega = float('nan')
+
+    # Current portfolio payoff from held positions, at expiry
+    def terminal_payoff_for_position(self, spot_arr, p: Position) -> np.ndarray:
+        qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+        side = str(getattr(p, "side", "")).lower()
+        signed_qty = qty if side == "long" else -qty
+
+        strike = float(getattr(p, "strike", 0.0) or 0.0)
+        opt = str(getattr(p, "opt", "") or "")
+        if opt == "C":
+            return signed_qty * np.maximum(spot_arr - strike, 0.0)
+        if opt == "P":
+            return signed_qty * np.maximum(strike - spot_arr, 0.0)
+        if opt == "F":
+            return signed_qty * (spot_arr - strike)
+        return np.zeros_like(spot_arr)
+
+
+    def run_test(self, target_expiry, target_profile):
+        held_positions = self.get_held_positions()
+        candidates = self._build_candidates(target_expiry=target_expiry)
+        df_target = target_profile
+        target_strikes = np.asarray(target_profile.index, dtype=float)
+        target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float)
+
+        spot_arr = np.array(self.spot_ladder, dtype=float)
+        target_interp = np.interp(spot_arr, target_strikes, target_payoff)
+
+        base_payoff = np.zeros_like(spot_arr)
+        for p in self.positions:
+            base_payoff += self.terminal_payoff_for_position(spot_arr, p)
+
+        residual = target_interp - base_payoff
+
+        # --- Build strike weights using vega ---
+        # Higher weight near high-vega strikes, lower weight on low-vega strikes.
+        c_vega = np.array([abs(float(getattr(c, "vega", 0.0) or 0.0)) for c in candidates], dtype=float)
+        if np.all(c_vega == 0.0):
+            vega_weight = np.ones_like(c_vega)
+        else:
+            vega_weight = c_vega / np.max(c_vega)
+
+        # Keep a floor so deep OTM strikes still have some influence.
+        min_weight = 0.15
+        strike_weight = np.maximum(vega_weight, min_weight)
+
+        # --- Build weighted payoff matrix ---
+        A_cols = []
+        lower = []
+        upper = []
+        meta = []
+
+        for i, c in enumerate(candidates):
+            if c.opt not in ("C", "P", "F"):
+                continue
+
+            strike = float(c.strike or 0.0)
+
+            if c.opt == "C":
+                curve = np.maximum(spot_arr - strike, 0.0)
+            elif c.opt == "P":
+                curve = np.maximum(strike - spot_arr, 0.0)
+            else:
+                curve = spot_arr - strike
+
+            # Apply vega strike weighting to the curve itself
+            curve = strike_weight[i] * curve
+
+            A_cols.append(curve)
+            meta.append(c)
+
+            held_qty = float(held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0))
+
+            # Prefer unwinds of held positions first.
+            if held_qty > 0:
+                lower.append(-abs(held_qty))
+                upper.append(0.0)
+            elif held_qty < 0:
+                lower.append(0.0)
+                upper.append(abs(held_qty))
+            else:
+                # Allow new positions, but keep them bounded.
+                max_trade = 2500.0
+                lower.append(-max_trade)
+                upper.append(max_trade)
+
+        if not A_cols:
+            return {
+                "status": "no_fit_candidates",
+                "message": "No call/put candidates available for payoff fitting.",
+            }
+
+        A = np.column_stack(A_cols)
+
+        # --- Weighted least squares objective ---
+        # Fit the residual with emphasis on vega-rich strikes.
+        # You can tune this exponent:
+        #   1.0 = mild weighting
+        #   2.0 = stronger ATM preference
+        payoff_row_weights = 1.0 + 2.0 * (1.0 - np.abs(spot_arr - self.eth_spot) / max(self.eth_spot, 1.0))
+        payoff_row_weights = np.clip(payoff_row_weights, 0.5, 3.0)
+
+        W = np.sqrt(payoff_row_weights)
+        A_w = A * W[:, None]
+        b_w = residual * W
+
+        # Small ridge penalty to avoid unnecessary overfitting
+        ridge = 1e-3
+        A_aug = np.vstack([A_w, math.sqrt(ridge) * np.eye(A.shape[1])])
+        b_aug = np.concatenate([b_w, np.zeros(A.shape[1])])
+
+        result = lsq_linear(
+            A_aug,
+            b_aug,
+            bounds=(np.array(lower, dtype=float), np.array(upper, dtype=float)),
+            lsmr_tol="auto",
+            verbose=0,
+        )
+
+        x = result.x
+
+        trades = []
+        fitted_payoff = base_payoff.copy()
+
+        for qty, c, w in zip(x, meta, strike_weight[: len(meta)]):
+            rounded_qty = int(np.round(qty))
+            if rounded_qty == 0:
+                continue
+
+            instrument_name = (
+                "ETH-PERPETUAL" if c.opt == "F"
+                else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
+            )
+
+            if c.opt == "C":
+                curve = rounded_qty * np.maximum(spot_arr - float(c.strike), 0.0)
+            elif c.opt == "P":
+                curve = rounded_qty * np.maximum(float(c.strike) - spot_arr, 0.0)
+            else:
+                curve = rounded_qty * (spot_arr - float(c.strike))
+
+            fitted_payoff += curve
+
+            trades.append({
+                "counterparty": c.counterparty,
+                "instrument": instrument_name,
+                "expiry": c.expiry_date,
+                "dte": c.dte,
+                "strike": c.strike,
+                "opt": c.opt,
+                "qty": rounded_qty,
+                "side": "Buy" if rounded_qty > 0 else "Sell",
+                "bs_price_usd": round(float(c.bs_price_usd or 0.0), 2),
+                "vega": round(float(c.vega or 0.0), 4),
+                "strike_weight": round(float(w), 4),
+                "delta_contribution": round(float(rounded_qty * (c.delta or 0.0)), 4),
+                "gamma_contribution": round(float(rounded_qty * (c.gamma or 0.0)), 6),
+                "vega_contribution": round(float(rounded_qty * (c.vega or 0.0)), 4),
+            })
+
+        mse_before = float(np.mean((base_payoff - target_interp) ** 2))
+        mse_after = float(np.mean((fitted_payoff - target_interp) ** 2))
+
+        plt.plot(spot_arr, base_payoff, label="Base Payoff")
+        plt.plot(spot_arr, target_interp, label="Target Payoff")
+        plt.plot(spot_arr, fitted_payoff, label="Fitted Payoff")
+        plt.legend()
+        plt.show()
+
+        return {
+            "status": "ok",
+            "target_expiry": target_expiry,
+            "optimizer_converged": bool(result.success),
+            "fit_error_before": round(mse_before, 2),
+            "fit_error_after": round(mse_after, 2),
+            "spot_ladder": spot_arr.tolist(),
+            "target_payoff": np.round(target_interp, 2).tolist(),
+            "before_payoff": np.round(base_payoff, 2).tolist(),
+            "after_payoff": np.round(fitted_payoff, 2).tolist(),
+            "trades": trades,
+            "candidates_evaluated": len(meta),
+        }
 
     def run(self,
             risk_aversion: float = 1.0,
