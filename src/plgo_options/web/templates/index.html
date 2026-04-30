@@ -1458,7 +1458,8 @@
       <!-- Shared fields -->
       <div class="modal-grid" style="margin-bottom:.75rem">
         <label class="modal-field">Counterparty
-          <input type="text" id="tf-counterparty" value="">
+          <input type="text" id="tf-counterparty" list="tf-counterparty-list" value="" autocomplete="off">
+          <datalist id="tf-counterparty-list"></datalist>
         </label>
         <label class="modal-field">Trade Date
           <input type="date" id="tf-trade-date">
@@ -1495,9 +1496,11 @@
           </label>
           <label class="modal-field">Premium per Contract
             <input type="number" id="tf-premium-per" step="0.01">
+            <span style="font-size:.65rem;color:var(--muted)">Buy = negative, Sell = positive (auto)</span>
           </label>
           <label class="modal-field">Premium USD
-            <input type="number" id="tf-premium-usd" step="0.01">
+            <input type="number" id="tf-premium-usd" step="0.01" readonly>
+            <span style="font-size:.65rem;color:var(--muted)">= premium &times; qty (auto)</span>
           </label>
           <label class="modal-field">Notional ($mm)
             <input type="number" id="tf-notional" step="0.01">

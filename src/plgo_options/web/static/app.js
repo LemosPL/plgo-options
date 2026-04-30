@@ -1388,26 +1388,105 @@ function tfRenderLegs() {
     </select></td>
     <td><input type="number" class="tf-leg-strike" data-idx="${i}" value="${leg.strike}" step="any" min="0"></td>
     <td><input type="number" class="tf-leg-prem" data-idx="${i}" value="${leg.premium_per}" step="0.01"></td>
-    <td><input type="number" class="tf-leg-premusd" data-idx="${i}" value="${leg.premium_usd}" step="0.01"></td>
+    <td><input type="number" class="tf-leg-premusd" data-idx="${i}" value="${leg.premium_usd}" step="0.01" readonly></td>
     <td><button type="button" class="tf-leg-remove" data-idx="${i}">&times;</button></td>
   </tr>`).join("");
 
   // Wire leg inputs
-  tbody.querySelectorAll(".tf-leg-side").forEach(el => el.addEventListener("change", () => { tfLegs[el.dataset.idx].side = el.value; }));
+  tbody.querySelectorAll(".tf-leg-side").forEach(el => el.addEventListener("change", () => {
+    const idx = el.dataset.idx;
+    tfLegs[idx].side = el.value;
+    // Re-apply sign convention to existing premium when side changes
+    const signed = tfSignedPremium(el.value, tfLegs[idx].premium_per);
+    tfLegs[idx].premium_per = signed;
+    tfRecomputeLegUsd(idx);
+    tfRenderLegs();
+  }));
   tbody.querySelectorAll(".tf-leg-type").forEach(el => el.addEventListener("change", () => { tfLegs[el.dataset.idx].type = el.value; }));
   tbody.querySelectorAll(".tf-leg-strike").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].strike = parseFloat(el.value) || 0; }));
-  tbody.querySelectorAll(".tf-leg-prem").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].premium_per = parseFloat(el.value) || 0; }));
-  tbody.querySelectorAll(".tf-leg-premusd").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].premium_usd = parseFloat(el.value) || 0; }));
+  tbody.querySelectorAll(".tf-leg-prem").forEach(el => {
+    el.addEventListener("input", () => {
+      const idx = el.dataset.idx;
+      tfLegs[idx].premium_per = parseFloat(el.value) || 0;
+      tfRecomputeLegUsd(idx);
+      // Update USD cell live without re-rendering the row (keeps focus)
+      const usdEl = tbody.querySelector(`.tf-leg-premusd[data-idx="${idx}"]`);
+      if (usdEl) usdEl.value = tfLegs[idx].premium_usd;
+    });
+    el.addEventListener("change", () => {
+      const idx = el.dataset.idx;
+      const signed = tfSignedPremium(tfLegs[idx].side, parseFloat(el.value) || 0);
+      tfLegs[idx].premium_per = signed;
+      tfRecomputeLegUsd(idx);
+      tfRenderLegs();
+    });
+  });
   tbody.querySelectorAll(".tf-leg-remove").forEach(el => el.addEventListener("click", () => {
     tfLegs.splice(parseInt(el.dataset.idx), 1);
     tfRenderLegs();
   }));
 }
 
+// Recompute a single leg's premium_usd = signed premium_per × multi-qty.
+function tfRecomputeLegUsd(idx) {
+  const qty = parseFloat(document.getElementById("tf-multi-qty").value) || 0;
+  const leg = tfLegs[idx];
+  if (!leg) return;
+  const signed = tfSignedPremium(leg.side, leg.premium_per);
+  leg.premium_per = signed;
+  leg.premium_usd = +(signed * qty).toFixed(2);
+}
+
+// Recompute USD across all legs (e.g. when multi-qty changes).
+function tfRecomputeAllLegsUsd() {
+  for (let i = 0; i < tfLegs.length; i++) tfRecomputeLegUsd(i);
+  tfRenderLegs();
+}
+
 document.getElementById("btn-tf-add-leg").addEventListener("click", () => {
   tfLegs.push({ side: "Buy", type: "Call", strike: Math.round(ethSpot || 2000), premium_per: 0, premium_usd: 0 });
   tfRenderLegs();
 });
+
+// Recompute all leg USD totals when the shared multi-leg qty changes.
+document.getElementById("tf-multi-qty").addEventListener("input", tfRecomputeAllLegsUsd);
+
+// Premium-sign convention: Buy → negative, Sell/Unwind → positive.
+function tfSignedPremium(side, premium) {
+  const abs = Math.abs(parseFloat(premium) || 0);
+  return side === "Buy" ? -abs : abs;
+}
+
+// Recompute USD = signed premium × qty, without rewriting the premium input
+// (so the user can keep typing). Sign is enforced separately on `change`.
+function tfRecalcPremiumUsd() {
+  const side = document.getElementById("tf-side").value;
+  const $perEl = document.getElementById("tf-premium-per");
+  const $usdEl = document.getElementById("tf-premium-usd");
+  const qty = parseFloat(document.getElementById("tf-qty").value) || 0;
+  const raw = parseFloat($perEl.value);
+  if (isNaN(raw)) { $usdEl.value = ""; return; }
+  $usdEl.value = (tfSignedPremium(side, raw) * qty).toFixed(2);
+}
+
+// Enforce premium-per sign based on current side. Run on blur/change/side-switch.
+function tfEnforcePremiumSign() {
+  const side = document.getElementById("tf-side").value;
+  const $perEl = document.getElementById("tf-premium-per");
+  const raw = parseFloat($perEl.value);
+  if (isNaN(raw) || raw === 0) return;
+  $perEl.value = tfSignedPremium(side, raw);
+  tfRecalcPremiumUsd();
+}
+
+// Populate counterparty datalist from currently loaded trades.
+function tfPopulateCounterparties() {
+  const list = document.getElementById("tf-counterparty-list");
+  if (!list) return;
+  const source = (typeof tmTrades !== "undefined" && Array.isArray(tmTrades)) ? tmTrades : [];
+  const cptys = [...new Set(source.map(t => (t.counterparty || "").trim()).filter(Boolean))].sort();
+  list.innerHTML = cptys.map(c => `<option value="${c.replace(/"/g, "&quot;")}"></option>`).join("");
+}
 
 // Auto-fill ref spot and compute % OTM / notional when strike or qty changes
 function tfAutoCalc() {
@@ -1421,16 +1500,22 @@ function tfAutoCalc() {
   if (spot > 0 && qty > 0) {
     document.getElementById("tf-notional").value = ((qty * spot) / 1e6).toFixed(4);
   }
+  tfRecalcPremiumUsd();
 }
 ["tf-strike", "tf-qty", "tf-ref-spot"].forEach(id => {
   document.getElementById(id).addEventListener("input", tfAutoCalc);
 });
+document.getElementById("tf-side").addEventListener("change", tfEnforcePremiumSign);
+document.getElementById("tf-premium-per").addEventListener("input", tfRecalcPremiumUsd);
+document.getElementById("tf-premium-per").addEventListener("change", tfEnforcePremiumSign);
 
 function tmOpenModal(trade = null) {
   const modal = document.getElementById("modal-trade");
   const title = document.getElementById("modal-trade-title");
   const form = document.getElementById("trade-form");
   const stratBar = document.getElementById("tf-strategy-bar");
+
+  tfPopulateCounterparties();
 
   if (trade) {
     // Edit mode — single leg only, hide strategy bar
@@ -1453,6 +1538,8 @@ function tmOpenModal(trade = null) {
     document.getElementById("tf-premium-usd").value = trade.premium_usd || "";
     document.getElementById("tf-notional").value = trade.notional_mm || "";
     document.getElementById("tf-pct-otm").value = trade.pct_otm || "";
+    // Apply Buy=negative / Sell=positive convention and recompute USD
+    tfEnforcePremiumSign();
   } else {
     // New trade mode — show strategy bar, default to single
     title.textContent = "New Trade";
@@ -1480,6 +1567,9 @@ function tmCloseModal() {
 
 document.getElementById("trade-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  // Enforce sign rule + USD recompute in case user clicks Save without blurring fields.
+  tfEnforcePremiumSign();
+  if (tfPreset !== "single") tfRecomputeAllLegsUsd();
   const id = document.getElementById("tf-id").value;
   const counterparty = document.getElementById("tf-counterparty").value;
   const trade_date = document.getElementById("tf-trade-date").value;
