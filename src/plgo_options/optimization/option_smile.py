@@ -38,7 +38,9 @@ class OptionSmile:
       - or SmileSlice objects
     """
 
-    def __init__(self, slices: list[SmileSlice | dict[str, Any]]):
+    def __init__(self, slices: list[SmileSlice | dict[str, Any]], today: date | datetime | None = None):
+        self.today = self._parse_today(today)
+
         self.slices = [self._coerce_slice(s) for s in slices]
         self.slices.sort(key=lambda s: s.maturity)
 
@@ -49,6 +51,15 @@ class OptionSmile:
         self._maturity_to_spline: dict[datetime, CubicSpline] = {
             s.maturity: self._build_spline(s) for s in self.slices
         }
+
+    def _parse_today(self, value: date | datetime | None) -> datetime:
+        if value is None:
+            return datetime.utcnow()
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day)
+        raise TypeError(f"Unsupported today type: {type(value).__name__}")
 
     def _coerce_slice(self, s: SmileSlice | dict[str, Any]) -> SmileSlice:
         if isinstance(s, SmileSlice):
@@ -84,8 +95,7 @@ class OptionSmile:
         raise TypeError(f"Unsupported maturity type: {type(value).__name__}")
 
     def _year_fraction(self, maturity: datetime) -> float:
-        today = datetime.utcnow()
-        return max((maturity - today).total_seconds(), 0.0) / (365.25 * 24 * 3600)
+        return max((maturity - self.today).total_seconds(), 0.0) / (365.25 * 24 * 3600)
 
     def _build_spline(self, s: SmileSlice) -> CubicSpline:
         if len(s.strikes) != len(s.ivs):

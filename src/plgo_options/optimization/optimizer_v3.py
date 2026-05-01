@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import math
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from datetime import date, datetime
 
 from .base_optimizer import BaseOptimizer, RiskMode
+from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
 from .math_utils import bs_vec
+from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
+from .misc_utils import load_target_profile
 
-from scipy.optimize import lsq_linear
 import matplotlib.pyplot as plt
+
+from ..pricing import options
 
 
 class OptimizerV3(BaseOptimizer):
@@ -36,9 +41,29 @@ class OptimizerV3(BaseOptimizer):
         self.cost = None
         self.risk_reduction = None
 
-        self.lambda_delta = float('nan')
-        self.lambda_gamma = float('nan')
-        self.lambda_vega = float('nan')
+    def _estimate_trade_cost(
+        self,
+        qty: float,
+        price: float,
+        held_qty: float = 0.0,
+        unwind_discount: float = 0.2,
+        new_position_penalty: float = 0.04,
+        is_held: bool = False,
+    ) -> float:
+        """
+        Estimate transaction cost for a single leg.
+        """
+        abs_qty = abs(float(qty))
+        price = max(float(price), 0.0)
+
+        opposite = (qty * held_qty) < 0
+        unwind_abs = min(abs(float(held_qty)), abs_qty) if opposite else 0.0
+        new_abs = abs_qty - unwind_abs
+
+        unwind_cost = unwind_abs * price * unwind_discount
+        new_cost = new_abs * price * (1.0 + (0.0 if is_held else new_position_penalty))
+
+        return unwind_cost + new_cost
 
     # Current portfolio payoff from held positions, at expiry
     def terminal_payoff_for_position(self, spot_arr, p: Position) -> np.ndarray:
@@ -56,74 +81,168 @@ class OptimizerV3(BaseOptimizer):
             return signed_qty * (spot_arr - strike)
         return np.zeros_like(spot_arr)
 
+    def _build_option_smile(self) -> OptionSmile | None:
+        smile_slices = [
+            {
+                "expiry_code": smile["expiry_code"],
+                "expiry_date": smile["expiry_date"],
+                "strikes": smile["strikes"],
+                "ivs": [iv / 100.0 for iv in smile["ivs"]],
+            }
+            for smile in self.vol_surface
+            if smile.get("dte", 0) > 0
+        ]
 
-    def run_test(self, target_expiry, target_profile):
+        if not smile_slices:
+            return None
+
+        return OptionSmile(smile_slices, today=self.today)
+
+    def bs_value_for_position(
+            self,
+            spot_arr,
+            p: Position,
+            option_smile: OptionSmile | None = None,
+            horizon_days: int = 0,
+    ) -> np.ndarray:
+        """
+        Reprice an existing position across the spot ladder using Black-Scholes.
+
+        Uses sticky-strike volatility:
+            sigma = smile_vol(position_expiry, position_strike)
+
+        That sigma is then held fixed while evaluating BS over different spots.
+        """
+        qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+        side = str(getattr(p, "side", "")).lower()
+        signed_qty = qty if side == "long" else -qty
+
+        strike = float(getattr(p, "strike", 0.0) or 0.0)
+        opt = str(getattr(p, "opt", "") or "")
+        dte = int(getattr(p, "days_remaining", 0) or 0)
+
+        if opt == "F":
+            return signed_qty * (spot_arr - strike)
+
+        if opt not in ("C", "P"):
+            return np.zeros_like(spot_arr, dtype=float)
+
+        dte_at_horizon = max(dte - horizon_days, 0)
+        T = dte_at_horizon / 365.25
+        r = 0.0
+
+        if option_smile is not None:
+            maturity = datetime.combine(p.expiry_date, datetime.min.time())
+            sigma = option_smile.compute_vol(maturity, strike=strike)
+        else:
+            sigma = float(getattr(p, "iv_pct", 0.0) or 0.0) / 100.0
+
+        return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
+
+    def run(self,
+                 risk_aversion: float = 1.0,
+                 brokerage_txn_cost_pct: float = 5.0,
+                 deribit_txn_cost_pct: float = 0.1,
+                 max_collateral: float = 4_000_000.0,
+                 target_expiry: str | None = None,
+                 lambda_delta: float = 1.0,
+                 lambda_gamma: float = 1.0,
+                 lambda_vega: float = 1.0,
+                 unwind_discount: float = 0.2,
+                 new_position_penalty: float = 0.04,
+                 vega_cross_expiry_corr: float = 0.0, ):
+        is_replay = (target_expiry is not None)#False
+        target_expiry = "26JUN26"
+        target_profile = load_target_profile()
+
         held_positions = self.get_held_positions()
         candidates = self._build_candidates(target_expiry=target_expiry)
-        df_target = target_profile
+
         target_strikes = np.asarray(target_profile.index, dtype=float)
-        target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float)
+        target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float) #- 2000000
 
         spot_arr = np.array(self.spot_ladder, dtype=float)
+        spot_weights = 1./(0.02 + np.abs(np.log(spot_arr/self.eth_spot)))
         target_interp = np.interp(spot_arr, target_strikes, target_payoff)
 
+        option_smile = self._build_option_smile()
         base_payoff = np.zeros_like(spot_arr)
         for p in self.positions:
-            base_payoff += self.terminal_payoff_for_position(spot_arr, p)
+            base_payoff += self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
 
         residual = target_interp - base_payoff
 
-        # --- Build strike weights using vega ---
-        # Higher weight near high-vega strikes, lower weight on low-vega strikes.
+        # Normalize improvement to something comparable to dollars, keeps huge target curves from drowning the cost signal.
+        payoff_scale = max(float(np.mean(np.abs(target_interp))), 1.0)
+
         c_vega = np.array([abs(float(getattr(c, "vega", 0.0) or 0.0)) for c in candidates], dtype=float)
         if np.all(c_vega == 0.0):
             vega_weight = np.ones_like(c_vega)
         else:
             vega_weight = c_vega / np.max(c_vega)
 
-        # Keep a floor so deep OTM strikes still have some influence.
-        min_weight = 0.15
-        strike_weight = np.maximum(vega_weight, min_weight)
+        min_weight = 0.2
+        strike_weights = np.maximum(vega_weight, min_weight)
+        lams = 0.01 * np.ones(len(candidates))
+        base_lam = 1
 
-        # --- Build weighted payoff matrix ---
         A_cols = []
-        lower = []
-        upper = []
         meta = []
 
+        max_vega = c_vega.max()
+
+        # Filter smiles
+        matching_smiles = []
+        for smile in self.vol_surface:
+            if smile["dte"] <= 0:
+                continue
+            if target_expiry:
+                if smile["expiry_code"] == target_expiry:
+                    matching_smiles.append(smile)
+            else:
+                # ALL-expiries mode: only include expiries where we currently hold positions
+                if True:  # smile["expiry_code"] in held_expiry_codes:
+                    matching_smiles.append(smile)
+
+        option_smile = OptionSmile(
+                [
+                    {
+                        "expiry_code": smile["expiry_code"],
+                        "expiry_date": smile["expiry_date"],
+                        "strikes": smile["strikes"],
+                        "ivs": [iv / 100.0 for iv in smile["ivs"]],
+                    }
+                    for smile in matching_smiles
+                ],
+                today=self.today,
+            )
+
+        curves = []
         for i, c in enumerate(candidates):
             if c.opt not in ("C", "P", "F"):
+                lams[i] = 1.E10
                 continue
-
+            lams[i] = base_lam * np.pow(max_vega/c_vega[i], 2)
             strike = float(c.strike or 0.0)
+            bs_price = float(c.bs_price_usd or 0.0)
+            rounded_qty = 1
 
-            if c.opt == "C":
-                curve = np.maximum(spot_arr - strike, 0.0)
-            elif c.opt == "P":
-                curve = np.maximum(strike - spot_arr, 0.0)
-            else:
-                curve = spot_arr - strike
+            cost_factor = 0 # Cost used only to penalize the candidate curve
+            leg_cost = cost_factor * rounded_qty * bs_price
 
-            # Apply vega strike weighting to the curve itself
-            curve = strike_weight[i] * curve
+            r = 0.
+            T = c.dte / 365.25
+            curve_list = []
+            for spot in spot_arr:
+                vol = option_smile.compute_vol(option_smile.slices[0].maturity, strike=spot)
+                price = options.bs_price(spot, strike, T, r, vol, c.opt)
+                curve_list.append((rounded_qty * price - bs_price) - leg_cost)
+            curve = np.array(curve_list)
 
+            curves.append(curve)
+            curve = strike_weights[i] * curve
             A_cols.append(curve)
             meta.append(c)
-
-            held_qty = float(held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0))
-
-            # Prefer unwinds of held positions first.
-            if held_qty > 0:
-                lower.append(-abs(held_qty))
-                upper.append(0.0)
-            elif held_qty < 0:
-                lower.append(0.0)
-                upper.append(abs(held_qty))
-            else:
-                # Allow new positions, but keep them bounded.
-                max_trade = 2500.0
-                lower.append(-max_trade)
-                upper.append(max_trade)
 
         if not A_cols:
             return {
@@ -132,54 +251,108 @@ class OptimizerV3(BaseOptimizer):
             }
 
         A = np.column_stack(A_cols)
+        lasso = GeneralizedLasso()
+        '''
+        fit_intercept = False
+        lasso.fit_lin_reg(A, residual * 1.E-6, w=spot_weights, fit_intercept=fit_intercept)
+        betas_lin_reg = lasso.betas * 1.E6
+        err_fit_lin_reg = lasso.err_fit #* 1.E-6
+        '''
+        '''
+        print(A)
+        print(residual)
+        print(lams)
+        print(spot_weights)
+        '''
+        lasso.fit(A, residual*1.E-6, lams, w=spot_weights)
+        lasso.fit_lasso(A, residual * 1.E-6, lams)
+        betas_lasso = lasso.betas * 1.E6
+        err_fit_lasso = lasso.err_fit
 
-        # --- Weighted least squares objective ---
-        # Fit the residual with emphasis on vega-rich strikes.
-        # You can tune this exponent:
-        #   1.0 = mild weighting
-        #   2.0 = stronger ATM preference
         payoff_row_weights = 1.0 + 2.0 * (1.0 - np.abs(spot_arr - self.eth_spot) / max(self.eth_spot, 1.0))
-        payoff_row_weights = np.clip(payoff_row_weights, 0.5, 3.0)
+        payoff_row_weights = np.clip(payoff_row_weights, 0.005, 30.0)
+        spot_weights = payoff_row_weights
 
-        W = np.sqrt(payoff_row_weights)
-        A_w = A * W[:, None]
-        b_w = residual * W
+        x = betas_lasso#betas_lin_reg#
+        sum_weights = np.sum(spot_weights)
+        base_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(base_payoff - target_interp, 2))/sum_weights))
+        scored_trades = []
 
-        # Small ridge penalty to avoid unnecessary overfitting
-        ridge = 1e-3
-        A_aug = np.vstack([A_w, math.sqrt(ridge) * np.eye(A.shape[1])])
-        b_aug = np.concatenate([b_w, np.zeros(A.shape[1])])
-
-        result = lsq_linear(
-            A_aug,
-            b_aug,
-            bounds=(np.array(lower, dtype=float), np.array(upper, dtype=float)),
-            lsmr_tol="auto",
-            verbose=0,
-        )
-
-        x = result.x
-
-        trades = []
-        fitted_payoff = base_payoff.copy()
-
-        for qty, c, w in zip(x, meta, strike_weight[: len(meta)]):
+        i = -1
+        for qty, c, w in zip(x, meta, strike_weights[: len(meta)]):
+            i += 1
             rounded_qty = int(np.round(qty))
             if rounded_qty == 0:
                 continue
+
+            held_qty = float(held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0))
+            bs_price = float(c.bs_price_usd or 0.0)
+
+            est_cost = self._estimate_trade_cost(
+                qty=rounded_qty,
+                price=bs_price,
+                held_qty=held_qty,
+                unwind_discount=0.2,
+                new_position_penalty=0.04,
+                is_held=abs(held_qty) > 0,
+            )
 
             instrument_name = (
                 "ETH-PERPETUAL" if c.opt == "F"
                 else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
             )
 
-            if c.opt == "C":
-                curve = rounded_qty * np.maximum(spot_arr - float(c.strike), 0.0)
-            elif c.opt == "P":
-                curve = rounded_qty * np.maximum(float(c.strike) - spot_arr, 0.0)
-            else:
-                curve = rounded_qty * (spot_arr - float(c.strike))
+            curve = rounded_qty * curves[i]
+            new_payoff = base_payoff + curve
+            # linreg_payoff = base_payoff + curve
+            new_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(new_payoff - target_interp, 2)/sum_weights)))
 
+            # Improvement in RMSE, scaled to dollars-ish units.
+            rmse_improvement = base_rmse - new_rmse
+            normalized_benefit = rmse_improvement * payoff_scale * abs(rounded_qty)
+
+            net_benefit = normalized_benefit - est_cost
+            min_net_benefit = 50_000.0
+            if net_benefit <= min_net_benefit:
+                k=1#continue
+
+            base_rmse = new_rmse
+            scored_trades.append((net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name))
+
+        if is_replay:
+            spot = self.eth_spot  # or your reference spot S0
+            x = np.log(spot_arr / spot)
+
+            spot_ticks = np.array([1000, 1500, 2000, 2500, 3000, 4500, 7000], dtype=float)
+            tick_positions = np.log(spot_ticks / spot)
+
+            fig, axes = plt.subplots(3, 1, sharex=True)
+
+            axes[0].plot(x, base_payoff, label="Base Payoff")
+            axes[0].plot(x, target_interp, label="Target Payoff")
+            axes[0].plot(x, new_payoff, label="Fitted Payoff")
+            axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[0].legend()
+
+            axes[1].plot(x, new_payoff - base_payoff, label="Fitted - Base")
+            axes[1].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[1].set_xlabel("Spot")
+            #axes[1].set_ylim(210000, 215000)
+            axes[1].legend()
+            axes[1].set_xticks(tick_positions)
+            axes[1].set_xticklabels([f"{s:,.0f}" for s in spot_ticks])
+
+            axes[2].plot(x, spot_weights, label="Weights")
+            axes[2].legend()
+            plt.show()
+
+        scored_trades.sort(key=lambda t: t[0], reverse=True)
+        #scored_trades = scored_trades[:max_trades]
+
+        trades = []
+        fitted_payoff = base_payoff.copy()
+
+        for net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name in scored_trades:
             fitted_payoff += curve
 
             trades.append({
@@ -194,26 +367,20 @@ class OptimizerV3(BaseOptimizer):
                 "bs_price_usd": round(float(c.bs_price_usd or 0.0), 2),
                 "vega": round(float(c.vega or 0.0), 4),
                 "strike_weight": round(float(w), 4),
+                "estimated_cost": round(float(est_cost), 2),
+                "normalized_benefit": round(float(normalized_benefit), 2),
+                "net_benefit": round(float(net_benefit), 2),
                 "delta_contribution": round(float(rounded_qty * (c.delta or 0.0)), 4),
                 "gamma_contribution": round(float(rounded_qty * (c.gamma or 0.0)), 6),
                 "vega_contribution": round(float(rounded_qty * (c.vega or 0.0)), 4),
             })
 
-        mse_before = float(np.mean((base_payoff - target_interp) ** 2))
-        mse_after = float(np.mean((fitted_payoff - target_interp) ** 2))
-
-        plt.plot(spot_arr, base_payoff, label="Base Payoff")
-        plt.plot(spot_arr, target_interp, label="Target Payoff")
-        plt.plot(spot_arr, fitted_payoff, label="Fitted Payoff")
-        plt.legend()
-        plt.show()
-
         return {
             "status": "ok",
             "target_expiry": target_expiry,
-            "optimizer_converged": bool(result.success),
-            "fit_error_before": round(mse_before, 2),
-            "fit_error_after": round(mse_after, 2),
+            "optimizer_converged": True,
+            "fit_error_before": round(float(np.mean((base_payoff - target_interp) ** 2)), 2),
+            "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
             "spot_ladder": spot_arr.tolist(),
             "target_payoff": np.round(target_interp, 2).tolist(),
             "before_payoff": np.round(base_payoff, 2).tolist(),
@@ -222,7 +389,7 @@ class OptimizerV3(BaseOptimizer):
             "candidates_evaluated": len(meta),
         }
 
-    def run(self,
+    def run_previous(self,
             risk_aversion: float = 1.0,
             brokerage_txn_cost_pct: float = 5.0,
             deribit_txn_cost_pct: float = 0.1,

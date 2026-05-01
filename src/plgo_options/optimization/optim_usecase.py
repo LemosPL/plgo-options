@@ -110,18 +110,10 @@ class OptimizerUseCase:
         #self.run_params.lambda_gamma = -0.5
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
-        return optimizer.run()
 
-        self.run_params.lambda_delta = 0.
-        self.run_params.lambda_gamma = 1000000.
-        self.run_params.lambda_vega = 100000000.
-        self.run_params.max_collateral = 400_000_000.0
-        self.result = optimizer.run(**asdict(self.run_params))
-        return self.result
-
-    def fit_target(self):
+    def run_test(self):
         df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run_test(target_expiry="26JUN26", target_profile=df_target)
+        result = optimizer.run(target_expiry="26JUN26")#, target_profile=df_target)
 
-        k=1
+        return result

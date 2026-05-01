@@ -44,9 +44,9 @@ def main() -> None:
     trades = []
     before_payoff, after_payoff = optimizer.build_payoffs(horizons, spot_arr, trades)
 
-    usecase.fit_target()
+    result = usecase.run_test()
 
-    result = usecase.run()
+    #result = usecase.run()
 
 
     #out_path = path.with_name(path.stem + "_replayed.json")
@@ -56,7 +56,9 @@ def main() -> None:
     trades = result.get('trades', [])
     print(len(trades))
     print(f"trades: {len(trades or [])}")
-    print(np.array(trades, dtype=object))
+    for trade in trades:
+        print(trade["instrument"], trade["qty"])
+    # print(np.array(trades, dtype=object))
 
 if __name__ == "__main__":
     main()
