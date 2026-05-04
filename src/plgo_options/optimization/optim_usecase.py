@@ -114,6 +114,6 @@ class OptimizerUseCase:
     def run_test(self):
         df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="26JUN26")#, target_profile=df_target)
+        result = optimizer.run(target_expiry="31JUL26")#, target_profile=df_target)
 
         return result

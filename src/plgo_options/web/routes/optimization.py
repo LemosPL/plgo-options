@@ -54,7 +54,7 @@ async def run_optimizer(params: OptimizationParams):
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
-
+    print(params.save_usecase_snapshot)
     try:
         if params.save_usecase_snapshot:
             save_dir = Path("data/optimization_snapshots/usecases")

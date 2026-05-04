@@ -127,14 +127,15 @@ class OptimizerV3(BaseOptimizer):
         if opt not in ("C", "P"):
             return np.zeros_like(spot_arr, dtype=float)
 
-        dte_at_horizon = max(dte - horizon_days, 0)
-        T = dte_at_horizon / 365.25
+        # dte_at_horizon = max(dte - horizon_days, 0)
         r = 0.0
 
         if option_smile is not None:
             maturity = datetime.combine(p.expiry_date, datetime.min.time())
+            T = option_smile._year_fraction(maturity)  # T = dte_at_horizon / 365.25
             sigma = option_smile.compute_vol(maturity, strike=strike)
         else:
+            T = float('nan')
             sigma = float(getattr(p, "iv_pct", 0.0) or 0.0) / 100.0
 
         return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
@@ -152,7 +153,7 @@ class OptimizerV3(BaseOptimizer):
                  new_position_penalty: float = 0.04,
                  vega_cross_expiry_corr: float = 0.0, ):
         is_replay = (target_expiry is not None)#False
-        target_expiry = "26JUN26"
+        target_expiry = "31JUL26"
         target_profile = load_target_profile()
 
         held_positions = self.get_held_positions()
@@ -165,10 +166,23 @@ class OptimizerV3(BaseOptimizer):
         spot_weights = 1./(0.02 + np.abs(np.log(spot_arr/self.eth_spot)))
         target_interp = np.interp(spot_arr, target_strikes, target_payoff)
 
+        # payoff_row_weights = 1.0 + 2.0 * (1.0 - np.abs(spot_arr - self.eth_spot) / max(self.eth_spot, 1.0))
+        # payoff_row_weights = np.clip(payoff_row_weights, 0.005, 30.0)
+
+        sigma_ln = 0.5  # width in log-space; smaller = more concentrated around spot
+        x = np.log(spot_arr / self.eth_spot)
+
+        payoff_row_weights = np.exp(-0.5 * (x / sigma_ln) ** 2)
+        payoff_row_weights = payoff_row_weights / np.mean(payoff_row_weights)
+        spot_weights = payoff_row_weights
+
         option_smile = self._build_option_smile()
         base_payoff = np.zeros_like(spot_arr)
         for p in self.positions:
-            base_payoff += self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
+            bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
+            if np.isnan(bs_value.sum()):
+                continue
+            base_payoff += bs_value
 
         residual = target_interp - base_payoff
 
@@ -258,20 +272,9 @@ class OptimizerV3(BaseOptimizer):
         betas_lin_reg = lasso.betas * 1.E6
         err_fit_lin_reg = lasso.err_fit #* 1.E-6
         '''
-        '''
-        print(A)
-        print(residual)
-        print(lams)
-        print(spot_weights)
-        '''
         lasso.fit(A, residual*1.E-6, lams, w=spot_weights)
-        lasso.fit_lasso(A, residual * 1.E-6, lams)
         betas_lasso = lasso.betas * 1.E6
         err_fit_lasso = lasso.err_fit
-
-        payoff_row_weights = 1.0 + 2.0 * (1.0 - np.abs(spot_arr - self.eth_spot) / max(self.eth_spot, 1.0))
-        payoff_row_weights = np.clip(payoff_row_weights, 0.005, 30.0)
-        spot_weights = payoff_row_weights
 
         x = betas_lasso#betas_lin_reg#
         sum_weights = np.sum(spot_weights)
@@ -364,6 +367,7 @@ class OptimizerV3(BaseOptimizer):
                 "opt": c.opt,
                 "qty": rounded_qty,
                 "side": "Buy" if rounded_qty > 0 else "Sell",
+                "iv_pct": round(c.iv_pct, 1),
                 "bs_price_usd": round(float(c.bs_price_usd or 0.0), 2),
                 "vega": round(float(c.vega or 0.0), 4),
                 "strike_weight": round(float(w), 4),
@@ -375,19 +379,33 @@ class OptimizerV3(BaseOptimizer):
                 "vega_contribution": round(float(rounded_qty * (c.vega or 0.0)), 4),
             })
 
-        return {
-            "status": "ok",
-            "target_expiry": target_expiry,
-            "optimizer_converged": True,
-            "fit_error_before": round(float(np.mean((base_payoff - target_interp) ** 2)), 2),
-            "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
-            "spot_ladder": spot_arr.tolist(),
-            "target_payoff": np.round(target_interp, 2).tolist(),
-            "before_payoff": np.round(base_payoff, 2).tolist(),
-            "after_payoff": np.round(fitted_payoff, 2).tolist(),
-            "trades": trades,
-            "candidates_evaluated": len(meta),
-        }
+            horizons = sorted(set(self.chart_horizons + [0, 90]))
+            before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
+                horizons,
+                spot_arr,
+                trades,
+            )
+
+            return {
+                "status": "ok",
+                "target_expiry": target_expiry,
+                "optimizer_converged": True,
+                "fit_error_before": round(float(np.mean((base_payoff - target_interp) ** 2)), 2),
+                "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
+                "spot_ladder": spot_arr.tolist(),
+                "chart_horizons": horizons,
+                "target_payoff": np.round(target_interp, 2).tolist(),
+                "before_payoff": np.round(base_payoff, 2).tolist(),
+                "after_payoff": np.round(fitted_payoff, 2).tolist(),
+                "before": {
+                    "payoff_by_horizon": before_payoff_by_horizon,
+                },
+                "after": {
+                    "payoff_by_horizon": after_payoff_by_horizon,
+                },
+                "trades": trades,
+                "candidates_evaluated": len(meta),
+            }
 
     def run_previous(self,
             risk_aversion: float = 1.0,
