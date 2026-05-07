@@ -332,7 +332,6 @@ class BaseOptimizer:
         max_collateral: float = 4_000_000.0,
         target_expiry: str | None = None,
         lambda_delta: float = 1.0,
-        lambda_gamma: float = 1.0,
         lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,

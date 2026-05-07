@@ -1247,25 +1247,7 @@
       <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem">
         <button id="btn-load-optv2" class="btn-primary" style="width:auto">Load Risk Profile</button>
         <label class="pf-filter-label">λ Overall
-          <input type="number" id="optv2-risk-aversion" value="1.0" step="0.1" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">λ Delta
-          <input type="number" id="optv2-lambda-delta" value="1.0" step="0.1" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">λ Gamma
-          <input type="number" id="optv2-lambda-gamma" value="1.0" step="0.1" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">λ Vega
-          <input type="number" id="optv2-lambda-vega" value="100" step="10" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">Brokerage Txn Cost (%)
-          <input type="number" id="optv2-brokerage-txn-cost" value="5" step="0.1" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">Deribit Txn Cost (%)
-          <input type="number" id="optv2-deribit-txn-cost" value="0.15" step="0.01" min="0" style="width:5rem">
-        </label>
-        <label class="pf-filter-label">Max Collateral ($)
-          <input type="number" id="optv2-max-collateral" value="4000000" step="100000" min="0" style="width:8rem">
+          <input type="number" id="optv2-lam-factor" value="1.0" step="0.1" min="0" style="width:5rem">
         </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
@@ -1568,6 +1550,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=37"></script>
+<script src="/static/app.js?v=38"></script>
 </body>
 </html>

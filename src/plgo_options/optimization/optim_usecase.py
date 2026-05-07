@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -15,14 +15,8 @@ from plgo_options.optimization.snapshot import load_snapshot_dict
 
 @dataclass
 class OptimizerRunParams:
-    risk_aversion: float = 1.0
-    brokerage_txn_cost_pct: float = 5.0
-    deribit_txn_cost_pct: float = 0.1
-    max_collateral: float = 4_000_000.0
-    target_expiry: str | None = None
-    lambda_delta: float = 001.0
-    lambda_gamma: float = 1.0
-    lambda_vega: float = 1.0
+    lam_factor: float = 1.0
+    target_expiry: str | None = "31JUL26"
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     vega_cross_expiry_corr: float = 0.8
@@ -66,10 +60,17 @@ class OptimizerUseCase:
 
         today_str = path.name.split('_')[0]
         today = datetime.strptime(today_str, "%Y%m%d")
+        valid_run_param_names = {field.name for field in fields(OptimizerRunParams)}
+        run_params_data = {
+            key: value
+            for key, value in data["run_params"].items()
+            if key in valid_run_param_names
+        }
+
         return_val = cls(
             today=today,
             optimizer_input=data["optimizer_input"],
-            run_params=OptimizerRunParams(**data["run_params"]),
+            run_params=OptimizerRunParams(**run_params_data),
             result=data.get("result"),
         )
         # print(return_val)
@@ -106,8 +107,6 @@ class OptimizerUseCase:
     def run(self) -> dict[str, Any]:
         optimizer = self.build_optimizer(self.today)
 
-        #self.run_params.lambda_delta = -2500.
-        #self.run_params.lambda_gamma = -0.5
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
 

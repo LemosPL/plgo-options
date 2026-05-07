@@ -18,14 +18,8 @@ router = APIRouter()
 
 
 class OptimizationParams(BaseModel):
-    risk_aversion: float = 1.0
-    brokerage_txn_cost_pct: float = 5.0
-    deribit_txn_cost_pct: float = 0.1
-    max_collateral: float = 4_000_000.0
+    lam_factor: float = 1.0
     target_expiry: str | None = None
-    lambda_delta: float = 1.0
-    lambda_gamma: float = 1.0
-    lambda_vega: float = 1.0
     vega_cross_expiry_corr: float = 0.0
     save_usecase_snapshot: bool = False
 
@@ -42,14 +36,8 @@ async def run_optimizer(params: OptimizationParams):
         raise HTTPException(status_code=500, detail=f"Failed to gather portfolio data: {e}")
 
     run_params = OptimizerRunParams(
-        risk_aversion=params.risk_aversion,
-        brokerage_txn_cost_pct=params.brokerage_txn_cost_pct,
-        deribit_txn_cost_pct=params.deribit_txn_cost_pct,
-        max_collateral=params.max_collateral,
+        lam_factor=params.lam_factor,
         target_expiry=params.target_expiry,
-        lambda_delta=params.lambda_delta,
-        lambda_gamma=params.lambda_gamma,
-        lambda_vega=params.lambda_vega,
         vega_cross_expiry_corr=params.vega_cross_expiry_corr,
     )
 

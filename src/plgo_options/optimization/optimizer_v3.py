@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import date, datetime
+from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
 from .elastic_net import GeneralizedLasso
@@ -98,6 +99,66 @@ class OptimizerV3(BaseOptimizer):
 
         return OptionSmile(smile_slices, today=self.today)
 
+    def _risk_neutral_spot_weights(
+            self,
+            spot_arr: np.ndarray,
+            option_smile: OptionSmile,
+            target_expiry: str,
+    ) -> np.ndarray:
+        """
+        Infer risk-neutral terminal spot weights from the target-expiry smile.
+
+        Uses Breeden-Litzenberger:
+            q(K) = exp(rT) * d²C(K,T) / dK²
+
+        With r = 0 here, q(K) is approximated by the numerical second
+        derivative of call prices across the strike/state grid.
+        """
+        matching_slice = next(
+            (
+                smile_slice
+                for smile_slice in option_smile.slices
+                if smile_slice.expiry_code == target_expiry
+            ),
+            None,
+        )
+
+        if matching_slice is None:
+            return np.ones_like(spot_arr, dtype=float)
+
+        strikes = np.asarray(spot_arr, dtype=float)
+        if strikes.size < 3:
+            return np.ones_like(strikes, dtype=float)
+
+        maturity = matching_slice.maturity
+        T = option_smile._year_fraction(maturity)
+        r = 0.0
+
+        call_prices = np.array(
+            [
+                options.bs_price(
+                    self.eth_spot,
+                    strike,
+                    T,
+                    r,
+                    option_smile.compute_vol(maturity, strike=strike),
+                    "C",
+                )
+                for strike in strikes
+            ],
+            dtype=float,
+        )
+
+        raw_density = np.gradient(np.gradient(call_prices, strikes), strikes)
+        density = gaussian_filter1d(raw_density, sigma=1.5, mode="nearest")
+        density = np.clip(density, 0.0, None)
+
+        if not np.any(np.isfinite(density)) or float(np.sum(density)) <= 0.0:
+            return np.ones_like(strikes, dtype=float)
+
+        weights = density / np.mean(density[density > 0.0])
+        return np.clip(weights, 1e-1, None)
+
     def bs_value_for_position(
             self,
             spot_arr,
@@ -119,16 +180,10 @@ class OptimizerV3(BaseOptimizer):
 
         strike = float(getattr(p, "strike", 0.0) or 0.0)
         opt = str(getattr(p, "opt", "") or "")
-        dte = int(getattr(p, "days_remaining", 0) or 0)
-
         if opt == "F":
             return signed_qty * (spot_arr - strike)
-
         if opt not in ("C", "P"):
             return np.zeros_like(spot_arr, dtype=float)
-
-        # dte_at_horizon = max(dte - horizon_days, 0)
-        r = 0.0
 
         if option_smile is not None:
             maturity = datetime.combine(p.expiry_date, datetime.min.time())
@@ -138,22 +193,16 @@ class OptimizerV3(BaseOptimizer):
             T = float('nan')
             sigma = float(getattr(p, "iv_pct", 0.0) or 0.0) / 100.0
 
+        r = 0.0
         return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
 
     def run(self,
-                 risk_aversion: float = 1.0,
-                 brokerage_txn_cost_pct: float = 5.0,
-                 deribit_txn_cost_pct: float = 0.1,
-                 max_collateral: float = 4_000_000.0,
+                 lam_factor: float = 1.0,
                  target_expiry: str | None = None,
-                 lambda_delta: float = 1.0,
-                 lambda_gamma: float = 1.0,
-                 lambda_vega: float = 1.0,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
                  vega_cross_expiry_corr: float = 0.0, ):
         is_replay = (target_expiry is not None)#False
-        target_expiry = "31JUL26"
         target_profile = load_target_profile()
 
         held_positions = self.get_held_positions()
@@ -163,20 +212,18 @@ class OptimizerV3(BaseOptimizer):
         target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float) #- 2000000
 
         spot_arr = np.array(self.spot_ladder, dtype=float)
-        spot_weights = 1./(0.02 + np.abs(np.log(spot_arr/self.eth_spot)))
         target_interp = np.interp(spot_arr, target_strikes, target_payoff)
 
-        # payoff_row_weights = 1.0 + 2.0 * (1.0 - np.abs(spot_arr - self.eth_spot) / max(self.eth_spot, 1.0))
-        # payoff_row_weights = np.clip(payoff_row_weights, 0.005, 30.0)
-
-        sigma_ln = 0.5  # width in log-space; smaller = more concentrated around spot
-        x = np.log(spot_arr / self.eth_spot)
-
-        payoff_row_weights = np.exp(-0.5 * (x / sigma_ln) ** 2)
-        payoff_row_weights = payoff_row_weights / np.mean(payoff_row_weights)
-        spot_weights = payoff_row_weights
-
         option_smile = self._build_option_smile()
+        if target_expiry is not None and option_smile is not None:
+            spot_weights = self._risk_neutral_spot_weights(
+                spot_arr=spot_arr,
+                option_smile=option_smile,
+                target_expiry=target_expiry,
+            )
+        else:
+            spot_weights = np.ones_like(spot_arr, dtype=float)
+
         base_payoff = np.zeros_like(spot_arr)
         for p in self.positions:
             bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
@@ -184,7 +231,10 @@ class OptimizerV3(BaseOptimizer):
                 continue
             base_payoff += bs_value
 
-        residual = target_interp - base_payoff
+        raw_residual = target_interp - base_payoff
+        cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
+        adjusted_base_payoff = base_payoff + cash_shift
+        residual = target_interp - adjusted_base_payoff
 
         # Normalize improvement to something comparable to dollars, keeps huge target curves from drowning the cost signal.
         payoff_scale = max(float(np.mean(np.abs(target_interp))), 1.0)
@@ -198,7 +248,7 @@ class OptimizerV3(BaseOptimizer):
         min_weight = 0.2
         strike_weights = np.maximum(vega_weight, min_weight)
         lams = 0.01 * np.ones(len(candidates))
-        base_lam = 1
+        base_lam = 0.5
 
         A_cols = []
         meta = []
@@ -278,7 +328,7 @@ class OptimizerV3(BaseOptimizer):
 
         x = betas_lasso#betas_lin_reg#
         sum_weights = np.sum(spot_weights)
-        base_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(base_payoff - target_interp, 2))/sum_weights))
+        base_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(adjusted_base_payoff - target_interp, 2))/sum_weights))
         scored_trades = []
 
         i = -1
@@ -306,8 +356,8 @@ class OptimizerV3(BaseOptimizer):
             )
 
             curve = rounded_qty * curves[i]
-            new_payoff = base_payoff + curve
-            # linreg_payoff = base_payoff + curve
+            new_payoff = adjusted_base_payoff + curve
+            # linreg_payoff = adjusted_base_payoff + curve
             new_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(new_payoff - target_interp, 2)/sum_weights)))
 
             # Improvement in RMSE, scaled to dollars-ish units.
@@ -331,7 +381,8 @@ class OptimizerV3(BaseOptimizer):
 
             fig, axes = plt.subplots(3, 1, sharex=True)
 
-            axes[0].plot(x, base_payoff, label="Base Payoff")
+            # axes[0].plot(x, base_payoff, label="Base Payoff")
+            axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
             axes[0].plot(x, target_interp, label="Target Payoff")
             axes[0].plot(x, new_payoff, label="Fitted Payoff")
             axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
