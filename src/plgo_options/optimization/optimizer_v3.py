@@ -9,7 +9,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
 from .elastic_net import GeneralizedLasso
-from .models import Position, Candidate
+from .models import Position, Candidate, SpreadCandidate
 from .math_utils import bs_vec
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
@@ -219,6 +219,11 @@ class OptimizerV3(BaseOptimizer):
         spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
         candidates = option_legs + spread_candidates
 
+        print(f"option legs: {len(option_legs)}")
+        print(f"spread candidates: {len(spread_candidates)}")
+        print(f"call spreads: {sum(1 for c in spread_candidates if c.kind == 'CALL_SPREAD')}")
+        print(f"put spreads: {sum(1 for c in spread_candidates if c.kind == 'PUT_SPREAD')}")
+        
         target_strikes = np.asarray(target_profile.index, dtype=float)
         target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float) #- 2000000
 
@@ -250,7 +255,7 @@ class OptimizerV3(BaseOptimizer):
         # Normalize improvement to something comparable to dollars, keeps huge target curves from drowning the cost signal.
         payoff_scale = max(float(np.mean(np.abs(target_interp))), 1.0)
 
-        c_vega = np.array([abs(float(getattr(c, "vega", 0.0) or 0.0)) for c in candidates], dtype=float)
+        c_vega = np.array([abs(self._candidate_vega(c)) for c in candidates], dtype=float)
         if np.all(c_vega == 0.0):
             vega_weight = np.ones_like(c_vega)
         else:
@@ -265,7 +270,7 @@ class OptimizerV3(BaseOptimizer):
         A_cols = []
         meta = []
 
-        max_vega = c_vega.max()
+        max_vega = max(float(c_vega.max()), 1e-12)
 
         # Filter smiles
         matching_smiles = []
@@ -298,26 +303,21 @@ class OptimizerV3(BaseOptimizer):
             if not self._is_spread_candidate(c) and c.opt not in ("C", "P", "F"):
                 lams[i] = 1.E10
                 continue
-            lams[i] = base_lam * np.pow(max_vega/c_vega[i], 2)
-            strike = float(c.strike or 0.0)
-            bs_price = float(c.bs_price_usd or 0.0)
-            rounded_qty = 1
 
-            cost_factor = 0 # Cost used only to penalize the candidate curve
-            leg_cost = cost_factor * rounded_qty * bs_price
+            candidate_vega = max(abs(self._candidate_vega(c)), 1e-12)
+            lams[i] = base_lam * np.pow(max_vega / candidate_vega, 2)
+            if self._is_spread_candidate(c):
+                lams[i] *= 1.0
 
-            r = 0.
-            T = c.dte / 365.25
-            curve_list = []
-            for spot in spot_arr:
-                vol = option_smile.compute_vol(option_smile.slices[0].maturity, strike=spot)
-                price = options.bs_price(spot, strike, T, r, vol, c.opt)
-                curve_list.append((rounded_qty * price - bs_price) - leg_cost)
-            curve = np.array(curve_list)
+            curve = self._candidate_curve(
+                c=c,
+                spot_arr=spot_arr,
+                option_smile=option_smile,
+            )
 
             curves.append(curve)
-            curve = strike_weights[i] * curve
-            A_cols.append(curve)
+            weighted_curve = strike_weights[i] * curve
+            A_cols.append(weighted_curve)
             meta.append(c)
 
         if not A_cols:
@@ -350,22 +350,15 @@ class OptimizerV3(BaseOptimizer):
             if rounded_qty == 0:
                 continue
 
-            held_qty = float(held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0))
-            bs_price = float(c.bs_price_usd or 0.0)
-
-            est_cost = self._estimate_trade_cost(
+            est_cost = self._estimate_candidate_trade_cost(
+                c=c,
                 qty=rounded_qty,
-                price=bs_price,
-                held_qty=held_qty,
-                unwind_discount=0.2,
-                new_position_penalty=0.04,
-                is_held=abs(held_qty) > 0,
+                held_positions=held_positions,
+                unwind_discount=unwind_discount,
+                new_position_penalty=new_position_penalty,
             )
 
-            instrument_name = (
-                "ETH-PERPETUAL" if c.opt == "F"
-                else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
-            )
+            instrument_name = self._candidate_instrument_name(c)
 
             curve = rounded_qty * curves[i]
             new_payoff = adjusted_base_payoff + curve
@@ -386,36 +379,10 @@ class OptimizerV3(BaseOptimizer):
         #scored_trades = scored_trades[:max_trades]
 
         trades = []
-        fitted_payoff = base_payoff.copy()
-        if is_replay:
-            spot = self.eth_spot  # or your reference spot S0
-            x = np.log(spot_arr / spot)
-
-            spot_ticks = np.array([1000, 1500, 2000, 2500, 3000, 4500, 7000], dtype=float)
-            tick_positions = np.log(spot_ticks / spot)
-
-            fig, axes = plt.subplots(3, 1, sharex=True)
-
-            # axes[0].plot(x, base_payoff, label="Base Payoff")
-            axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
-            axes[0].plot(x, target_interp, label="Target Payoff")
-            axes[0].plot(x, new_payoff, label="Fitted Payoff")
-            axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
-            axes[0].legend()
-
-            axes[1].plot(x, new_payoff - adjusted_base_payoff, label="Fitted - Adjusted Base")
-            axes[1].axvline(0, color="gray", linestyle="--", linewidth=1)
-            axes[1].set_xlabel("Spot")
-            # axes[1].set_ylim(210000, 215000)
-            axes[1].legend()
-            axes[1].set_xticks(tick_positions)
-            axes[1].set_xticklabels([f"{s:,.0f}" for s in spot_ticks])
-
-            axes[2].plot(x, spot_weights, label="Weights")
-            axes[2].legend()
-            plt.show()
+        fitted_payoff = adjusted_base_payoff.copy()
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
+        trades = self._aggregate_trade_legs(trades)
 
         if not scored_trades:
             before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
@@ -429,13 +396,15 @@ class OptimizerV3(BaseOptimizer):
                 "target_expiry": target_expiry,
                 "optimizer_converged": True,
                 "message": "Optimizer ran successfully, but no trades passed the selection criteria.",
-                "fit_error_before": round(float(np.mean((base_payoff - target_interp) ** 2)), 2),
-                "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
+                "cash_shift": round(float(cash_shift), 2),
+                "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
+                "fit_error_after": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
                 "spot_ladder": spot_arr.tolist(),
                 "chart_horizons": horizons,
                 "target_payoff": np.round(target_interp, 2).tolist(),
-                "before_payoff": np.round(base_payoff, 2).tolist(),
-                "after_payoff": np.round(fitted_payoff, 2).tolist(),
+                "before_payoff": np.round(adjusted_base_payoff, 2).tolist(),
+                "after_payoff": np.round(adjusted_base_payoff, 2).tolist(),
+                "raw_before_payoff": np.round(base_payoff, 2).tolist(),
                 "before": {
                     "payoff_by_horizon": before_payoff_by_horizon,
                 },
@@ -449,26 +418,62 @@ class OptimizerV3(BaseOptimizer):
         for net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name in scored_trades:
             fitted_payoff += curve
 
-            trades.append({
-                "counterparty": c.counterparty,
-                "instrument": instrument_name,
-                "expiry": c.expiry_date,
-                "dte": c.dte,
-                "strike": c.strike,
-                "opt": c.opt,
-                "qty": rounded_qty,
-                "side": "Buy" if rounded_qty > 0 else "Sell",
-                "iv_pct": round(c.iv_pct, 1),
-                "bs_price_usd": round(float(c.bs_price_usd or 0.0), 2),
-                "vega": round(float(c.vega or 0.0), 4),
-                "strike_weight": round(float(w), 4),
-                "estimated_cost": round(float(est_cost), 2),
-                "normalized_benefit": round(float(normalized_benefit), 2),
-                "net_benefit": round(float(net_benefit), 2),
-                "delta_contribution": round(float(rounded_qty * (c.delta or 0.0)), 4),
-                "gamma_contribution": round(float(rounded_qty * (c.gamma or 0.0)), 6),
-                "vega_contribution": round(float(rounded_qty * (c.vega or 0.0)), 4),
-            })
+            for leg, leg_qty, strategy in self._candidate_trade_legs(c, rounded_qty):
+                leg_instrument_name = (
+                    "ETH-PERPETUAL" if leg.opt == "F"
+                    else f"ETH-{leg.expiry_code}-{int(leg.strike)}-{leg.opt}"
+                )
+
+                trades.append({
+                    "counterparty": leg.counterparty,
+                    "instrument": leg_instrument_name,
+                    "strategy": strategy,
+                    "strategy_instrument": instrument_name,
+                    "expiry": leg.expiry_date,
+                    "dte": leg.dte,
+                    "strike": leg.strike,
+                    "opt": leg.opt,
+                    "qty": leg_qty,
+                    "side": "Buy" if leg_qty > 0 else "Sell",
+                    "iv_pct": round(float(leg.iv_pct or 0.0), 1),
+                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                    "vega": round(float(leg.vega or 0.0), 4),
+                    "strike_weight": round(float(w), 4),
+                    "estimated_cost": round(float(est_cost), 2),
+                    "normalized_benefit": round(float(normalized_benefit), 2),
+                    "net_benefit": round(float(net_benefit), 2),
+                    "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
+                    "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
+                    "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+                })
+
+        if is_replay:
+            spot = self.eth_spot  # or your reference spot S0
+            x = np.log(spot_arr / spot)
+
+            spot_ticks = np.array([1000, 1500, 2000, 2500, 3000, 4500, 7000], dtype=float)
+            tick_positions = np.log(spot_ticks / spot)
+
+            fig, axes = plt.subplots(3, 1, sharex=True)
+
+            # axes[0].plot(x, base_payoff, label="Base Payoff")
+            axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
+            axes[0].plot(x, target_interp, label="Target Payoff")
+            axes[0].plot(x, fitted_payoff, label="Fitted Payoff")
+            axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[0].legend()
+
+            axes[1].plot(x, fitted_payoff - adjusted_base_payoff, label="Fitted - Adjusted Base")
+            axes[1].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[1].set_xlabel("Spot")
+            # axes[1].set_ylim(210000, 215000)
+            axes[1].legend()
+            axes[1].set_xticks(tick_positions)
+            axes[1].set_xticklabels([f"{s:,.0f}" for s in spot_ticks])
+
+            axes[2].plot(x, spot_weights, label="Weights")
+            axes[2].legend()
+            plt.show()
 
         before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
             horizons,
@@ -476,17 +481,30 @@ class OptimizerV3(BaseOptimizer):
             trades,
         )
 
+        print(f"selected structures: {len(scored_trades)}")
+        print(f"trade legs emitted: {len(trades)}")
+
+        for trade in trades:
+            print(
+                trade.get("strategy", "NA"),
+                trade.get("strategy_instrument", ""),
+                trade["instrument"],
+                trade["qty"],
+            )
+
         return {
             "status": "ok",
             "target_expiry": target_expiry,
             "optimizer_converged": True,
-            "fit_error_before": round(float(np.mean((base_payoff - target_interp) ** 2)), 2),
+            "cash_shift": round(float(cash_shift), 2),
+            "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
             "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
             "spot_ladder": spot_arr.tolist(),
             "chart_horizons": horizons,
             "target_payoff": np.round(target_interp, 2).tolist(),
-            "before_payoff": np.round(base_payoff, 2).tolist(),
+            "before_payoff": np.round(adjusted_base_payoff, 2).tolist(),
             "after_payoff": np.round(fitted_payoff, 2).tolist(),
+            "raw_before_payoff": np.round(base_payoff, 2).tolist(),
             "before": {
                 "payoff_by_horizon": before_payoff_by_horizon,
             },
@@ -905,6 +923,16 @@ class OptimizerV3(BaseOptimizer):
         Spread:
             long leg value minus short leg value minus net entry price.
         """
+        matching_slice = next(
+            (
+                smile_slice
+                for smile_slice in option_smile.slices
+                if smile_slice.expiry_code == c.expiry_code
+            ),
+            None,
+        )
+        maturity = matching_slice.maturity if matching_slice is not None else option_smile.slices[0].maturity
+
         if self._is_spread_candidate(c):
             long_leg = c.long_leg
             short_leg = c.short_leg
@@ -922,11 +950,11 @@ class OptimizerV3(BaseOptimizer):
             curve_list = []
             for spot in spot_arr:
                 long_vol = option_smile.compute_vol(
-                    option_smile.slices[0].maturity,
+                    maturity,
                     strike=long_strike,
                 )
                 short_vol = option_smile.compute_vol(
-                    option_smile.slices[0].maturity,
+                    maturity,
                     strike=short_strike,
                 )
 
@@ -962,7 +990,7 @@ class OptimizerV3(BaseOptimizer):
         curve_list = []
         for spot in spot_arr:
             vol = option_smile.compute_vol(
-                option_smile.slices[0].maturity,
+                maturity,
                 strike=strike,
             )
             price = options.bs_price(spot, strike, T, r, vol, c.opt)
@@ -985,6 +1013,107 @@ class OptimizerV3(BaseOptimizer):
             ]
 
         return [(c, qty, "NAKED")]
+
+    def _aggregate_trade_legs(self, trades: list[dict]) -> list[dict]:
+        aggregated: dict[tuple, dict] = {}
+
+        for trade in trades:
+            key = (
+                trade.get("counterparty"),
+                trade.get("instrument"),
+                trade.get("expiry"),
+                trade.get("strike"),
+                trade.get("opt"),
+            )
+
+            qty = int(trade.get("qty", 0) or 0)
+            if qty == 0:
+                continue
+
+            if key not in aggregated:
+                aggregated[key] = trade.copy()
+                aggregated[key]["qty"] = qty
+                aggregated[key]["estimated_cost"] = float(trade.get("estimated_cost", 0.0) or 0.0)
+                aggregated[key]["normalized_benefit"] = float(trade.get("normalized_benefit", 0.0) or 0.0)
+                aggregated[key]["net_benefit"] = float(trade.get("net_benefit", 0.0) or 0.0)
+                aggregated[key]["delta_contribution"] = float(trade.get("delta_contribution", 0.0) or 0.0)
+                aggregated[key]["gamma_contribution"] = float(trade.get("gamma_contribution", 0.0) or 0.0)
+                aggregated[key]["vega_contribution"] = float(trade.get("vega_contribution", 0.0) or 0.0)
+                aggregated[key]["strategy"] = trade.get("strategy", "MIXED")
+                aggregated[key]["strategy_instrument"] = trade.get("strategy_instrument", "")
+                continue
+
+            existing = aggregated[key]
+            existing["qty"] += qty
+            existing["estimated_cost"] += float(trade.get("estimated_cost", 0.0) or 0.0)
+            existing["normalized_benefit"] += float(trade.get("normalized_benefit", 0.0) or 0.0)
+            existing["net_benefit"] += float(trade.get("net_benefit", 0.0) or 0.0)
+            existing["delta_contribution"] += float(trade.get("delta_contribution", 0.0) or 0.0)
+            existing["gamma_contribution"] += float(trade.get("gamma_contribution", 0.0) or 0.0)
+            existing["vega_contribution"] += float(trade.get("vega_contribution", 0.0) or 0.0)
+
+            if existing.get("strategy_instrument") != trade.get("strategy_instrument"):
+                existing["strategy"] = "MIXED"
+                existing["strategy_instrument"] = "Aggregated"
+
+        result = []
+        for trade in aggregated.values():
+            if trade["qty"] == 0:
+                continue
+
+            trade["side"] = "Buy" if trade["qty"] > 0 else "Sell"
+            trade["estimated_cost"] = round(float(trade.get("estimated_cost", 0.0)), 2)
+            trade["normalized_benefit"] = round(float(trade.get("normalized_benefit", 0.0)), 2)
+            trade["net_benefit"] = round(float(trade.get("net_benefit", 0.0)), 2)
+            trade["delta_contribution"] = round(float(trade.get("delta_contribution", 0.0)), 4)
+            trade["gamma_contribution"] = round(float(trade.get("gamma_contribution", 0.0)), 6)
+            trade["vega_contribution"] = round(float(trade.get("vega_contribution", 0.0)), 4)
+            result.append(trade)
+
+        result.sort(key=lambda t: (str(t.get("expiry")), float(t.get("strike") or 0.0), str(t.get("opt"))))
+        return result
+
+    def _candidate_instrument_name(self, c) -> str:
+        if self._is_spread_candidate(c):
+            return (
+                f"{c.kind}: "
+                f"ETH-{c.expiry_code}-{int(c.long_leg.strike)}-{c.long_leg.opt} / "
+                f"ETH-{c.expiry_code}-{int(c.short_leg.strike)}-{c.short_leg.opt}"
+            )
+
+        return (
+            "ETH-PERPETUAL" if c.opt == "F"
+            else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
+        )
+
+    def _estimate_candidate_trade_cost(
+            self,
+            c,
+            qty: int,
+            held_positions: dict,
+            unwind_discount: float,
+            new_position_penalty: float,
+    ) -> float:
+        est_cost = 0.0
+
+        for leg, leg_qty, _strategy in self._candidate_trade_legs(c, qty):
+            held_qty = float(
+                held_positions.get(
+                    (leg.expiry_code, leg.strike, leg.opt, leg.counterparty),
+                    0.0,
+                )
+            )
+
+            est_cost += self._estimate_trade_cost(
+                qty=leg_qty,
+                price=float(leg.bs_price_usd or 0.0),
+                held_qty=held_qty,
+                unwind_discount=unwind_discount,
+                new_position_penalty=new_position_penalty,
+                is_held=abs(held_qty) > 0,
+            )
+
+        return est_cost
 
     def _pick_two_monthly_expiries(self, expiry_codes: list[str], min_dte: int = 29) -> list[tuple[str, int]]:
         today = date.today()
@@ -1126,6 +1255,7 @@ class OptimizerV3(BaseOptimizer):
             })
 
         return condor_trades, x
+
 
     '''
 from scipy.optimize import minimize
