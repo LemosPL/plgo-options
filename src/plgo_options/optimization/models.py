@@ -49,6 +49,63 @@ class Candidate:
     vega: float
     bs_price_usd: float
 
+@dataclass(frozen=True)
+class SpreadCandidate:
+    kind: str  # "CALL_SPREAD" or "PUT_SPREAD"
+    long_leg: Candidate
+    short_leg: Candidate
+
+    @property
+    def expiry_code(self) -> str:
+        return self.long_leg.expiry_code
+
+    @property
+    def expiry_date(self):
+        return self.long_leg.expiry_date
+
+    @property
+    def dte(self) -> int:
+        return self.long_leg.dte
+
+    @property
+    def counterparty(self) -> str:
+        return self.long_leg.counterparty
+
+    @property
+    def opt(self) -> str:
+        return self.long_leg.opt
+
+    @property
+    def strike(self) -> float:
+        return self.long_leg.strike
+
+    @property
+    def width(self) -> float:
+        return abs(float(self.short_leg.strike) - float(self.long_leg.strike))
+
+    @property
+    def bs_price_usd(self) -> float:
+        return float(self.long_leg.bs_price_usd or 0.0) - float(self.short_leg.bs_price_usd or 0.0)
+
+    @property
+    def vega(self) -> float:
+        return float(self.long_leg.vega or 0.0) - float(self.short_leg.vega or 0.0)
+
+    @property
+    def delta(self) -> float:
+        return float(self.long_leg.delta or 0.0) - float(self.short_leg.delta or 0.0)
+
+    @property
+    def gamma(self) -> float:
+        return float(self.long_leg.gamma or 0.0) - float(self.short_leg.gamma or 0.0)
+
+    @property
+    def iv_pct(self) -> float:
+        return 0.5 * (
+            float(self.long_leg.iv_pct or 0.0)
+            + float(self.short_leg.iv_pct or 0.0)
+        )
+
 
 POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
 def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list[Position]:

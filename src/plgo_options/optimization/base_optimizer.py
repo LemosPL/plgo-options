@@ -25,7 +25,7 @@ from pathlib import Path
 from datetime import datetime, date
 from collections import defaultdict
 
-from .models import Position, Candidate, load_positions_from_latest_xlsx
+from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
@@ -194,9 +194,68 @@ class BaseOptimizer:
 
         return candidates
 
-    # ------------------------------------------------------------------
-    # Estimate vol-of-vol from the term structure
-    # ------------------------------------------------------------------
+    def _build_spread_candidates(self, candidates: list[Candidate], target_expiry: str | None = None) -> list[SpreadCandidate]:
+        """
+        Build vertical spread candidates from single-option candidates.
+
+        Call spreads:
+            long lower call, short higher call, both strikes > spot.
+
+        Put spreads:
+            long higher put, short lower put, both strikes < spot.
+
+        One optimizer unit = one long spread.
+        Negative optimizer quantity naturally means selling the spread.
+        """
+        option_candidates = [
+            c for c in candidates
+            if c.opt in ("C", "P")
+               and c.strike is not None
+               and c.bs_price_usd is not None
+               and (target_expiry is None or c.expiry_code == target_expiry)
+        ]
+
+        spreads: list[SpreadCandidate] = []
+
+        grouped: dict[tuple[str, str, str], list[Candidate]] = {}
+        for c in option_candidates:
+            key = (c.expiry_code, c.opt, c.counterparty)
+            grouped.setdefault(key, []).append(c)
+
+        for (expiry_code, opt, counterparty), legs in grouped.items():
+            legs = sorted(legs, key=lambda c: float(c.strike))
+
+            if opt == "C":
+                calls = [c for c in legs if float(c.strike) > self.eth_spot]
+
+                for i, lower_call in enumerate(calls):
+                    for higher_call in calls[i + 1:]:
+                        spreads.append(
+                            SpreadCandidate(
+                                kind="CALL_SPREAD",
+                                long_leg=lower_call,
+                                short_leg=higher_call,
+                            )
+                        )
+
+            elif opt == "P":
+                puts = [c for c in legs if float(c.strike) < self.eth_spot]
+
+                # For a debit put spread:
+                # long higher-strike put, short lower-strike put.
+                descending_puts = sorted(puts, key=lambda c: float(c.strike), reverse=True)
+
+                for i, higher_put in enumerate(descending_puts):
+                    for lower_put in descending_puts[i + 1:]:
+                        spreads.append(
+                            SpreadCandidate(
+                                kind="PUT_SPREAD",
+                                long_leg=higher_put,
+                                short_leg=lower_put,
+                            )
+                        )
+
+        return spreads
 
     def _estimate_vol_of_vol_daily(self) -> float:
         """Estimate daily vol-of-vol from the vol surface term structure.
@@ -326,13 +385,8 @@ class BaseOptimizer:
 
     def run(
         self,
-        risk_aversion: float = 1.0,
-        brokerage_txn_cost_pct: float = 5.0,
-        deribit_txn_cost_pct: float = 0.1,
-        max_collateral: float = 4_000_000.0,
+        lam_factor: float = 1.0,
         target_expiry: str | None = None,
-        lambda_delta: float = 1.0,
-        lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
         vega_cross_expiry_corr: float = 0.0,
@@ -348,6 +402,7 @@ class BaseOptimizer:
         vega_cross_expiry_corr : float
             Correlation of vol shocks across expiries. Lower means less cross-expiry
             vega netting; higher means more shared vega risk.
+            :param lam_factor:
         """
         print(f"Running base optimizer")
 
