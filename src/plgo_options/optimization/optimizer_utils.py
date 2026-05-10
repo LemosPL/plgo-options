@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 
 def _safe_int(v, default: int = 0) -> int:
@@ -41,5 +41,11 @@ def expiry_sort_key(expiry_code: str) -> tuple[int, str]:
         return (10**9, expiry_code)
 
 def get_expiry_code(expiry_str) -> str:
-    expiry_code = datetime.strptime(expiry_str, "%Y-%m-%d").strftime("%d%b%y").upper()
+    if isinstance(expiry_str, datetime):
+        return expiry_str.strftime("%d%b%y").upper()
+
+    if isinstance(expiry_str, date):
+        return expiry_str.strftime("%d%b%y").upper()
+
+    expiry_code = datetime.strptime(str(expiry_str), "%Y-%m-%d").strftime("%d%b%y").upper()
     return expiry_code

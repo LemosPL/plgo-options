@@ -20,6 +20,7 @@ class OptimizerRunParams:
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     vega_cross_expiry_corr: float = 0.8
+    roll_dte_threshold: int | None = None
 
 
 @dataclass
@@ -113,6 +114,8 @@ class OptimizerUseCase:
     def run_test(self):
         df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="31JUL26", is_replay=True)#, target_profile=df_target)
+        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=7)#, target_profile=df_target)
 
+        print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
+        print(f"replacement_trades: {len(result.get('replacement_trades', []))}")
         return result

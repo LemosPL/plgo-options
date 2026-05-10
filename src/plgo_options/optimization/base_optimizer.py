@@ -90,7 +90,11 @@ class BaseOptimizer:
     # Build candidate instruments from vol surface
     # ------------------------------------------------------------------
 
-    def _build_candidates(self, target_expiry: str | None = None) -> list[Candidate]:
+    def _build_candidates(
+        self,
+        target_expiry: str | None = None,
+        include_itm: bool = False,
+    ) -> list[Candidate]:
         """Generate tradeable instruments from the vol surface.
 
         Parameters
@@ -159,12 +163,11 @@ class BaseOptimizer:
                     continue
 
                 for opt in ("C", "P"):
-                    if opt == "C" and (strike < S or strike > strike_hi):
-                        continue
-                    elif opt == "P" and (strike > S or strike < strike_lo):
-                        continue
-                    c = self.create_candidate(S, strike, 0., sigma, opt, expiry_code, expiry_date, dte, counterparty)
-                    candidate_by_key[(c.expiry_code, c.strike, c.opt, c.counterparty)] = c
+                    if not include_itm:
+                        if opt == "C" and (strike < S or strike > strike_hi):
+                            continue
+                        elif opt == "P" and (strike > S or strike < strike_lo):
+                            continue
 
                     candidates.append(self.create_candidate(S, strike, 0.0, sigma, opt,
                                                             expiry_code, expiry_date, dte, counterparty))

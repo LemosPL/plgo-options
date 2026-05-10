@@ -82,6 +82,201 @@ class OptimizerV3(BaseOptimizer):
             return signed_qty * (spot_arr - strike)
         return np.zeros_like(spot_arr)
 
+    def _get_roll_positions(self, roll_dte_threshold: int | None) -> list[Position]:
+        if roll_dte_threshold is None:
+            return []
+
+        roll_positions = []
+        for p in self.positions:
+            dte = int(getattr(p, "days_remaining", 0) or 0)
+            opt = str(getattr(p, "opt", "") or "")
+
+            if opt in ("C", "P", "F") and dte <= roll_dte_threshold:
+                roll_positions.append(p)
+
+        return roll_positions
+
+    def _build_roll_unwind_trades(self, roll_positions: list[Position]) -> list[dict]:
+        trades = []
+
+        for p in roll_positions:
+            qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+            if qty == 0:
+                continue
+
+            unwind_qty = -int(round(qty))
+            if unwind_qty == 0:
+                continue
+
+            opt = str(getattr(p, "opt", "") or "")
+            strike = float(getattr(p, "strike", 0.0) or 0.0)
+            expiry_code = get_expiry_code(getattr(p, "expiry_date", getattr(p, "expiry", "")))
+
+            instrument_name = (
+                "ETH-PERPETUAL" if opt == "F"
+                else f"ETH-{expiry_code}-{int(strike)}-{opt}"
+            )
+
+            trades.append({
+                "counterparty": getattr(p, "counterparty", ""),
+                "instrument": instrument_name,
+                "strategy": "ROLL_UNWIND",
+                "strategy_instrument": instrument_name,
+                "expiry": getattr(p, "expiry_date", getattr(p, "expiry", "")),
+                "dte": int(getattr(p, "days_remaining", 0) or 0),
+                "strike": strike,
+                "opt": opt,
+                "qty": unwind_qty,
+                "side": "Buy" if unwind_qty > 0 else "Sell",
+                "iv_pct": round(float(getattr(p, "iv_pct", 0.0) or 0.0), 1),
+                "bs_price_usd": round(float(getattr(p, "mark_price_usd", 0.0) or 0.0), 2),
+                "vega": round(float(getattr(p, "vega", 0.0) or 0.0), 4),
+                "estimated_cost": 0.0,
+                "normalized_benefit": 0.0,
+                "net_benefit": 0.0,
+                "delta_contribution": round(float(unwind_qty * (getattr(p, "delta", 0.0) or 0.0)), 4),
+                "gamma_contribution": round(float(unwind_qty * (getattr(p, "gamma", 0.0) or 0.0)), 6),
+                "vega_contribution": round(float(unwind_qty * (getattr(p, "vega", 0.0) or 0.0)), 4),
+            })
+
+        return trades
+
+    def _build_roll_replacement_trades(
+        self,
+        roll_positions: list[Position],
+        option_legs: list[Candidate],
+        target_expiry: str | None,
+        min_abs_delta: float = 0.05,
+    ) -> list[dict]:
+        if target_expiry is None:
+            return []
+
+        trades = []
+
+        for p in roll_positions:
+            old_qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+            old_delta = float(getattr(p, "delta", 0.0) or 0.0)
+            old_opt = str(getattr(p, "opt", "") or "")
+            old_strike = float(getattr(p, "strike", 0.0) or 0.0)
+            raw_side = str(getattr(p, "side_raw", getattr(p, "side", ""))).lower()
+            old_qty = abs(float(getattr(p, "net_qty", 0.0) or 0.0))
+
+            if raw_side in ("sell", "short"):
+                old_qty = -old_qty
+
+            if old_qty == 0.0 or old_opt not in ("C", "P"):
+                continue
+
+            # Only force replacement for currently ITM rolled positions.
+            if old_opt == "C" and old_strike >= self.eth_spot:
+                continue
+            if old_opt == "P" and old_strike <= self.eth_spot:
+                continue
+
+            desired_delta_exposure = old_qty * old_delta
+            if abs(desired_delta_exposure) <= 0.0:
+                continue
+
+            same_opt_candidates = [
+                c for c in option_legs
+                if c.expiry_code == target_expiry
+                and c.opt == old_opt
+                and abs(float(c.delta or 0.0)) >= min_abs_delta
+            ]
+
+            # Require target replacement to also be ITM.
+            if old_opt == "C":
+                same_opt_candidates = [
+                    c for c in same_opt_candidates
+                    if float(c.strike or 0.0) < self.eth_spot
+                ]
+            else:
+                same_opt_candidates = [
+                    c for c in same_opt_candidates
+                    if float(c.strike or 0.0) > self.eth_spot
+                ]
+
+            if not same_opt_candidates:
+                continue
+
+            replacement = min(
+                same_opt_candidates,
+                key=lambda c: abs(abs(float(c.delta or 0.0)) - abs(old_delta)),
+            )
+
+            replacement_delta = float(replacement.delta or 0.0)
+            if abs(replacement_delta) < min_abs_delta:
+                continue
+
+            old_price = float(getattr(p, "mark_price_usd", 0.0) or 0.0)
+            new_price = max(float(replacement.bs_price_usd or 0.0), 1e-9)
+
+            old_premium_abs = abs(old_qty * old_price)
+            replacement_abs_qty = int(round(old_premium_abs / new_price))
+
+            replacement_qty = int(math.copysign(replacement_abs_qty, old_qty))
+
+            instrument_name = f"ETH-{replacement.expiry_code}-{int(replacement.strike)}-{replacement.opt}"
+
+            trades.append({
+                "counterparty": replacement.counterparty,
+                "instrument": instrument_name,
+                "strategy": "ROLL_REPLACEMENT",
+                "strategy_instrument": instrument_name,
+                "expiry": replacement.expiry_date,
+                "dte": replacement.dte,
+                "strike": replacement.strike,
+                "opt": replacement.opt,
+                "qty": replacement_qty,
+                "side": "Buy" if replacement_qty > 0 else "Sell",
+                "iv_pct": round(float(replacement.iv_pct or 0.0), 1),
+                "bs_price_usd": round(float(replacement.bs_price_usd or 0.0), 2),
+                "vega": round(float(replacement.vega or 0.0), 4),
+                "estimated_cost": 0.0,
+                "normalized_benefit": 0.0,
+                "net_benefit": 0.0,
+                "delta_contribution": round(float(replacement_qty * replacement_delta), 4),
+                "gamma_contribution": round(float(replacement_qty * (replacement.gamma or 0.0)), 6),
+                "vega_contribution": round(float(replacement_qty * (replacement.vega or 0.0)), 4),
+                "rolled_from": getattr(p, "instrument", ""),
+            })
+
+        return trades
+
+    def _build_roll_summary(
+        self,
+        roll_positions: list[Position],
+        roll_unwind_trades: list[dict],
+        roll_replacement_trades: list[dict],
+    ) -> dict:
+        current_mtm = float(
+            sum(float(getattr(p, "current_mtm", 0.0) or 0.0) for p in roll_positions)
+        )
+
+        close_value = float(
+            sum(
+                float(t.get("qty", 0.0) or 0.0)
+                * float(t.get("bs_price_usd", 0.0) or 0.0)
+                for t in roll_unwind_trades
+            )
+        )
+
+        open_value = float(
+            sum(
+                float(t.get("qty", 0.0) or 0.0)
+                * float(t.get("bs_price_usd", 0.0) or 0.0)
+                for t in roll_replacement_trades
+            )
+        )
+
+        return {
+            "rolled_positions_count": len(roll_positions),
+            "current_mtm_before_roll": round(current_mtm, 2),
+            "close_value": round(close_value, 2),
+            "open_value": round(open_value, 2),
+            "net_roll_cash": round(close_value - open_value, 2),
+        }
+
     def _build_option_smile(self) -> OptionSmile | None:
         smile_slices = [
             {
@@ -98,6 +293,30 @@ class OptimizerV3(BaseOptimizer):
             return None
 
         return OptionSmile(smile_slices, today=self.today)
+
+    def _trade_value_curve(
+        self,
+        trade: dict,
+        spot_arr: np.ndarray,
+    ) -> np.ndarray:
+        qty = float(trade.get("qty", 0.0) or 0.0)
+        strike = float(trade.get("strike", 0.0) or 0.0)
+        opt = str(trade.get("opt", "") or "")
+        dte = int(trade.get("dte", 0) or 0)
+        iv_pct = float(trade.get("iv_pct", 0.0) or 0.0)
+
+        if opt == "F":
+            return qty * (spot_arr - strike)
+
+        if opt not in ("C", "P"):
+            return np.zeros_like(spot_arr, dtype=float)
+
+        T = max(dte, 0) / 365.25
+        sigma = iv_pct / 100.0
+        price_curve = bs_vec(spot_arr, strike, T, 0.0, sigma, opt)
+        entry_price = float(trade.get("bs_price_usd", 0.0) or 0.0)
+
+        return qty * (price_curve - entry_price)
 
     def _risk_neutral_spot_weights(
             self,
@@ -203,29 +422,55 @@ class OptimizerV3(BaseOptimizer):
                  new_position_penalty: float = 0.04,
                  vega_cross_expiry_corr: float = 0.0,
                  is_replay: bool = False,
+                 roll_dte_threshold: int | None = 7,
             ):
-
+        roll_dte_threshold = 7
         print(lam_factor)
         print(target_expiry)
         print(unwind_discount)
         print(new_position_penalty)
         print(vega_cross_expiry_corr)
+        print(f"roll_dte_threshold: {roll_dte_threshold}")
         #is_replay = (target_expiry is not None)#False
         target_profile = load_target_profile()
 
         held_positions = self.get_held_positions()
+        roll_positions = self._get_roll_positions(roll_dte_threshold)
+        roll_position_ids = {id(p) for p in roll_positions}
+        is_roll_mode = len(roll_positions) > 0
+        
+        print(f"roll positions: {len(roll_positions)}")
+        roll_unwind_trades = self._build_roll_unwind_trades(roll_positions)
+        print(f"roll unwind trades: {len(roll_unwind_trades)}")
 
-        option_legs = self._build_candidates(target_expiry=target_expiry)
+        option_legs = self._build_candidates(
+            target_expiry=target_expiry,
+            include_itm=is_roll_mode
+        )
         spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
         candidates = option_legs + spread_candidates
 
+        roll_replacement_trades = self._build_roll_replacement_trades(
+            roll_positions=roll_positions,
+            option_legs=option_legs,
+            target_expiry=target_expiry,
+        )
+
+        roll_summary = self._build_roll_summary(
+            roll_positions=roll_positions,
+            roll_unwind_trades=roll_unwind_trades,
+            roll_replacement_trades=roll_replacement_trades,
+        )
+        print(f"roll summary: {roll_summary}")
+        
+        print(f"roll replacement trades: {len(roll_replacement_trades)}")
         print(f"option legs: {len(option_legs)}")
         print(f"spread candidates: {len(spread_candidates)}")
         print(f"call spreads: {sum(1 for c in spread_candidates if c.kind == 'CALL_SPREAD')}")
         print(f"put spreads: {sum(1 for c in spread_candidates if c.kind == 'PUT_SPREAD')}")
-        
+
         target_strikes = np.asarray(target_profile.index, dtype=float)
-        target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float) #- 2000000
+        target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float)  # - 2000000
 
         spot_arr = np.array(self.spot_ladder, dtype=float)
         target_interp = np.interp(spot_arr, target_strikes, target_payoff)
@@ -242,11 +487,16 @@ class OptimizerV3(BaseOptimizer):
 
         base_payoff = np.zeros_like(spot_arr)
         for p in self.positions:
+            if id(p) in roll_position_ids:
+                continue
+
             bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
             if np.isnan(bs_value.sum()):
                 continue
             base_payoff += bs_value
 
+        for trade in roll_replacement_trades:
+            base_payoff += self._trade_value_curve(trade, spot_arr)
         raw_residual = target_interp - base_payoff
         cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
         adjusted_base_payoff = base_payoff + cash_shift
@@ -376,15 +626,16 @@ class OptimizerV3(BaseOptimizer):
             scored_trades.append((net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name))
 
         scored_trades.sort(key=lambda t: t[0], reverse=True)
-        #scored_trades = scored_trades[:max_trades]
 
-        trades = []
+        trades = list(roll_unwind_trades) + list(roll_replacement_trades)
+        roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
+        replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
         fitted_payoff = adjusted_base_payoff.copy()
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
-        trades = self._aggregate_trade_legs(trades)
 
         if not scored_trades:
+            trades = self._aggregate_trade_legs(trades)
             before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
                 horizons,
                 spot_arr,
@@ -411,6 +662,8 @@ class OptimizerV3(BaseOptimizer):
                 "after": {
                     "payoff_by_horizon": after_payoff_by_horizon,
                 },
+                "roll_unwind_trades": roll_unwind_output,
+                "replacement_trades": replacement_output,
                 "trades": trades,
                 "candidates_evaluated": len(meta),
             }
@@ -447,7 +700,7 @@ class OptimizerV3(BaseOptimizer):
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
                 })
 
-        if is_replay:
+        if False:# is_replay:
             spot = self.eth_spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
@@ -474,6 +727,16 @@ class OptimizerV3(BaseOptimizer):
             axes[2].plot(x, spot_weights, label="Weights")
             axes[2].legend()
             plt.show()
+
+        trades = self._aggregate_trade_legs(trades)
+        roll_unwind_output = [
+            trade for trade in trades
+            if trade.get("strategy") == "ROLL_UNWIND"
+        ]
+        replacement_output = [
+            trade for trade in trades
+            if trade.get("strategy") != "ROLL_UNWIND"
+        ]
 
         before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
             horizons,
@@ -511,6 +774,8 @@ class OptimizerV3(BaseOptimizer):
             "after": {
                 "payoff_by_horizon": after_payoff_by_horizon,
             },
+            "roll_unwind_trades": roll_unwind_output,
+            "replacement_trades": replacement_output,
             "trades": trades,
             "candidates_evaluated": len(meta),
         }
