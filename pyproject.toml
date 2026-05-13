@@ -20,6 +20,8 @@ dependencies = [
     "aiosqlite>=0.19",
     "anthropic>=0.80",
     "python-dotenv>=1.0",
+    "pulp>=2.7",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]
