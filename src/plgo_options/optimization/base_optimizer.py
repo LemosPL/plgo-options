@@ -433,7 +433,6 @@ class BaseOptimizer:
         target_expiry: str | None = None,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
-        vega_cross_expiry_corr: float = 0.0,
         roll_dte_threshold: int | None = 7,
     ) -> dict:
         """Run the optimization and return proposed trades.
@@ -444,10 +443,6 @@ class BaseOptimizer:
             Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
         new_position_penalty : float
             Extra cost per dollar notional for trades in instruments not already held.
-        vega_cross_expiry_corr : float
-            Correlation of vol shocks across expiries. Lower means less cross-expiry
-            vega netting; higher means more shared vega risk.
-            :param lam_factor:
         """
         print(f"Running base optimizer")
 

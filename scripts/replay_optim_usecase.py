@@ -28,12 +28,13 @@ def build_optimizer(self) -> OptimizerV2:
 
 def run(self) -> dict[str, Any]:
     optimizer = self.build_optimizer()
+    print(f"Running optimizer with params: {self.run_params}")
     self.result = optimizer.run(**asdict(self.run_params))
     return self.result
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260511_115607_ALL.json")
+        path = Path("../data/optimization_snapshots/usecases/20260513_154458_ALL.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -44,7 +45,7 @@ def main() -> None:
     trades = []
     before_payoff, after_payoff = optimizer.build_payoffs(horizons, spot_arr, trades)
 
-    result = usecase.run()#run_test()
+    result = usecase.run_test()
 
     #result = usecase.run()
 

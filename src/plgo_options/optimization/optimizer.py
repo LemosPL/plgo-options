@@ -81,7 +81,6 @@ class OptimizerV2(BaseOptimizer):
         lambda_vega: float = 1.0,
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
-        vega_cross_expiry_corr: float = 0.0,
     ) -> dict:
         """Run the optimization and return proposed trades.
 
@@ -91,9 +90,6 @@ class OptimizerV2(BaseOptimizer):
             Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
         new_position_penalty : float
             Extra cost per dollar notional for trades in instruments not already held.
-        vega_cross_expiry_corr : float
-            Correlation of vol shocks across expiries. Lower means less cross-expiry
-            vega netting; higher means more shared vega risk.
         """
         print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
         spot = self.eth_spot
@@ -248,7 +244,6 @@ class OptimizerV2(BaseOptimizer):
             port_delta, port_gamma, port_theta, port_vega,
             sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
             port_vega_by_expiry=port_vega_by_expiry,
-            vega_cross_expiry_corr=vega_cross_expiry_corr,
         )
 
         def objective(x: np.ndarray) -> float:
@@ -271,7 +266,6 @@ class OptimizerV2(BaseOptimizer):
                 new_delta, new_gamma, new_theta, new_vega,
                 sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
                 port_vega_by_expiry=new_vega_by_expiry,
-                vega_cross_expiry_corr=vega_cross_expiry_corr,
             )
 
             # Risk reduction relative to doing nothing
@@ -444,7 +438,6 @@ class OptimizerV2(BaseOptimizer):
             new_delta, new_gamma, new_theta, new_vega,
             sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
             port_vega_by_expiry=new_vega_by_expiry,
-            vega_cross_expiry_corr=vega_cross_expiry_corr,
         )
 
         total_cost = sum(t["trade_cost"] for t in trades)

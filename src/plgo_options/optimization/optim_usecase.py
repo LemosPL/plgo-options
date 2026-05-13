@@ -20,7 +20,6 @@ class OptimizerRunParams:
     target_expiry: str | None = "31JUL26"
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
-    vega_cross_expiry_corr: float = 0.8
     roll_dte_threshold: int | None = None
     is_replay: bool = False
 
@@ -111,10 +110,9 @@ class OptimizerUseCase:
         print('run()')
         optimizer = self.build_optimizer(self.today)
 
-        '''self.run_params.target_expiry = "31JUL26"
+        self.run_params.target_expiry = "31JUL26"
         self.run_params.lam_factor = 0.3
-        self.run_params.is_replay = True
-        self.run_params.roll_dte_threshold = 7'''
+        self.run_params.roll_dte_threshold = 7
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
 

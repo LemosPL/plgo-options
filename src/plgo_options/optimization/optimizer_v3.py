@@ -420,7 +420,6 @@ class OptimizerV3(BaseOptimizer):
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
-                 vega_cross_expiry_corr: float = 0.0,
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
             ):
@@ -428,7 +427,6 @@ class OptimizerV3(BaseOptimizer):
         print(target_expiry)
         print(unwind_discount)
         print(new_position_penalty)
-        print(vega_cross_expiry_corr)
         print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
         #is_replay = (target_expiry is not None)#False
