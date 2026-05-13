@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import time
@@ -26,6 +27,152 @@ client = DeribitClient()
 MIN_DTE = 7
 SPOT_STEP = 50
 DEFAULT_IV = 0.80  # 80% fallback
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt v2 — cacheable sections
+# Sections A (identity + principles) and G (response style) are stable across
+# turns and are sent as a separately-cached prefix on each Anthropic call.
+# Anthropic caches based on byte-identical content, so keep these as module
+# constants. See section H of the spec for the tool-filter logic.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SECTION_A_IDENTITY = """You are the PLGO Options Trading Assistant — a senior options strategist for Protocol Labs' ETH derivatives portfolio.
+
+You have three tools: scan_trades, build_strategy, suggest_rolls. Calling a tool is how you act. Describing trades in text without calling a tool is a non-action — the user sees nothing on their screen. When the user gives you specific trades, or asks to add/test/try/show something, call the relevant tool first, then comment.
+
+## How you operate
+
+1. All cost and P&L numbers in your responses come from tool results. You never estimate, round non-zero costs to "$0" or "near-zero" (tolerance ±$1,000), invent impact tables, or render tables with placeholder values (TBD, —, ?, "to be priced"). If a tool result does not cover what you need, call the tool again with different parameters or fall back to build_strategy to price the missing items directly. Always show real numbers or explicitly say "I haven't priced this yet."
+
+2. You work on whole structures, not individual legs. A put spread is one unit. Closing one leg of a spread is a mistake — reference structures by their trade IDs (e.g. "Put Spread [#12, #13]").
+
+3. Closing a protective position removes protection — that is not "taking profit." Real profit harvesting is close + reopen-equivalent at a lower cost; the difference is the profit. If you cannot show a cheaper reopen, the position is doing its job and should stay.
+
+4. Every analysis considers three actions in this order: (1) roll existing, (2) close + reopen, (3) add new. Suggesting only new trades without first asking whether existing structures should be rolled or closed is incomplete advice.
+
+5. When the user states an OBJECTIVE (lowest cost, closest to zero, max floor, best protection, cost-neutral) with PARTIAL CONSTRAINTS, treat unspecified parameters (strikes, quantities, expiry) as SEARCH VARIABLES, not missing inputs. Generate 5–15 candidate combinations, call build_strategy in parallel (emit multiple tool_use blocks in one assistant turn) to price each, rank by the objective, and present the top 5–8 in a ranked table. Quantity is a powerful lever — vary it alongside strikes. Never ask the user to specify what you can search for. Asking "what strikes?" when the user said "find the lowest cost" is a failure mode.
+
+6. When a user request would damage the portfolio (closing protection without replacement, adding legs that conflict with existing structures, vague "improve my portfolio" with no direction), push back in one line: name what's at stake, offer the safer alternative, ask which they want. Then execute.
+
+## Scope
+
+ETH options and perpetuals on this portfolio. No emojis. Do not discuss other topics."""
+
+
+SECTION_G_RESPONSE_STYLE = """## Response style
+
+Default: short focused answer + tool call. 2–6 lines of analysis is usually right.
+
+Expand to a full diagnosis-and-plan format only when:
+- The user explicitly asks to review or optimize the whole portfolio
+- The user draws a target payoff curve
+- You are proposing a multi-action plan (close + roll + new in one turn)
+
+Format: **bold** key numbers. Markdown tables when comparing 2+ strategies. Reference structures by ID. Quote tool-returned costs exactly.
+
+### Example 1 — User pastes specific trades
+
+User: "What do you think of these?" (pastes 4 trades)
+
+> Added the put spread ([#new1]/[#new2]) and the call spread ([#new3]/[#new4]) to Suggestions.
+>
+> - Put spread 2400/2200 27JUN26: **$48,200**
+> - Call spread 3200/3800 27JUN26: **$31,500 credit**
+>
+> Combined: floor moves from $2,100 to $2,380, BE drops from $2,950 to $2,820. The put spread overlaps your existing Put Spread [#12, #13] at the same strikes, just shorter expiry. Worth rolling [#12, #13] forward to 27JUN26 instead of stacking — should I check the roll cost?
+
+### Example 2 — User wants the lowest-cost close + reopen (grid search)
+
+User: "Close the May 15 put spread and call spread, reopen on 31JUL26 with different strikes and quantities, net cost close to zero."
+
+[Issue 10–14 parallel build_strategy calls in one assistant turn: candidate strike combos × 2–3 quantity scenarios for each spread. Each call covers the FULL close + reopen so the returned net_cost is the real number.]
+
+> Tested 12 close + reopen combinations across strike width and size. Top 6 closest to net zero:
+>
+> | # | Spread | Close → Reopen | Qty | Net Cost |
+> |---|---|---|---|---|
+> | 1 | Put + Call combined | PS 1600/3900 → 1900/2400 + CS 1000/2400 → 2400/3200 | 1000 ETH each | **+$2,400** |
+> | 2 | Put + Call combined | PS 1600/3900 → 1850/2450 + CS 1000/2400 → 2350/3250 | 1000 ETH each | **−$11,800 credit** |
+> | 3 | Put + Call combined | PS 1600/3900 → 1900/2400 + CS 1000/2400 → 2400/3200 | 750 ETH each | **+$1,100** |
+> | 4 | Put + Call combined | PS 1600/3900 → 1900/2350 + CS 1000/2400 → 2350/3300 | 1000 ETH each | **−$4,200 credit** |
+> | 5 | Put only | PS 1600/3900 → 1900/2400 | 1000 ETH | **−$3,800 credit** |
+> | 6 | Call only | CS 1000/2400 → 2400/3200 | 1000 ETH | **+$5,900** |
+>
+> Top 3 are in Suggestions (#new1–#new3). #new1 at +$2,400 is closest to zero with full size. #new2 at −$11,800 gives you credit but slightly narrower strikes. Want me to widen the strike grid further, test smaller sizes, or lock in one of these?
+
+### Example 3 — bad response (avoid)
+
+User: same as Example 2.
+
+> Got it. What new expiry and strikes do you want for each spread? Please specify the long strike, short strike, and quantity per leg for the put spread, and the same for the call spread.
+
+This is the failure mode. The user already stated the objective (close to zero) and the expiry (31JUL26). Strikes and quantities are search variables. Asking the user to specify them is a non-action."""
+
+
+def _bs_delta(spot: float, strike: float, dte: int, sigma: float, opt: str) -> float:
+    """Per-contract Black–Scholes delta (signed naturally: call ∈ (0,1), put ∈ (-1,0))."""
+    if spot <= 0 or strike <= 0 or sigma <= 0 or dte <= 0:
+        if opt == "C":
+            return 1.0 if spot > strike else 0.0
+        return -1.0 if spot < strike else 0.0
+    T = dte / 365.25
+    d1 = (math.log(spot / strike) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+    return float(norm.cdf(d1)) if opt == "C" else float(norm.cdf(d1) - 1.0)
+
+
+def _render_positions_md(positions_detail: list[dict]) -> str:
+    if not positions_detail:
+        return "_(no positions)_"
+    rows = ["| ID | Side | Type | Strike | Expiry | Qty | Δ |",
+            "|----|------|------|--------|--------|-----|---|"]
+    for pd in positions_detail:
+        # Position delta = per-contract delta × net_qty (signed by side)
+        delta_per = pd.get("delta_per", 0.0)
+        net_qty = pd.get("net_qty", 0.0)
+        pos_delta = delta_per * net_qty
+        strike_s = f"{int(pd['strike']):,}" if pd['strike'] == int(pd['strike']) else f"{pd['strike']:,.2f}"
+        rows.append(
+            f"| #{pd['id']} | {pd['side']} | {pd['type']} | "
+            f"{strike_s} | {pd['expiry']} | {pd['qty']:.0f} | "
+            f"{pos_delta:+,.0f} |"
+        )
+    return "\n".join(rows)
+
+
+def _render_wb_md(wb_legs: list[dict]) -> str:
+    if not wb_legs:
+        return "_(empty)_"
+    rows = ["| Side | Type | Strike | Expiry | Qty |",
+            "|------|------|--------|--------|-----|"]
+    for leg in wb_legs:
+        rows.append(
+            f"| {str(leg.get('side','?')).title()} | "
+            f"{leg.get('opt','?')} | {leg.get('strike','?')} | "
+            f"{leg.get('expiry_code', leg.get('expiry','?'))} | "
+            f"{leg.get('qty', '?')} |"
+        )
+    return "\n".join(rows)
+
+
+def _render_added_md(added: list[dict]) -> str:
+    if not added:
+        return "_(none)_"
+    rows = ["| ID | Side | Type | Strike | Expiry | Qty | Premium |",
+            "|----|------|------|--------|--------|-----|---------|"]
+    for a in added:
+        prem = a.get("premium_usd") or 0
+        try:
+            prem_s = f"${float(prem):,.0f}"
+        except (TypeError, ValueError):
+            prem_s = "?"
+        rows.append(
+            f"| #{a.get('id','?')} | {a.get('side','?')} | "
+            f"{a.get('option_type', a.get('opt','?'))} | "
+            f"{a.get('strike','?')} | {a.get('expiry','?')} | "
+            f"{a.get('qty','?')} | {prem_s} |"
+        )
+    return "\n".join(rows)
 
 
 class OptimizeRequest(BaseModel):
@@ -1329,6 +1476,17 @@ async def chat(req: ChatRequest):
     except Exception:
         spot = 0
 
+    # Per-turn Deribit option-book cache. All tool handlers read from this so
+    # parallel build_strategy / suggest_rolls invocations don't each refetch
+    # the ~2k-row book. Built once per chat turn; closure-captured by handlers.
+    try:
+        _turn_book_raw = await client._get("get_book_summary_by_currency", {
+            "currency": "ETH", "kind": "option",
+        })
+        turn_book: dict[str, dict] = {s.get("instrument_name", ""): s for s in _turn_book_raw}
+    except Exception:
+        turn_book = {}
+
     try:
         db = await get_db()
         db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
@@ -1386,6 +1544,7 @@ async def chat(req: ChatRequest):
                 "premium_usd": entry_premium,
                 "current_value_usd": round(current_value, 2),
                 "mtm_pnl_usd": round(mtm_pnl, 2),
+                "delta_per": _bs_delta(spot, strike, dte, sigma, opt),
             })
         expiry_groups[exp_short] = expiry_groups.get(exp_short, 0) + 1
 
@@ -1661,14 +1820,8 @@ async def chat(req: ChatRequest):
         if not strategies:
             strategies = [{"name": "Custom Strategy", "legs": parsed_legs}]
 
-        # Fetch live prices from Deribit
-        try:
-            summaries_raw = await client._get("get_book_summary_by_currency", {
-                "currency": "ETH", "kind": "option",
-            })
-            summaries = {s.get("instrument_name", ""): s for s in summaries_raw}
-        except Exception:
-            summaries = {}
+        # Fetch live prices from Deribit (cached per turn)
+        summaries = turn_book
 
         all_suggestions = []
         for strat in strategies:
@@ -1779,7 +1932,7 @@ async def chat(req: ChatRequest):
             print(f"Auto match_target error:\n{_tb.format_exc()}")
             target_match_summary = f"Target matching failed: {e}"
 
-    # ── Build system prompt ──
+    # ── Build system prompt (v2: cacheable A+G + dynamic state) ──
     fmt_spot = f"${spot:,.2f}"
     fmt_net_calls = f"{net_calls:+,.0f}"
     fmt_net_puts = f"{net_puts:+,.0f}"
@@ -1790,225 +1943,106 @@ async def chat(req: ChatRequest):
     fmt_be = f"${breakeven:,.0f}" if breakeven else "N/A"
     fmt_expiries = ', '.join(sorted(expiry_groups.keys())[:8])
     fmt_ladder = _json.dumps(pnl_ladder)
-    fmt_positions = _json.dumps(positions_detail, default=str)
+    positions_md = _render_positions_md(positions_detail)
 
-    system_prompt = """YOU MUST FOLLOW THESE RULES. THEY ARE NON-NEGOTIABLE:
+    # Section B — live state (always present, dynamic)
+    dynamic_parts: list[str] = [
+        f"""## Live market
+ETH spot: {fmt_spot}
 
-1. You have 3 tools: `scan_trades`, `build_strategy`, `suggest_rolls`. USE THEM.
-2. When the user gives you specific trades (strikes, expiries, sides, qtys) — IMMEDIATELY call `build_strategy` to add them to the Suggestions table. Do NOT just describe them in text.
-3. When the user asks to "add", "test", "try", "show" trades — call `build_strategy` or `scan_trades`. NEVER say you cannot manage the workbench or suggestions. You CAN — via your tools.
-4. NEVER use emojis.
-5. NEVER say you lack portfolio data — it is provided below.
-6. NEVER discuss topics outside ETH options/perps trading for this portfolio.
-7. You CAN add strategies to the Suggestions table via build_strategy. You CANNOT directly add to the Workbench — the user must click the "+" button on a suggestion to move it to the workbench. When the user says "add to workbench", call build_strategy to put it in the Suggestions table, then tell them to click "+" to move it to the workbench.
-
-=== CRITICAL: COST AND P&L ACCURACY ===
-8. NEVER invent, estimate, or guess cost numbers. ONLY use the exact cost/P&L values returned by your tools (build_strategy, scan_trades, suggest_rolls). The tool results contain computed costs from live Deribit prices — those are the ONLY source of truth.
-9. If the user asks for a "cost neutral" or "$0 cost" strategy and your tool returns a non-zero cost — REPORT THE ACTUAL COST from the tool result. Then explain that the strategy does not achieve $0 cost and suggest adjustments. NEVER claim a strategy costs $0 when the tool says otherwise.
-10. When presenting strategies to the user, ALWAYS quote the "Net cost" value exactly as returned by the tool. Do NOT round aggressively, do NOT replace with "$0" or "near-zero" unless the actual value is within +/- $1,000.
-11. NEVER write P&L impact tables with made-up numbers. Only include P&L figures if they come directly from tool results (the "impact" field). If you don't have tool results yet, say "call build_strategy to get exact numbers" instead of guessing.
-12. If you want to propose multiple strategies, call build_strategy for EACH one separately so you get real costs for each. Do NOT describe strategies with cost estimates before calling the tool.
-
-=== CRITICAL: NEVER SUGGEST "TAKE PROFIT" WITHOUT REOPENING PROTECTION ===
-13. Closing a profitable position is NOT free money — it REMOVES the protection that position provides. If the market moves after closing, the portfolio is exposed.
-14. The ONLY valid way to suggest "harvesting profit" is: close the position AND simultaneously reopen equivalent protection at a lower cost. The real profit is the NET DIFFERENCE, not the full close value.
-15. If you cannot demonstrate a cheaper way to reopen the same protection shape, then there is NO profit to harvest — the position is doing exactly what it was designed to do.
-16. NEVER tell the user they can "take profit of $X" by closing positions. Instead say: "Close this structure ($X value), reopen equivalent protection for $Y, net real profit = $X - $Y".
-17. NEVER suggest pure overlays (adding short calls/puts on top of existing positions without closing anything). Overlays create hidden risk — selling calls caps upside, selling puts adds downside. Always use rolls or close+reopen instead.
-
-=== CRITICAL: CHALLENGE INCOMPLETE OR RISKY USER REQUESTS ===
-You are a senior advisor, not a yes-man. When a user request would damage the portfolio, you MUST push back and educate before executing. Specifically:
-
-18. If the user asks to CLOSE or "take profit" on positions WITHOUT mentioning reopening:
-   - FIRST quantify what protection they would lose: "These call spreads provide $X in upside protection above $Y. Closing them leaves the portfolio fully exposed above $Y."
-   - THEN offer the proper alternative: "I can find a way to reopen equivalent protection cheaper — you keep the hedge and capture the net difference as real profit."
-   - THEN ask: "Do you want me to (A) close AND reopen (recommended), or (B) close outright and accept the exposure?"
-   - Only proceed with option B if the user explicitly confirms they want to remove the protection.
-
-19. If the user asks for something vague like "improve my portfolio" or "reduce cost":
-   - Ask what direction they want to improve: downside protection? upside participation? lower breakeven? Tighter spreads?
-   - Do NOT guess — ask one focused follow-up question, then execute.
-
-20. If the user asks to add trades that would CONFLICT with existing structures (e.g., selling calls when they already have long call spreads):
-   - Flag the conflict: "You already have Long Call Spread [#X, #Y] at these strikes. Adding a short call here would partially cancel that protection."
-   - Ask: "Should I adjust the existing structure instead, or do you intentionally want to reduce that exposure?"
-
-When parsing pasted trades:
-- Instrument "ETH-26JUN26-2400-P" means expiry_code="26JUN26", strike=2400, opt="P"
-- Group into strategies: Long+Short puts at different strikes = "Put Spread"
-- Call build_strategy once per logical strategy (a spread = 2 legs in one call)
-
-"""
-
-    system_prompt += f"""You are the PLGO Options Trading Assistant — a senior options strategist for Protocol Labs' ETH derivatives portfolio.
-
-=== LIVE MARKET ===
-ETH Spot: {fmt_spot}
-
-=== PORTFOLIO SUMMARY ===
+## Portfolio snapshot
 Positions: {num_positions} | Net calls: {fmt_net_calls} ETH | Net puts: {fmt_net_puts} ETH
 Expiries: {fmt_expiries}
-P&L at spot: {fmt_pnl} | Worst: {fmt_worst} (at {fmt_worst_at}) | Best: {fmt_best} | BE: {fmt_be}
-P&L ladder: {fmt_ladder}
+P&L at spot: {fmt_pnl} | Worst: {fmt_worst} at {fmt_worst_at} | Best: {fmt_best} | BE: {fmt_be}
+Ladder: {fmt_ladder}
 
-=== ALL POSITIONS ===
-{fmt_positions}
+## Positions
 
-=== PORTFOLIO STRUCTURES (trades are paired — NEVER split these) ===
-{structures_text}
+{positions_md}
 
-IMPORTANT: When suggesting rolls, cost reductions, or closing trades, ALWAYS operate on entire structures.
-A put spread (Long Put + Short Put) must be rolled/closed as a UNIT — never close just one leg.
-An iron condor has 4 legs — roll all 4 together. Reference structures by their trade IDs.
-When analyzing risk or suggesting improvements, describe what each STRUCTURE does, not individual legs.
-"""
+## Structures (operate on these as units)
 
+{structures_text}"""
+    ]
+
+    # Section C — Workbench (conditional)
     if wb_legs:
-        fmt_wb = _json.dumps(wb_legs, default=str)
+        fmt_wb_md = _render_wb_md(wb_legs)
         fmt_wb_cost = f"${wb_total_cost:,.2f}"
         fmt_wb_pnl = f"${new_pnl_at_spot:,.0f}"
         fmt_wb_worst = f"${new_worst:,.0f}"
         fmt_wb_be = f"${new_breakeven:,.0f}" if new_breakeven else "N/A"
-        system_prompt += f"""
-=== WORKBENCH ===
-{fmt_wb}
-Cost: {fmt_wb_cost} | P&L: {fmt_wb_pnl} | Worst: {fmt_wb_worst} | BE: {fmt_wb_be}
-"""
+        dynamic_parts.append(f"""## Workbench (pending legs)
 
+{fmt_wb_md}
+
+Cost: {fmt_wb_cost} | P&L at spot: {fmt_wb_pnl} | Worst: {fmt_wb_worst} | BE: {fmt_wb_be}""")
+
+    # Section D — Recently added (conditional)
     if added_trades:
-        system_prompt += f"""
-=== RECENTLY ADDED ===
-{_json.dumps(added_trades, default=str)}
-"""
+        dynamic_parts.append(f"""## Recently added to Suggestions
 
+The user added these trades to the Suggestions table this turn. They are already priced. Do not re-add them — focus on analysis: risk profile, greeks impact, interaction with existing positions, breakeven, concerns or improvements.
+
+{_render_added_md(added_trades)}""")
+
+    # Section E — Rolled/closed (conditional)
     if closed_ids:
-        system_prompt += f"""
-=== ROLLED/CLOSED TRADES (optimizer working portfolio) ===
-The following trade IDs have been "rolled" in the optimizer's working portfolio (NOT in the real DB):
-{_json.dumps(list(closed_ids))}
-These are excluded from the portfolio payoff. Do NOT suggest rolling them again.
-"""
+        rolled_ids_str = ", ".join(f"#{i}" for i in sorted(closed_ids))
+        dynamic_parts.append(f"""## Rolled/closed in working portfolio
 
+These IDs have been rolled in this working session (not in the DB). They are excluded from payoff and should not be rolled again.
+
+IDs: {rolled_ids_str}""")
+
+    # Section F — Fast-path pasted trades (conditional)
     if fast_path_summary:
-        system_prompt += f"""
-=== USER'S PASTED TRADES (already priced and added to Suggestions table) ===
-{fast_path_summary}
+        dynamic_parts.append(f"""## User's pasted trades (already priced, in Suggestions)
 
-The trades above have ALREADY been parsed, priced with live Deribit data, and added to the Suggestions table.
-Do NOT call build_strategy for these trades again — they are already there.
-Instead, focus on ANALYZING them: risk profile, greeks impact, how they interact with the existing portfolio,
-max loss scenarios, breakeven analysis, and any concerns or improvements you see.
-Answer any specific questions the user asked about these trades.
-"""
+These trades were parsed and priced before this turn. They are already in the Suggestions table — do not re-add. Analyze them: risk profile, greeks, interaction with existing portfolio, max loss scenarios, breakeven. Answer the specific question the user asked.
 
-    system_prompt += """
-=== TOOLS ===
-- `build_strategy(name, legs)`: Build specific trades and add to Suggestions table. Use when you know exact legs or user pastes trades. Fetches live Deribit prices.
-- `scan_trades(query, filters)`: Search Deribit broadly. Results go to Suggestions table.
-- `suggest_rolls(objective)`: Analyze which existing positions to roll. Returns priced roll suggestions (close existing + open at new expiry/strike). Use when user mentions "roll", "extend", "adjust expiry", "restructure existing", or when near-term positions are expiring. Results appear as Roll Cards in the Suggestions table with category "roll".
+{fast_path_summary}""")
 
-=== STRATEGY NAMING ===
-Every strategy you create via build_strategy MUST have a descriptive name that includes:
-1. The ZONE it addresses: "Downside:", "Upside:", or "Cost Reduction:" prefix
-2. The STRUCTURE type: "Put Spread", "Call Spread", "Collar", "Butterfly", "Roll", etc.
-3. KEY STRIKES and EXPIRY: e.g. "2400/2200 27JUN25"
-Examples: "Downside: Put Spread 2400/2200 27JUN25", "Upside: Call Spread 3200/3800 26SEP25", "Cost Reduction: Sell Call 4000 27JUN25"
-This naming lets the user identify each trade block in the workbench at a glance.
-
-=== PROACTIVE PORTFOLIO ANALYSIS ===
-CRITICAL: When analyzing the portfolio or suggesting improvements, you MUST consider ALL of these actions, not just new trades:
-
-1. **ROLL existing structures** — Call `suggest_rolls` PROACTIVELY when:
-   - Any structure has DTE < 60 days (getting close to expiry)
-   - Strikes are far from current spot (deeply ITM or OTM structures losing effectiveness)
-   - The user asks to improve the portfolio, reduce cost, or match a target
-   - Rolling can reduce cost (e.g., rolling to farther expiry collects more premium)
-   Think: "Before adding new trades, can I improve the portfolio by rolling what already exists?"
-
-2. **CLOSE + REOPEN (NEVER close alone)** — CRITICAL RULE:
-   Closing a profitable position is NOT "taking profit" — it REMOVES protection from the portfolio.
-   You MUST NEVER suggest closing positions without simultaneously showing how to reopen equivalent protection.
-   The ONLY valid "profit harvest" is: close a structure, reopen equivalent protection cheaper, and the NET DIFFERENCE is the real profit.
-   Example: Close call spread worth $500K, reopen same protection at current strikes for $350K = real profit of $150K with protection maintained.
-   If you cannot show a cheaper way to reopen the same protection, then there is NO profit to take — the position is doing its job.
-
-   When closing IS justified (as part of close+reopen):
-   - A structure is marked [recycle candidate] — CHEAP to close and far OTM, reopen closer to spot
-   - A structure is marked [TIGHTEN CANDIDATE] — reduce width, reopen tighter
-   - A structure is working against the target shape — close and reopen in the right direction
-   NEVER close structures marked [PROTECTION] without reopening equivalent protection.
-   CRITICAL: Always close ENTIRE structures, never individual legs.
-   - A "Call Spread [#39, #38]" must be closed by reversing BOTH legs.
-   - Always reference the trade IDs: "Close Call Spread [#39, #38] 3700/5700"
-   - Use build_strategy with BOTH the close legs (role: "close") AND the reopen legs (role: "open") so the user sees the full picture.
-
-3. **NEW trades** — Add new structures only when rolling/closing isn't sufficient.
-
-The BEST analysis combines all three: "Roll structure [#12,#13] to extend duration, close+reopen [#15,#16] at better strikes (net credit $50K), and add a new put spread to fill the gap."
-
-=== ROLL WORKFLOW ===
-When rolling or closing/restructuring positions:
-1. Use `suggest_rolls` with the appropriate objective
-2. Explain which positions you recommend rolling and WHY (DTE risk, cost efficiency, strike adjustment)
-3. Show the roll suggestions so the user can click "+" to add them to the workbench
-4. The roll suggestions show: original trade (counterparty, ID, strike, expiry) -> close leg + open leg at new expiry
-5. The user can then click Calculate to get live prices and see the net roll cost
-
-=== RESPONSE STYLE ===
-When analyzing/optimizing:
-1. DIAGNOSE — reference problem STRUCTURES by their trade IDs (e.g., "Put Spread [#12, #13] at 2400/2200")
-2. EVALUATE EXISTING — for each structure, state: keep as-is, roll, or close? Why?
-3. CALL TOOLS — call suggest_rolls for structures that should be rolled, build_strategy for new trades, BEFORE writing analysis
-4. STRATEGY — present using ONLY the cost and impact numbers returned by your tools. Quote them exactly.
-5. IMPACT TABLE — ONLY include P&L figures from tool results. If the tool did not return a P&L ladder, do NOT make one up.
-6. GREEKS — brief delta/theta/vega impact (qualitative is fine)
-
-IMPORTANT: The order is TOOL FIRST, THEN ANALYSIS. Never write cost estimates before calling the tool. The user trusts your numbers — wrong costs erode trust.
-IMPORTANT: NEVER suggest only new trades without first evaluating whether existing structures should be rolled or closed. The user expects a complete portfolio management view.
-
-Use **bold** for key numbers. Use markdown tables. Reference positions by ID. Be structured and actionable.
-"""
-
-    # ── Inject drawn target profile if provided ──
+    # Section H — Drawn target payoff (conditional)
     if req.target_payoff:
-        target_lines = []
-        for pt in req.target_payoff:
-            target_lines.append(f"  ETH ${pt['x']:,.0f} -> P&L ${pt['y']:,.0f}")
-        system_prompt += f"""
-=== DRAWN TARGET PAYOFF PROFILE ===
-The user has drawn a target payoff curve on the chart.
+        target_lines = "\n".join(
+            f"  ETH ${pt['x']:,.0f} → P&L ${pt['y']:,.0f}" for pt in req.target_payoff
+        )
+        dynamic_parts.append(f"""## Target payoff curve
 
-Target points (Spot Price -> Desired P&L):
-{chr(10).join(target_lines)}
+The user has drawn a target. Target matching has already run and the new-trade strategies for the gap are already in Suggestions.
 
-The system has ALREADY run target matching optimization and added NEW TRADE strategies to the Suggestions table.
-It has ALSO analyzed every existing position to determine which ones HELP vs HURT the target match.
+Existing positions are tagged in the Structures block:
+- **[KEEP]** — helping the target shape
+- **[ROLL]** — short DTE or wrong strike, needs to be extended/adjusted
+- **[CLOSE]** — working against the target shape
+
+Target points (Spot → desired P&L):
+{target_lines}
 
 {target_match_summary or "Target matching is processing."}
 
-YOUR JOB — COMPLETE PORTFOLIO PLAN (follow this order):
+Your job:
 
-**STEP 1 — EXISTING POSITIONS:** The analysis above tells you which positions to CLOSE, ROLL, or KEEP.
-- For CLOSE candidates: explain WHY closing them improves the target match. These are positions working AGAINST the desired curve shape.
-- For ROLL candidates: call `suggest_rolls` to get priced roll suggestions. These have short DTE and need to be extended.
-- For ESSENTIAL positions: briefly note they are helping and should be kept.
-You MUST call `suggest_rolls` if there are any ROLL candidates in the analysis. Do NOT skip this step.
+1. For each **[ROLL]** structure, call `suggest_rolls` to get priced suggestions.
+2. Walk the user through the plan in this order:
+   - Close: [list with IDs and why each hurts the shape]
+   - Roll: [list with IDs and target expiry]
+   - Downside (new, already in Suggestions): [strategy name + cost]
+   - Upside (new, already in Suggestions): [strategy name + cost]
+3. End with total estimated cost of the full restructuring.
 
-**STEP 2 — BELOW SPOT (Downside):** Analyze the curve BELOW current spot. What does the user want on the downside? Explain the Downside new-trade strategy: legs, cost, match quality.
+The match_target tool has been filtered out of your tool list in this mode — you cannot accidentally double-run it.""")
 
-**STEP 3 — ABOVE SPOT (Upside):** Analyze the curve ABOVE current spot. Explain the Upside new-trade strategy: legs, cost, match quality.
+    dynamic_state_block = "\n\n".join(dynamic_parts)
 
-**STEP 4 — COMPLETE ACTION PLAN:** Present the FULL plan as a numbered list:
-  1. Close positions: [list with IDs]
-  2. Roll positions: [list with IDs and target expiry]
-  3. New trades - Downside: [strategy name and cost]
-  4. New trades - Upside: [strategy name and cost]
-  5. Total estimated cost of the full restructuring
-
-Present each action as a distinct **named trade block** so the user can add them individually to the workbench.
-Do NOT call build_strategy or scan_trades — the new trade strategies are already in the Suggestions table.
-You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
-"""
+    # Final cacheable prefix (A + G) + dynamic suffix. Anthropic caches the
+    # blocks up to and including the one marked with cache_control.
+    system_blocks = [
+        {"type": "text", "text": SECTION_A_IDENTITY},
+        {"type": "text", "text": SECTION_G_RESPONSE_STYLE, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": dynamic_state_block},
+    ]
 
     # ── Build messages ──
     messages = []
@@ -2017,148 +2051,140 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
         messages.append({"role": role, "content": h.get("text", "")})
     messages.append({"role": "user", "content": msg})
 
-    # ── Tool definitions ──
-    tools = [
-        {
-            "name": "scan_trades",
-            "description": "Scan the market for option structures that improve the portfolio. Returns ranked suggestions with cost and impact metrics. Use this when the user wants trade ideas, hedging structures, or improvements to their portfolio.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language description of what to optimize for (e.g. 'protect downside below 1500', 'improve payoff from 0 to 2000')"
-                    },
-                    "budget": {
-                        "type": "number",
-                        "description": "Maximum cost in USD for the trade. Default 15000.",
-                        "default": 15000
-                    },
-                    "min_floor_improvement": {
-                        "type": "number",
-                        "description": "If set, only return trades where worst-case P&L improves by at least this amount. Use when user wants floor/worst-case improvement.",
-                        "default": 0
-                    },
-                    "min_downside_improvement": {
-                        "type": "number",
-                        "description": "If set, only return trades where downside zone improves. Use when user wants downside protection.",
-                        "default": 0
-                    },
-                    "min_upside_improvement": {
-                        "type": "number",
-                        "description": "If set, only return trades where upside zone improves.",
-                        "default": 0
-                    },
-                    "min_breakeven_improvement": {
-                        "type": "number",
-                        "description": "If set, only return trades where breakeven moves lower by at least this amount.",
-                        "default": 0
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Number of results to return. Default 10.",
-                        "default": 10
-                    },
-                    "target_expiry": {
-                        "type": "string",
-                        "description": "Filter to specific expiry code (e.g. '27JUN25'). Leave empty for all."
-                    },
-                    "min_dte": {
-                        "type": "integer",
-                        "description": "Minimum days to expiry for instruments. Default 7. Set higher when user wants longer-dated trades.",
-                        "default": 7
-                    },
-                },
-                "required": ["query"]
-            }
-        },
-        {
-            "name": "suggest_rolls",
-            "description": "Analyze which existing portfolio positions could be rolled (closed and reopened at a different strike/expiry). Returns priced roll suggestions showing close leg + open leg with live Deribit prices and net roll cost. Results appear as Roll Cards in the Suggestions table. Use when user mentions rolling, closing and reopening, extending duration, adjusting existing positions, or restructuring.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "objective": {
-                        "type": "string",
-                        "description": "What the roll should achieve: 'raise_floor', 'lower_breakeven', 'reduce_cost', 'extend_duration', 'adjust_strikes'",
-                        "enum": ["raise_floor", "lower_breakeven", "reduce_cost", "extend_duration", "adjust_strikes"]
-                    },
-                    "min_dte": {
-                        "type": "integer",
-                        "description": "Minimum DTE for the new (rolled) positions. Default 60.",
-                        "default": 60
-                    },
-                    "max_roll_cost": {
-                        "type": "number",
-                        "description": "Maximum net cost of the roll in USD. Default 15000.",
-                        "default": 15000
-                    },
-                },
-                "required": ["objective"]
-            }
-        },
-        {
-            "name": "build_strategy",
-            "description": "Build a custom strategy from specific legs and add it to the Suggestions table. Use this when YOU recommend specific trades (strike, type, side, expiry) and want them to appear in the user's UI so they can add to workbench and test. This fetches live Deribit prices for each leg. For roll/recycle strategies, tag each leg with role='close' or role='open' so the UI visually distinguishes which legs close existing positions vs open new ones.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Strategy name (e.g. 'Floor Raiser: Bear Put Spread', 'Repair Corridor')"
-                    },
-                    "legs": {
-                        "type": "array",
-                        "description": "Array of trade legs",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "side": {"type": "string", "enum": ["buy", "sell"]},
-                                "opt": {"type": "string", "enum": ["C", "P", "PERP"], "description": "C=Call, P=Put, PERP=Perpetual"},
-                                "strike": {"type": "number", "description": "Strike for options, entry price for perps"},
-                                "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'. Use 'PERP' for perpetuals."},
-                                "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."},
-                                "role": {"type": "string", "enum": ["close", "open"], "description": "Tag this leg as 'close' (closing an existing position) or 'open' (opening a new one). Use when building roll/recycle strategies so the UI shows which legs are closes vs opens."}
-                            },
-                            "required": ["side", "opt", "strike"]
-                        }
+    # ── Tool definitions (v2 descriptions; schemas unchanged) ──
+    TOOL_BUILD_STRATEGY = {
+        "name": "build_strategy",
+        "description": (
+            "Build a specific multi-leg strategy from named legs and add it to the Suggestions table with live Deribit prices. "
+            "Returns the full priced result (net cost, floor impact, P&L change, breakeven) in the tool result — no separate Calculate step needed.\n\n"
+            "Call this immediately when:\n"
+            "- The user pastes or describes specific trades (strikes, expiries, sides, qtys)\n"
+            "- You are recommending specific legs you want priced\n"
+            "- The user says \"add\", \"test\", \"try\", or \"show\" specific trades\n\n"
+            "GRID SEARCH MODE — this is also how you find the optimum across a parameter space:\n\n"
+            "When the user states an objective (lowest cost, closest to zero, max floor, cost-neutral) with partial constraints, call build_strategy 5–15 times in PARALLEL (emit multiple tool_use blocks in the same assistant turn). Vary strikes, quantities, and expiries to cover the search space. Then rank results by the objective and present the top 5–8 in a table. Parallel multi-call per turn is the expected pattern — that is what optimization means.\n\n"
+            "Quantity is a key lever: halving the reopen size roughly halves the reopen cost. Vary it alongside strikes when targeting low cost.\n\n"
+            "For close + reopen (the valid way to harvest profit on a protective structure): include BOTH the closing legs (role=\"close\") AND the reopening legs (role=\"open\") in the same call. The user sees the full structure as one unit. The \"real profit\" is the difference between the close credit and the reopen debit — that net is what the tool returns (negative = credit). Never propose a bare close on a [PROTECTION]-tagged structure without including a reopen.\n\n"
+            "Naming convention (required):\n"
+            "\"<Zone>: <Structure> <strikes> <expiry>\"\n"
+            "Zone ∈ {Downside, Upside, Cost Reduction, Roll}\n"
+            "Examples: \"Downside: Put Spread 2400/2200 27JUN26\", \"Roll: Put Spread 1600/3900 → 1900/2400 31JUL26\", \"Cost Reduction: Sell Call 4000 27JUN26\".\n\n"
+            "For grid-search candidates, use a numeric suffix:\n"
+            "\"Roll Search #1: PS 1600/3900 → 1900/2400 31JUL26\", \"Roll Search #2: PS 1600/3900 → 1850/2450 31JUL26\", etc.\n\n"
+            "Parsing pasted instruments:\n"
+            "\"ETH-26JUN26-2400-P\" → expiry_code=\"26JUN26\", strike=2400, opt=\"P\".\n"
+            "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Strategy name (see naming convention in description)"},
+                "legs": {
+                    "type": "array",
+                    "description": "Array of trade legs",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "side": {"type": "string", "enum": ["buy", "sell"]},
+                            "opt": {"type": "string", "enum": ["C", "P", "PERP"], "description": "C=Call, P=Put, PERP=Perpetual"},
+                            "strike": {"type": "number", "description": "Strike for options, entry price for perps"},
+                            "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'. Use 'PERP' for perpetuals."},
+                            "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."},
+                            "role": {"type": "string", "enum": ["close", "open"], "description": "Tag as 'close' (closing an existing position) or 'open' (opening a new one). Required for roll/close+reopen strategies."}
+                        },
+                        "required": ["side", "opt", "strike"]
                     }
-                },
-                "required": ["name", "legs"]
-            }
-        },
-        {
-            "name": "match_target",
-            "description": (
-                "Find a multi-leg option strategy that best matches the user's drawn target payoff profile. "
-                "Uses optimization to decompose the gap between current portfolio and target into tradeable legs. "
-                "MUST be called whenever the user provides a target payoff profile (drawn on the chart). "
-                "Returns a strategy with legs, cost, and target match percentage."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "min_dte": {
-                        "type": "integer", "default": 14,
-                        "description": "Minimum days to expiry for candidate options"
-                    },
-                    "max_spread_pct": {
-                        "type": "number", "default": 40,
-                        "description": "Maximum bid-ask spread percentage"
-                    }
-                },
-                "required": []
-            }
+                }
+            },
+            "required": ["name", "legs"]
         }
-    ]
+    }
+
+    TOOL_SUGGEST_ROLLS = {
+        "name": "suggest_rolls",
+        "description": (
+            "Analyze existing portfolio positions for roll opportunities. Returns priced roll suggestions (close existing + open at new expiry/strike) as Roll Cards in the Suggestions table.\n\n"
+            "Call this proactively when:\n"
+            "- Any structure has DTE < 60\n"
+            "- Strikes are far from spot (deep ITM or OTM, losing effectiveness)\n"
+            "- The user asks to improve the portfolio, reduce cost, or match a target\n"
+            "- The user mentions \"roll\", \"extend\", \"adjust expiry\", \"restructure existing\"\n"
+            "- A target payoff curve is drawn and existing positions are tagged [ROLL]\n\n"
+            "If suggest_rolls returns results but they do not cover the specific structures the user asked about (e.g. you asked about positions [#429]–[#432] but the top results are other structures), do not stop there. Either call again with parameters that target those structures, or fall back to build_strategy in grid-search mode to price the rolls directly. Never render a table with TBD or placeholder values.\n\n"
+            "Always operate on entire structures. A put spread rolls as 2 legs together; an iron condor rolls as 4 legs together. Reference structures by trade IDs.\n\n"
+            "If the user asks to \"close and take profit\" on a [PROTECTION] structure without mentioning reopening, push back before calling: name the protection that would be lost, offer the close+reopen alternative via this tool, ask which they want. Then proceed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "description": "What the roll should achieve",
+                    "enum": ["raise_floor", "lower_breakeven", "reduce_cost", "extend_duration", "adjust_strikes"]
+                },
+                "min_dte": {"type": "integer", "default": 60, "description": "Minimum DTE for the new (rolled) positions"},
+                "max_roll_cost": {"type": "number", "default": 15000, "description": "Maximum net cost of the roll in USD"},
+            },
+            "required": ["objective"]
+        }
+    }
+
+    TOOL_SCAN_TRADES = {
+        "name": "scan_trades",
+        "description": (
+            "Search Deribit broadly for option structures that improve the portfolio. Returns ranked suggestions with cost and impact metrics, added to the Suggestions table.\n\n"
+            "Call this when:\n"
+            "- The user wants new trade ideas without specifying legs\n"
+            "- The user describes a goal (\"hedge downside below $2000\", \"cheap upside above $4000\") rather than specific strikes\n"
+            "- You want to fill a gap in the portfolio shape and don't yet know the best strikes\n\n"
+            "If you already know the exact legs, use build_strategy — it is more precise. scan_trades is for exploration; build_strategy is for execution and grid-search."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Natural language description of what to optimize for"},
+                "budget": {"type": "number", "default": 15000, "description": "Maximum cost in USD"},
+                "min_floor_improvement": {"type": "number", "default": 0, "description": "Only return trades where worst-case P&L improves by at least this amount"},
+                "min_downside_improvement": {"type": "number", "default": 0, "description": "Only return trades where downside zone improves"},
+                "min_upside_improvement": {"type": "number", "default": 0, "description": "Only return trades where upside zone improves"},
+                "min_breakeven_improvement": {"type": "number", "default": 0, "description": "Only return trades where breakeven moves lower"},
+                "max_results": {"type": "integer", "default": 10},
+                "target_expiry": {"type": "string", "description": "Filter to specific expiry code (e.g. '27JUN25'). Leave empty for all."},
+                "min_dte": {"type": "integer", "default": 7, "description": "Minimum days to expiry"},
+            },
+            "required": ["query"]
+        }
+    }
+
+    TOOL_MATCH_TARGET = {
+        "name": "match_target",
+        "description": (
+            "Find a multi-leg strategy that best matches a user-drawn target payoff. Uses optimization to decompose the gap between current portfolio and target.\n\n"
+            "This tool is invoked automatically by the system when the user draws a target curve. By the time you see the target payoff section in your context, match_target has already run and the new-trade strategies are already in the Suggestions table. Do not call it directly."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_dte": {"type": "integer", "default": 14, "description": "Minimum days to expiry for candidate options"},
+                "max_spread_pct": {"type": "number", "default": 40, "description": "Maximum bid-ask spread percentage"}
+            },
+            "required": []
+        }
+    }
+
+    # Filter match_target out when a target curve is already drawn — the auto-run
+    # already happened. Constraint by availability beats constraint by instruction.
+    tools = [TOOL_BUILD_STRATEGY, TOOL_SUGGEST_ROLLS, TOOL_SCAN_TRADES]
+    if not req.target_payoff:
+        tools.append(TOOL_MATCH_TARGET)
 
     # ── Call Claude ──
     try:
         aclient = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = aclient.messages.create(
             model=ANTHROPIC_MODEL,
-            max_tokens=4000,
-            system=system_prompt,
+            max_tokens=8000,
+            system=system_blocks,
             messages=messages,
             tools=tools,
         )
@@ -2395,14 +2421,8 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
         if not to_roll:
             return "No structures found matching the roll criteria.", None
 
-        # ── 4. Fetch Deribit data ──
-        try:
-            summaries_raw = await client._get("get_book_summary_by_currency", {
-                "currency": "ETH", "kind": "option",
-            })
-            summaries_map = {s.get("instrument_name", ""): s for s in summaries_raw}
-        except Exception:
-            summaries_map = {}
+        # ── 4. Use cached Deribit book (one fetch per turn) ──
+        summaries_map = turn_book
 
         avail_expiries = {}
         for name in summaries_map:
@@ -2734,14 +2754,8 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                 "The real profit is the NET DIFFERENCE between close proceeds and reopen cost, not the full close value."
             ), None
 
-        # Fetch live prices from Deribit
-        try:
-            summaries_raw = await client._get("get_book_summary_by_currency", {
-                "currency": "ETH", "kind": "option",
-            })
-            summaries = {s.get("instrument_name", ""): s for s in summaries_raw}
-        except Exception:
-            summaries = {}
+        # Use cached Deribit book (one fetch per turn — see turn_book at top of chat handler)
+        summaries = turn_book
 
         # Default qty from portfolio average
         avg_qty = 1000
@@ -2913,85 +2927,61 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
                 result.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
         return result
 
-    # Loop until Claude gives a text response (max 5 tool rounds)
+    # Loop until Claude gives a text response (max 10 tool rounds — grid search
+    # often needs 2 rounds, multi-action plans need 3–4).
     text = ""
     current_response = response
-    for _round in range(5):
+    for _round in range(10):
         if current_response.stop_reason != "tool_use":
             break
 
         tool_blocks = [b for b in current_response.content if b.type == "tool_use"]
-        tool_results_content = []
 
-        for tb in tool_blocks:
-            if tb.name == "scan_trades":
-                tr_text, tr_data = await _handle_scan_trades(tb.input)
-                if tr_data:
-                    if result_data and "suggestions" in result_data:
-                        # Merge: keep existing suggestions, add new ones
-                        result_data["suggestions"].extend(tr_data.get("suggestions", []))
-                        result_data["num_suggestions"] += tr_data.get("num_suggestions", 0)
-                    else:
-                        result_data = tr_data
-                tool_results_content.append({
-                    "type": "tool_result", "tool_use_id": tb.id, "content": tr_text
-                })
-            elif tb.name == "suggest_rolls":
-                roll_text, roll_data = await _handle_suggest_rolls(tb.input)
-                if roll_data:
-                    if result_data and "suggestions" in result_data:
-                        result_data["suggestions"].extend(roll_data.get("suggestions", []))
-                        result_data["num_suggestions"] += roll_data.get("num_suggestions", 0)
-                        # Merge available expiries
-                        existing = set(result_data.get("available_expiries", []))
-                        existing.update(roll_data.get("available_expiries", []))
-                        result_data["available_expiries"] = sorted(existing, key=lambda x: datetime.strptime(x, "%d%b%y"))
-                    else:
-                        result_data = roll_data
-                tool_results_content.append({
-                    "type": "tool_result", "tool_use_id": tb.id, "content": roll_text
-                })
-            elif tb.name == "build_strategy":
-                bs_text, bs_data = await _handle_build_strategy(tb.input)
-                if bs_data:
-                    if result_data and "suggestions" in result_data:
-                        # Merge into existing suggestions
-                        result_data["suggestions"].extend(bs_data.get("suggestions", []))
-                        result_data["num_suggestions"] += bs_data.get("num_suggestions", 0)
-                    else:
-                        result_data = bs_data
-                tool_results_content.append({
-                    "type": "tool_result", "tool_use_id": tb.id, "content": bs_text
-                })
-            elif tb.name == "match_target":
-                # If target match was already auto-run, don't duplicate
-                if target_match_summary and result_data and result_data.get("suggestions"):
-                    mt_text = "Target matching was already performed automatically. The strategies are already in the Suggestions table — do NOT add more."
-                    tool_results_content.append({
-                        "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
-                    })
+        # Dispatch every tool_use block concurrently. Each coroutine returns
+        # (tb, text, data) so we can merge results in a deterministic order
+        # after the gather completes.
+        async def _dispatch(tb):
+            try:
+                if tb.name == "scan_trades":
+                    text_, data_ = await _handle_scan_trades(tb.input)
+                elif tb.name == "suggest_rolls":
+                    text_, data_ = await _handle_suggest_rolls(tb.input)
+                elif tb.name == "build_strategy":
+                    text_, data_ = await _handle_build_strategy(tb.input)
+                elif tb.name == "match_target":
+                    if target_match_summary and result_data and result_data.get("suggestions"):
+                        return tb, "Target matching was already performed automatically. The strategies are already in the Suggestions table — do NOT add more.", None
+                    text_, data_ = await _handle_match_target(tb.input, req.target_payoff or [])
                 else:
+                    return tb, "Unknown tool.", None
+            except Exception as e:
+                import traceback
+                print(f"{tb.name} error:\n{traceback.format_exc()}")
+                return tb, f"Error in {tb.name}: {e}", None
+            return tb, text_, data_
+
+        dispatched = await asyncio.gather(*[_dispatch(tb) for tb in tool_blocks])
+
+        tool_results_content = []
+        for tb, tr_text, tr_data in dispatched:
+            tool_results_content.append({
+                "type": "tool_result", "tool_use_id": tb.id, "content": tr_text,
+            })
+            if not tr_data:
+                continue
+            if result_data and "suggestions" in result_data:
+                result_data["suggestions"].extend(tr_data.get("suggestions", []))
+                result_data["num_suggestions"] = result_data.get("num_suggestions", 0) + tr_data.get("num_suggestions", 0)
+                # suggest_rolls also contributes available_expiries — merge if present
+                if tr_data.get("available_expiries"):
+                    existing = set(result_data.get("available_expiries", []))
+                    existing.update(tr_data["available_expiries"])
                     try:
-                        mt_text, mt_data = await _handle_match_target(tb.input, req.target_payoff or [])
-                    except Exception as e:
-                        import traceback
-                        tb_str = traceback.format_exc()
-                        print(f"match_target error:\n{tb_str}")
-                        mt_text = f"Error in match_target: {e}"
-                        mt_data = None
-                    if mt_data:
-                        if result_data and "suggestions" in result_data:
-                            result_data["suggestions"].extend(mt_data.get("suggestions", []))
-                            result_data["num_suggestions"] += mt_data.get("num_suggestions", 0)
-                        else:
-                            result_data = mt_data
-                    tool_results_content.append({
-                        "type": "tool_result", "tool_use_id": tb.id, "content": mt_text
-                    })
+                        result_data["available_expiries"] = sorted(existing, key=lambda x: datetime.strptime(x, "%d%b%y"))
+                    except ValueError:
+                        result_data["available_expiries"] = sorted(existing)
             else:
-                tool_results_content.append({
-                    "type": "tool_result", "tool_use_id": tb.id, "content": "Unknown tool."
-                })
+                result_data = tr_data
 
         # Serialize content blocks to dicts so they survive re-serialization
         messages.append({"role": "assistant", "content": _serialize_content(current_response.content)})
@@ -3000,8 +2990,8 @@ You CAN and SHOULD call `suggest_rolls` if there are positions to roll.
         try:
             current_response = aclient.messages.create(
                 model=ANTHROPIC_MODEL,
-                max_tokens=4000,
-                system=system_prompt,
+                max_tokens=8000,
+                system=system_blocks,
                 messages=messages,
                 tools=tools,
             )

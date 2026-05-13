@@ -459,6 +459,79 @@ select { margin-bottom: .5rem; }
   color: var(--green);
 }
 
+.risk-sub {
+  display: flex;
+  justify-content: center;
+  gap: .75rem;
+  margin-top: .25rem;
+  font-size: .68rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--muted);
+}
+.risk-sub-item { white-space: nowrap; }
+.risk-sub-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-right: .15rem;
+}
+.risk-sub-pos { color: var(--green); }
+.risk-sub-neg { color: var(--red); }
+
+.risk-metric-clickable { cursor: pointer; transition: border-color .15s, background .15s; }
+.risk-metric-clickable:hover { border-color: var(--accent); background: var(--hover-bg); }
+
+/* MTM history modal */
+.mtm-modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.55);
+  display: none;
+  align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.mtm-modal-backdrop.open { display: flex; }
+.mtm-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.mtm-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .8rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.mtm-modal-header h3 { margin: 0; font-size: 1rem; }
+.mtm-modal-close {
+  background: none; border: none; color: var(--muted);
+  font-size: 1.4rem; cursor: pointer; line-height: 1;
+}
+.mtm-modal-close:hover { color: var(--text); }
+.mtm-modal-body { padding: 1rem; overflow-y: auto; }
+
+/* MTM history table */
+#mtmh-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+#mtmh-table th {
+  position: sticky; top: 0; background: var(--surface);
+  text-align: right; padding: .4rem .6rem; color: var(--muted);
+  font-weight: 500; border-bottom: 1px solid var(--border);
+}
+#mtmh-table th:first-child, #mtmh-table td:first-child { text-align: left; }
+#mtmh-table td {
+  text-align: right; padding: .35rem .6rem;
+  border-bottom: 1px solid var(--row-border);
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: .74rem;
+}
+#mtmh-table tr:hover { background: var(--hover-bg); }
+.mtmh-pos { color: var(--green); }
+.mtmh-neg { color: var(--red); }
+.mtmh-empty {
+  text-align: center; padding: 2rem; color: var(--muted);
+}
+
 /* ── Portfolio filter toolbar ─────────────────────────────── */
 .pf-toolbar {
   display: flex;

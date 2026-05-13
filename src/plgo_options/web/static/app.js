@@ -933,6 +933,13 @@ document.querySelectorAll(".nav-item").forEach(item => {
         if (vc && vc.data) Plotly.Plots.resize(vc);
       }, 50);
     }
+    if (pg === "mtmhistory") {
+      mtmhLoadPage();
+      setTimeout(() => {
+        const c = document.getElementById("mtmh-chart");
+        if (c && c.data) Plotly.Plots.resize(c);
+      }, 60);
+    }
     // execution is now a subtab inside structurer, not a standalone page
   });
 });
@@ -1093,6 +1100,8 @@ function tmRenderSummary() {
   const $mtm = document.getElementById("tm-mtm");
   $mtm.textContent = `$${totalMtm.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   $mtm.style.color = totalMtm >= 0 ? "var(--green)" : "var(--red)";
+  // Fire-and-forget: pull Δ1d / Δ7d from the snapshot history
+  refreshMtmDeltas();
 
   const $delta = document.getElementById("tm-delta");
   $delta.textContent = totalDelta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1368,7 +1377,7 @@ function tfApplyPreset() {
           strike = Math.round(spot * offsets[i]);
         }
       }
-      return { ...leg, strike, premium_per: 0, premium_usd: 0 };
+      return { ...leg, strike, qty: 1000, premium_per: 0, premium_usd: 0 };
     });
     tfRenderLegs();
   }
@@ -1387,6 +1396,7 @@ function tfRenderLegs() {
       <option value="Put" ${leg.type === "Put" ? "selected" : ""}>Put</option>
     </select></td>
     <td><input type="number" class="tf-leg-strike" data-idx="${i}" value="${leg.strike}" step="any" min="0"></td>
+    <td><input type="number" class="tf-leg-qty" data-idx="${i}" value="${leg.qty ?? 1000}" step="100" min="0"></td>
     <td><input type="number" class="tf-leg-prem" data-idx="${i}" value="${leg.premium_per}" step="0.01"></td>
     <td><input type="number" class="tf-leg-premusd" data-idx="${i}" value="${leg.premium_usd}" step="0.01" readonly></td>
     <td><button type="button" class="tf-leg-remove" data-idx="${i}">&times;</button></td>
@@ -1404,6 +1414,13 @@ function tfRenderLegs() {
   }));
   tbody.querySelectorAll(".tf-leg-type").forEach(el => el.addEventListener("change", () => { tfLegs[el.dataset.idx].type = el.value; }));
   tbody.querySelectorAll(".tf-leg-strike").forEach(el => el.addEventListener("input", () => { tfLegs[el.dataset.idx].strike = parseFloat(el.value) || 0; }));
+  tbody.querySelectorAll(".tf-leg-qty").forEach(el => el.addEventListener("input", () => {
+    const idx = el.dataset.idx;
+    tfLegs[idx].qty = parseFloat(el.value) || 0;
+    tfRecomputeLegUsd(idx);
+    const usdEl = tbody.querySelector(`.tf-leg-premusd[data-idx="${idx}"]`);
+    if (usdEl) usdEl.value = tfLegs[idx].premium_usd;
+  }));
   tbody.querySelectorAll(".tf-leg-prem").forEach(el => {
     el.addEventListener("input", () => {
       const idx = el.dataset.idx;
@@ -1427,29 +1444,26 @@ function tfRenderLegs() {
   }));
 }
 
-// Recompute a single leg's premium_usd = signed premium_per × multi-qty.
+// Recompute a single leg's premium_usd = signed premium_per × per-leg qty.
 function tfRecomputeLegUsd(idx) {
-  const qty = parseFloat(document.getElementById("tf-multi-qty").value) || 0;
   const leg = tfLegs[idx];
   if (!leg) return;
+  const qty = parseFloat(leg.qty) || 0;
   const signed = tfSignedPremium(leg.side, leg.premium_per);
   leg.premium_per = signed;
   leg.premium_usd = +(signed * qty).toFixed(2);
 }
 
-// Recompute USD across all legs (e.g. when multi-qty changes).
+// Recompute USD across all legs.
 function tfRecomputeAllLegsUsd() {
   for (let i = 0; i < tfLegs.length; i++) tfRecomputeLegUsd(i);
   tfRenderLegs();
 }
 
 document.getElementById("btn-tf-add-leg").addEventListener("click", () => {
-  tfLegs.push({ side: "Buy", type: "Call", strike: Math.round(ethSpot || 2000), premium_per: 0, premium_usd: 0 });
+  tfLegs.push({ side: "Buy", type: "Call", strike: Math.round(ethSpot || 2000), qty: 1000, premium_per: 0, premium_usd: 0 });
   tfRenderLegs();
 });
-
-// Recompute all leg USD totals when the shared multi-leg qty changes.
-document.getElementById("tf-multi-qty").addEventListener("input", tfRecomputeAllLegsUsd);
 
 // Premium-sign convention: Buy → negative, Sell/Unwind → positive.
 function tfSignedPremium(side, premium) {
@@ -1583,10 +1597,9 @@ document.getElementById("trade-form").addEventListener("submit", async (e) => {
     if (!strike || strike <= 0) { alert("Strike is required"); return; }
     if (!qty || qty <= 0) { alert("Qty is required"); return; }
   } else {
-    const qty = parseFloat(document.getElementById("tf-multi-qty").value);
-    if (!qty || qty <= 0) { alert("Qty per leg is required"); return; }
     if (tfLegs.length === 0) { alert("Add at least one leg"); return; }
     if (tfLegs.some(l => !l.strike || l.strike <= 0)) { alert("All legs need a strike"); return; }
+    if (tfLegs.some(l => !l.qty || l.qty <= 0)) { alert("All legs need a qty"); return; }
   }
   if (!expiry) { alert("Expiry date is required"); return; }
 
@@ -1620,17 +1633,17 @@ document.getElementById("trade-form").addEventListener("submit", async (e) => {
       };
       await post("/api/trades/", data);
     } else {
-      // Create multi-leg strategy — one trade per leg
-      const qty = parseFloat(document.getElementById("tf-multi-qty").value) || 0;
+      // Create multi-leg strategy — one trade per leg, each with its own qty
       for (const leg of tfLegs) {
+        const legQty = parseFloat(leg.qty) || 0;
         const otm = ref_spot > 0 ? ((leg.strike / ref_spot) - 1) * 100 : 0;
-        const notional = ref_spot > 0 ? (qty * ref_spot) / 1e6 : 0;
+        const notional = ref_spot > 0 ? (legQty * ref_spot) / 1e6 : 0;
         await post("/api/trades/", {
           asset: currentAsset, counterparty, trade_date, expiry, ref_spot,
           side: leg.side,
           option_type: leg.type,
           strike: leg.strike,
-          qty,
+          qty: legQty,
           premium_per: leg.premium_per,
           premium_usd: leg.premium_usd,
           notional_mm: notional,
@@ -7979,3 +7992,217 @@ function vcRenderTable(callStrikes, callMids, callIvs, putStrikes, putMids, putI
 
   $section.style.display = "";
 }
+
+// ─── MTM History ────────────────────────────────────────────
+// One snapshot per (date, asset) is written lazily on /api/portfolio/pnl.
+// This block: (1) renders Δ1d / Δ7d on the Portfolio MTM summary card,
+// (2) opens a modal on card click, (3) drives the standalone MTM History page.
+
+let mtmhPageLoaded = false;
+
+function _mtmFmt(n, opts = {}) {
+  if (n === null || n === undefined || isNaN(n)) return "--";
+  const sign = opts.signed && n > 0 ? "+" : "";
+  return sign + "$" + Math.round(n).toLocaleString();
+}
+
+function _mtmDeltaSpan(d, kind = "mtm") {
+  // d = {mtm_change, spot_change, from_date} | null
+  if (!d) return '<span style="color:var(--muted)">--</span>';
+  const val = kind === "spot" ? d.spot_change : d.mtm_change;
+  if (val === null || val === undefined) return '<span style="color:var(--muted)">--</span>';
+  const cls = val >= 0 ? "risk-sub-pos" : "risk-sub-neg";
+  const sign = val > 0 ? "+" : "";
+  return `<span class="${cls}">${sign}$${Math.round(val).toLocaleString()}</span>`;
+}
+
+async function refreshMtmDeltas() {
+  const $d1 = document.getElementById("tm-mtm-d1d");
+  const $d7 = document.getElementById("tm-mtm-d7d");
+  if (!$d1 || !$d7) return;
+  try {
+    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=14`);
+    $d1.innerHTML = _mtmDeltaSpan(data.delta_1d);
+    $d7.innerHTML = _mtmDeltaSpan(data.delta_7d);
+  } catch (e) {
+    $d1.textContent = "--";
+    $d7.textContent = "--";
+  }
+}
+
+function _renderMtmChart(elId, history) {
+  const dates = history.map(h => h.date);
+  const mtm = history.map(h => h.mtm_usd);
+  const spot = history.map(h => h.spot);
+
+  const traces = [
+    {
+      x: dates, y: mtm, name: "Portfolio MTM (USD)",
+      type: "scatter", mode: "lines+markers",
+      line: { color: "#3fb950", width: 2 },
+      marker: { size: 5 },
+      yaxis: "y",
+    },
+    {
+      x: dates, y: spot, name: "Spot",
+      type: "scatter", mode: "lines",
+      line: { color: "#58a6ff", width: 1.5, dash: "dot" },
+      yaxis: "y2",
+    },
+  ];
+  const layout = {
+    margin: { t: 10, r: 50, b: 40, l: 60 },
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor: "rgba(0,0,0,0)",
+    font: { color: getComputedStyle(document.body).color, size: 11 },
+    showlegend: true,
+    legend: { orientation: "h", y: -0.15 },
+    xaxis: { showgrid: false },
+    yaxis: { title: "MTM (USD)", tickprefix: "$", gridcolor: "rgba(128,128,128,.2)" },
+    yaxis2: { title: "Spot", overlaying: "y", side: "right", showgrid: false, tickprefix: "$" },
+    hovermode: "x unified",
+  };
+  Plotly.newPlot(elId, traces, layout, { responsive: true, displayModeBar: false });
+}
+
+function _renderMtmTable(history) {
+  const $tbody = document.getElementById("mtmh-tbody");
+  if (!$tbody) return;
+  if (!history.length) {
+    $tbody.innerHTML = '<tr><td colspan="10" class="mtmh-empty">No snapshots yet.</td></tr>';
+    return;
+  }
+  const rows = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const h = history[i];
+    const prev = i > 0 ? history[i - 1] : null;
+    const dMtm = prev ? h.mtm_usd - prev.mtm_usd : null;
+    const dSpot = prev ? h.spot - prev.spot : null;
+    const dMtmCls = dMtm == null ? "" : dMtm >= 0 ? "mtmh-pos" : "mtmh-neg";
+    const dSpotCls = dSpot == null ? "" : dSpot >= 0 ? "mtmh-pos" : "mtmh-neg";
+    rows.push(`<tr>
+      <td>${h.date}</td>
+      <td>$${Number(h.spot).toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+      <td>${_mtmFmt(h.mtm_usd)}</td>
+      <td class="${dMtmCls}">${dMtm == null ? "--" : _mtmFmt(dMtm, { signed: true })}</td>
+      <td class="${dSpotCls}">${dSpot == null ? "--" : (dSpot > 0 ? "+" : "") + "$" + dSpot.toFixed(2)}</td>
+      <td>${h.position_count}</td>
+      <td>${(h.delta ?? 0).toFixed(2)}</td>
+      <td>${(h.gamma ?? 0).toFixed(4)}</td>
+      <td>${(h.theta ?? 0).toFixed(2)}</td>
+      <td>${(h.vega ?? 0).toFixed(2)}</td>
+    </tr>`);
+  }
+  $tbody.innerHTML = rows.join("");
+}
+
+async function mtmhLoadPage() {
+  const range = document.getElementById("mtmh-range").value || "30";
+  try {
+    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=${range}`);
+    const history = data.history || [];
+    const $summary = document.getElementById("mtmh-summary");
+    const $empty = document.getElementById("mtmh-empty");
+    const $chart = document.getElementById("mtmh-chart");
+
+    if (!history.length) {
+      $summary.textContent = "";
+      $chart.style.display = "none";
+      $empty.style.display = "";
+      _renderMtmTable([]);
+      return;
+    }
+
+    $chart.style.display = "";
+    $empty.style.display = "none";
+
+    const cur = data.current;
+    const d1 = data.delta_1d;
+    const d7 = data.delta_7d;
+    const fmtChg = (d) => d
+      ? `<span class="${d.mtm_change >= 0 ? "mtmh-pos" : "mtmh-neg"}">${d.mtm_change >= 0 ? "+" : ""}$${Math.round(d.mtm_change).toLocaleString()}</span> <span style="opacity:.6">(from ${d.from_date})</span>`
+      : '<span style="opacity:.5">--</span>';
+    $summary.innerHTML = `
+      <strong>${currentAsset}</strong> &nbsp;|&nbsp;
+      Latest <strong>${_mtmFmt(cur.mtm_usd)}</strong> @ spot $${Number(cur.spot).toFixed(2)} on ${cur.date}
+      &nbsp;|&nbsp; Δ1d: ${fmtChg(d1)}
+      &nbsp;|&nbsp; Δ7d: ${fmtChg(d7)}
+    `;
+    _renderMtmChart("mtmh-chart", history);
+    _renderMtmTable(history);
+  } catch (e) {
+    console.error("MTM history load failed:", e);
+  }
+}
+
+async function mtmhOpenModal() {
+  document.getElementById("mtmh-modal-asset").textContent = currentAsset;
+  const $modal = document.getElementById("mtmh-modal");
+  $modal.classList.add("open");
+  try {
+    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=30`);
+    const history = data.history || [];
+    const $summary = document.getElementById("mtmh-modal-summary");
+    const $empty = document.getElementById("mtmh-modal-empty");
+    const $chart = document.getElementById("mtmh-modal-chart");
+
+    if (!history.length) {
+      $summary.textContent = "";
+      $chart.style.display = "none";
+      $empty.style.display = "";
+      return;
+    }
+    $chart.style.display = "";
+    $empty.style.display = "none";
+
+    const cur = data.current;
+    const d1 = data.delta_1d, d7 = data.delta_7d;
+    const fmtChg = (d) => d
+      ? `<span class="${d.mtm_change >= 0 ? "mtmh-pos" : "mtmh-neg"}">${d.mtm_change >= 0 ? "+" : ""}$${Math.round(d.mtm_change).toLocaleString()}</span>`
+      : '<span style="opacity:.5">--</span>';
+    $summary.innerHTML = `Latest <strong>${_mtmFmt(cur.mtm_usd)}</strong> on ${cur.date} &nbsp;|&nbsp; Δ1d: ${fmtChg(d1)} &nbsp;|&nbsp; Δ7d: ${fmtChg(d7)}`;
+    // Plotly needs a tick to size correctly inside a just-opened modal
+    setTimeout(() => _renderMtmChart("mtmh-modal-chart", history), 50);
+  } catch (e) {
+    console.error("MTM history modal load failed:", e);
+  }
+}
+
+function mtmhCloseModal() {
+  document.getElementById("mtmh-modal").classList.remove("open");
+}
+
+// Wire up MTM history UI once DOM is ready
+(function initMtmHistoryUi() {
+  const setup = () => {
+    const card = document.getElementById("tm-mtm-card");
+    if (card) card.addEventListener("click", mtmhOpenModal);
+
+    const closeBtn = document.getElementById("mtmh-modal-close");
+    if (closeBtn) closeBtn.addEventListener("click", mtmhCloseModal);
+
+    const backdrop = document.getElementById("mtmh-modal");
+    if (backdrop) backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) mtmhCloseModal();
+    });
+
+    const openPage = document.getElementById("mtmh-modal-open-page");
+    if (openPage) openPage.addEventListener("click", (e) => {
+      e.preventDefault();
+      mtmhCloseModal();
+      const nav = document.querySelector('.nav-item[data-page="mtmhistory"]');
+      if (nav) nav.click();
+    });
+
+    const refresh = document.getElementById("btn-mtmh-refresh");
+    if (refresh) refresh.addEventListener("click", mtmhLoadPage);
+
+    const range = document.getElementById("mtmh-range");
+    if (range) range.addEventListener("change", mtmhLoadPage);
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setup);
+  } else {
+    setup();
+  }
+})();

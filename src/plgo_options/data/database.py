@@ -59,6 +59,22 @@ CREATE TABLE IF NOT EXISTS trade_audit_log (
 );
 """
 
+MTM_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
+    snapshot_date TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    spot REAL NOT NULL DEFAULT 0,
+    mtm_usd REAL NOT NULL DEFAULT 0,
+    position_count INTEGER NOT NULL DEFAULT 0,
+    delta REAL DEFAULT 0,
+    gamma REAL DEFAULT 0,
+    theta REAL DEFAULT 0,
+    vega REAL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (snapshot_date, asset)
+);
+"""
+
 
 async def get_db() -> aiosqlite.Connection:
     global _db
@@ -77,6 +93,7 @@ async def init_db():
     db = await get_db()
     await db.execute(TRADES_SCHEMA)
     await db.execute(AUDIT_SCHEMA)
+    await db.execute(MTM_HISTORY_SCHEMA)
     await db.commit()
 
     # Migration: add 'asset' column if missing (existing DBs)

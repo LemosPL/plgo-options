@@ -493,6 +493,48 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
 
     spot_ladder = active_ladder
 
+    # Lazy daily MTM snapshot: write one row per (date, asset) the first time
+    # the endpoint is hit on a new UTC day. INSERT OR IGNORE is a no-op if a
+    # row already exists, so this is safe to call on every request.
+    # Self-heal the table in case the DB was created before this migration shipped.
+    try:
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
+                snapshot_date TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                spot REAL NOT NULL DEFAULT 0,
+                mtm_usd REAL NOT NULL DEFAULT 0,
+                position_count INTEGER NOT NULL DEFAULT 0,
+                delta REAL DEFAULT 0,
+                gamma REAL DEFAULT 0,
+                theta REAL DEFAULT 0,
+                vega REAL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (snapshot_date, asset)
+            )"""
+        )
+        await db.execute(
+            """INSERT OR IGNORE INTO portfolio_mtm_history
+                 (snapshot_date, asset, spot, mtm_usd, position_count,
+                  delta, gamma, theta, vega)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                today.isoformat(),
+                asset.upper(),
+                float(eth_spot or 0),
+                round(float(total_mtm), 2),
+                len(enriched),
+                round(float(total_delta), 4),
+                round(float(total_gamma), 6),
+                round(float(total_theta), 4),
+                round(float(total_vega), 4),
+            ),
+        )
+        await db.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("MTM snapshot write failed: %s", e)
+
     return {
         "asset": asset.upper(),
         "eth_spot": eth_spot,
@@ -512,6 +554,95 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "portfolio_theta": round(total_theta, 2),
             "portfolio_vega": round(total_vega, 2),
         },
+    }
+
+
+@router.get("/mtm-history")
+async def mtm_history(asset: str = "ETH", days: int = 90):
+    """Return daily MTM history rows for an asset, plus current/Δ1d/Δ7d.
+
+    Δ1d compares the most recent row to the row immediately before it.
+    Δ7d compares the most recent row to the row closest to 7 calendar days
+    before it (≥ 7 days back; if none qualifies, returns None).
+    """
+    from datetime import timedelta
+
+    asset_u = asset.upper()
+    days = max(1, min(int(days or 90), 730))
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    try:
+        db = await get_db()
+        await db.execute(
+            """CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
+                snapshot_date TEXT NOT NULL,
+                asset TEXT NOT NULL,
+                spot REAL NOT NULL DEFAULT 0,
+                mtm_usd REAL NOT NULL DEFAULT 0,
+                position_count INTEGER NOT NULL DEFAULT 0,
+                delta REAL DEFAULT 0,
+                gamma REAL DEFAULT 0,
+                theta REAL DEFAULT 0,
+                vega REAL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (snapshot_date, asset)
+            )"""
+        )
+        cursor = await db.execute(
+            """SELECT snapshot_date, spot, mtm_usd, position_count,
+                      delta, gamma, theta, vega
+               FROM portfolio_mtm_history
+               WHERE asset = ? AND snapshot_date >= ?
+               ORDER BY snapshot_date ASC""",
+            (asset_u, cutoff),
+        )
+        rows = await cursor.fetchall()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read MTM history: {e}")
+
+    history = [
+        {
+            "date": r["snapshot_date"],
+            "spot": r["spot"],
+            "mtm_usd": r["mtm_usd"],
+            "position_count": r["position_count"],
+            "delta": r["delta"],
+            "gamma": r["gamma"],
+            "theta": r["theta"],
+            "vega": r["vega"],
+        }
+        for r in rows
+    ]
+
+    current = history[-1] if history else None
+    prev_day = history[-2] if len(history) >= 2 else None
+
+    delta_1d = None
+    if current and prev_day:
+        delta_1d = {
+            "from_date": prev_day["date"],
+            "mtm_change": round(current["mtm_usd"] - prev_day["mtm_usd"], 2),
+            "spot_change": round((current["spot"] or 0) - (prev_day["spot"] or 0), 4),
+        }
+
+    delta_7d = None
+    if current:
+        target = date.fromisoformat(current["date"]) - timedelta(days=7)
+        candidates = [h for h in history if date.fromisoformat(h["date"]) <= target]
+        if candidates:
+            base = candidates[-1]
+            delta_7d = {
+                "from_date": base["date"],
+                "mtm_change": round(current["mtm_usd"] - base["mtm_usd"], 2),
+                "spot_change": round((current["spot"] or 0) - (base["spot"] or 0), 4),
+            }
+
+    return {
+        "asset": asset_u,
+        "history": history,
+        "current": current,
+        "delta_1d": delta_1d,
+        "delta_7d": delta_7d,
     }
 
 
