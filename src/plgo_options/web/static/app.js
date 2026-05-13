@@ -4000,7 +4000,7 @@ function opt2RenderPortfolio() {
   // ... existing code ...
       const rollDteInput = document.getElementById("optv2-roll-dte-threshold").value;
       const rollDteThreshold = rollDteInput === "" ? null : parseInt(rollDteInput, 10);
-  
+
   const filterSide = document.getElementById("opt2-port-filter-side").value;
 
   let filtered = allPos.map(r => {
@@ -7151,6 +7151,7 @@ init();
 let optv2Data = null;
 
 document.getElementById("btn-load-optv2").addEventListener("click", async () => {
+  console.log("[OPT-FE] btn-load-optv2 clicked");
   const $btn = document.getElementById("btn-load-optv2");
   $btn.classList.add("loading");
   $btn.textContent = "Loading…";
@@ -7460,6 +7461,7 @@ function optv2NearestIdx(arr, val) {
 
 /* ── Run Optimizer ──────────────────────────────────────────── */
 document.getElementById("btn-run-optv2").addEventListener("click", async () => {
+  console.log("[OPT-FE] btn-run-optv2 clicked");
   const $btn = document.getElementById("btn-run-optv2");
   $btn.classList.add("loading");
   $btn.textContent = "Running…";
@@ -7475,30 +7477,25 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       const v = parseFloat(el.value);
       return Number.isNaN(v) ? fallback : v;
     }
+    const rollDteThreshold = document.getElementById("optv2-roll-dte-threshold").value || null;
     const params = {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
-      vega_cross_expiry_corr: parseFloat(document.getElementById("optv2-vega-corr").value || "0"),
+      vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
       save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
+      is_replay: false,
     };
-    const result = await post("/api/optimization/run", {
+    const data = await post("/api/optimization/run", {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
-      vega_cross_expiry_corr: parseFloat(document.getElementById("optv2-vega-corr").value || "0"),
+      vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
       save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
+      is_replay: false,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.statusText);
-    }
-    const data = await res.json();
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
-  } catch (e) {
-    console.error("Optimizer v2: run failed:", e);
-    alert("Optimizer failed — check console.\n" + e.message);
   } finally {
     $btn.classList.remove("loading");
     $btn.textContent = "Run Optimizer";

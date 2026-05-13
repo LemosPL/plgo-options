@@ -23,7 +23,7 @@ class OptimizationParams(BaseModel):
     vega_cross_expiry_corr: float = 0.0
     roll_dte_threshold: int | None = None
     save_usecase_snapshot: bool = False
-
+    is_replay:bool = False
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -49,6 +49,7 @@ async def run_optimizer(params: OptimizationParams):
         if params.save_usecase_snapshot:
             save_dir = Path("data/optimization_snapshots/usecases")
             save_path = usecase.save_auto(save_dir)
+        print("xx")
         result = usecase.run()
     except Exception as e:
         tb = traceback.format_exc()

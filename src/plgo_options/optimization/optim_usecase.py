@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -107,15 +108,18 @@ class OptimizerUseCase:
         return OptimizerV2.from_snapshot_dict(self.optimizer_input)
 
     def run(self) -> dict[str, Any]:
+        print('run()')
         optimizer = self.build_optimizer(self.today)
-        self.run_params.target_expiry = "31JUL26"
+
+        '''self.run_params.target_expiry = "31JUL26"
         self.run_params.lam_factor = 0.3
         self.run_params.is_replay = True
-        self.run_params.roll_dte_threshold = 7
+        self.run_params.roll_dte_threshold = 7'''
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
 
     def run_test(self):
+        print('run_test()')
         df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
         optimizer = self.build_optimizer(self.today)
         result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=7)#, target_profile=df_target)
