@@ -118,9 +118,8 @@ class OptimizerUseCase:
 
     def run_test(self):
         print('run_test()')
-        df_target = pd.read_csv("../data/ETH - target.csv", index_col=0)#"Payoff ($)")
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=7)#, target_profile=df_target)
+        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=7, lam_factor=0.3)
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")

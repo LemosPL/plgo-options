@@ -15,7 +15,7 @@ from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
-from .misc_utils import load_target_profile
+from .misc_utils import load_target_profile, shift_target_profile
 
 import matplotlib.pyplot as plt
 
@@ -430,7 +430,7 @@ class OptimizerV3(BaseOptimizer):
         print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
         #is_replay = (target_expiry is not None)#False
-        target_profile = load_target_profile()
+        target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
 
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(roll_dte_threshold)
