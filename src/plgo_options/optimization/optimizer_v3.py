@@ -9,7 +9,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
 from .elastic_net import GeneralizedLasso
-from .models import Position, Candidate, SpreadCandidate, StraddleCandidate
+from .models import Position, Candidate
 from .math_utils import bs_vec
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
@@ -447,7 +447,11 @@ class OptimizerV3(BaseOptimizer):
         )
         spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
         straddle_candidates = self._build_straddle_candidates(option_legs, target_expiry=target_expiry)
-        candidates = option_legs + spread_candidates + straddle_candidates
+        iron_condor_candidates = self._build_iron_condor_candidates(
+            option_legs,
+            target_expiry=target_expiry,
+        )
+        candidates = option_legs + spread_candidates + straddle_candidates + iron_condor_candidates
 
         roll_replacement_trades = self._build_roll_replacement_trades(
             roll_positions=roll_positions,
@@ -466,6 +470,7 @@ class OptimizerV3(BaseOptimizer):
         print(f"option legs: {len(option_legs)}")
         print(f"spread candidates: {len(spread_candidates)}")
         print(f"straddle candidates: {len(straddle_candidates)}")
+        print(f"iron condor candidates: {len(iron_condor_candidates)}")
         print(f"call spreads: {sum(1 for c in spread_candidates if c.kind == 'CALL_SPREAD')}")
         print(f"put spreads: {sum(1 for c in spread_candidates if c.kind == 'PUT_SPREAD')}")
 
@@ -560,6 +565,8 @@ class OptimizerV3(BaseOptimizer):
                 lams[i] *= 1.0
             elif self._is_straddle_candidate(c):
                 lams[i] *= 1.5
+            elif self._is_iron_condor_candidate(c):
+                lams[i] *= 2.0
             else:
                 strike = float(getattr(c, "strike", 0.0) or 0.0)
                 opt = str(getattr(c, "opt", "") or "")
@@ -1155,8 +1162,16 @@ class OptimizerV3(BaseOptimizer):
     def _is_straddle_candidate(self, c) -> bool:
         return hasattr(c, "call_leg") and hasattr(c, "put_leg")
 
+    def _is_iron_condor_candidate(self, c) -> bool:
+        return (
+            hasattr(c, "put_low_leg")
+            and hasattr(c, "put_high_leg")
+            and hasattr(c, "call_low_leg")
+            and hasattr(c, "call_high_leg")
+        )
+
     def _is_structured_candidate(self, c) -> bool:
-        return self._is_spread_candidate(c) or self._is_straddle_candidate(c)
+        return self._is_spread_candidate(c) or self._is_straddle_candidate(c) or self._is_iron_condor_candidate(c)
 
     def _candidate_vega(self, c) -> float:
         if self._is_spread_candidate(c):
@@ -1298,6 +1313,39 @@ class OptimizerV3(BaseOptimizer):
                 curve_list.append((call_price + put_price) - entry_price)
 
             return np.array(curve_list, dtype=float)
+        elif self._is_iron_condor_candidate(c):
+            T = c.dte / 365.25
+            r = 0.0
+            entry_price = float(c.bs_price_usd or 0.0)
+
+            legs = [
+                (c.put_low_leg, 1.0),
+                (c.put_high_leg, -1.0),
+                (c.call_low_leg, -1.0),
+                (c.call_high_leg, 1.0),
+            ]
+
+            curve_list = []
+            for spot in spot_arr:
+                value = 0.0
+                for leg, leg_sign in legs:
+                    strike = float(leg.strike or 0.0)
+                    vol = option_smile.compute_vol(
+                        maturity,
+                        strike=strike,
+                    )
+                    value += leg_sign * options.bs_price(
+                        spot,
+                        strike,
+                        T,
+                        r,
+                        vol,
+                        leg.opt,
+                    )
+
+                curve_list.append(value - entry_price)
+
+            return np.array(curve_list, dtype=float)
         if c.opt not in ("C", "P", "F"):
             return np.zeros_like(spot_arr, dtype=float)
 
@@ -1328,18 +1376,14 @@ class OptimizerV3(BaseOptimizer):
                 qty of call leg and qty of put leg.
             """
         if self._is_spread_candidate(c):
-            return [
-                (c.long_leg, qty, c.kind),
-                (c.short_leg, -qty, c.kind),
-            ]
-
-        if self._is_straddle_candidate(c):
-            return [
-                (c.call_leg, qty, c.kind),
-                (c.put_leg, qty, c.kind),
-            ]
-
-        return [(c, qty, "NAKED")]
+            return [(c.long_leg, qty, c.kind), (c.short_leg, -qty, c.kind),]
+        elif self._is_straddle_candidate(c):
+            return [(c.call_leg, qty, c.kind), (c.put_leg, qty, c.kind)]
+        elif self._is_iron_condor_candidate(c):
+            return [(c.put_low_leg, qty, c.kind), (c.put_high_leg, -qty, c.kind),
+                    (c.call_low_leg, -qty, c.kind), (c.call_high_leg, qty, c.kind)]
+        else:
+            return [(c, qty, "NAKED")]
 
     def _aggregate_trade_legs(self, trades: list[dict]) -> list[dict]:
         aggregated: dict[tuple, dict] = {}
@@ -1412,6 +1456,14 @@ class OptimizerV3(BaseOptimizer):
                 f"{c.kind}: "
                 f"ETH-{c.expiry_code}-{int(c.strike)}-C / "
                 f"ETH-{c.expiry_code}-{int(c.strike)}-P"
+            )
+        if self._is_iron_condor_candidate(c):
+            return (
+                f"{c.kind}: "
+                f"ETH-{c.expiry_code}-{int(c.put_low_leg.strike)}-P / "
+                f"ETH-{c.expiry_code}-{int(c.put_high_leg.strike)}-P / "
+                f"ETH-{c.expiry_code}-{int(c.call_low_leg.strike)}-C / "
+                f"ETH-{c.expiry_code}-{int(c.call_high_leg.strike)}-C"
             )
         return (
             "ETH-PERPETUAL" if c.opt == "F"

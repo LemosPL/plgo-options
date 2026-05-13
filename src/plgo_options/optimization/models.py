@@ -165,6 +165,96 @@ class StraddleCandidate:
         )
 
 
+@dataclass(frozen=True)
+class IronCondorCandidate:
+    kind: str  # "IRON_CONDOR"
+    put_low_leg: Candidate    # long put wing
+    put_high_leg: Candidate   # short put body
+    call_low_leg: Candidate   # short call body
+    call_high_leg: Candidate  # long call wing
+
+    @property
+    def expiry_code(self) -> str:
+        return self.put_low_leg.expiry_code
+
+    @property
+    def expiry_date(self):
+        return self.put_low_leg.expiry_date
+
+    @property
+    def dte(self) -> int:
+        return self.put_low_leg.dte
+
+    @property
+    def counterparty(self) -> str:
+        return self.put_low_leg.counterparty
+
+    @property
+    def opt(self) -> str:
+        return "IRON_CONDOR"
+
+    @property
+    def strike(self) -> float:
+        return 0.5 * (
+            float(self.put_high_leg.strike or 0.0)
+            + float(self.call_low_leg.strike or 0.0)
+        )
+
+    @property
+    def bs_price_usd(self) -> float:
+        return (
+            float(self.put_low_leg.bs_price_usd or 0.0)
+            - float(self.put_high_leg.bs_price_usd or 0.0)
+            - float(self.call_low_leg.bs_price_usd or 0.0)
+            + float(self.call_high_leg.bs_price_usd or 0.0)
+        )
+
+    @property
+    def vega(self) -> float:
+        return (
+            float(self.put_low_leg.vega or 0.0)
+            - float(self.put_high_leg.vega or 0.0)
+            - float(self.call_low_leg.vega or 0.0)
+            + float(self.call_high_leg.vega or 0.0)
+        )
+
+    @property
+    def delta(self) -> float:
+        return (
+            float(self.put_low_leg.delta or 0.0)
+            - float(self.put_high_leg.delta or 0.0)
+            - float(self.call_low_leg.delta or 0.0)
+            + float(self.call_high_leg.delta or 0.0)
+        )
+
+    @property
+    def gamma(self) -> float:
+        return (
+            float(self.put_low_leg.gamma or 0.0)
+            - float(self.put_high_leg.gamma or 0.0)
+            - float(self.call_low_leg.gamma or 0.0)
+            + float(self.call_high_leg.gamma or 0.0)
+        )
+
+    @property
+    def theta(self) -> float:
+        return (
+            float(self.put_low_leg.theta or 0.0)
+            - float(self.put_high_leg.theta or 0.0)
+            - float(self.call_low_leg.theta or 0.0)
+            + float(self.call_high_leg.theta or 0.0)
+        )
+
+    @property
+    def iv_pct(self) -> float:
+        return 0.25 * (
+            float(self.put_low_leg.iv_pct or 0.0)
+            + float(self.put_high_leg.iv_pct or 0.0)
+            + float(self.call_low_leg.iv_pct or 0.0)
+            + float(self.call_high_leg.iv_pct or 0.0)
+        )
+
+
 POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
 def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list[Position]:
     """Load positions from the most recent .xlsx file in data/positions."""

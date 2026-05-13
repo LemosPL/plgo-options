@@ -25,7 +25,7 @@ from pathlib import Path
 from datetime import datetime, date
 from collections import defaultdict
 
-from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate, StraddleCandidate
+from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate, StraddleCandidate, IronCondorCandidate
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
@@ -300,6 +300,92 @@ class BaseOptimizer:
             )
 
         return straddles
+
+    def _build_iron_condor_candidates(
+            self,
+            option_legs: list[Candidate],
+            target_expiry: str | None = None,
+            min_body_width: float = 100.0,
+            max_body_width: float = 1200.0,
+            max_wing_width: float = 1200.0,
+            max_candidates_per_expiry: int = 80,
+    ) -> list[IronCondorCandidate]:
+        condors: list[IronCondorCandidate] = []
+
+        expiry_codes = sorted(
+            {c.expiry_code for c in option_legs if c.opt in ("C", "P")},
+            key=expiry_sort_key,
+        )
+
+        for expiry_code in expiry_codes:
+            if target_expiry is not None and expiry_code != target_expiry:
+                continue
+
+            expiry_legs = [
+                c for c in option_legs
+                if c.expiry_code == expiry_code
+                   and c.opt in ("C", "P")
+            ]
+
+            puts = sorted(
+                [c for c in expiry_legs if c.opt == "P"],
+                key=lambda c: float(c.strike or 0.0),
+            )
+            calls = sorted(
+                [c for c in expiry_legs if c.opt == "C"],
+                key=lambda c: float(c.strike or 0.0),
+            )
+
+            if len(puts) < 2 or len(calls) < 2:
+                continue
+
+            expiry_condors: list[IronCondorCandidate] = []
+
+            for put_low in puts:
+                for put_high in puts:
+                    if put_low.strike >= put_high.strike:
+                        continue
+
+                    put_wing_width = float(put_high.strike) - float(put_low.strike)
+                    if put_wing_width > max_wing_width:
+                        continue
+
+                    for call_low in calls:
+                        if call_low.strike <= put_high.strike:
+                            continue
+
+                        body_width = float(call_low.strike) - float(put_high.strike)
+                        if body_width < min_body_width or body_width > max_body_width:
+                            continue
+
+                        for call_high in calls:
+                            if call_high.strike <= call_low.strike:
+                                continue
+
+                            call_wing_width = float(call_high.strike) - float(call_low.strike)
+                            if call_wing_width > max_wing_width:
+                                continue
+
+                            expiry_condors.append(
+                                IronCondorCandidate(
+                                    kind="IRON_CONDOR",
+                                    put_low_leg=put_low,
+                                    put_high_leg=put_high,
+                                    call_low_leg=call_low,
+                                    call_high_leg=call_high,
+                                )
+                            )
+
+            expiry_condors.sort(
+                key=lambda c: (
+                    abs(float(c.delta or 0.0)),
+                    -abs(float(c.vega or 0.0)),
+                    abs(float(c.call_low_leg.strike) - float(c.put_high_leg.strike)),
+                )
+            )
+            condors.extend(expiry_condors[:max_candidates_per_expiry])
+
+        return condors
 
     def _estimate_vol_of_vol_daily(self) -> float:
         """Estimate daily vol-of-vol from the vol surface term structure.
