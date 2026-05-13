@@ -9,7 +9,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
 from .elastic_net import GeneralizedLasso
-from .models import Position, Candidate, SpreadCandidate
+from .models import Position, Candidate, SpreadCandidate, StraddleCandidate
 from .math_utils import bs_vec
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
@@ -101,6 +101,9 @@ class OptimizerV3(BaseOptimizer):
 
         for p in roll_positions:
             qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+            raw_side = str(getattr(p, "side_raw", getattr(p, "side", ""))).lower()
+            if raw_side in ("sell", "short"):
+                qty = -qty
             if qty == 0:
                 continue
 
@@ -154,16 +157,13 @@ class OptimizerV3(BaseOptimizer):
         trades = []
 
         for p in roll_positions:
-            old_qty = float(getattr(p, "net_qty", 0.0) or 0.0)
             old_delta = float(getattr(p, "delta", 0.0) or 0.0)
             old_opt = str(getattr(p, "opt", "") or "")
             old_strike = float(getattr(p, "strike", 0.0) or 0.0)
             raw_side = str(getattr(p, "side_raw", getattr(p, "side", ""))).lower()
             old_qty = abs(float(getattr(p, "net_qty", 0.0) or 0.0))
-
             if raw_side in ("sell", "short"):
                 old_qty = -old_qty
-
             if old_qty == 0.0 or old_opt not in ("C", "P"):
                 continue
 
@@ -416,7 +416,7 @@ class OptimizerV3(BaseOptimizer):
         return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
 
     def run(self,
-                 lam_factor: float = 1.0,
+                 lam_factor: float = 0.5,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
@@ -424,12 +424,12 @@ class OptimizerV3(BaseOptimizer):
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
             ):
-        roll_dte_threshold = 7
         print(lam_factor)
         print(target_expiry)
         print(unwind_discount)
         print(new_position_penalty)
         print(vega_cross_expiry_corr)
+        print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
         #is_replay = (target_expiry is not None)#False
         target_profile = load_target_profile()
@@ -448,7 +448,8 @@ class OptimizerV3(BaseOptimizer):
             include_itm=is_roll_mode
         )
         spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
-        candidates = option_legs + spread_candidates
+        straddle_candidates = self._build_straddle_candidates(option_legs, target_expiry=target_expiry)
+        candidates = option_legs + spread_candidates + straddle_candidates
 
         roll_replacement_trades = self._build_roll_replacement_trades(
             roll_positions=roll_positions,
@@ -466,6 +467,7 @@ class OptimizerV3(BaseOptimizer):
         print(f"roll replacement trades: {len(roll_replacement_trades)}")
         print(f"option legs: {len(option_legs)}")
         print(f"spread candidates: {len(spread_candidates)}")
+        print(f"straddle candidates: {len(straddle_candidates)}")
         print(f"call spreads: {sum(1 for c in spread_candidates if c.kind == 'CALL_SPREAD')}")
         print(f"put spreads: {sum(1 for c in spread_candidates if c.kind == 'PUT_SPREAD')}")
 
@@ -514,7 +516,7 @@ class OptimizerV3(BaseOptimizer):
         min_weight = 0.2
         strike_weights = np.maximum(vega_weight, min_weight)
         lams = 0.01 * np.ones(len(candidates))
-        base_lam = lam_factor# 0.5
+        base_lam = lam_factor
         print(f"base_lam: {base_lam}")
 
         A_cols = []
@@ -550,7 +552,7 @@ class OptimizerV3(BaseOptimizer):
 
         curves = []
         for i, c in enumerate(candidates):
-            if not self._is_spread_candidate(c) and c.opt not in ("C", "P", "F"):
+            if not self._is_structured_candidate(c) and c.opt not in ("C", "P", "F"):
                 lams[i] = 1.E10
                 continue
 
@@ -558,6 +560,14 @@ class OptimizerV3(BaseOptimizer):
             lams[i] = base_lam * np.pow(max_vega / candidate_vega, 2)
             if self._is_spread_candidate(c):
                 lams[i] *= 1.0
+            elif self._is_straddle_candidate(c):
+                lams[i] *= 1.5
+            else:
+                strike = float(getattr(c, "strike", 0.0) or 0.0)
+                opt = str(getattr(c, "opt", "") or "")
+                is_itm = (opt == "C" and strike < self.eth_spot) or (opt == "P" and strike > self.eth_spot)
+                if is_itm:
+                    lams[i] *= 2.0
 
             curve = self._candidate_curve(
                 c=c,
@@ -700,7 +710,8 @@ class OptimizerV3(BaseOptimizer):
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
                 })
 
-        if False:# is_replay:
+        print("is_replay:" + str(is_replay))
+        if is_replay:
             spot = self.eth_spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
@@ -709,7 +720,7 @@ class OptimizerV3(BaseOptimizer):
 
             fig, axes = plt.subplots(3, 1, sharex=True)
 
-            # axes[0].plot(x, base_payoff, label="Base Payoff")
+            # axes[0].plot(x, base_payoff, label="
             axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
             axes[0].plot(x, target_interp, label="Target Payoff")
             axes[0].plot(x, fitted_payoff, label="Fitted Payoff")
@@ -781,17 +792,17 @@ class OptimizerV3(BaseOptimizer):
         }
 
     def run_previous(self,
-            risk_aversion: float = 1.0,
-            brokerage_txn_cost_pct: float = 5.0,
-            deribit_txn_cost_pct: float = 0.1,
-            max_collateral: float = 4_000_000.0,
-            target_expiry: str | None = None,
-            lambda_delta: float = 1.0,
-            lambda_gamma: float = 1.0,
-            lambda_vega: float = 1.0,
-            unwind_discount: float = 0.2,
-            new_position_penalty: float = 0.04,
-            vega_cross_expiry_corr: float = 0.0, ):
+                     risk_aversion: float = 1.0,
+                     brokerage_txn_cost_pct: float = 5.0,
+                     deribit_txn_cost_pct: float = 0.1,
+                     max_collateral: float = 4_000_000.0,
+                     target_expiry: str | None = None,
+                     lambda_delta: float = 1.0,
+                     lambda_gamma: float = 1.0,
+                     lambda_vega: float = 1.0,
+                     unwind_discount: float = 0.2,
+                     new_position_penalty: float = 0.04,
+                     vega_cross_expiry_corr: float = 0.0, ):
 
         # Liquidate all existing positions (outside of the target expiry range?)
         held_positions = self.get_held_positions()
@@ -804,12 +815,12 @@ class OptimizerV3(BaseOptimizer):
 
         x = np.array([0.0] * len(candidates))
         i = -1
-        for c in candidates:#(exp_code, strike_i, opt_i, counterparty_i), held_qty in held_positions.items():
+        for c in candidates:  # (exp_code, strike_i, opt_i, counterparty_i), held_qty in held_positions.items():
             i += 1
             held_qty = held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0)
             if held_qty == 0:
                 continue
-            #candidate = candidate_by_key.get((exp_code, strike_i, opt_i, counterparty_i))  # matching candidate quote if exists
+            # candidate = candidate_by_key.get((exp_code, strike_i, opt_i, counterparty_i))  # matching candidate quote if exists
             # Fallbacks if the instrument is not in candidates
             price_i = float(c.bs_price_usd) if c and c.bs_price_usd is not None else 0.0
             dte_i = int(c.dte) if c and c.dte is not None else 0
@@ -852,7 +863,7 @@ class OptimizerV3(BaseOptimizer):
         x[-1] += perp_trade['qty']
         trades.append(perp_trade)
 
-        qty = 1000.*lambda_gamma
+        qty = 1000. * lambda_gamma
         call_to_put_ratio = lambda_vega
         condor_trades, x = self.solve_condor(qty, candidate_by_key, x, call_to_put_ratio)
         for trade in condor_trades:
@@ -861,7 +872,7 @@ class OptimizerV3(BaseOptimizer):
             trade_key = (expiry_code, trade['strike'], trade['opt'], trade['counterparty'])
             i = list(candidate_by_key.keys()).index(trade_key)
             x[i] += trade['qty']
-        #trades = []
+        # trades = []
 
         new_delta, new_gamma, new_theta, new_vega, new_vega_by_expiry = (
             self.compute_greeks(x, candidates, port_delta, port_gamma, port_theta, port_vega, port_vega_by_expiry))
@@ -972,9 +983,9 @@ class OptimizerV3(BaseOptimizer):
         }
 
         for exp_code in c_vega_by_expiry.keys():
-            #c_vega_by_expiry[exp_code] = np.sum(c_vega_by_expiry[exp_code], axis=0)
+            # c_vega_by_expiry[exp_code] = np.sum(c_vega_by_expiry[exp_code], axis=0)
             diff = np.sum(np.dot(x, c_vega_by_expiry[exp_code]))
-            k=1
+            k = 1
 
         new_vega_by_expiry = {
             exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(x, c_vega_by_expiry[exp_code])
@@ -1119,10 +1130,10 @@ class OptimizerV3(BaseOptimizer):
     def add_perp_hedge(self, perp_candidate, qty):
         c = perp_candidate
         instrument_name = ("ETH-PERPETUAL" if c.opt == "F" else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}")
-        cost_rate = 5./10000.
+        cost_rate = 5. / 10000.
 
         # Close the full held quantity: long position  -> sell to unwind, short position -> buy to unwind
-        unwind_signed = qty# * condor_mults[k]  # -int(round(held_qty))
+        unwind_signed = qty  # * condor_mults[k]  # -int(round(held_qty))
         unwind_qty = abs(unwind_signed)
         unwind_notional = unwind_qty * 0
         cost_unwind_part = cost_rate * 0 * unwind_notional
@@ -1142,6 +1153,12 @@ class OptimizerV3(BaseOptimizer):
 
     def _is_spread_candidate(self, c) -> bool:
         return hasattr(c, "long_leg") and hasattr(c, "short_leg")
+
+    def _is_straddle_candidate(self, c) -> bool:
+        return hasattr(c, "call_leg") and hasattr(c, "put_leg")
+
+    def _is_structured_candidate(self, c) -> bool:
+        return self._is_spread_candidate(c) or self._is_straddle_candidate(c)
 
     def _candidate_vega(self, c) -> float:
         if self._is_spread_candidate(c):
@@ -1243,7 +1260,46 @@ class OptimizerV3(BaseOptimizer):
                 curve_list.append((long_price - short_price) - spread_entry)
 
             return np.array(curve_list, dtype=float)
+        elif self._is_straddle_candidate(c):
+            call_leg = c.call_leg
+            put_leg = c.put_leg
 
+            T = c.dte / 365.25
+            r = 0.0
+            strike = float(c.strike or 0.0)
+            entry_price = float(c.bs_price_usd or 0.0)
+
+            curve_list = []
+            for spot in spot_arr:
+                call_vol = option_smile.compute_vol(
+                    maturity,
+                    strike=float(call_leg.strike or 0.0),
+                )
+                put_vol = option_smile.compute_vol(
+                    maturity,
+                    strike=float(put_leg.strike or 0.0),
+                )
+
+                call_price = options.bs_price(
+                    spot,
+                    float(call_leg.strike or 0.0),
+                    T,
+                    r,
+                    call_vol,
+                    "C",
+                )
+                put_price = options.bs_price(
+                    spot,
+                    float(put_leg.strike or 0.0),
+                    T,
+                    r,
+                    put_vol,
+                    "P",
+                )
+
+                curve_list.append((call_price + put_price) - entry_price)
+
+            return np.array(curve_list, dtype=float)
         if c.opt not in ("C", "P", "F"):
             return np.zeros_like(spot_arr, dtype=float)
 
@@ -1265,16 +1321,24 @@ class OptimizerV3(BaseOptimizer):
 
     def _candidate_trade_legs(self, c, qty: int) -> list[tuple[Candidate, int, str]]:
         """
-        Expand optimizer quantity into executable option legs.
-        Naked candidate:
-            qty of that candidate.
-        Spread candidate:
-            qty of long leg and -qty of short leg.
-        """
+            Expand optimizer quantity into executable option legs.
+            Naked candidate:
+                qty of that candidate.
+            Spread candidate:
+                qty of long leg and -qty of short leg.
+            Straddle candidate:
+                qty of call leg and qty of put leg.
+            """
         if self._is_spread_candidate(c):
             return [
                 (c.long_leg, qty, c.kind),
                 (c.short_leg, -qty, c.kind),
+            ]
+
+        if self._is_straddle_candidate(c):
+            return [
+                (c.call_leg, qty, c.kind),
+                (c.put_leg, qty, c.kind),
             ]
 
         return [(c, qty, "NAKED")]
@@ -1345,7 +1409,12 @@ class OptimizerV3(BaseOptimizer):
                 f"ETH-{c.expiry_code}-{int(c.long_leg.strike)}-{c.long_leg.opt} / "
                 f"ETH-{c.expiry_code}-{int(c.short_leg.strike)}-{c.short_leg.opt}"
             )
-
+        if self._is_straddle_candidate(c):
+            return (
+                f"{c.kind}: "
+                f"ETH-{c.expiry_code}-{int(c.strike)}-C / "
+                f"ETH-{c.expiry_code}-{int(c.strike)}-P"
+            )
         return (
             "ETH-PERPETUAL" if c.opt == "F"
             else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
@@ -1470,20 +1539,20 @@ class OptimizerV3(BaseOptimizer):
         if not front_candidates or not back_candidates:
             raise ValueError("Could not build candidates for one or both selected expiries")
 
-        #front_condor = self._pick_iron_condor_legs(front_candidates, front_expiry)
+        # front_condor = self._pick_iron_condor_legs(front_candidates, front_expiry)
         back_condor = self._pick_iron_condor_legs(back_candidates, back_expiry)
 
         selected_candidates = back_condor
 
         price_by_expiry = {
-            #front_expiry: self._condor_price(front_condor),
+            # front_expiry: self._condor_price(front_condor),
             back_expiry: self._condor_price(back_condor),
         }
         # Now the LP works only on those 8-ish legs
         candidates = selected_candidates
         # Solve the LP: maximize x*front_ic_qty + (1-x)*back_ic_qty under collateral constraints
         collateral_by_counterparty = {"FlowDesk": 8750000, "KeyRock": 0}  # 7926168
-        cost_by_counterparty= {"FlowDesk": 0.01, "KeyRock": 0.05}
+        cost_by_counterparty = {"FlowDesk": 0.01, "KeyRock": 0.05}
         solver = PulpSolver()
         solution = solver.solve(price_by_expiry, cost_by_counterparty, collateral_by_counterparty)
 
@@ -1501,11 +1570,11 @@ class OptimizerV3(BaseOptimizer):
             )[0]) if c else 0.0
 
             # Close the full held quantity: long position  -> sell to unwind, short position -> buy to unwind
-            unwind_signed = condor_qty*condor_mults[k]  # -int(round(held_qty))
+            unwind_signed = condor_qty * condor_mults[k]  # -int(round(held_qty))
             unwind_qty = abs(unwind_signed)
             unwind_notional = unwind_qty * c.bs_price_usd
             cost_unwind_part = cost_rate * 0 * unwind_notional
-            #x[i] = unwind_signed
+            # x[i] = unwind_signed
 
             condor_trades.append({
                 "counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date if c else "",
@@ -1520,7 +1589,6 @@ class OptimizerV3(BaseOptimizer):
             })
 
         return condor_trades, x
-
 
     '''
 from scipy.optimize import minimize

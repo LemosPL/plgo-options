@@ -3997,7 +3997,10 @@ function opt2RenderPortfolio() {
 
   // Apply filters
   const filterCpty = document.getElementById("opt2-port-filter-cpty").value;
-  const filterType = document.getElementById("opt2-port-filter-type").value;
+  // ... existing code ...
+      const rollDteInput = document.getElementById("optv2-roll-dte-threshold").value;
+      const rollDteThreshold = rollDteInput === "" ? null : parseInt(rollDteInput, 10);
+  
   const filterSide = document.getElementById("opt2-port-filter-side").value;
 
   let filtered = allPos.map(r => {
@@ -7473,14 +7476,18 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       return Number.isNaN(v) ? fallback : v;
     }
     const params = {
-      lam_factor: readNum("optv2-lam-factor", 1.0),
+      lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
-      save_usecase_snapshot: document.getElementById("optv2-save-usecase").checked,
+      vega_cross_expiry_corr: parseFloat(document.getElementById("optv2-vega-corr").value || "0"),
+      roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
+      save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
     };
-    const res = await fetch("/api/optimization/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
+    const result = await post("/api/optimization/run", {
+      lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
+      target_expiry: document.getElementById("optv2-target-expiry").value || null,
+      vega_cross_expiry_corr: parseFloat(document.getElementById("optv2-vega-corr").value || "0"),
+      roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
+      save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));

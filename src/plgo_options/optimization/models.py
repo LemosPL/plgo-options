@@ -107,6 +107,64 @@ class SpreadCandidate:
         )
 
 
+@dataclass(frozen=True)
+class StraddleCandidate:
+    kind: str  # "STRADDLE"
+    call_leg: Candidate
+    put_leg: Candidate
+
+    @property
+    def expiry_code(self) -> str:
+        return self.call_leg.expiry_code
+
+    @property
+    def expiry_date(self):
+        return self.call_leg.expiry_date
+
+    @property
+    def dte(self) -> int:
+        return self.call_leg.dte
+
+    @property
+    def counterparty(self) -> str:
+        return self.call_leg.counterparty
+
+    @property
+    def opt(self) -> str:
+        return "STRADDLE"
+
+    @property
+    def strike(self) -> float:
+        return self.call_leg.strike
+
+    @property
+    def bs_price_usd(self) -> float:
+        return float(self.call_leg.bs_price_usd or 0.0) + float(self.put_leg.bs_price_usd or 0.0)
+
+    @property
+    def vega(self) -> float:
+        return float(self.call_leg.vega or 0.0) + float(self.put_leg.vega or 0.0)
+
+    @property
+    def delta(self) -> float:
+        return float(self.call_leg.delta or 0.0) + float(self.put_leg.delta or 0.0)
+
+    @property
+    def gamma(self) -> float:
+        return float(self.call_leg.gamma or 0.0) + float(self.put_leg.gamma or 0.0)
+
+    @property
+    def theta(self) -> float:
+        return float(self.call_leg.theta or 0.0) + float(self.put_leg.theta or 0.0)
+
+    @property
+    def iv_pct(self) -> float:
+        return 0.5 * (
+            float(self.call_leg.iv_pct or 0.0)
+            + float(self.put_leg.iv_pct or 0.0)
+        )
+
+
 POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
 def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list[Position]:
     """Load positions from the most recent .xlsx file in data/positions."""

@@ -21,6 +21,7 @@ class OptimizationParams(BaseModel):
     lam_factor: float = 1.0
     target_expiry: str | None = None
     vega_cross_expiry_corr: float = 0.0
+    roll_dte_threshold: int | None = None
     save_usecase_snapshot: bool = False
 
 
@@ -39,6 +40,7 @@ async def run_optimizer(params: OptimizationParams):
         lam_factor=params.lam_factor,
         target_expiry=params.target_expiry,
         vega_cross_expiry_corr=params.vega_cross_expiry_corr,
+        roll_dte_threshold=params.roll_dte_threshold,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

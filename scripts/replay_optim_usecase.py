@@ -33,7 +33,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260508_175959_ALL.json")
+        path = Path("../data/optimization_snapshots/usecases/20260511_115607_ALL.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -44,7 +44,7 @@ def main() -> None:
     trades = []
     before_payoff, after_payoff = optimizer.build_payoffs(horizons, spot_arr, trades)
 
-    result = usecase.run_test()
+    result = usecase.run()#run_test()
 
     #result = usecase.run()
 

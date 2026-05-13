@@ -25,7 +25,7 @@ from pathlib import Path
 from datetime import datetime, date
 from collections import defaultdict
 
-from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate
+from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate, StraddleCandidate
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
@@ -260,6 +260,47 @@ class BaseOptimizer:
 
         return spreads
 
+    def _build_straddle_candidates(self, candidates: list[Candidate], target_expiry: str | None = None) -> list[StraddleCandidate]:
+        """
+        Build straddle candidates from single-option candidates.
+
+        Straddles:
+            long call + long put, same expiry, same strike, same counterparty.
+
+        One optimizer unit = one long straddle.
+        Negative optimizer quantity naturally means selling the straddle.
+        """
+        option_candidates = [
+            c for c in candidates
+            if c.opt in ("C", "P")
+               and c.strike is not None
+               and c.bs_price_usd is not None
+               and (target_expiry is None or c.expiry_code == target_expiry)
+        ]
+
+        grouped: dict[tuple[str, float, str], dict[str, Candidate]] = {}
+        for c in option_candidates:
+            key = (c.expiry_code, float(c.strike), c.counterparty)
+            grouped.setdefault(key, {})[c.opt] = c
+
+        straddles: list[StraddleCandidate] = []
+        for _key, legs_by_opt in grouped.items():
+            call_leg = legs_by_opt.get("C")
+            put_leg = legs_by_opt.get("P")
+
+            if call_leg is None or put_leg is None:
+                continue
+
+            straddles.append(
+                StraddleCandidate(
+                    kind="STRADDLE",
+                    call_leg=call_leg,
+                    put_leg=put_leg,
+                )
+            )
+
+        return straddles
+
     def _estimate_vol_of_vol_daily(self) -> float:
         """Estimate daily vol-of-vol from the vol surface term structure.
 
@@ -393,6 +434,7 @@ class BaseOptimizer:
         unwind_discount: float = 0.2,
         new_position_penalty: float = 0.04,
         vega_cross_expiry_corr: float = 0.0,
+        roll_dte_threshold: int | None = 7,
     ) -> dict:
         """Run the optimization and return proposed trades.
 
