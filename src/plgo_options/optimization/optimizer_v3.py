@@ -318,6 +318,32 @@ class OptimizerV3(BaseOptimizer):
 
         return qty * (price_curve - entry_price)
 
+    def _trade_premium_summary(self, trades: list[dict]) -> dict:
+        option_trades = [
+            trade for trade in trades
+            if trade.get("opt") in ("C", "P")
+        ]
+
+        gross_premium_bought = sum(
+            float(trade.get("qty", 0.0) or 0.0) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            for trade in option_trades
+            if float(trade.get("qty", 0.0) or 0.0) > 0
+        )
+
+        gross_premium_sold = sum(
+            abs(float(trade.get("qty", 0.0) or 0.0)) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            for trade in option_trades
+            if float(trade.get("qty", 0.0) or 0.0) < 0
+        )
+
+        net_premium_generated = gross_premium_sold - gross_premium_bought
+
+        return {
+            "gross_premium_sold": round(float(gross_premium_sold), 2),
+            "gross_premium_bought": round(float(gross_premium_bought), 2),
+            "net_premium_generated": round(float(net_premium_generated), 2),
+        }
+
     def _risk_neutral_spot_weights(
             self,
             spot_arr: np.ndarray,
@@ -651,6 +677,7 @@ class OptimizerV3(BaseOptimizer):
 
         if not scored_trades:
             trades = self._aggregate_trade_legs(trades)
+            premium_summary = self._trade_premium_summary(trades)
             before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
                 horizons,
                 spot_arr,
@@ -663,8 +690,9 @@ class OptimizerV3(BaseOptimizer):
                 "optimizer_converged": True,
                 "message": "Optimizer ran successfully, but no trades passed the selection criteria.",
                 "cash_shift": round(float(cash_shift), 2),
-                "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
-                "fit_error_after": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
+                "premium_summary": premium_summary,
+                "net_premium_generated": premium_summary["net_premium_generated"],
+                "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),                "fit_error_after": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
                 "spot_ladder": spot_arr.tolist(),
                 "chart_horizons": horizons,
                 "target_payoff": np.round(target_interp, 2).tolist(),
@@ -745,6 +773,7 @@ class OptimizerV3(BaseOptimizer):
             plt.show()
 
         trades = self._aggregate_trade_legs(trades)
+        premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [
             trade for trade in trades
             if trade.get("strategy") == "ROLL_UNWIND"
@@ -776,6 +805,8 @@ class OptimizerV3(BaseOptimizer):
             "target_expiry": target_expiry,
             "optimizer_converged": True,
             "cash_shift": round(float(cash_shift), 2),
+            "premium_summary": premium_summary,
+            "net_premium_generated": premium_summary["net_premium_generated"],
             "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
             "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
             "spot_ladder": spot_arr.tolist(),

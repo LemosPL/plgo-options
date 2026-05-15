@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+from scipy.interpolate import UnivariateSpline
 
 
 def shift_target_profile(
@@ -29,8 +30,19 @@ def shift_target_profile(
     return shifted
 
 
+def smooth_target_profile(target_profile, payoff_col="Payoff($)", smooth_factor=1e13):
+    strikes = target_profile.index.astype(float).to_numpy()
+    payoffs = target_profile[payoff_col].astype(float).to_numpy()
+
+    spline = UnivariateSpline(strikes, payoffs, s=smooth_factor)
+
+    smoothed = target_profile.copy()
+    smoothed[payoff_col] = spline(strikes)
+    return smoothed
+
+
 def load_target_profile():
-    base_filename = "data/ETH - target.csv"
+    base_filename = "data/ETH - target shifted.csv"
     filename = base_filename
     if os.path.exists("../" + base_filename):
         filename = "../" + base_filename
@@ -39,4 +51,5 @@ def load_target_profile():
     elif os.path.exists("../../../" + base_filename):
         filename = "../../../" + base_filename
     target_profile = pd.read_csv(filename, index_col=0)  # "Payoff ($)")
-    return target_profile
+    smoothed_profile = smooth_target_profile(target_profile)
+    return smoothed_profile

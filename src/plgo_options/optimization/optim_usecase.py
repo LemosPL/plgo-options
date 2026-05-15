@@ -110,9 +110,9 @@ class OptimizerUseCase:
         print('run()')
         optimizer = self.build_optimizer(self.today)
 
-        self.run_params.target_expiry = "31JUL26"
+        '''self.run_params.target_expiry = "31JUL26"
         self.run_params.lam_factor = 0.3
-        self.run_params.roll_dte_threshold = 7
+        self.run_params.roll_dte_threshold = 7'''
         self.result = optimizer.run(**asdict(self.run_params))
         return self.result
 
