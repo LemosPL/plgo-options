@@ -24,4 +24,4 @@ DERIBIT_EXEC_URL = "https://test.deribit.com/api/v2" if DERIBIT_TESTNET else DER
 
 # Anthropic API
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")

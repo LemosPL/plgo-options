@@ -159,30 +159,25 @@ def _generate_summary(
 
     trade_block = "\n".join(trade_summary_lines) if trade_summary_lines else "  (no trades proposed)"
 
-    prompt = f"""You are analyzing an ETH options portfolio optimization result for an institutional-scale portfolio.
+    prompt = f"""You are reviewing an ETH options optimization result for an institutional portfolio.
 
-Current ETH spot: ${eth_spot:,.2f}
+ETH spot: ${eth_spot:,.2f}
 
-BEFORE optimization:
-  Delta: {before['delta']:.2f}, Gamma: {before['gamma']:.4f}, Theta: {before['theta']:.2f}, Vega: {before['vega']:.2f}
-  Daily Risk (1-sigma): ${before['daily_risk']:,.0f}
+| Greek | Before              | After               | Δ                                  |
+|-------|---------------------|---------------------|------------------------------------|
+| Delta | {before['delta']:.2f}  | {after['delta']:.2f}   | {after['delta'] - before['delta']:+.2f}  |
+| Gamma | {before['gamma']:.4f}  | {after['gamma']:.4f}   | {after['gamma'] - before['gamma']:+.4f}  |
+| Theta | {before['theta']:.2f}  | {after['theta']:.2f}   | {after['theta'] - before['theta']:+.2f}  |
+| Vega  | {before['vega']:.2f}   | {after['vega']:.2f}    | {after['vega'] - before['vega']:+.2f}    |
 
-AFTER optimization:
-  Delta: {after['delta']:.2f}, Gamma: {after['gamma']:.4f}, Theta: {after['theta']:.2f}, Vega: {after['vega']:.2f}
-  Daily Risk (1-sigma): ${after['daily_risk']:,.0f}
-
+Daily risk (1σ): ${before['daily_risk']:,.0f} → ${after['daily_risk']:,.0f}
 Risk reduction: ${before['daily_risk'] - after['daily_risk']:,.0f}
 Total trade cost: ${total_cost:,.0f}
 
-Proposed actions ({n_unwinds} unwinds, {n_rolls} rolls, {n_new} new positions):
+Proposed actions ({n_unwinds} unwinds, {n_rolls} rolls, {n_new} new):
 {trade_block}
 
-Provide a concise executive summary (3-5 sentences) explaining:
-1. The overall optimization strategy and what it achieves
-2. The key risk changes (which greeks improved most)
-3. Whether the cost-benefit tradeoff looks favorable
-
-Be direct and professional. Focus on WHY these trades make sense, not just WHAT they are. Use dollar values where helpful."""
+Write a 3–5 sentence executive summary: what the optimization achieves, which greek change matters most, and whether the cost-benefit looks favorable. Be direct. Lead with the dollar number that matters most."""
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
