@@ -3032,8 +3032,9 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 result.append({"type": "tool_use", "id": b.id, "name": b.name, "input": b.input})
         return result
 
-    # Loop until Claude gives a text response (max 10 tool rounds — grid search
-    # often needs 2 rounds, multi-action plans need 3–4).
+    # Loop until Claude gives a text response (max 16 tool rounds — grid search
+    # often needs 2 rounds, multi-action plans need 3–4, multi-batch rolls
+    # (close several structures + grid-search alternatives) can need 6–10).
     NARRATION_PATTERNS = (
         "running the", "let me run", "i'll price", "i will price",
         "executing now", "running the grid", "let me search",
@@ -3044,7 +3045,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
     text = ""
     current_response = response
     narration_retries = 0
-    for _round in range(10):
+    for _round in range(16):
         if current_response.stop_reason != "tool_use":
             # Narration-without-execution guard: model promised to act but emitted
             # no tool_use blocks. Auto-prod it once per turn to actually call.
