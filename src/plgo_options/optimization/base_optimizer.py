@@ -94,7 +94,13 @@ class BaseOptimizer:
         self,
         target_expiry: str | None = None,
         include_itm: bool = False,
+        counterparties: list[str] | None = None,
     ) -> list[Candidate]:
+        selected_counterparties = {
+            c.strip()
+            for c in (counterparties or [])
+            if c and c.strip() and c.strip().upper() != "ALL"
+        }
         """Generate tradeable instruments from the vol surface.
 
         Parameters

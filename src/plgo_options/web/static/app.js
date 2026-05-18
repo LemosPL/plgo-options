@@ -1494,12 +1494,22 @@ function tfEnforcePremiumSign() {
 }
 
 // Populate counterparty datalist from currently loaded trades.
-function tfPopulateCounterparties() {
-  const list = document.getElementById("tf-counterparty-list");
-  if (!list) return;
-  const source = (typeof tmTrades !== "undefined" && Array.isArray(tmTrades)) ? tmTrades : [];
-  const cptys = [...new Set(source.map(t => (t.counterparty || "").trim()).filter(Boolean))].sort();
-  list.innerHTML = cptys.map(c => `<option value="${c.replace(/"/g, "&quot;")}"></option>`).join("");
+function optv2PopulateCounterparties() {
+  const select = document.getElementById("optv2-counterparties");
+  if (!select || !optv2Data) return;
+
+  const counterparties = [...new Set(
+    (optv2Data.positions || [])
+      .filter(p => (p.db_status || p.status || "active") !== "expired")
+      .map(p => (p.counterparty || "").trim())
+      .filter(Boolean)
+  )].sort();
+
+  console.log("[OPT-FE] counterparties:", counterparties);
+
+  select.innerHTML =
+    `<option value="ALL" selected>ALL</option>` +
+    counterparties.map(c => `<option value="${c.replace(/"/g, "&quot;")}">${c}</option>`).join("");
 }
 
 // Auto-fill ref spot and compute % OTM / notional when strike or qty changes
@@ -7258,6 +7268,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
   try {
     optv2Data = await get("/api/portfolio/pnl");
+    optv2PopulateCounterparties();
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
@@ -7578,14 +7589,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       return Number.isNaN(v) ? fallback : v;
     }
     const rollDteThreshold = document.getElementById("optv2-roll-dte-threshold").value || null;
-    const params = {
-      lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
-      target_expiry: document.getElementById("optv2-target-expiry").value || null,
-      vega_cross_expiry_corr: parseFloat("0"),
-      roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
-      save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
-      is_replay: false,
-    };
+    const selectedCounterparty = document.getElementById("optv2-counterparties")?.value || "ALL";
     const data = await post("/api/optimization/run", {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
@@ -7593,6 +7597,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
       save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
       is_replay: false,
+      counterparties: selectedCounterparty === "ALL" ? null : [selectedCounterparty],
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);

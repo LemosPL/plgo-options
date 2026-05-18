@@ -22,7 +22,8 @@ class OptimizationParams(BaseModel):
     target_expiry: str | None = None
     roll_dte_threshold: int | None = None
     save_usecase_snapshot: bool = False
-    is_replay:bool = False
+    is_replay: bool = False
+    counterparties: list[str] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -41,6 +42,7 @@ async def run_optimizer(params: OptimizationParams):
         target_expiry=params.target_expiry,
         roll_dte_threshold=params.roll_dte_threshold,
         is_replay=False,
+        counterparties=params.counterparties,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
