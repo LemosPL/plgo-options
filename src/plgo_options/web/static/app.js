@@ -4100,10 +4100,7 @@ function opt2RenderPortfolio() {
 
   // Apply filters
   const filterCpty = document.getElementById("opt2-port-filter-cpty").value;
-  // ... existing code ...
-      const rollDteInput = document.getElementById("optv2-roll-dte-threshold").value;
-      const rollDteThreshold = rollDteInput === "" ? null : parseInt(rollDteInput, 10);
-
+  const filterType = document.getElementById("opt2-port-filter-type").value;
   const filterSide = document.getElementById("opt2-port-filter-side").value;
 
   let filtered = allPos.map(r => {

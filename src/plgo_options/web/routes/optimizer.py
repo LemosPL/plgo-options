@@ -55,6 +55,16 @@ You have three tools: scan_trades, build_strategy, suggest_rolls. Calling a tool
 
 6. When a user request would damage the portfolio (closing protection without replacement, adding legs that conflict with existing structures, vague "improve my portfolio" with no direction), push back in one line: name what's at stake, offer the safer alternative, ask which they want. Then execute.
 
+7. The user is a senior portfolio manager and the authority on their own positions and trading context. When they correct you, provide context the system data may not have (OTC counterparty, custom contracts, off-exchange settlement, recent trades not yet in the feed), or use imperative language ("execute", "accept my order", "do it"), treat their statement as ground truth and adapt. Do not invoke "the system" or "the tool" to override an explicit user instruction. If the data conflicts with the user's statement, surface the conflict in one line and ask which to use — do not silently side with the data.
+
+8. Correction protocol: when the user says "you are wrong", "check again", "that's not right", or similar, do not repeat the same response. Re-examine the specific assumption that may be wrong: call the tool with different parameters, re-read the portfolio block carefully, or ask one targeted question about what specifically was wrong. Re-rendering the same data with the same conclusion is not checking again.
+
+9. OTC and off-exchange positions: positions marked OTC, or which the user states are OTC, follow counterparty terms, not listed-option expiry mechanics. They can be rolled, closed, or restructured by negotiation at any time including expiry day. If the system data flags such a position as expired or DTE=0, and the user asks to roll or modify it, price the requested action via build_strategy and proceed — do not refuse based on the DTE flag.
+
+10. Close prices for OTC or expired positions: the build_strategy tool prices these via fallback (portfolio mark, then Deribit, then intrinsic at spot). When you present a roll result that used a non-live close price, surface that in one line ("close legs priced at intrinsic — actual OTC settlement may differ; tell me the settlement price and I'll re-run"). Never say a close was "rejected" — the tool now always returns a price.
+
+11. Narrating an action is not executing it. If you say "let me run a grid search", "running the search now", "I'll price these", "executing now", or similar, the tool_use blocks for that action MUST appear in the SAME assistant response. A response whose entire content is a promise to act is a failure equivalent to silence — the loop will exit and the user will see no results. Either emit the tool calls in this turn, or do not promise them.
+
 ## Scope
 
 ETH options and perpetuals on this portfolio. No emojis. Do not discuss other topics."""
@@ -1522,9 +1532,14 @@ async def chat(req: ChatRequest):
             dte = 0
         if strike > 0 and qty > 0:
             sigma = _get_sigma(strike, expiry_str, smiles)
+            # Deribit-style expiry code (non-zero-padded day, e.g. "1MAY25")
+            try:
+                exp_code = f"{exp_date.day}{exp_date.strftime('%b').upper()}{exp_date.strftime('%y')}"
+            except (AttributeError, ValueError):
+                exp_code = ""
             positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
                               "expiry": expiry_str, "counterparty": t.get("counterparty", ""),
-                              "dte": dte, "sigma": sigma})
+                              "dte": dte, "sigma": sigma, "expiry_code": exp_code})
             side_label = "Long" if sign > 0 else "Short"
             # Compute mark-to-market value at current spot
             entry_premium = _safe_float(t.get("premium_usd"))
@@ -1533,17 +1548,25 @@ async def chat(req: ChatRequest):
                 current_price_per = bs_price(spot, strike, T_mtm, 0.0, sigma, opt)
                 current_value = sign * current_price_per * qty  # positive = asset value for longs
                 mtm_pnl = current_value - (sign * entry_premium)  # P&L = current value - cost paid
+                mark_price_eth = current_price_per / spot if spot > 0 else 0.0
             else:
-                current_value = 0.0
-                mtm_pnl = 0.0
+                # Expired or no IV — fall back to intrinsic value at spot
+                if opt == "P":
+                    intrinsic_usd = max(0.0, strike - spot)
+                else:
+                    intrinsic_usd = max(0.0, spot - strike)
+                current_value = sign * intrinsic_usd * qty
+                mtm_pnl = current_value - (sign * entry_premium)
+                mark_price_eth = intrinsic_usd / spot if spot > 0 else 0.0
             positions_detail.append({
                 "id": t["id"], "counterparty": t.get("counterparty", ""),
                 "side": side_label, "type": "Call" if opt == "C" else "Put",
                 "strike": strike, "qty": qty, "net_qty": sign * qty,
-                "expiry": exp_short, "dte": dte,
+                "expiry": exp_short, "expiry_code": exp_code, "dte": dte,
                 "premium_usd": entry_premium,
                 "current_value_usd": round(current_value, 2),
                 "mtm_pnl_usd": round(mtm_pnl, 2),
+                "mark_price_eth": round(mark_price_eth, 6),
                 "delta_per": _bs_delta(spot, strike, dte, sigma, opt),
             })
         expiry_groups[exp_short] = expiry_groups.get(exp_short, 0) + 1
@@ -2057,6 +2080,8 @@ The match_target tool has been filtered out of your tool list in this mode — y
         "description": (
             "Build a specific multi-leg strategy from named legs and add it to the Suggestions table with live Deribit prices. "
             "Returns the full priced result (net cost, floor impact, P&L change, breakeven) in the tool result — no separate Calculate step needed.\n\n"
+            "Close legs (role=\"close\") are priced via a fallback chain: (1) match against the user's existing portfolio position and use its mark price, (2) live Deribit quote if the instrument is listed, (3) intrinsic value at current spot. The pricing source for each leg is returned in `pricing_notes` — always cite that source when presenting the result so the user knows whether a close price came from a live quote, a portfolio mark, or an intrinsic assumption. If a close was priced at intrinsic, mention that the actual OTC settlement may differ and offer to let the user override the close price.\n\n"
+            "Open legs (role=\"open\") must price from Deribit. If the instrument isn't listed, the tool errors — pick different strikes/expiries in your grid search.\n\n"
             "Call this immediately when:\n"
             "- The user pastes or describes specific trades (strikes, expiries, sides, qtys)\n"
             "- You are recommending specific legs you want priced\n"
@@ -2073,7 +2098,8 @@ The match_target tool has been filtered out of your tool list in this mode — y
             "\"Roll Search #1: PS 1600/3900 → 1900/2400 31JUL26\", \"Roll Search #2: PS 1600/3900 → 1850/2450 31JUL26\", etc.\n\n"
             "Parsing pasted instruments:\n"
             "\"ETH-26JUN26-2400-P\" → expiry_code=\"26JUN26\", strike=2400, opt=\"P\".\n"
-            "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor)."
+            "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor).\n\n"
+            "This tool prices ANY combination of legs the user asks for, including rolls of positions the portfolio data flags as expired (those may be OTC and still tradable). If the user requests a roll on an expired-flagged position, price it; do not refuse."
         ),
         "input_schema": {
             "type": "object",
@@ -2762,14 +2788,41 @@ The match_target tool has been filtered out of your tool list in this mode — y
         if positions:
             avg_qty = max(100, min(round(np.mean([abs(p["net_qty"]) for p in positions]) / 5 / 100) * 100, 2000))
 
+        def _match_close_leg_to_position(leg):
+            """Find portfolio position matching a close leg by (opt, strike, expiry).
+            Close-leg side must be opposite the position's side (sell to close long, buy to close short)."""
+            leg_exp_code = leg.get("expiry_code", "")
+            try:
+                leg_exp = datetime.strptime(leg_exp_code, "%d%b%y").date()
+            except ValueError:
+                return None
+            target_side = "Long" if leg["side"] == "sell" else "Short"
+            for pd in positions_detail:
+                if pd["type"][0] != leg["opt"]:
+                    continue
+                if abs(pd["strike"] - leg["strike"]) > 1e-6:
+                    continue
+                try:
+                    pd_exp = datetime.strptime(pd["expiry"], "%Y-%m-%d").date()
+                except (ValueError, KeyError):
+                    continue
+                if pd_exp != leg_exp:
+                    continue
+                if pd["side"] != target_side:
+                    continue
+                return pd
+            return None
+
         formatted_legs = []
         total_cost = 0.0
+        pricing_notes: list[str] = []
         for leg in legs_input:
             strike = leg["strike"]
             opt_type = leg["opt"]
             side = leg["side"]
             exp_code = leg.get("expiry_code", "PERP")
             qty = leg.get("qty", avg_qty)
+            role = leg.get("role")
 
             # Handle perpetual legs — no Deribit lookup, linear payoff
             if opt_type == "PERP":
@@ -2782,8 +2835,8 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     "bid_usd": 0, "ask_usd": 0,
                     "spread_pct": 0, "mark_iv": None,
                 }
-                if leg.get("role") in ("close", "open"):
-                    leg_data["role"] = leg["role"]
+                if role in ("close", "open"):
+                    leg_data["role"] = role
                 formatted_legs.append(leg_data)
                 continue
 
@@ -2791,37 +2844,71 @@ The match_target tool has been filtered out of your tool list in this mode — y
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
             inst_name = f"ETH-{exp_code}-{strike_str}-{opt_type}"
 
-            # Look up live price
+            # Look up live price (used by both branches when available)
             mkt = summaries.get(inst_name, {})
             bid = mkt.get("bid_price") or 0
             ask = mkt.get("ask_price") or 0
-            mark = mkt.get("mark_price") or 0
             mark_iv = mkt.get("mark_iv")
-            price_eth = ask if side == "buy" else bid
 
-            # Compute DTE
+            # Compute DTE from expiry code
             try:
                 exp_date = datetime.strptime(exp_code, "%d%b%y").date()
                 dte = (exp_date - date.today()).days
             except ValueError:
                 dte = 0
 
-            # Reject expired instruments
-            if dte <= 0:
-                return f"Rejected: {inst_name} is expired (DTE={dte}). Use a future expiry.", None
+            price_eth = 0.0
+            pricing_source = None
 
-            # Fallback to BS pricing when no market data (OTC positions, illiquid strikes)
-            if bid <= 0 and ask <= 0:
-                T_fb = max(dte, 1) / 365.25
-                sigma_fb = _get_sigma(strike, exp_code, smiles, expiry_code=exp_code) if smiles else DEFAULT_IV
-                if spot > 0 and T_fb > 0:
-                    bs_px = bs_price(spot, strike, T_fb, 0.0, sigma_fb, opt_type)
-                    price_eth = bs_px / spot if spot > 0 else 0
-                    bid = price_eth * 0.95  # estimate bid/ask from BS
-                    ask = price_eth * 1.05
-                    mark_iv = sigma_fb * 100
+            if role == "close":
+                # Fallback chain: portfolio mark → Deribit live → intrinsic at spot.
+                # Never reject — close legs may be OTC or expired-flagged but still tradable.
+                matched_pos = _match_close_leg_to_position(leg)
+                live_price = (ask if side == "buy" else bid)
+                if matched_pos is not None and matched_pos.get("mark_price_eth", 0) > 0:
+                    price_eth = matched_pos["mark_price_eth"]
+                    pricing_source = f"portfolio_mark_#{matched_pos['id']}"
+                    bid = bid or price_eth * 0.97
+                    ask = ask or price_eth * 1.03
+                elif live_price > 0:
+                    price_eth = live_price
+                    pricing_source = "deribit_live"
+                elif bid > 0 or ask > 0:
+                    price_eth = (bid + ask) / 2 if (bid > 0 and ask > 0) else max(bid, ask)
+                    pricing_source = "deribit_mid"
                 else:
-                    return f"Rejected: {inst_name} has no market data and cannot be priced.", None
+                    if spot > 0:
+                        if opt_type == "P":
+                            intrinsic_eth = max(0.0, strike - spot) / spot
+                        else:
+                            intrinsic_eth = max(0.0, spot - strike) / spot
+                    else:
+                        intrinsic_eth = 0.0
+                    price_eth = intrinsic_eth
+                    bid = price_eth * 0.95
+                    ask = price_eth * 1.05
+                    pricing_source = "intrinsic_at_spot"
+            else:
+                # role == "open" (or unset): strict path. Reject expired or unpriceable.
+                if dte <= 0:
+                    return f"Rejected: {inst_name} is expired (DTE={dte}). Open legs need a future expiry.", None
+
+                price_eth = ask if side == "buy" else bid
+                if bid <= 0 and ask <= 0:
+                    # BS fallback for OTC/illiquid open legs
+                    T_fb = max(dte, 1) / 365.25
+                    sigma_fb = _get_sigma(strike, exp_code, smiles, expiry_code=exp_code) if smiles else DEFAULT_IV
+                    if spot > 0 and T_fb > 0:
+                        bs_px = bs_price(spot, strike, T_fb, 0.0, sigma_fb, opt_type)
+                        price_eth = bs_px / spot if spot > 0 else 0
+                        bid = price_eth * 0.95
+                        ask = price_eth * 1.05
+                        mark_iv = sigma_fb * 100
+                        pricing_source = "bs_estimate"
+                    else:
+                        return f"Rejected: {inst_name} has no market data and cannot be priced.", None
+                else:
+                    pricing_source = "deribit_live"
 
             sign = 1.0 if side == "buy" else -1.0
             leg_cost = sign * price_eth * qty * spot
@@ -2836,11 +2923,23 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
                 "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
                 "spread_pct": spread_pct, "mark_iv": mark_iv,
+                "pricing_source": pricing_source,
             }
-            # Pass through role tag (close/open) for roll/recycle strategies
-            if leg.get("role") in ("close", "open"):
-                leg_data["role"] = leg["role"]
+            if role in ("close", "open"):
+                leg_data["role"] = role
             formatted_legs.append(leg_data)
+
+            # Record a pricing note whenever the close leg didn't come from a live quote
+            if role == "close" and pricing_source and pricing_source != "deribit_live":
+                pricing_notes.append(
+                    f"CLOSE {side} {opt_type}-{strike_str} {exp_code} qty {qty:,.0f}: "
+                    f"${price_eth * spot:,.2f}/ETH from {pricing_source}"
+                )
+            elif role == "open" and pricing_source == "bs_estimate":
+                pricing_notes.append(
+                    f"OPEN {side} {opt_type}-{strike_str} {exp_code} qty {qty:,.0f}: "
+                    f"${price_eth * spot:,.2f}/ETH from bs_estimate (no live quote)"
+                )
 
         # Compute payoff impact (BS-aware with market IV)
         lo_val = max(500, int(spot * 0.2))
@@ -2896,6 +2995,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             "num_suggestions": 1,
             "available_expiries": sorted(set(l["expiry_code"] for l in formatted_legs)),
             "suggestions": [suggestion],
+            "pricing_notes": pricing_notes,
         }
 
         cost_str = f"${abs(round(total_cost)):,}"
@@ -2905,14 +3005,19 @@ The match_target tool has been filtered out of your tool list in this mode — y
             f"{'Buy' if l['side'] == 'buy' else 'Sell'} {l['instrument']} x{l['qty']:,.0f} @ ${l['price_usd']:,.2f}"
             for l in formatted_legs
         )
+        pricing_block = ""
+        if pricing_notes:
+            pricing_block = "Pricing notes (non-live sources):\n  - " + "\n  - ".join(pricing_notes) + "\n"
         summary = (
             f"Built strategy: {strategy_name}\n"
             f"Legs: {leg_summary}\n"
-            f"=== ACTUAL COST (from live Deribit prices): {cost_str} ===\n"
+            f"=== NET COST: {cost_str} ===\n"
+            f"{pricing_block}"
             f"Floor change: {suggestion['impact']['min_improvement']:+,.0f}\n"
             f"P&L at spot change: {suggestion['impact']['at_spot']:+,.0f}\n"
             f"New worst-case P&L: ${suggestion['impact']['new_min']:,.0f}\n"
-            f"IMPORTANT: You MUST report this exact cost to the user. Do NOT say the cost is $0 or 'neutral' if the above cost is not near zero.\n"
+            f"IMPORTANT: Report this exact cost to the user. Do NOT say the cost is $0 or 'neutral' if the above cost is not near zero. "
+            f"When pricing notes are present, cite the source for each close leg (portfolio mark, deribit live, or intrinsic) so the user knows whether to override.\n"
             f"The strategy is now in the Suggestions table. The user can click + to add it to their workbench."
         )
         return summary, result_data
@@ -2929,10 +3034,48 @@ The match_target tool has been filtered out of your tool list in this mode — y
 
     # Loop until Claude gives a text response (max 10 tool rounds — grid search
     # often needs 2 rounds, multi-action plans need 3–4).
+    NARRATION_PATTERNS = (
+        "running the", "let me run", "i'll price", "i will price",
+        "executing now", "running the grid", "let me search",
+        "i'll search", "i will search", "running a grid",
+        "let me execute", "i'll execute", "i will execute",
+        "let me build", "i'll build", "i will build",
+    )
     text = ""
     current_response = response
+    narration_retries = 0
     for _round in range(10):
         if current_response.stop_reason != "tool_use":
+            # Narration-without-execution guard: model promised to act but emitted
+            # no tool_use blocks. Auto-prod it once per turn to actually call.
+            has_tool_use = any(b.type == "tool_use" for b in current_response.content)
+            response_text = " ".join(
+                getattr(b, "text", "") for b in current_response.content if b.type == "text"
+            ).lower()
+            is_narration_only = (
+                not has_tool_use
+                and narration_retries < 1
+                and any(p in response_text for p in NARRATION_PATTERNS)
+            )
+            if is_narration_only:
+                narration_retries += 1
+                messages.append({"role": "assistant", "content": _serialize_content(current_response.content)})
+                messages.append({
+                    "role": "user",
+                    "content": "You said you would run that action but emitted no tool calls. Emit the tool_use blocks now in this turn — do not narrate again.",
+                })
+                try:
+                    current_response = aclient.messages.create(
+                        model=ANTHROPIC_MODEL,
+                        max_tokens=8000,
+                        system=system_blocks,
+                        messages=messages,
+                        tools=tools,
+                    )
+                    continue
+                except Exception as e:
+                    text = f"**Error:** {e}"
+                    break
             break
 
         tool_blocks = [b for b in current_response.content if b.type == "tool_use"]
