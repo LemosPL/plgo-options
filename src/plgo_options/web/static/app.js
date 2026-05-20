@@ -856,6 +856,18 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     sbLoaded = false;
     pfData = null;
 
+    // Optimizer chat: clear cached portfolio data, baseline, chat history,
+    // workbench, and added/closed trade state — they're asset-specific.
+    if (typeof opt2Data !== "undefined") opt2Data = null;
+    if (typeof opt2Baseline !== "undefined") opt2Baseline = null;
+    if (typeof opt2ChatHistory !== "undefined") opt2ChatHistory = [];
+    if (typeof opt2WbLegs !== "undefined") opt2WbLegs = [];
+    if (typeof opt2AddedTrades !== "undefined") opt2AddedTrades = [];
+    if (typeof opt2ClosedTradeIds !== "undefined") opt2ClosedTradeIds = [];
+    if (typeof opt2ScenarioTrades !== "undefined") opt2ScenarioTrades = [];
+    const $log = document.getElementById("opt2-chat-log");
+    if ($log) $log.innerHTML = "";
+
     // Fetch spot + vol surface for the new asset, then reload page
     Promise.all([
       get(`/api/market/spot?asset=${asset}`).catch(() => null),
@@ -4012,6 +4024,7 @@ async function opt2Run() {
       })),
       closed_trade_ids: opt2ClosedTradeIds,
       target_payoff: drawnTarget,
+      asset: currentAsset,
     });
 
     opt2StopProgress();
@@ -4022,6 +4035,31 @@ async function opt2Run() {
     const text = (result.text || "").replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
     opt2AddMsg("bot", text);
     opt2ChatHistory.push({ role: "bot", text: result.text || "" });
+
+    // Compact cost-decomposition card when run_roll_search ran this turn
+    const decomp = result.data && result.data.search_decomposition;
+    if (decomp) {
+      const fmt = (v) => "$" + Math.round(v || 0).toLocaleString();
+      const intrinsicShare = decomp.close_cost_usd
+        ? Math.round(100 * (decomp.intrinsic_close_cost_usd || 0) / decomp.close_cost_usd)
+        : 0;
+      const sources = [...new Set(
+        (decomp.close_cost_breakdown || []).map(l => l.pricing_source).filter(Boolean)
+      )].join(", ") || "—";
+      const html = `
+        <div class="opt2-decomp">
+          <div class="opt2-decomp-title">Roll search cost breakdown</div>
+          <div class="opt2-decomp-grid">
+            <div><span>Combinations tried</span><strong>${(decomp.tried_combinations || 0).toLocaleString()}</strong></div>
+            <div><span>Close cost (fixed)</span><strong>${fmt(decomp.close_cost_usd)}</strong></div>
+            <div><span>Intrinsic floor</span><strong>${fmt(decomp.intrinsic_close_cost_usd)} (${intrinsicShare}%)</strong></div>
+            <div><span>Best net cost</span><strong>${fmt(decomp.best_net_cost_usd)}</strong></div>
+            <div><span>Recoverable savings</span><strong>${fmt(decomp.recoverable_savings_usd)}</strong></div>
+            <div><span>Pricing sources</span><strong>${sources}</strong></div>
+          </div>
+        </div>`;
+      opt2AddMsg("bot", html);
+    }
 
     // If we got suggestions, populate the data and show tables
     if (result.type === "suggestions" && result.data) {
@@ -4813,6 +4851,7 @@ async function opt2RefreshChart() {
       workbench_legs: [],
       added_trades: [],
       closed_trade_ids: opt2ClosedTradeIds,
+      asset: currentAsset,
     });
     if (result.data) {
       opt2Data.current_payoff = result.data.current_payoff;
@@ -7328,85 +7367,6 @@ function optv2RenderGreeks() {
 
 let optv2OptResult = null;  // stores latest optimization result
 
-function optv2CsvEscape(value) {
-  if (value === null || value === undefined) return "";
-  const text = String(value);
-  if (/[",\n\r]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
-}
-
-function optv2TimestampForFilename() {
-  const d = new Date();
-  const pad = n => String(n).padStart(2, "0");
-  return [
-    d.getFullYear(),
-    pad(d.getMonth() + 1),
-    pad(d.getDate()),
-    "_",
-    pad(d.getHours()),
-    pad(d.getMinutes()),
-    pad(d.getSeconds()),
-  ].join("");
-}
-
-function optv2ExportTradesCsv() {
-  const trades = optv2OptResult?.trades || [];
-
-  if (!trades.length) {
-    alert("No optimizer trades to export. Run the optimizer first.");
-    return;
-  }
-
-  const columns = [
-    "strategy",
-    "strategy_instrument",
-    "counterparty",
-    "instrument",
-    "side",
-    "qty",
-    "opt",
-    "strike",
-    "expiry",
-    "dte",
-    "iv_pct",
-    "bs_price_usd",
-    "notional",
-    "is_unwind",
-    "unwind_qty",
-    "new_qty",
-    "estimated_cost",
-    "trade_cost",
-    "normalized_benefit",
-    "net_benefit",
-    "delta_contribution",
-    "gamma_contribution",
-    "vega_contribution",
-  ];
-
-  const csvRows = [
-    columns.join(","),
-    ...trades.map(trade =>
-      columns.map(col => optv2CsvEscape(trade[col])).join(",")
-    ),
-  ];
-
-  const csv = csvRows.join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-
-  const filename = `optimizer_v2_trades_${optv2TimestampForFilename()}.csv`;
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-
-  URL.revokeObjectURL(url);
-}
 /* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
 function optv2RenderPayoff() {
   const spots = optv2Data.spot_ladder;
@@ -7668,15 +7628,20 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       return Number.isNaN(v) ? fallback : v;
     }
     const rollDteThreshold = document.getElementById("optv2-roll-dte-threshold").value || null;
-    const selectedCounterparty = document.getElementById("optv2-counterparties")?.value || "ALL";
+    const cptySel = document.getElementById("optv2-counterparties");
+    const selectedCounterparties = cptySel
+      ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
+      : [];
     const data = await post("/api/optimization/run", {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
+      unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
+      new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
       save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
       is_replay: false,
-      counterparties: selectedCounterparty === "ALL" ? null : [selectedCounterparty],
+      counterparties: selectedCounterparties.length ? selectedCounterparties : null,
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -7687,12 +7652,39 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   }
 });
 
-const optv2ExportBtn = document.getElementById("btn-export-optv2-trades");
-if (optv2ExportBtn) {
-  optv2ExportBtn.addEventListener("click", optv2ExportTradesCsv);
+/* ── Render optimization results (optimizer_v3: LASSO + boxes) ── */
+
+// Human-readable strategy label from the engine's strategy code.
+const OPTV2_STRATEGY_LABELS = {
+  ROLL_UNWIND: "Unwind",
+  ROLL_REPLACEMENT: "Roll replacement",
+  BOX_NEUTRALIZER: "Box (collateral)",
+  CALL_SPREAD: "Call spread",
+  PUT_SPREAD: "Put spread",
+  STRADDLE: "Straddle",
+  IRON_CONDOR: "Iron condor",
+  SINGLE: "Single leg",
+};
+
+function optv2StrategyLabel(code) {
+  return OPTV2_STRATEGY_LABELS[code] || (code || "Single leg");
 }
 
-/* ── Render optimization results ───────────────────────────── */
+function optv2OptType(opt) {
+  if (opt === "C") return "Call";
+  if (opt === "P") return "Put";
+  if (opt === "F") return "Perp";
+  return opt || "";
+}
+
+function optv2ExpiryText(t) {
+  // Prefer an embedded Deribit code in the instrument (ETH-29MAY26-2400-C).
+  const parts = String(t.instrument || "").split("-");
+  if (parts.length >= 2 && /\d{1,2}[A-Z]{3}\d{2}/.test(parts[1])) return parts[1];
+  const exp = t.expiry || "";
+  return String(exp).slice(0, 10);
+}
+
 function optv2RenderResult(data) {
   const $section = document.getElementById("optv2-result-section");
 
@@ -7703,82 +7695,154 @@ function optv2RenderResult(data) {
   }
 
   $section.style.display = "";
-
-  // Store result and re-render main payoff chart with before/after overlay
   optv2OptResult = data;
-
-  const exportBtn = document.getElementById("btn-export-optv2-trades");
-  if (exportBtn) {
-    exportBtn.disabled = !(data.status === "ok" && Array.isArray(data.trades) && data.trades.length > 0);
-  }
-
-  document.getElementById("optv2-result-section").style.display = "block";
   optv2RenderPayoff();
 
-  // Status badge
   document.getElementById("optv2-result-status").textContent =
     data.optimizer_converged ? "Converged" : "Did not converge";
 
-  // Before
-  const b = data.before;
-  document.getElementById("optv2-before-delta").textContent = optv2Fmt(b.delta, 2);
-  document.getElementById("optv2-before-gamma").textContent = optv2Fmt(b.gamma, 4);
-  document.getElementById("optv2-before-theta").textContent = optv2Fmt(b.theta, 2);
-  document.getElementById("optv2-before-vega").textContent  = optv2Fmt(b.vega, 2);
-  document.getElementById("optv2-before-risk").textContent  = "$" + optv2Fmt(b.daily_risk, 2);
+  // Warnings / errors banner
+  const $warn = document.getElementById("optv2-warnings");
+  if (data.message) {
+    $warn.style.display = "";
+    $warn.textContent = data.message;
+  } else {
+    $warn.style.display = "none";
+  }
 
-  // After
-  const a = data.after;
-  document.getElementById("optv2-after-delta").textContent = optv2Fmt(a.delta, 2);
-  document.getElementById("optv2-after-gamma").textContent = optv2Fmt(a.gamma, 4);
-  document.getElementById("optv2-after-theta").textContent = optv2Fmt(a.theta, 2);
-  document.getElementById("optv2-after-vega").textContent  = optv2Fmt(a.vega, 2);
-  document.getElementById("optv2-after-risk").textContent  = "$" + optv2Fmt(a.daily_risk, 2);
+  const unwinds = data.roll_unwind_trades || [];
+  const replacements = data.replacement_trades || [];
+  const allTrades = data.trades || [];
+  const ps = data.premium_summary || {};
 
-  // Summary stats
-  document.getElementById("optv2-trade-cost").textContent     = "$" + optv2Fmt(data.total_trade_cost, 2);
-  document.getElementById("optv2-risk-reduction").textContent  = "$" + optv2Fmt(b.daily_risk - a.daily_risk, 2);
-  document.getElementById("optv2-utility-gain").textContent    = optv2Fmt(data.utility_improvement, 2);
-  document.getElementById("optv2-candidates").textContent      = data.candidates_evaluated;
+  // ── A. Summary ──
+  document.getElementById("optv2-sum-unwind").textContent = unwinds.length;
+  document.getElementById("optv2-sum-replacement").textContent = replacements.length;
+  const netPrem = data.net_premium_generated ?? ps.net_premium_generated ?? 0;
+  const $netPrem = document.getElementById("optv2-sum-net-premium");
+  $netPrem.textContent = (netPrem >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(netPrem), 0);
+  $netPrem.style.color = netPrem >= 0 ? "var(--green)" : "var(--red)";
+  const cash = data.cash_shift || 0;
+  document.getElementById("optv2-sum-cash-shift").textContent =
+    (cash >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(cash), 0);
+  // Fit error improvement (before - after); positive = better fit
+  const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;
+  const $fit = document.getElementById("optv2-sum-fit");
+  if (fitBefore != null && fitAfter != null) {
+    const pct = fitBefore > 0 ? (100 * (fitBefore - fitAfter) / fitBefore) : 0;
+    $fit.textContent = optv2Fmt(pct, 1) + "%";
+    $fit.style.color = pct >= 0 ? "var(--green)" : "var(--red)";
+  } else {
+    $fit.textContent = "—";
+  }
+  document.getElementById("optv2-candidates").textContent = data.candidates_evaluated ?? "—";
+  document.getElementById("optv2-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
+  document.getElementById("optv2-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
+  document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry || "All";
 
   // Show "After" matrix next to the main P&L Matrix
   const $afterPanel = document.getElementById("optv2-matrix-after-panel");
   const $matrixGrid = document.getElementById("optv2-matrix-grid");
-  $afterPanel.style.display = "";
-  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
+    $afterPanel.style.display = "";
+    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+  }
 
-  // Trades table
-  const $tbody = document.getElementById("optv2-trades-tbody");
+  // ── D. Strategy grouping ──
+  optv2RenderStrategyGroups(allTrades);
+
+  // ── B. Trades to unwind / close ──
+  optv2RenderTradeTable(
+    "optv2-unwind-tbody", unwinds, "optv2-unwind-count",
+    (t) => [
+      `<td>${t.instrument}</td>`,
+      `<td>${optv2ExpiryText(t)}</td>`,
+      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`,
+      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${t.counterparty || "—"}</td>`,
+    ], 9,
+    "No positions flagged for unwind/roll at this DTE threshold."
+  );
+
+  // ── C. Replacement / new trades ──
+  optv2RenderTradeTable(
+    "optv2-replacement-tbody", replacements, "optv2-replacement-count",
+    (t) => [
+      `<td>${t.instrument}</td>`,
+      `<td>${optv2ExpiryText(t)}</td>`,
+      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`,
+      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
+    ], 9,
+    "No replacement or new trades proposed."
+  );
+}
+
+function optv2RenderTradeTable(tbodyId, rows, countId, rowFn, colspan, emptyMsg) {
+  const $tbody = document.getElementById(tbodyId);
   $tbody.innerHTML = "";
-
-  if (data.trades.length === 0) {
+  const $count = countId ? document.getElementById(countId) : null;
+  if ($count) $count.textContent = rows.length ? `(${rows.length})` : "";
+  if (!rows.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="12" style="text-align:center;opacity:.6">No trades proposed — portfolio is already optimal given cost constraints.</td>';
+    tr.innerHTML = `<td colspan="${colspan}" style="text-align:center;opacity:.6">${emptyMsg}</td>`;
     $tbody.appendChild(tr);
     return;
   }
-
-  data.trades.forEach(t => {
+  rows.forEach(t => {
     const tr = document.createElement("tr");
-    tr.innerHTML = [
-      `<td>${t.counterparty || ""}</td>`,
-      `<td>${t.instrument}</td>`,
-      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td>${Math.abs(t.qty)}</td>`,
-      `<td>${t.strike.toLocaleString()}</td>`,
-      `<td>${t.opt === "C" ? "Call" : "Put"}</td>`,
-      `<td>${t.dte}</td>`,
-      `<td>${optv2Fmt(t.iv_pct, 1)}</td>`,
-      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 2)}</td>`,
-      `<td style="text-align:center"><span style="font-weight:700;font-size:.8rem;color:${t.is_unwind ? 'var(--green)' : 'var(--muted)'}">${t.is_unwind ? '✓ Yes' : '✗ No'}</span></td>`,
-      `<td>${optv2Fmt(t.delta_contribution, 4)}</td>`,
-      `<td>${optv2Fmt(t.gamma_contribution, 6)}</td>`,
-      `<td>${optv2Fmt(t.vega_contribution, 4)}</td>`,
-    ].join("");
+    tr.innerHTML = rowFn(t).join("");
     $tbody.appendChild(tr);
   });
+}
+
+// Group trade legs by their strategy_instrument so multi-leg structures
+// (spreads / straddles / boxes) render as one card instead of loose rows.
+function optv2RenderStrategyGroups(trades) {
+  const $wrap = document.getElementById("optv2-strategy-groups");
+  $wrap.innerHTML = "";
+  if (!trades || !trades.length) {
+    $wrap.innerHTML = '<div style="opacity:.6;font-size:.82rem">No structures proposed.</div>';
+    return;
+  }
+
+  const groups = new Map();
+  trades.forEach(t => {
+    const key = t.strategy_instrument || t.instrument;
+    if (!groups.has(key)) groups.set(key, { key, strategy: t.strategy, legs: [] });
+    groups.get(key).legs.push(t);
+  });
+
+  for (const g of groups.values()) {
+    const isStructure = g.legs.length > 1;
+    const card = document.createElement("div");
+    card.style.cssText =
+      "border:1px solid var(--border);border-radius:6px;padding:.55rem .7rem;background:var(--card-bg)";
+    const legText = g.legs.map(l => {
+      const c = l.side === "Buy" ? "var(--green)" : "var(--red)";
+      return `<span style="white-space:nowrap"><span style="color:${c}">${l.side} ${Math.abs(l.qty)}</span> `
+        + `${optv2OptType(l.opt)} ${optv2Fmt(l.strike, 0)}</span>`;
+    }).join('<span style="opacity:.4"> · </span>');
+    const net = g.legs.reduce((s, l) => s + (l.qty * (l.bs_price_usd || 0)), 0);
+    const netLabel = (net <= 0 ? "credit +$" : "debit -$") + optv2Fmt(Math.abs(net), 0);
+    card.innerHTML =
+      `<div style="display:flex;justify-content:space-between;gap:1rem;align-items:baseline">`
+      + `<div><span style="font-weight:700;font-size:.82rem">${optv2StrategyLabel(g.strategy)}</span>`
+      + (isStructure ? ` <span style="opacity:.5;font-size:.74rem">${g.legs.length} legs · ${g.key}</span>` : ` <span style="opacity:.5;font-size:.74rem">${g.key}</span>`)
+      + `</div>`
+      + `<div style="font-size:.78rem;color:${net <= 0 ? "var(--green)" : "var(--red)"}">${netLabel}</div></div>`
+      + `<div style="margin-top:.35rem;font-size:.8rem;display:flex;flex-wrap:wrap;gap:.5rem">${legText}</div>`;
+    $wrap.appendChild(card);
+  }
 }
 
 /* ── Before/After payoff comparison charts ──────────────────── */
