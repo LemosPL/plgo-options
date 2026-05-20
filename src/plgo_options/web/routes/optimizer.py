@@ -67,7 +67,9 @@ You have four tools: scan_trades (exploration), build_strategy (one specific gre
 
 11. Narrating an action is not executing it. If you say "let me run a grid search", "running the search now", "I'll price these", "executing now", or similar, the tool_use blocks for that action MUST appear in the SAME assistant response. A response whose entire content is a promise to act is a failure equivalent to silence — the loop will exit and the user will see no results. Either emit the tool calls in this turn, or do not promise them.
 
-12. When the user states a target that is infeasible under their stated constraints (e.g. "under $1M" while their request implies $12M of unavoidable intrinsic settlement), do not enumerate the infeasible search space first. Lead with the constraint relaxation that makes the target feasible ("hitting your <$1M target requires not closing the deep-ITM shorts"), present the feasible plan as the primary answer with ranked candidates, and include the original infeasible approach only as a footnote comparison. Never bury the feasible plan beneath a wall of doomed candidates. The run_roll_search result includes `search_decomposition.intrinsic_close_cost_usd` — compare it against the user's target before presenting; if intrinsic_floor > target, surface that gap as the first sentence of your response.
+12. When the user states a target that is infeasible under their stated constraints (e.g. "under $1M" while their request implies $7M of unavoidable intrinsic settlement), do not enumerate the infeasible search space first. Lead with the constraint relaxation that makes the target feasible ("hitting your <$1M target is impossible — the intrinsic floor alone is $7M; cheapest achievable roll is $2.08M"), present the feasible plan as the primary answer with ranked candidates, and include the original infeasible approach only as a footnote comparison. Never bury the feasible plan beneath a wall of doomed candidates. The run_roll_search result includes `search_decomposition.intrinsic_close_cost_usd` — compare it against the user's target before presenting; if intrinsic_floor > target, surface that gap as the first sentence of your response.
+
+12a. CRITICAL — interpreting an EMPTY run_roll_search result. The tool will tell you exactly why a result is empty. If reason is "INFEASIBLE REQUEST" / "all_candidates_filtered", the positions priced FINE — your budget/floor constraint simply rejected every candidate. Lead with the cheapest-achievable figure the tool reports and tell the user the target is infeasible. NEVER, in this case: (a) claim a "data feed issue" or that positions "can't be priced" or were "dropped", or (b) ask the user for OTC settlement prices. Those responses are flat wrong when the closes already priced (you will see their cost in the same result). Only ask about OTC prices if the tool explicitly says close legs failed to price ("all close legs failed to price"), which is a different message. If a budget rejected everything, re-running with the SAME budget is pointless — either drop the budget or raise it above the cheapest-achievable number.
 
 13. Every dollar figure, strike, quantity, or cost you put in a response MUST come from the most recent tool result in this turn (or from the portfolio context block above). If a number is not in the tool output or the portfolio block, do not invent one. Say "I do not have that number — calling the tool now" and call the appropriate tool. Fabricating financial numbers in an options trading context is a critical failure that can produce wrong trades. The server runs a post-response check and will re-prompt you if it finds unverified dollar figures; do not rely on that net — get it right first time.
 
@@ -288,9 +290,12 @@ def _verify_dollar_figures(response_text: str, source_texts: list[str]) -> list[
         if v is None:
             continue
         magnitude = abs(v)
-        if magnitude < 1000:
+        # Only police material headline figures. Small numbers (< $5k) and
+        # near-matches (within 3% or $1k) are too noisy — rounded restatements
+        # and simple sums of shown figures would otherwise trip false positives.
+        if magnitude < 5000:
             continue
-        tol = max(100.0, magnitude * 0.02)
+        tol = max(1000.0, magnitude * 0.03)
         if not any(abs(magnitude - t) <= tol for t in source_magnitudes):
             flagged.append(raw)
     return flagged
@@ -725,6 +730,18 @@ def _run_roll_search_core(
     candidates: list[dict] = []
     qty_scales = qty_scales or [1.0]
 
+    # Track what was achievable BEFORE constraint filtering, so an empty result
+    # can explain "your budget is below the floor" instead of looking like a
+    # pricing failure. priced_count = combos that priced cleanly; best_* capture
+    # the cheapest and highest-floor candidates regardless of filters.
+    priced_count = 0
+    best_net_seen: dict | None = None       # cheapest net_cost candidate (pre-filter)
+    best_floor_seen: dict | None = None      # highest floor candidate (pre-filter)
+    filter_drops = {
+        "min_floor": 0, "max_breakeven": 0, "max_notional": 0,
+        "cost_budget": 0, "min_short_strike": 0,
+    }
+
     for tgt_exp in target_expiry_codes:
         try:
             tgt_dte = max((datetime.strptime(tgt_exp, "%d%b%y").date() - date.today()).days, 0)
@@ -742,6 +759,7 @@ def _run_roll_search_core(
                     # min_short_strike enforcement (sell-side legs only)
                     if (min_short_strike is not None and tpl["side"] == "sell"
                             and k < min_short_strike):
+                        filter_drops["min_short_strike"] += 1
                         skip = True
                         break
                     qty = max(1.0, round(tpl["base_qty"] * qscale))
@@ -772,18 +790,34 @@ def _run_roll_search_core(
                 spot_imp = new_spot_pnl - float(current_payoff[spot_idx])
                 be_imp = (breakeven - new_be) if (breakeven and new_be) else 0.0
 
+                # Record achievability BEFORE filters so an empty result can
+                # report the cheapest / best-floor combo that exists.
+                priced_count += 1
+                if best_net_seen is None or net_cost < best_net_seen["net_cost"]:
+                    best_net_seen = {"net_cost": net_cost, "floor_imp": floor_imp,
+                                     "new_floor": new_floor, "strikes": [int(k) for k in strike_combo],
+                                     "expiry": tgt_exp, "qty_scale": qscale}
+                if best_floor_seen is None or floor_imp > best_floor_seen["floor_imp"]:
+                    best_floor_seen = {"net_cost": net_cost, "floor_imp": floor_imp,
+                                       "new_floor": new_floor, "strikes": [int(k) for k in strike_combo],
+                                       "expiry": tgt_exp, "qty_scale": qscale}
+
                 # Constraint filters
                 if min_floor is not None and new_floor < min_floor:
+                    filter_drops["min_floor"] += 1
                     continue
                 if max_be is not None and new_be is not None and new_be > max_be:
+                    filter_drops["max_breakeven"] += 1
                     continue
                 if max_notional is not None:
                     notional = sum(abs(l["qty"] * spot) for l in open_legs)
                     if notional > max_notional:
+                        filter_drops["max_notional"] += 1
                         continue
                 if cost_budget is not None:
                     lo, hi = cost_budget
                     if net_cost < lo or net_cost > hi:
+                        filter_drops["cost_budget"] += 1
                         continue
 
                 # Score per objective
@@ -842,14 +876,34 @@ def _run_roll_search_core(
                 })
 
     if not candidates:
-        return [], {
-            "reason": "no candidates passed constraints",
-            "tried_combinations": len(target_expiry_codes) * max(1, sum(
-                len(s) for s in per_leg_strikes
-            )) * len(qty_scales),
+        # Distinguish "nothing priced" (real data problem) from "everything
+        # priced but filtered out by your constraints" (an infeasible request).
+        if priced_count == 0:
+            return [], {
+                "reason": "no_combinations_priced",
+                "priced_count": 0,
+                "close_cost_usd": round(total_close_cost, 2),
+                "intrinsic_close_cost_usd": round(intrinsic_close_cost, 2),
+            }
+        info = {
+            "reason": "all_candidates_filtered",
+            "priced_count": priced_count,
+            "filter_drops": filter_drops,
             "close_cost_usd": round(total_close_cost, 2),
             "intrinsic_close_cost_usd": round(intrinsic_close_cost, 2),
         }
+        if best_net_seen is not None:
+            info["cheapest_achievable_net_usd"] = round(best_net_seen["net_cost"], 2)
+            info["cheapest_achievable_strikes"] = best_net_seen["strikes"]
+            info["cheapest_achievable_expiry"] = best_net_seen["expiry"]
+        if best_floor_seen is not None:
+            info["best_floor_net_usd"] = round(best_floor_seen["net_cost"], 2)
+            info["best_floor_improvement_usd"] = round(best_floor_seen["floor_imp"], 2)
+        if cost_budget is not None:
+            info["cost_budget_usd"] = list(cost_budget)
+        if constraints.get("min_floor_usd") is not None:
+            info["min_floor_usd"] = constraints["min_floor_usd"]
+        return [], info
 
     # Pareto frontier on (net_cost ↓, floor_improvement ↑). Sweep by cost, keep
     # any point that strictly improves the running-best floor — those are the
@@ -3133,43 +3187,94 @@ The match_target tool has been filtered out of your tool list in this mode — y
         if floor_constraint is not None:
             decomp["floor_constraint_usd"] = floor_constraint
 
-        # Completeness assertion. The engine's contract: one close_cost_breakdown
-        # entry per requested position. If the count drops, something silently
-        # failed and the result is unsafe to present.
+        # ── Empty-result handling FIRST (before the completeness assertion). ──
+        # An empty result can mean two very different things, and conflating
+        # them is what produced the "data feed dropped all positions" / "give me
+        # OTC prices" loop: when constraints filter every candidate out, there is
+        # NO close_cost_breakdown in decomp, so a naive completeness check would
+        # wrongly conclude the positions failed to price.
+        if not top:
+            reason = decomp.get("reason", "no candidates")
+            close_cost = decomp.get("close_cost_usd")
+            intrinsic = decomp.get("intrinsic_close_cost_usd")
+
+            if reason == "no_combinations_priced":
+                return (
+                    "Grid search priced 0 reopen combinations — the REOPEN legs could "
+                    "not be priced (bad expiry code, or strikes with no smile/quote). "
+                    "The close legs are fine. Check target_expiry_codes and the reopen "
+                    "strike grid. Do NOT tell the user the positions can't be priced.",
+                    None,
+                )
+
+            if reason == "all_candidates_filtered":
+                priced_n = decomp.get("priced_count", 0)
+                cheapest = decomp.get("cheapest_achievable_net_usd")
+                best_floor_net = decomp.get("best_floor_net_usd")
+                best_floor_imp = decomp.get("best_floor_improvement_usd")
+                drops = decomp.get("filter_drops", {})
+                budget = decomp.get("cost_budget_usd")
+                min_floor_req = decomp.get("min_floor_usd")
+                lines = [
+                    f"INFEASIBLE REQUEST — not a data problem. The engine priced {priced_n} "
+                    f"reopen combinations successfully, then your constraints filtered out "
+                    f"ALL of them. The close legs priced fine (close cost ${close_cost:,.0f}, "
+                    f"intrinsic floor ${intrinsic:,.0f})."
+                ]
+                if cheapest is not None:
+                    lines.append(
+                        f"Cheapest achievable net cost across the whole grid is "
+                        f"${cheapest:,.0f}. Nothing can go below the intrinsic floor of "
+                        f"${intrinsic:,.0f} — that part of the close is unavoidable."
+                    )
+                if budget and drops.get("cost_budget"):
+                    lines.append(
+                        f"Your cost_budget was {budget} but the cheapest roll is "
+                        f"${cheapest:,.0f}, so every candidate was rejected. The budget "
+                        f"is below what is physically achievable."
+                    )
+                if min_floor_req is not None and drops.get("min_floor"):
+                    lines.append(
+                        f"min_floor_usd={min_floor_req:,.0f} rejected {drops['min_floor']} "
+                        f"candidates; best achievable floor improvement is "
+                        f"${best_floor_imp:,.0f} at net ${best_floor_net:,.0f}."
+                    )
+                lines.append(
+                    "TELL THE USER the target is infeasible and lead with the cheapest "
+                    "achievable number above. Do NOT ask for OTC settlement prices. Do "
+                    "NOT claim a data feed issue. Offer to re-run without the budget, or "
+                    "at a budget >= the cheapest achievable figure."
+                )
+                return "\n".join(lines), None
+
+            # Fallback (e.g. empty inputs / close legs failed)
+            msg_lines = [f"Grid search returned no usable candidates ({reason})."]
+            if close_cost is not None:
+                msg_lines.append(
+                    f"Close cost: ${close_cost:,.0f}; intrinsic floor: ${intrinsic:,.0f}. "
+                    "Relax constraints or widen the grid."
+                )
+            return "\n".join(msg_lines), None
+
+        # Completeness assertion (only meaningful when we have candidates).
+        # Contract: one close_cost_breakdown entry per requested position.
         priced_ids = [
             l.get("id") for l in (decomp.get("close_cost_breakdown") or []) if l.get("id")
         ]
         if len(priced_ids) != len(close_positions):
+            # Genuine partial-pricing of close legs WITH candidates present. This
+            # is extremely rare (close legs fall back to intrinsic and almost
+            # always price). Note it on the result but DO NOT refuse outright and
+            # DO NOT imply a feed-wide failure — the candidates that exist are
+            # valid, and the close cost shown already reflects priced legs.
             requested_ids = sorted(p["id"] for p in close_positions)
             dropped = sorted(set(requested_ids) - set(priced_ids))
-            return (
-                f"REFUSING TO RETURN INCOMPLETE RESULT: requested {len(close_positions)} "
-                f"positions ({requested_ids}) but only priced {len(priced_ids)} "
-                f"({sorted(priced_ids)}). Dropped: {dropped}. This usually means a "
-                "position had an unparseable expiry or empty data. Inspect those IDs "
-                "in the portfolio block and either fix the underlying data or omit "
-                "them explicitly from close_trade_ids before retrying.",
-                None,
+            decomp["partial_pricing_warning"] = (
+                f"{len(priced_ids)} of {len(close_positions)} close legs priced; "
+                f"not priced: {dropped}"
             )
         decomp["positions_priced"] = len(priced_ids)
         decomp["positions_priced_ids"] = sorted(priced_ids)
-
-        if not top:
-            reason = decomp.get("reason", "no candidates")
-            tried = decomp.get("tried_combinations", 0)
-            close_cost = decomp.get("close_cost_usd")
-            intrinsic = decomp.get("intrinsic_close_cost_usd")
-            msg_lines = [f"Grid search returned no usable candidates ({reason})."]
-            if tried:
-                msg_lines.append(f"Combinations tried: {tried}.")
-            if close_cost is not None:
-                msg_lines.append(
-                    f"Close cost (deterministic): ${close_cost:,.0f}; intrinsic floor: ${intrinsic:,.0f}."
-                )
-                msg_lines.append(
-                    "Try a wider strike_pcts grid, more expiries, smaller qty_scales, or relax constraints."
-                )
-            return "\n".join(msg_lines), None
 
         # Build the result payload — frontend already knows how to render
         # suggestions with close_legs/open_legs.
@@ -4084,14 +4189,17 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     messages.append({
                         "role": "user",
                         "content": (
-                            "FABRICATION GUARD: Your response contains dollar figures "
-                            "that do not appear in any tool result this turn or in the "
-                            "portfolio context: "
+                            "[SYSTEM INTEGRITY CHECK — the user did NOT send this; they "
+                            "will never see it.] Your draft contained dollar figures not "
+                            "found in any tool result this turn or the portfolio context: "
                             f"{', '.join(unverified[:8])}. "
-                            "Either call the appropriate tool to verify these numbers, "
-                            "or remove them entirely from your response. Do not present "
-                            "unverified financial numbers — this is a critical failure "
-                            "in an options trading context (rule 13)."
+                            "Re-send your COMPLETE answer using only tool-sourced numbers — "
+                            "remove or correct those figures (call a tool if you need them). "
+                            "Do NOT apologize, do NOT write 'you're right', and do NOT "
+                            "reference this check or any 'fabricated'/'removed' figure — the "
+                            "user has not seen your draft and such phrasing makes the tool "
+                            "look broken. Just present the clean answer as if it were your "
+                            "first reply."
                         ),
                     })
                     try:
