@@ -856,6 +856,18 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     sbLoaded = false;
     pfData = null;
 
+    // Optimizer chat: clear cached portfolio data, baseline, chat history,
+    // workbench, and added/closed trade state — they're asset-specific.
+    if (typeof opt2Data !== "undefined") opt2Data = null;
+    if (typeof opt2Baseline !== "undefined") opt2Baseline = null;
+    if (typeof opt2ChatHistory !== "undefined") opt2ChatHistory = [];
+    if (typeof opt2WbLegs !== "undefined") opt2WbLegs = [];
+    if (typeof opt2AddedTrades !== "undefined") opt2AddedTrades = [];
+    if (typeof opt2ClosedTradeIds !== "undefined") opt2ClosedTradeIds = [];
+    if (typeof opt2ScenarioTrades !== "undefined") opt2ScenarioTrades = [];
+    const $log = document.getElementById("opt2-chat-log");
+    if ($log) $log.innerHTML = "";
+
     // Fetch spot + vol surface for the new asset, then reload page
     Promise.all([
       get(`/api/market/spot?asset=${asset}`).catch(() => null),
@@ -4002,6 +4014,7 @@ async function opt2Run() {
       })),
       closed_trade_ids: opt2ClosedTradeIds,
       target_payoff: drawnTarget,
+      asset: currentAsset,
     });
 
     opt2StopProgress();
@@ -4012,6 +4025,31 @@ async function opt2Run() {
     const text = (result.text || "").replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
     opt2AddMsg("bot", text);
     opt2ChatHistory.push({ role: "bot", text: result.text || "" });
+
+    // Compact cost-decomposition card when run_roll_search ran this turn
+    const decomp = result.data && result.data.search_decomposition;
+    if (decomp) {
+      const fmt = (v) => "$" + Math.round(v || 0).toLocaleString();
+      const intrinsicShare = decomp.close_cost_usd
+        ? Math.round(100 * (decomp.intrinsic_close_cost_usd || 0) / decomp.close_cost_usd)
+        : 0;
+      const sources = [...new Set(
+        (decomp.close_cost_breakdown || []).map(l => l.pricing_source).filter(Boolean)
+      )].join(", ") || "—";
+      const html = `
+        <div class="opt2-decomp">
+          <div class="opt2-decomp-title">Roll search cost breakdown</div>
+          <div class="opt2-decomp-grid">
+            <div><span>Combinations tried</span><strong>${(decomp.tried_combinations || 0).toLocaleString()}</strong></div>
+            <div><span>Close cost (fixed)</span><strong>${fmt(decomp.close_cost_usd)}</strong></div>
+            <div><span>Intrinsic floor</span><strong>${fmt(decomp.intrinsic_close_cost_usd)} (${intrinsicShare}%)</strong></div>
+            <div><span>Best net cost</span><strong>${fmt(decomp.best_net_cost_usd)}</strong></div>
+            <div><span>Recoverable savings</span><strong>${fmt(decomp.recoverable_savings_usd)}</strong></div>
+            <div><span>Pricing sources</span><strong>${sources}</strong></div>
+          </div>
+        </div>`;
+      opt2AddMsg("bot", html);
+    }
 
     // If we got suggestions, populate the data and show tables
     if (result.type === "suggestions" && result.data) {
@@ -4803,6 +4841,7 @@ async function opt2RefreshChart() {
       workbench_legs: [],
       added_trades: [],
       closed_trade_ids: opt2ClosedTradeIds,
+      asset: currentAsset,
     });
     if (result.data) {
       opt2Data.current_payoff = result.data.current_payoff;

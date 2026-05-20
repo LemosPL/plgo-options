@@ -39,7 +39,9 @@ DEFAULT_IV = 0.80  # 80% fallback
 
 SECTION_A_IDENTITY = """You are the PLGO Options Trading Assistant — a senior options strategist for Protocol Labs' ETH derivatives portfolio.
 
-You have three tools: scan_trades, build_strategy, suggest_rolls. Calling a tool is how you act. Describing trades in text without calling a tool is a non-action — the user sees nothing on their screen. When the user gives you specific trades, or asks to add/test/try/show something, call the relevant tool first, then comment.
+You have four tools: scan_trades (exploration), build_strategy (one specific greenfield trade), suggest_rolls (find candidates by structure), run_roll_search (full grid search for rolls). Calling a tool is how you act. Describing trades in text without calling a tool is a non-action — the user sees nothing on their screen. When the user gives you specific trades, or asks to add/test/try/show something, call the relevant tool first, then comment.
+
+**run_roll_search is the preferred tool for any roll-and-optimize request.** It runs a full Python-side grid search over (expiry × reopen strikes × qty scales), prices everything via the same fallback chain, applies constraints, and returns up to 50 ranked candidates in ONE call. Use it any time the user names positions to close and wants to find the best reopen (cheapest, target cost, max floor, etc.). Do NOT issue 10 parallel build_strategy calls for grid search — that pattern is obsolete. build_strategy is for one specific trade you already know.
 
 ## How you operate
 
@@ -51,7 +53,7 @@ You have three tools: scan_trades, build_strategy, suggest_rolls. Calling a tool
 
 4. Every analysis considers three actions in this order: (1) roll existing, (2) close + reopen, (3) add new. Suggesting only new trades without first asking whether existing structures should be rolled or closed is incomplete advice.
 
-5. When the user states an OBJECTIVE (lowest cost, closest to zero, max floor, best protection, cost-neutral) with PARTIAL CONSTRAINTS, treat unspecified parameters (strikes, quantities, expiry) as SEARCH VARIABLES, not missing inputs. Generate 5–15 candidate combinations, call build_strategy in parallel (emit multiple tool_use blocks in one assistant turn) to price each, rank by the objective, and present the top 5–8 in a ranked table. Quantity is a powerful lever — vary it alongside strikes. Never ask the user to specify what you can search for. Asking "what strikes?" when the user said "find the lowest cost" is a failure mode.
+5. When the user states an OBJECTIVE (lowest cost, closest to zero, max floor, best protection, cost-neutral) with PARTIAL CONSTRAINTS, treat unspecified parameters (strikes, quantities, expiry) as SEARCH VARIABLES, not missing inputs. For ANY request that involves closing existing positions and reopening (rolls, harvests, restructures), call `run_roll_search` ONCE with the close IDs, a reopen_template covering the strike and qty grids, and the objective — the server enumerates and ranks all candidates and returns them in a single result. Do NOT issue multiple parallel build_strategy calls; that pattern is dead. For a greenfield position with no closes (a new hedge, an income trade with no rolled leg), call build_strategy ONCE. Never ask the user to specify what you can search for. Asking "what strikes?" when the user said "find the lowest cost" is a failure mode.
 
 6. When a user request would damage the portfolio (closing protection without replacement, adding legs that conflict with existing structures, vague "improve my portfolio" with no direction), push back in one line: name what's at stake, offer the safer alternative, ask which they want. Then execute.
 
@@ -59,11 +61,23 @@ You have three tools: scan_trades, build_strategy, suggest_rolls. Calling a tool
 
 8. Correction protocol: when the user says "you are wrong", "check again", "that's not right", or similar, do not repeat the same response. Re-examine the specific assumption that may be wrong: call the tool with different parameters, re-read the portfolio block carefully, or ask one targeted question about what specifically was wrong. Re-rendering the same data with the same conclusion is not checking again.
 
-9. OTC and off-exchange positions: positions marked OTC, or which the user states are OTC, follow counterparty terms, not listed-option expiry mechanics. They can be rolled, closed, or restructured by negotiation at any time including expiry day. If the system data flags such a position as expired or DTE=0, and the user asks to roll or modify it, price the requested action via build_strategy and proceed — do not refuse based on the DTE flag.
+9. OTC and off-exchange positions: positions marked OTC (is_otc=true on the position, or which the user states are OTC) follow counterparty terms, not listed-option expiry mechanics. They can be rolled, closed, or restructured by negotiation at any time including expiry day. If the system data flags such a position as expired or DTE=0, and the user asks to roll or modify it, price the requested action via run_roll_search and proceed — do not refuse based on the DTE flag.
 
-10. Close prices for OTC or expired positions: the build_strategy tool prices these via fallback (portfolio mark, then Deribit, then intrinsic at spot). When you present a roll result that used a non-live close price, surface that in one line ("close legs priced at intrinsic — actual OTC settlement may differ; tell me the settlement price and I'll re-run"). Never say a close was "rejected" — the tool now always returns a price.
+10. Close prices for OTC or expired positions: the pricing chain reads each position's `otc_override_price` first, then portfolio mark, then Deribit, then intrinsic at spot. Each candidate's close_legs list reports the `pricing_source` per leg. When you present a result, cite the source in one line ("close legs priced via portfolio_mark + intrinsic_at_spot — set otc_override_price on the OTC legs to lock the settlement number"). Never say a close was "rejected" — the engine always returns a price. Do NOT ask the user to "provide OTC settlement prices" in a loop; if they want to override, the path is: set otc_override_price on the trade once (via the OTC API), then any subsequent search uses it automatically.
 
 11. Narrating an action is not executing it. If you say "let me run a grid search", "running the search now", "I'll price these", "executing now", or similar, the tool_use blocks for that action MUST appear in the SAME assistant response. A response whose entire content is a promise to act is a failure equivalent to silence — the loop will exit and the user will see no results. Either emit the tool calls in this turn, or do not promise them.
+
+12. When the user states a target that is infeasible under their stated constraints (e.g. "under $1M" while their request implies $12M of unavoidable intrinsic settlement), do not enumerate the infeasible search space first. Lead with the constraint relaxation that makes the target feasible ("hitting your <$1M target requires not closing the deep-ITM shorts"), present the feasible plan as the primary answer with ranked candidates, and include the original infeasible approach only as a footnote comparison. Never bury the feasible plan beneath a wall of doomed candidates. The run_roll_search result includes `search_decomposition.intrinsic_close_cost_usd` — compare it against the user's target before presenting; if intrinsic_floor > target, surface that gap as the first sentence of your response.
+
+13. Every dollar figure, strike, quantity, or cost you put in a response MUST come from the most recent tool result in this turn (or from the portfolio context block above). If a number is not in the tool output or the portfolio block, do not invent one. Say "I do not have that number — calling the tool now" and call the appropriate tool. Fabricating financial numbers in an options trading context is a critical failure that can produce wrong trades. The server runs a post-response check and will re-prompt you if it finds unverified dollar figures; do not rely on that net — get it right first time.
+
+14. Cost terminology. When the user refers to "cost", "roll cost", or "the trade cost", they mean NET cost (close debit minus reopen credit). Gross close cost is shown only as a breakdown component, never as the headline number. A roll that nets to a credit costs negative dollars — not "infeasible", not "free" — a credit. Lead with the net number.
+
+15. Position scoping. When the user references positions by date ("trades on the 29th", "the May expiries") or by group ("all the call spreads", "the deep-ITM shorts"), include ALL positions matching that filter in a SINGLE run_roll_search call. Use `include_all_expiring_on` for date filters so the server resolves the close_trade_ids deterministically. Do not partial-match by hand. Do not split call spreads from put spreads from naked legs into separate calls — the engine prices every leg you pass and grids over all groups simultaneously. The server enforces this: a second run_roll_search call this turn whose close set is not a superset of the prior call is REJECTED with an error telling you to combine. One filter, one combined search.
+
+16. Multi-objective default. When the user states two objectives in one breath ("low cost AND maintain profile", "cheap AND improve floor", "cost-neutral, don't impact payoff"), this is constrained optimization. Either (a) optimize the first stated objective subject to a constraint on the second (e.g. objective=minimize_net_cost with constraints.min_floor_usd or floor_constraint set), or (b) call objective=pareto_frontier and present the trade-off curve. Never collapse to a single objective and silently ignore the other.
+
+17. Budget constraints. When the user gives a cost range ("between $1 and $1M", "up to $500K", "no more than a $200K debit"), this is a BUDGET, not a target. Pass it as `cost_budget=[lo, hi]` (credits are negative, so "up to $500K cost, any credit OK" = [-inf, 500000] — use a large negative number like -1e9 for unbounded credit). Then optimize the implicit protection objective (floor improvement, BE reduction, payoff shape) — typically objective=maximize_floor_subject_to_cost_budget. Do not interpret a range as "hit this number exactly."
 
 ## Scope
 
@@ -96,20 +110,18 @@ User: "What do you think of these?" (pastes 4 trades)
 
 User: "Close the May 15 put spread and call spread, reopen on 31JUL26 with different strikes and quantities, net cost close to zero."
 
-[Issue 10–14 parallel build_strategy calls in one assistant turn: candidate strike combos × 2–3 quantity scenarios for each spread. Each call covers the FULL close + reopen so the returned net_cost is the real number.]
+[ONE run_roll_search call this turn. close_trade_ids = the four IDs. reopen_template has two long/short legs for the put spread and two for the call spread, each with a strike_pcts grid (e.g. [0.85, 0.88, 0.92, 0.96] for longs / [1.04, 1.08, 1.12, 1.16] for shorts) and base_qty from the original positions. target_expiry_codes=["31JUL26"]. qty_scales=[1.0, 0.75, 0.5]. objective="target_net_cost" with target_net_cost_usd=0. The server enumerates the full grid and returns up to 50 ranked candidates in one result.]
 
-> Tested 12 close + reopen combinations across strike width and size. Top 6 closest to net zero:
+> Searched 96 close+reopen combinations on 31JUL26 (4×4 strike grid × 3 qty scales × 2 spreads). Close cost is **$612K** with **$540K** intrinsic (deep-ITM buybacks — that's the floor). Top 4 closest to net zero:
 >
-> | # | Spread | Close → Reopen | Qty | Net Cost |
-> |---|---|---|---|---|
-> | 1 | Put + Call combined | PS 1600/3900 → 1900/2400 + CS 1000/2400 → 2400/3200 | 1000 ETH each | **+$2,400** |
-> | 2 | Put + Call combined | PS 1600/3900 → 1850/2450 + CS 1000/2400 → 2350/3250 | 1000 ETH each | **−$11,800 credit** |
-> | 3 | Put + Call combined | PS 1600/3900 → 1900/2400 + CS 1000/2400 → 2400/3200 | 750 ETH each | **+$1,100** |
-> | 4 | Put + Call combined | PS 1600/3900 → 1900/2350 + CS 1000/2400 → 2350/3300 | 1000 ETH each | **−$4,200 credit** |
-> | 5 | Put only | PS 1600/3900 → 1900/2400 | 1000 ETH | **−$3,800 credit** |
-> | 6 | Call only | CS 1000/2400 → 2400/3200 | 1000 ETH | **+$5,900** |
+> | # | Combined roll | Qty | Net Cost |
+> |---|---|---|---|
+> | 1 | PS 1600/3900 → 1900/2400, CS 1000/2400 → 2400/3200 | 1000 ETH | **+$2,400** |
+> | 2 | PS 1600/3900 → 1850/2450, CS 1000/2400 → 2350/3250 | 1000 ETH | **−$11,800 credit** |
+> | 3 | Same strikes as #1 | 750 ETH | **+$1,100** |
+> | 4 | PS 1600/3900 → 1900/2350, CS 1000/2400 → 2350/3300 | 1000 ETH | **−$4,200 credit** |
 >
-> Top 3 are in Suggestions (#new1–#new3). #new1 at +$2,400 is closest to zero with full size. #new2 at −$11,800 gives you credit but slightly narrower strikes. Want me to widen the strike grid further, test smaller sizes, or lock in one of these?
+> #1 sits closest to zero at full size. #2 actually credits $11.8K with slightly narrower strikes. The $540K intrinsic floor means you can't get the net below that without leaving the deep-ITM shorts open through expiry. Want a wider strike grid, smaller sizes, or to lock one of these?
 
 ### Example 3 — bad response (avoid)
 
@@ -117,7 +129,15 @@ User: same as Example 2.
 
 > Got it. What new expiry and strikes do you want for each spread? Please specify the long strike, short strike, and quantity per leg for the put spread, and the same for the call spread.
 
-This is the failure mode. The user already stated the objective (close to zero) and the expiry (31JUL26). Strikes and quantities are search variables. Asking the user to specify them is a non-action."""
+This is the failure mode. The user already stated the objective (close to zero) and the expiry (31JUL26). Strikes and quantities are search variables. Asking the user to specify them is a non-action.
+
+### Example 4 — bad response (avoid)
+
+User: same as Example 2.
+
+[Emits 12 parallel build_strategy calls.]
+
+This is also a failure. build_strategy for rolls is deprecated. One run_roll_search call covers the entire grid server-side and returns the ranked set in a single result."""
 
 
 def _bs_delta(spot: float, strike: float, dte: int, sigma: float, opt: str) -> float:
@@ -202,6 +222,7 @@ class ChatRequest(BaseModel):
     added_trades: list[dict] = []  # trades already added to portfolio from optimizer
     closed_trade_ids: list[int] = []  # trades "closed" in the optimizer working portfolio (for rolls)
     target_payoff: list[dict] | None = None  # drawn target: [{x: spot, y: payoff}, ...]
+    asset: str = "ETH"  # "ETH" or "FIL" — FIL has no Deribit options; pricing falls through to portfolio mark / BS / intrinsic
 
 
 class CalculateRequest(BaseModel):
@@ -214,6 +235,65 @@ def _safe_float(v) -> float:
         return float(v) if v is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
+
+
+# ── Dollar-figure fabrication guard ─────────────────────────────────────────
+# Used after each agent response to verify every $ figure in the prose appears
+# in some tool result or in the portfolio context block. Anything that doesn't
+# match (within tolerance) is flagged and the agent is re-prompted to either
+# call a tool to verify or remove the number.
+
+_DOLLAR_RE = re.compile(r'\$\s*-?[\d,]+(?:\.\d+)?\s*[KMBkmb]?')
+_NUMBER_RE = re.compile(r'-?[\d,]+(?:\.\d+)?\s*[KMBkmb]?')
+
+
+def _normalize_amount(raw: str) -> float | None:
+    """'$612K' → 612000.0, '-$1.2M' → -1200000.0, '12,800' → 12800.0."""
+    s = raw.strip().replace("$", "").replace(",", "").replace(" ", "")
+    if not s:
+        return None
+    mult = 1.0
+    if s[-1] in "KMBkmb":
+        suf = s[-1].upper()
+        s = s[:-1]
+        mult = {"K": 1e3, "M": 1e6, "B": 1e9}[suf]
+    try:
+        return float(s) * mult
+    except ValueError:
+        return None
+
+
+def _verify_dollar_figures(response_text: str, source_texts: list[str]) -> list[str]:
+    """Return $ figures in `response_text` whose magnitude doesn't appear in
+    any of `source_texts` (within ±2% or ±$100). Amounts under $1,000 are
+    skipped — they're typically too small to be load-bearing (strikes, qtys,
+    minor formatting) and produce noisy false positives."""
+    source_magnitudes: list[float] = []
+    for src in source_texts:
+        if not src:
+            continue
+        for m in _NUMBER_RE.findall(src):
+            v = _normalize_amount(m)
+            if v is not None:
+                source_magnitudes.append(abs(v))
+
+    flagged: list[str] = []
+    seen: set[str] = set()
+    for m in _DOLLAR_RE.finditer(response_text):
+        raw = m.group(0)
+        if raw in seen:
+            continue
+        seen.add(raw)
+        v = _normalize_amount(raw)
+        if v is None:
+            continue
+        magnitude = abs(v)
+        if magnitude < 1000:
+            continue
+        tol = max(100.0, magnitude * 0.02)
+        if not any(abs(magnitude - t) <= tol for t in source_magnitudes):
+            flagged.append(raw)
+    return flagged
 
 
 def _payoff_vec(spot_arr, strike, opt, qty):
@@ -267,6 +347,28 @@ async def _fetch_smiles() -> dict[str, VolSmile]:
         ivs = [float(np.mean(strike_ivs[k])) for k in strikes]
         if len(strikes) >= 2:
             smiles[exp] = VolSmile(strikes, ivs)
+    return smiles
+
+
+async def _fetch_fil_smiles(fil_spot: float) -> dict[str, VolSmile]:
+    """FIL has no exchange-listed options; build a proxy vol surface by
+    scaling the ETH smile by the HV(FIL)/HV(ETH) ratio and projecting
+    strikes from ETH moneyness onto FIL price space. Mirrors the
+    portfolio.py logic so optimizer and portfolio agree on FIL pricing."""
+    try:
+        eth_smiles = await _fetch_smiles()
+        vol_ratio = await client.get_historical_vol_ratio(days=30)
+        eth_spot_ref = await client.get_eth_spot_price()
+    except Exception:
+        return {}
+    if eth_spot_ref <= 0 or fil_spot <= 0:
+        return {}
+    smiles: dict[str, VolSmile] = {}
+    for exp_code, smile in eth_smiles.items():
+        scaled_ivs = [iv * vol_ratio for iv in smile.ivs.tolist()]
+        fil_strikes = [k / eth_spot_ref * fil_spot for k in smile.strikes.tolist()]
+        if len(fil_strikes) >= 2:
+            smiles[exp_code] = VolSmile(fil_strikes, scaled_ivs)
     return smiles
 
 
@@ -350,6 +452,473 @@ def _find_breakeven(spot_arr, payoff):
             frac = -payoff[i] / (payoff[i + 1] - payoff[i])
             return float(spot_arr[i] + frac * SPOT_STEP)
     return None
+
+
+def _sort_expiry_codes(codes):
+    """Sort Deribit-style expiry codes by date; fall back to lexicographic on parse failure."""
+    try:
+        return sorted(set(codes), key=lambda x: datetime.strptime(x, "%d%b%y"))
+    except (ValueError, TypeError):
+        return sorted(set(codes))
+
+
+# ===========================================================================
+# Roll grid search engine
+#
+# Server-side grid: enumerates (expiry × strike-combo × qty-scale) for a set
+# of close legs + a reopen template, prices everything via the existing
+# fallback chain, ranks candidates by objective, returns top N with cost
+# decomposition. Replaces the "LLM emits N parallel build_strategy calls"
+# pattern — one tool call from the model, all the search runs in Python.
+# ===========================================================================
+
+def _price_leg_fallback(
+    *,
+    strike: float, opt: str, exp_code: str, side: str, qty: float,
+    spot: float, summaries: dict, smiles: dict,
+    is_close: bool,
+    portfolio_match: dict | None = None,
+    otc_override_eth: float | None = None,
+    asset_prefix: str = "ETH",
+) -> dict | None:
+    """Price one leg via the fallback chain.
+
+    Close legs: otc_override -> portfolio_mark -> deribit_live -> deribit_mid
+                -> intrinsic_at_spot.  Always returns a priced dict.
+    Open legs:  deribit_live -> deribit_mid -> bs_estimate.  Returns None if
+                no quote and BS can't price either (e.g. expired-only listing).
+
+    `asset_prefix` ("ETH" or "FIL") only affects the displayed instrument name —
+    summaries lookups against FIL will simply miss (no listed FIL options), so
+    the chain falls through to portfolio_mark / intrinsic for closes and BS for
+    opens. That is the intended FIL flow.
+    """
+    strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+    inst_name = f"{asset_prefix}-{exp_code}-{strike_str}-{opt}"
+    mkt = summaries.get(inst_name, {}) if summaries else {}
+    bid = mkt.get("bid_price") or 0
+    ask = mkt.get("ask_price") or 0
+    mark_iv = mkt.get("mark_iv")
+    live = ask if side == "buy" else bid
+
+    try:
+        exp_date = datetime.strptime(exp_code, "%d%b%y").date()
+        dte = max((exp_date - date.today()).days, 0)
+    except (ValueError, TypeError):
+        dte = 0
+
+    price_eth = 0.0
+    src: str | None = None
+
+    if is_close:
+        if otc_override_eth is not None and otc_override_eth > 0:
+            price_eth = otc_override_eth
+            src = "otc_override"
+        elif portfolio_match is not None and portfolio_match.get("mark_price_eth", 0) > 0:
+            price_eth = portfolio_match["mark_price_eth"]
+            src = f"portfolio_mark_#{portfolio_match['id']}"
+        elif live > 0:
+            price_eth = live
+            src = "deribit_live"
+        elif bid > 0 or ask > 0:
+            price_eth = (bid + ask) / 2 if (bid > 0 and ask > 0) else max(bid, ask)
+            src = "deribit_mid"
+        else:
+            intrinsic_usd = (max(0.0, strike - spot) if opt == "P"
+                             else max(0.0, spot - strike))
+            price_eth = (intrinsic_usd / spot) if spot > 0 else 0.0
+            src = "intrinsic_at_spot"
+    else:
+        if live > 0:
+            price_eth = live
+            src = "deribit_live"
+        elif bid > 0 or ask > 0:
+            price_eth = (bid + ask) / 2 if (bid > 0 and ask > 0) else max(bid, ask)
+            src = "deribit_mid"
+        else:
+            sigma_fb = (_get_sigma(strike, "", smiles, expiry_code=exp_code)
+                        if smiles else DEFAULT_IV)
+            T = max(dte, 1) / 365.25
+            if spot > 0 and T > 0 and sigma_fb > 0:
+                price_eth = bs_price(spot, strike, T, 0.0, sigma_fb, opt) / spot
+                src = "bs_estimate"
+                mark_iv = sigma_fb * 100
+            else:
+                return None
+
+    sign = 1.0 if side == "buy" else -1.0
+    cost = sign * price_eth * qty * spot
+    spread_pct = round((ask - bid) / ask * 100, 1) if ask > 0 else 0
+    return {
+        "instrument": inst_name, "side": side, "qty": float(qty),
+        "strike": float(strike), "opt": opt, "expiry_code": exp_code, "dte": dte,
+        "price_eth": round(price_eth, 6), "price_usd": round(price_eth * spot, 2),
+        "bid_usd": round(bid * spot, 2), "ask_usd": round(ask * spot, 2),
+        "spread_pct": spread_pct, "mark_iv": mark_iv,
+        "pricing_source": src, "cost": float(cost),
+    }
+
+
+def _intrinsic_eth(strike: float, opt: str, spot: float) -> float:
+    if spot <= 0:
+        return 0.0
+    return (max(0.0, strike - spot) if opt == "P" else max(0.0, spot - strike)) / spot
+
+
+def _resolve_close_legs(
+    *,
+    close_positions: list[dict],
+    spot: float, summaries: dict, smiles: dict,
+    otc_overrides: dict[int, float] | None = None,
+    asset_prefix: str = "ETH",
+) -> list[dict]:
+    """Price every close leg deterministically (same across all candidates)."""
+    close_legs: list[dict] = []
+    overrides = otc_overrides or {}
+    for pd in close_positions:
+        opt = pd["type"][0]  # "Call" -> "C", "Put" -> "P"
+        # Close means flip the side
+        close_side = "sell" if pd["side"].lower() == "long" else "buy"
+        exp_code = pd.get("expiry_code") or ""
+        if not exp_code:
+            try:
+                exp_d = datetime.strptime(pd["expiry"], "%Y-%m-%d").date()
+                exp_code = f"{exp_d.day}{exp_d.strftime('%b').upper()}{exp_d.strftime('%y')}"
+            except (ValueError, KeyError):
+                exp_code = ""
+        # Position metadata already includes otc fields if the migration ran
+        otc_override = overrides.get(pd["id"])
+        if otc_override is None and pd.get("otc_override_price"):
+            try:
+                px_usd = float(pd["otc_override_price"])
+                otc_override = (px_usd / spot) if spot > 0 else None
+            except (TypeError, ValueError):
+                otc_override = None
+        leg = _price_leg_fallback(
+            strike=pd["strike"], opt=opt, exp_code=exp_code, side=close_side,
+            qty=pd["qty"], spot=spot, summaries=summaries, smiles=smiles,
+            is_close=True, portfolio_match=pd, otc_override_eth=otc_override,
+            asset_prefix=asset_prefix,
+        )
+        if leg is None:
+            continue
+        leg["role"] = "close"
+        leg["closes_position_id"] = pd["id"]
+        leg["intrinsic_cost"] = float(
+            (1.0 if close_side == "buy" else -1.0)
+            * _intrinsic_eth(pd["strike"], opt, spot) * pd["qty"] * spot
+        )
+        close_legs.append(leg)
+    return close_legs
+
+
+def _candidate_strike_for_leg(
+    *,
+    original_strike: float, opt: str, side: str, spot: float,
+    pct_of_spot: float | None, strike_step: int = 50,
+) -> float:
+    """Resolve a candidate strike. If pct_of_spot is None, keep original.
+    Snaps to the strike grid (multiples of strike_step)."""
+    if pct_of_spot is None or pct_of_spot <= 0 or spot <= 0:
+        return float(original_strike)
+    raw = spot * pct_of_spot
+    return float(round(raw / strike_step) * strike_step)
+
+
+def _bs_payoff_for_legs(
+    legs: list[dict], spot_arr, smiles, *, sign_from_side: bool = True,
+):
+    """Sum BS payoff curve for a list of legs.  Each leg must have
+    side/opt/strike/qty/expiry_code (and dte)."""
+    payoff = np.zeros_like(spot_arr)
+    for leg in legs:
+        opt = leg["opt"]
+        strike = leg["strike"]
+        qty = leg["qty"]
+        sign = (1.0 if leg["side"] == "buy" else -1.0) if sign_from_side else 1.0
+        net_qty = sign * qty
+        exp_code = leg.get("expiry_code", "")
+        T = _time_to_expiry_years(exp_code) if exp_code else (max(leg.get("dte", 0), 0) / 365.25)
+        sigma = _get_sigma(strike, "", smiles, expiry_code=exp_code) if smiles else DEFAULT_IV
+        payoff += _bs_payoff_vec(spot_arr, strike, opt, net_qty, T, sigma)
+    return payoff
+
+
+def _close_payoff_removal(close_positions: list[dict], spot_arr, smiles):
+    """Payoff curve to SUBTRACT when removing the close_positions from the
+    base portfolio.  Uses the position's own dte/sigma (the legs being closed
+    are at their original expiry/IV, not the reopen expiry)."""
+    payoff = np.zeros_like(spot_arr)
+    for pd in close_positions:
+        opt = pd["type"][0]
+        net_qty = pd["net_qty"]
+        T = max(pd.get("dte", 0), 0) / 365.25
+        # original sigma for the position (re-derive via smile match on its own expiry)
+        sigma = _get_sigma(pd["strike"], pd.get("expiry", ""), smiles)
+        payoff += _bs_payoff_vec(spot_arr, pd["strike"], opt, net_qty, T, sigma)
+    return payoff
+
+
+def _run_roll_search_core(
+    *,
+    close_positions: list[dict],
+    reopen_legs_template: list[dict],   # [{opt, side, base_strike, strike_pcts, base_qty}]
+    target_expiry_codes: list[str],
+    qty_scales: list[float],
+    objective: str,
+    target_net_cost_usd: float | None,
+    constraints: dict,
+    max_candidates: int,
+    spot: float, summaries: dict, smiles: dict,
+    current_payoff, spot_arr, spot_idx: int, breakeven: float | None,
+    otc_overrides: dict[int, float] | None = None,
+    cost_budget: tuple[float, float] | None = None,
+    asset_prefix: str = "ETH",
+) -> tuple[list[dict], dict]:
+    """Enumerate the full grid, return ranked candidates + decomposition meta."""
+    import itertools
+
+    if not close_positions or not reopen_legs_template or not target_expiry_codes:
+        return [], {"reason": "empty inputs"}
+
+    # Deterministic close pricing (shared by every candidate)
+    close_legs = _resolve_close_legs(
+        close_positions=close_positions, spot=spot,
+        summaries=summaries, smiles=smiles, otc_overrides=otc_overrides,
+        asset_prefix=asset_prefix,
+    )
+    if not close_legs:
+        return [], {"reason": "all close legs failed to price"}
+
+    total_close_cost = sum(l["cost"] for l in close_legs)
+    intrinsic_close_cost = sum(l["intrinsic_cost"] for l in close_legs)
+
+    # Payoff curve once the closes are removed
+    base_after_close = current_payoff - _close_payoff_removal(close_positions, spot_arr, smiles)
+
+    # Strike grids per leg template position
+    per_leg_strikes: list[list[float]] = []
+    for tpl in reopen_legs_template:
+        pcts = tpl.get("strike_pcts") or []
+        if not pcts:
+            per_leg_strikes.append([float(tpl["base_strike"])])
+            continue
+        strikes = []
+        seen: set[float] = set()
+        for p in pcts:
+            k = _candidate_strike_for_leg(
+                original_strike=tpl["base_strike"], opt=tpl["opt"],
+                side=tpl["side"], spot=spot, pct_of_spot=p,
+            )
+            if k not in seen:
+                seen.add(k)
+                strikes.append(k)
+        per_leg_strikes.append(strikes or [float(tpl["base_strike"])])
+
+    # Constraint defaults
+    min_floor = constraints.get("min_floor_usd")
+    max_be = constraints.get("max_breakeven_usd")
+    max_notional = constraints.get("max_notional_usd")
+    min_short_strike = constraints.get("min_short_strike_usd")
+    min_dte_c = constraints.get("min_dte", 0)
+
+    candidates: list[dict] = []
+    qty_scales = qty_scales or [1.0]
+
+    for tgt_exp in target_expiry_codes:
+        try:
+            tgt_dte = max((datetime.strptime(tgt_exp, "%d%b%y").date() - date.today()).days, 0)
+        except ValueError:
+            continue
+        if tgt_dte < min_dte_c:
+            continue
+
+        for strike_combo in itertools.product(*per_leg_strikes):
+            for qscale in qty_scales:
+                open_legs: list[dict] = []
+                skip = False
+                for i, tpl in enumerate(reopen_legs_template):
+                    k = strike_combo[i]
+                    # min_short_strike enforcement (sell-side legs only)
+                    if (min_short_strike is not None and tpl["side"] == "sell"
+                            and k < min_short_strike):
+                        skip = True
+                        break
+                    qty = max(1.0, round(tpl["base_qty"] * qscale))
+                    ol = _price_leg_fallback(
+                        strike=k, opt=tpl["opt"], exp_code=tgt_exp,
+                        side=tpl["side"], qty=qty, spot=spot,
+                        summaries=summaries, smiles=smiles, is_close=False,
+                        asset_prefix=asset_prefix,
+                    )
+                    if ol is None:
+                        skip = True
+                        break
+                    ol["role"] = "open"
+                    open_legs.append(ol)
+                if skip:
+                    continue
+
+                total_open_cost = sum(l["cost"] for l in open_legs)
+                net_cost = total_close_cost + total_open_cost
+
+                # Payoff impact
+                reopen_curve = _bs_payoff_for_legs(open_legs, spot_arr, smiles)
+                new_payoff = base_after_close + reopen_curve
+                new_floor = float(new_payoff.min())
+                new_spot_pnl = float(new_payoff[spot_idx])
+                new_be = _find_breakeven(spot_arr, new_payoff)
+                floor_imp = new_floor - float(current_payoff.min())
+                spot_imp = new_spot_pnl - float(current_payoff[spot_idx])
+                be_imp = (breakeven - new_be) if (breakeven and new_be) else 0.0
+
+                # Constraint filters
+                if min_floor is not None and new_floor < min_floor:
+                    continue
+                if max_be is not None and new_be is not None and new_be > max_be:
+                    continue
+                if max_notional is not None:
+                    notional = sum(abs(l["qty"] * spot) for l in open_legs)
+                    if notional > max_notional:
+                        continue
+                if cost_budget is not None:
+                    lo, hi = cost_budget
+                    if net_cost < lo or net_cost > hi:
+                        continue
+
+                # Score per objective
+                if objective == "minimize_net_cost":
+                    score = -net_cost
+                elif objective in ("maximize_floor", "maximize_floor_improvement"):
+                    # maximize_floor_improvement = pure floor optimization; old
+                    # maximize_floor lightly penalized cost as a tiebreaker.
+                    score = (
+                        floor_imp if objective == "maximize_floor_improvement"
+                        else floor_imp - 0.0001 * abs(net_cost)
+                    )
+                elif objective == "maximize_floor_subject_to_cost_budget":
+                    # cost_budget already filters; rank pure floor improvement
+                    score = floor_imp
+                elif objective == "target_net_cost" and target_net_cost_usd is not None:
+                    score = -abs(net_cost - target_net_cost_usd)
+                elif objective == "max_credit_zero_floor_loss":
+                    score = -net_cost - (1e6 if floor_imp < 0 else 0)
+                elif objective == "pareto_frontier":
+                    # Frontier extracted after the loop; score is a placeholder
+                    # so the candidate survives until the pareto pass.
+                    score = floor_imp
+                else:
+                    score = floor_imp - 0.0001 * abs(net_cost)
+
+                strikes_str = "/".join(str(int(k)) for k in strike_combo)
+                cand_name = (
+                    f"Roll Search: {strikes_str} {tgt_exp} qty x{qscale:g}"
+                )
+
+                candidates.append({
+                    "name": cand_name,
+                    "category": "roll",
+                    "is_roll": True,
+                    "close_legs": [dict(cl) for cl in close_legs],
+                    "open_legs": open_legs,
+                    "legs": [dict(cl) for cl in close_legs] + open_legs,
+                    "expiry_code": tgt_exp,
+                    "dte": tgt_dte,
+                    "qty_scale": qscale,
+                    "strikes": [int(k) for k in strike_combo],
+                    "close_cost_usd": round(total_close_cost, 2),
+                    "open_cost_usd": round(total_open_cost, 2),
+                    "net_cost_usd": round(net_cost, 2),
+                    "score": float(score),
+                    "impact": {
+                        "at_spot": round(spot_imp, 2),
+                        "min_improvement": round(floor_imp, 2),
+                        "new_min": round(new_floor, 2),
+                        "new_breakeven": round(new_be, 2) if new_be else None,
+                        "breakeven_improvement": round(be_imp, 2),
+                        "downside": 0, "upside": 0, "zone": 0,
+                    },
+                    "new_payoff": np.round(new_payoff, 2).tolist(),
+                })
+
+    if not candidates:
+        return [], {
+            "reason": "no candidates passed constraints",
+            "tried_combinations": len(target_expiry_codes) * max(1, sum(
+                len(s) for s in per_leg_strikes
+            )) * len(qty_scales),
+            "close_cost_usd": round(total_close_cost, 2),
+            "intrinsic_close_cost_usd": round(intrinsic_close_cost, 2),
+        }
+
+    # Pareto frontier on (net_cost ↓, floor_improvement ↑). Sweep by cost, keep
+    # any point that strictly improves the running-best floor — those are the
+    # non-dominated candidates.
+    pareto_size = None
+    if objective == "pareto_frontier":
+        by_cost = sorted(candidates, key=lambda c: c["net_cost_usd"])
+        frontier: list[dict] = []
+        best_fi = float("-inf")
+        for c in by_cost:
+            fi = c["impact"]["min_improvement"]
+            if fi > best_fi:
+                frontier.append(c)
+                best_fi = fi
+        pareto_size = len(frontier)
+        candidates = frontier
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    top = candidates[:max_candidates]
+
+    # Cost decomposition
+    best_open = top[0]["open_cost_usd"]
+    worst_open = max(c["open_cost_usd"] for c in candidates)
+    recoverable_savings = worst_open - best_open
+
+    decomposition = {
+        "tried_combinations": len(candidates),
+        "pareto_frontier_size": pareto_size,
+        "close_cost_usd": round(total_close_cost, 2),
+        "intrinsic_close_cost_usd": round(intrinsic_close_cost, 2),
+        "close_cost_breakdown": [
+            {
+                "id": l.get("closes_position_id"),
+                "instrument": l["instrument"],
+                "side": l["side"], "qty": l["qty"],
+                "price_usd": l["price_usd"], "cost_usd": round(l["cost"], 2),
+                "pricing_source": l["pricing_source"],
+                "intrinsic_cost_usd": round(l["intrinsic_cost"], 2),
+            }
+            for l in close_legs
+        ],
+        "best_net_cost_usd": top[0]["net_cost_usd"],
+        "worst_net_cost_usd": round(candidates[-1]["net_cost_usd"], 2),
+        "recoverable_savings_usd": round(recoverable_savings, 2),
+        "intrinsic_floor_usd": round(intrinsic_close_cost, 2),
+        "objective": objective,
+        "target_net_cost_usd": target_net_cost_usd,
+    }
+
+    # Per-candidate reopen breakdown
+    for cand in top:
+        cand["reopen_credit_breakdown"] = [
+            {
+                "instrument": l["instrument"], "side": l["side"], "qty": l["qty"],
+                "price_usd": l["price_usd"], "cost_usd": round(l["cost"], 2),
+                "pricing_source": l["pricing_source"],
+            }
+            for l in cand["open_legs"]
+        ]
+        cand["cost_decomposition"] = {
+            "close_cost_usd": round(total_close_cost, 2),
+            "open_cost_usd": cand["open_cost_usd"],
+            "intrinsic_floor_usd": round(intrinsic_close_cost, 2),
+            "excess_over_intrinsic_usd": round(
+                cand["net_cost_usd"] - intrinsic_close_cost, 2
+            ),
+        }
+
+    return top, decomposition
 
 
 # ---------------------------------------------------------------------------
@@ -1479,33 +2048,45 @@ async def chat(req: ChatRequest):
 
     msg = req.message.strip()
     history = req.history
+    asset = (req.asset or "ETH").upper()
+    is_fil = asset == "FIL"
+    asset_prefix = "FIL" if is_fil else "ETH"
 
     # ── Load live portfolio context ──
     try:
-        spot = await client.get_eth_spot_price()
+        spot = await (client.get_fil_spot_price() if is_fil else client.get_eth_spot_price())
     except Exception:
         spot = 0
 
-    # Per-turn Deribit option-book cache. All tool handlers read from this so
-    # parallel build_strategy / suggest_rolls invocations don't each refetch
-    # the ~2k-row book. Built once per chat turn; closure-captured by handlers.
-    try:
-        _turn_book_raw = await client._get("get_book_summary_by_currency", {
-            "currency": "ETH", "kind": "option",
-        })
-        turn_book: dict[str, dict] = {s.get("instrument_name", ""): s for s in _turn_book_raw}
-    except Exception:
-        turn_book = {}
+    # Per-turn Deribit option-book cache. ETH only — FIL has no exchange-listed
+    # options, so the cache stays empty and the pricing chain falls through to
+    # portfolio_mark / intrinsic / BS-estimate for every leg.
+    if is_fil:
+        turn_book: dict[str, dict] = {}
+    else:
+        try:
+            _turn_book_raw = await client._get("get_book_summary_by_currency", {
+                "currency": "ETH", "kind": "option",
+            })
+            turn_book = {s.get("instrument_name", ""): s for s in _turn_book_raw}
+        except Exception:
+            turn_book = {}
+
+    # Per-turn state shared across tool handler invocations and the post-response
+    # verification loop. Closure-captured by the dispatch helpers below.
+    _turn_roll_search_close_sets: list[set[int]] = []
+    _turn_tool_result_texts: list[str] = []
 
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset=asset)
     except Exception:
         db_trades = []
 
-    # Fetch vol surface for BS pricing
+    # Fetch vol surface for BS pricing. FIL uses the ETH smile scaled by the
+    # HV(FIL)/HV(ETH) ratio with strikes projected onto FIL price space.
     try:
-        smiles = await _fetch_smiles()
+        smiles = await (_fetch_fil_smiles(spot) if is_fil else _fetch_smiles())
     except Exception:
         smiles = {}
 
@@ -1568,6 +2149,10 @@ async def chat(req: ChatRequest):
                 "mtm_pnl_usd": round(mtm_pnl, 2),
                 "mark_price_eth": round(mark_price_eth, 6),
                 "delta_per": _bs_delta(spot, strike, dte, sigma, opt),
+                "is_otc": bool(t.get("is_otc")) if t.get("is_otc") is not None else False,
+                "last_otc_quote": t.get("last_otc_quote"),
+                "otc_settlement_method": t.get("otc_settlement_method"),
+                "otc_override_price": t.get("otc_override_price"),
             })
         expiry_groups[exp_short] = expiry_groups.get(exp_short, 0) + 1
 
@@ -1722,9 +2307,18 @@ async def chat(req: ChatRequest):
     if _dte_warnings:
         structures_text += "\n\n=== EXPIRY ALERTS ===\n" + "\n".join(_dte_warnings)
 
-    lo = max(500, int(spot * 0.2)) if spot > 0 else 500
-    hi = int(spot * 3.5) if spot > 0 else 8000
-    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    # Spot ladder is asset-specific. ETH lives in $500–$20K with $50 steps;
+    # FIL lives in $0.20–$10 with $0.05 steps. Same shape, very different
+    # absolute magnitudes — picking ETH bounds for FIL collapses the ladder.
+    if is_fil:
+        fil_lo = max(0.2, spot * 0.2) if spot > 0 else 0.2
+        fil_hi = max(spot * 3.5, 3.0) if spot > 0 else 3.0
+        fil_step = 0.05
+        spot_arr = np.arange(fil_lo, fil_hi + fil_step, fil_step, dtype=float)
+    else:
+        lo = max(500, int(spot * 0.2)) if spot > 0 else 500
+        hi = int(spot * 3.5) if spot > 0 else 8000
+        spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
     current_payoff = np.zeros_like(spot_arr)
     for p in positions:
         T = max(p["dte"], 0) / 365.25
@@ -1782,15 +2376,16 @@ async def chat(req: ChatRequest):
     }
 
     # ── Fast path: detect pasted trades and add directly ──
-    # Pattern: "Long/Short Put/Call ETH-DDMMMYY-STRIKE-C/P ... qty"
+    # Pattern: "Long/Short Put/Call <ASSET>-DDMMMYY-STRIKE-C/P ... qty"
+    # (asset prefix may be ETH or FIL; strike may be int or decimal for FIL)
     trade_pattern = re.findall(
-        r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP])\s+[\d-]+\s+\d+\s+\d+\s+[-\d.]+\s+(\d+)',
+        r'(Long|Short)\s+(Put|Call)\s+(?:ETH|FIL)-(\d{1,2}[A-Z]{3}\d{2})-(\d+(?:\.\d+)?)-([CP])\s+[\d-]+\s+\d+\s+\d+\s+[-\d.]+\s+(\d+)',
         msg, re.IGNORECASE
     )
     if not trade_pattern:
         # Also try simpler format: "Long Put ETH-26JUN26-2400-P qty 3000"
         trade_pattern = re.findall(
-            r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP]).*?(\d{3,})',
+            r'(Long|Short)\s+(Put|Call)\s+(?:ETH|FIL)-(\d{1,2}[A-Z]{3}\d{2})-(\d+(?:\.\d+)?)-([CP]).*?(\d{3,})',
             msg, re.IGNORECASE
         )
 
@@ -1852,7 +2447,7 @@ async def chat(req: ChatRequest):
             total_cost = 0.0
             for leg in strat["legs"]:
                 strike_str = str(int(leg["strike"])) if leg["strike"] == int(leg["strike"]) else str(leg["strike"])
-                inst_name = f"ETH-{leg['expiry_code']}-{strike_str}-{leg['opt']}"
+                inst_name = f"{asset_prefix}-{leg['expiry_code']}-{strike_str}-{leg['opt']}"
                 mkt = summaries.get(inst_name, {})
                 bid = mkt.get("bid_price") or 0
                 ask = mkt.get("ask_price") or 0
@@ -1956,7 +2551,8 @@ async def chat(req: ChatRequest):
             target_match_summary = f"Target matching failed: {e}"
 
     # ── Build system prompt (v2: cacheable A+G + dynamic state) ──
-    fmt_spot = f"${spot:,.2f}"
+    # FIL strikes/prices are O($1); ETH O($1K). Spot format follows asset.
+    fmt_spot = f"${spot:,.4f}" if is_fil else f"${spot:,.2f}"
     fmt_net_calls = f"{net_calls:+,.0f}"
     fmt_net_puts = f"{net_puts:+,.0f}"
     fmt_pnl = f"${pnl_at_spot:,.0f}"
@@ -1969,12 +2565,21 @@ async def chat(req: ChatRequest):
     positions_md = _render_positions_md(positions_detail)
 
     # Section B — live state (always present, dynamic)
+    asset_note = ""
+    if is_fil:
+        asset_note = (
+            "\n\n**ASSET = FIL.** FIL has no exchange-listed options (no Deribit market). "
+            "All pricing comes from portfolio mark / BS-estimate / intrinsic / OTC override. "
+            "Strikes and spot are on the order of $1 (not $1,000 like ETH) — use FIL-scale "
+            "magnitudes when proposing strikes. Vol surface is the ETH smile scaled by the "
+            "FIL/ETH historical-vol ratio with strikes projected onto FIL price space."
+        )
     dynamic_parts: list[str] = [
         f"""## Live market
-ETH spot: {fmt_spot}
+{asset} spot: {fmt_spot}{asset_note}
 
 ## Portfolio snapshot
-Positions: {num_positions} | Net calls: {fmt_net_calls} ETH | Net puts: {fmt_net_puts} ETH
+Positions: {num_positions} | Net calls: {fmt_net_calls} {asset} | Net puts: {fmt_net_puts} {asset}
 Expiries: {fmt_expiries}
 P&L at spot: {fmt_pnl} | Worst: {fmt_worst} at {fmt_worst_at} | Best: {fmt_best} | BE: {fmt_be}
 Ladder: {fmt_ladder}
@@ -2078,28 +2683,21 @@ The match_target tool has been filtered out of your tool list in this mode — y
     TOOL_BUILD_STRATEGY = {
         "name": "build_strategy",
         "description": (
-            "Build a specific multi-leg strategy from named legs and add it to the Suggestions table with live Deribit prices. "
-            "Returns the full priced result (net cost, floor impact, P&L change, breakeven) in the tool result — no separate Calculate step needed.\n\n"
-            "Close legs (role=\"close\") are priced via a fallback chain: (1) match against the user's existing portfolio position and use its mark price, (2) live Deribit quote if the instrument is listed, (3) intrinsic value at current spot. The pricing source for each leg is returned in `pricing_notes` — always cite that source when presenting the result so the user knows whether a close price came from a live quote, a portfolio mark, or an intrinsic assumption. If a close was priced at intrinsic, mention that the actual OTC settlement may differ and offer to let the user override the close price.\n\n"
-            "Open legs (role=\"open\") must price from Deribit. If the instrument isn't listed, the tool errors — pick different strikes/expiries in your grid search.\n\n"
+            "Build ONE specific multi-leg strategy from named legs and add it to the Suggestions table with live Deribit prices. Returns net cost, floor impact, P&L change, and breakeven.\n\n"
+            "**GREENFIELD ONLY.** Use this when the strategy has no close legs — a new hedge, a new income trade, a new income spread the user described from scratch. If any leg closes an existing portfolio position (role=\"close\", or strike+expiry+opt matches an open position), call `run_roll_search` instead. The server rejects close-shaped build_strategy calls and routes you to run_roll_search.\n\n"
+            "Open legs price from Deribit (live → mid → BS fallback). If a specific instrument isn't listed, the tool errors — pick a listed strike/expiry.\n\n"
             "Call this immediately when:\n"
-            "- The user pastes or describes specific trades (strikes, expiries, sides, qtys)\n"
-            "- You are recommending specific legs you want priced\n"
-            "- The user says \"add\", \"test\", \"try\", or \"show\" specific trades\n\n"
-            "GRID SEARCH MODE — this is also how you find the optimum across a parameter space:\n\n"
-            "When the user states an objective (lowest cost, closest to zero, max floor, cost-neutral) with partial constraints, call build_strategy 5–15 times in PARALLEL (emit multiple tool_use blocks in the same assistant turn). Vary strikes, quantities, and expiries to cover the search space. Then rank results by the objective and present the top 5–8 in a table. Parallel multi-call per turn is the expected pattern — that is what optimization means.\n\n"
-            "Quantity is a key lever: halving the reopen size roughly halves the reopen cost. Vary it alongside strikes when targeting low cost.\n\n"
-            "For close + reopen (the valid way to harvest profit on a protective structure): include BOTH the closing legs (role=\"close\") AND the reopening legs (role=\"open\") in the same call. The user sees the full structure as one unit. The \"real profit\" is the difference between the close credit and the reopen debit — that net is what the tool returns (negative = credit). Never propose a bare close on a [PROTECTION]-tagged structure without including a reopen.\n\n"
+            "- The user pastes or describes specific NEW trades (strikes, expiries, sides, qtys)\n"
+            "- You are recommending one specific greenfield trade you want priced\n"
+            "- The user says \"add\", \"test\", \"try\", or \"show\" a single specific trade\n\n"
+            "Do NOT use this in grid-search mode or for rolls. Emitting many parallel build_strategy calls to enumerate a strike/qty grid is the OLD pattern and is now rejected — use `run_roll_search` for grid search.\n\n"
             "Naming convention (required):\n"
             "\"<Zone>: <Structure> <strikes> <expiry>\"\n"
-            "Zone ∈ {Downside, Upside, Cost Reduction, Roll}\n"
-            "Examples: \"Downside: Put Spread 2400/2200 27JUN26\", \"Roll: Put Spread 1600/3900 → 1900/2400 31JUL26\", \"Cost Reduction: Sell Call 4000 27JUN26\".\n\n"
-            "For grid-search candidates, use a numeric suffix:\n"
-            "\"Roll Search #1: PS 1600/3900 → 1900/2400 31JUL26\", \"Roll Search #2: PS 1600/3900 → 1850/2450 31JUL26\", etc.\n\n"
+            "Zone ∈ {Downside, Upside, Cost Reduction}\n"
+            "Examples: \"Downside: Put Spread 2400/2200 27JUN26\", \"Cost Reduction: Sell Call 4000 27JUN26\".\n\n"
             "Parsing pasted instruments:\n"
             "\"ETH-26JUN26-2400-P\" → expiry_code=\"26JUN26\", strike=2400, opt=\"P\".\n"
-            "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor).\n\n"
-            "This tool prices ANY combination of legs the user asks for, including rolls of positions the portfolio data flags as expired (those may be OTC and still tradable). If the user requests a roll on an expired-flagged position, price it; do not refuse."
+            "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor)."
         ),
         "input_schema": {
             "type": "object",
@@ -2136,7 +2734,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             "- The user asks to improve the portfolio, reduce cost, or match a target\n"
             "- The user mentions \"roll\", \"extend\", \"adjust expiry\", \"restructure existing\"\n"
             "- A target payoff curve is drawn and existing positions are tagged [ROLL]\n\n"
-            "If suggest_rolls returns results but they do not cover the specific structures the user asked about (e.g. you asked about positions [#429]–[#432] but the top results are other structures), do not stop there. Either call again with parameters that target those structures, or fall back to build_strategy in grid-search mode to price the rolls directly. Never render a table with TBD or placeholder values.\n\n"
+            "If suggest_rolls returns results but they do not cover the specific structures the user asked about (e.g. you asked about positions [#429]–[#432] but the top results are other structures), do not stop there. Call `run_roll_search` directly with those trade IDs to price the rolls across a full grid. Never render a table with TBD or placeholder values.\n\n"
             "Always operate on entire structures. A put spread rolls as 2 legs together; an iron condor rolls as 4 legs together. Reference structures by trade IDs.\n\n"
             "If the user asks to \"close and take profit\" on a [PROTECTION] structure without mentioning reopening, push back before calling: name the protection that would be lost, offer the close+reopen alternative via this tool, ask which they want. Then proceed."
         ),
@@ -2163,7 +2761,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             "- The user wants new trade ideas without specifying legs\n"
             "- The user describes a goal (\"hedge downside below $2000\", \"cheap upside above $4000\") rather than specific strikes\n"
             "- You want to fill a gap in the portfolio shape and don't yet know the best strikes\n\n"
-            "If you already know the exact legs, use build_strategy — it is more precise. scan_trades is for exploration; build_strategy is for execution and grid-search."
+            "If you already know the exact greenfield legs, use build_strategy. If the user wants to roll/close+reopen existing positions, use run_roll_search. scan_trades is for exploration only."
         ),
         "input_schema": {
             "type": "object",
@@ -2198,9 +2796,122 @@ The match_target tool has been filtered out of your tool list in this mode — y
         }
     }
 
+    TOOL_RUN_ROLL_SEARCH = {
+        "name": "run_roll_search",
+        "description": (
+            "Server-side grid search for rolling a set of existing positions. Enumerates the full grid of (target expiry × reopen strikes × quantity scales), prices every candidate via the existing fallback chain (portfolio mark / Deribit live / intrinsic for closes, Deribit / BS for opens), filters by constraints, and returns up to `max_candidates` ranked candidates as Roll Cards. ONE call from you = full search.\n\n"
+            "USE THIS instead of issuing many parallel build_strategy calls when the user asks to: roll specific positions, find the cheapest roll, target a net cost, maximize floor, or compare alternatives across strikes/qtys/expiries. The result includes cost_decomposition with intrinsic_floor_usd (the unavoidable cost from deep-ITM close legs), recoverable_savings_usd, and per-leg pricing sources — use these to explain WHY the cost is what it is, not just WHAT it is.\n\n"
+            "Required: close_trade_ids (which existing positions to close), reopen_template (legs to open, with strike/qty grids), and an objective.\n\n"
+            "Reopen template format — list of legs, each with a strike_pcts array (fractions of spot; the grid for that leg) and a base_qty (the original qty to scale). If you omit strike_pcts on a leg, the server fills [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15] by default. Example for rolling a put spread:\n"
+            "  reopen_template.legs = [\n"
+            "    {opt: 'P', side: 'buy',  base_strike: 1900, base_qty: 1000, strike_pcts: [0.85, 0.88, 0.90, 0.92]},\n"
+            "    {opt: 'P', side: 'sell', base_strike: 2400, base_qty: 1000, strike_pcts: [1.05, 1.10, 1.15, 1.20]}\n"
+            "  ]\n"
+            "qty_scales applies uniformly: [0.5, 0.75, 1.0] tests half-size, 3/4-size, full-size. Default if omitted: [1.0, 0.75, 0.5, 0.33]. Hard cap on total combinations is 5,000 — server will reject grids exceeding that with guidance on what to shrink.\n\n"
+            "Constraints (all optional): min_floor_usd (or top-level floor_constraint), max_breakeven_usd, max_notional_usd, min_short_strike_usd, min_dte, cost_budget=[lo, hi] (filters candidates whose NET cost falls outside the inclusive range — credits are negative; \"between $1 and $1M\" → [1, 1000000]). Constraints filter server-side; do not post-filter in your response.\n\n"
+            "Objectives:\n"
+            "  - minimize_net_cost: lowest absolute net cost (most credit / least debit). \"Cost\" = NET (close debit minus reopen credit); a roll that nets to a credit costs negative dollars.\n"
+            "  - maximize_floor_improvement: pure floor optimization, cost ignored. Use when the user said \"raise the floor\" with no cost ceiling.\n"
+            "  - maximize_floor_subject_to_cost_budget: maximize floor improvement filtered by cost_budget. Use when the user gave a budget range (\"up to $500K\", \"between $1 and $1M\") and wants the best protection inside it. cost_budget is required.\n"
+            "  - target_net_cost: closest to target_net_cost_usd\n"
+            "  - max_credit_zero_floor_loss: most credit subject to no floor degradation\n"
+            "  - pareto_frontier: return only the Pareto-optimal candidates on (net_cost ↓, floor_improvement ↑). Use when the user states TWO objectives (\"cheap AND improve floor\", \"cost neutral and don't impact payoff\") — the frontier shows the trade-off curve, not a single winner.\n\n"
+            "Position scoping. If the user references positions by date (\"trades on the 29th\", \"the May 29 expiries\") or by group (\"all May expiries\"), pass `include_all_expiring_on` with the ISO date (\"2026-05-29\") or Deribit code (\"29MAY26\"). The server resolves it to every open position with that expiry and merges with any explicit close_trade_ids. Do NOT partial-match by hand or split into multiple searches — one filter, one combined call.\n\n"
+            "When to call: as soon as the user names which positions (or how to filter them) and what expiry to roll into. You do not need to know their preferred strikes — that's what the grid is for. If you receive results that don't satisfy the user's target, do NOT issue another grid; surface the constraint that makes the target infeasible (compare target against `search_decomposition.intrinsic_close_cost_usd`)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "close_trade_ids": {
+                    "type": "array", "items": {"type": "integer"},
+                    "description": "Trade IDs from the portfolio that should be closed.",
+                },
+                "reopen_template": {
+                    "type": "object",
+                    "properties": {
+                        "legs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "opt": {"type": "string", "enum": ["C", "P"]},
+                                    "side": {"type": "string", "enum": ["buy", "sell"]},
+                                    "base_strike": {"type": "number"},
+                                    "base_qty": {"type": "number"},
+                                    "strike_pcts": {
+                                        "type": "array", "items": {"type": "number"},
+                                        "description": "Strike grid as fractions of spot (e.g. 0.85 = 85% of spot).",
+                                    },
+                                },
+                                "required": ["opt", "side", "base_strike", "base_qty"],
+                            },
+                        },
+                        "target_expiry_codes": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Deribit expiry codes for reopen legs, e.g. ['31JUL26', '29AUG26'].",
+                        },
+                        "qty_scales": {
+                            "type": "array", "items": {"type": "number"},
+                            "description": "Multipliers on each leg's base_qty, e.g. [0.5, 0.75, 1.0].",
+                        },
+                    },
+                    "required": ["legs", "target_expiry_codes"],
+                },
+                "objective": {
+                    "type": "string",
+                    "enum": [
+                        "minimize_net_cost",
+                        "maximize_floor",
+                        "maximize_floor_improvement",
+                        "maximize_floor_subject_to_cost_budget",
+                        "target_net_cost",
+                        "max_credit_zero_floor_loss",
+                        "pareto_frontier",
+                    ],
+                },
+                "target_net_cost_usd": {
+                    "type": "number",
+                    "description": "Required when objective=target_net_cost.",
+                },
+                "cost_budget": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": "Inclusive [lo, hi] range on NET cost in USD. Candidates outside this range are filtered out. Credits are negative; e.g. [-50000, 500000] allows up to $50K of credit and up to $500K of debit.",
+                },
+                "floor_constraint": {
+                    "type": "number",
+                    "description": "Minimum acceptable portfolio floor in USD after the roll. Alias for constraints.min_floor_usd.",
+                },
+                "include_all_expiring_on": {
+                    "type": "string",
+                    "description": "Auto-resolve close_trade_ids to every open position with this expiry. Accepts ISO (YYYY-MM-DD) or Deribit code (e.g. '29MAY26'). Use when the user filters positions by date.",
+                },
+                "constraints": {
+                    "type": "object",
+                    "properties": {
+                        "min_floor_usd": {"type": "number"},
+                        "max_breakeven_usd": {"type": "number"},
+                        "max_notional_usd": {"type": "number"},
+                        "min_short_strike_usd": {"type": "number"},
+                        "min_dte": {"type": "integer"},
+                    },
+                },
+                "max_candidates": {"type": "integer", "default": 50},
+                "otc_overrides": {
+                    "type": "object",
+                    "description": "Map of trade_id (as string) -> override close price in USD per ETH. Used when the user has provided OTC settlement prices that supersede the fallback chain.",
+                    "additionalProperties": {"type": "number"},
+                },
+            },
+            "required": ["reopen_template", "objective"],
+        },
+    }
+
     # Filter match_target out when a target curve is already drawn — the auto-run
     # already happened. Constraint by availability beats constraint by instruction.
-    tools = [TOOL_BUILD_STRATEGY, TOOL_SUGGEST_ROLLS, TOOL_SCAN_TRADES]
+    tools = [TOOL_RUN_ROLL_SEARCH, TOOL_BUILD_STRATEGY, TOOL_SUGGEST_ROLLS, TOOL_SCAN_TRADES]
     if not req.target_payoff:
         tools.append(TOOL_MATCH_TARGET)
 
@@ -2273,6 +2984,249 @@ The match_target tool has been filtered out of your tool list in this mode — y
             return text, result
         except Exception as e:
             return f"Error scanning: {e}", None
+
+    async def _handle_run_roll_search(inp: dict) -> tuple[str, dict | None]:
+        """Server-side grid search engine. The model passes intent + grid; Python enumerates."""
+        close_ids = list(inp.get("close_trade_ids") or [])
+
+        # include_all_expiring_on auto-resolves to every open position whose
+        # expiry matches. Accepted formats: "2026-05-29" (ISO) or "29MAY26"
+        # (Deribit code). Merges with any explicit close_trade_ids.
+        expiring_on = inp.get("include_all_expiring_on")
+        auto_resolved_ids: list[int] = []
+        if expiring_on:
+            iso_target: str | None = None
+            try:
+                iso_target = datetime.strptime(expiring_on, "%Y-%m-%d").date().isoformat()
+            except (ValueError, TypeError):
+                try:
+                    iso_target = datetime.strptime(expiring_on, "%d%b%y").date().isoformat()
+                except (ValueError, TypeError):
+                    iso_target = None
+            if iso_target is None:
+                return (
+                    f"include_all_expiring_on={expiring_on!r} is not a recognized date. "
+                    "Use ISO (YYYY-MM-DD) or Deribit code (e.g. '29MAY26').",
+                    None,
+                )
+            for pd in positions_detail:
+                if pd.get("expiry") == iso_target and pd["id"] not in close_ids:
+                    close_ids.append(pd["id"])
+                    auto_resolved_ids.append(pd["id"])
+
+        close_positions = [pd for pd in positions_detail if pd["id"] in close_ids]
+        if not close_positions:
+            return (
+                "No portfolio positions matched. Check close_trade_ids against the "
+                "portfolio table, or pass include_all_expiring_on with a valid expiry "
+                "date that matches at least one open position.",
+                None,
+            )
+
+        # Per-turn consolidation guard. The agent's failure mode is splitting one
+        # portfolio analysis into multiple subset-grids (e.g. call spreads
+        # separately from the put complex) and then stitching the results in
+        # prose — which loses the cross-group cost terms. Any follow-up call
+        # this turn must close at least the union of every prior call's set.
+        new_close_set = set(close_ids)
+        if _turn_roll_search_close_sets:
+            prior_union: set[int] = set().union(*_turn_roll_search_close_sets)
+            missing = prior_union - new_close_set
+            if missing:
+                merged = sorted(prior_union | new_close_set)
+                return (
+                    "REJECTED: portfolio analyses cannot be split across multiple "
+                    "run_roll_search calls in one turn. Earlier this turn you ran "
+                    f"run_roll_search closing positions {sorted(prior_union)}. This "
+                    f"call closes {sorted(new_close_set)} — it omits {sorted(missing)}.\n\n"
+                    "The engine prices every leg you pass in a SINGLE grid; splitting "
+                    "into per-structure searches drops the cross-group cost terms and "
+                    "produces an incomplete answer. Re-call ONCE with close_trade_ids="
+                    f"{merged} (or use include_all_expiring_on for the date filter).",
+                    None,
+                )
+        _turn_roll_search_close_sets.append(new_close_set)
+        template = inp.get("reopen_template") or {}
+        legs_tpl = template.get("legs") or []
+        target_exps = template.get("target_expiry_codes") or []
+        qty_scales = template.get("qty_scales") or [1.0, 0.75, 0.5, 0.33]
+        if not legs_tpl or not target_exps:
+            return (
+                "reopen_template must include both `legs` and `target_expiry_codes`.",
+                None,
+            )
+
+        # Server-side defaults: if the model omitted strike_pcts on a leg, fill a
+        # reasonable grid. Otherwise the search collapses to a single strike.
+        DEFAULT_STRIKE_PCTS = [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15]
+        for tpl in legs_tpl:
+            if not tpl.get("strike_pcts"):
+                tpl["strike_pcts"] = list(DEFAULT_STRIKE_PCTS)
+
+        # Hard cap to keep the grid bounded. 5,000 priced candidates is the worst
+        # case the engine will actually crunch in a turn.
+        per_leg_choices = max(1, max(len(t.get("strike_pcts") or [1]) for t in legs_tpl))
+        approx_combos = (
+            len(target_exps)
+            * max(1, len(qty_scales))
+            * (per_leg_choices ** max(1, len(legs_tpl)))
+        )
+        MAX_COMBOS = 5000
+        if approx_combos > MAX_COMBOS:
+            return (
+                f"Requested grid produces ~{approx_combos:,} combinations, over the "
+                f"{MAX_COMBOS:,} cap. Reduce strike_pcts length on each leg, drop a "
+                "target expiry, or shorten qty_scales. Per-leg strike grid stays "
+                "below ~7 entries when you have 2 legs and 2 expiries.",
+                None,
+            )
+
+        otc_raw = inp.get("otc_overrides") or {}
+        otc_overrides: dict[int, float] = {}
+        for k, v in otc_raw.items():
+            try:
+                tid = int(k)
+                px_eth = float(v) / spot if spot > 0 else None
+                if px_eth is not None and px_eth > 0:
+                    otc_overrides[tid] = px_eth
+            except (TypeError, ValueError):
+                continue
+
+        # floor_constraint is a top-level alias for constraints.min_floor_usd —
+        # the model can pass either; both end up in the same filter.
+        constraints_in = dict(inp.get("constraints") or {})
+        floor_constraint = inp.get("floor_constraint")
+        if floor_constraint is not None and "min_floor_usd" not in constraints_in:
+            constraints_in["min_floor_usd"] = floor_constraint
+
+        cb_in = inp.get("cost_budget")
+        cost_budget: tuple[float, float] | None = None
+        if cb_in is not None:
+            try:
+                if isinstance(cb_in, (list, tuple)) and len(cb_in) == 2:
+                    cost_budget = (float(cb_in[0]), float(cb_in[1]))
+                    if cost_budget[0] > cost_budget[1]:
+                        cost_budget = (cost_budget[1], cost_budget[0])
+            except (TypeError, ValueError):
+                cost_budget = None
+
+        top, decomp = _run_roll_search_core(
+            close_positions=close_positions,
+            reopen_legs_template=legs_tpl,
+            target_expiry_codes=target_exps,
+            qty_scales=qty_scales,
+            objective=inp.get("objective", "minimize_net_cost"),
+            target_net_cost_usd=inp.get("target_net_cost_usd"),
+            constraints=constraints_in,
+            max_candidates=int(inp.get("max_candidates", 50) or 50),
+            spot=spot, summaries=turn_book, smiles=smiles,
+            current_payoff=current_payoff, spot_arr=spot_arr,
+            spot_idx=spot_idx, breakeven=breakeven,
+            otc_overrides=otc_overrides,
+            cost_budget=cost_budget,
+            asset_prefix=asset_prefix,
+        )
+        if auto_resolved_ids:
+            decomp["auto_resolved_close_ids"] = auto_resolved_ids
+        if cost_budget is not None:
+            decomp["cost_budget_usd"] = list(cost_budget)
+        if floor_constraint is not None:
+            decomp["floor_constraint_usd"] = floor_constraint
+
+        # Completeness assertion. The engine's contract: one close_cost_breakdown
+        # entry per requested position. If the count drops, something silently
+        # failed and the result is unsafe to present.
+        priced_ids = [
+            l.get("id") for l in (decomp.get("close_cost_breakdown") or []) if l.get("id")
+        ]
+        if len(priced_ids) != len(close_positions):
+            requested_ids = sorted(p["id"] for p in close_positions)
+            dropped = sorted(set(requested_ids) - set(priced_ids))
+            return (
+                f"REFUSING TO RETURN INCOMPLETE RESULT: requested {len(close_positions)} "
+                f"positions ({requested_ids}) but only priced {len(priced_ids)} "
+                f"({sorted(priced_ids)}). Dropped: {dropped}. This usually means a "
+                "position had an unparseable expiry or empty data. Inspect those IDs "
+                "in the portfolio block and either fix the underlying data or omit "
+                "them explicitly from close_trade_ids before retrying.",
+                None,
+            )
+        decomp["positions_priced"] = len(priced_ids)
+        decomp["positions_priced_ids"] = sorted(priced_ids)
+
+        if not top:
+            reason = decomp.get("reason", "no candidates")
+            tried = decomp.get("tried_combinations", 0)
+            close_cost = decomp.get("close_cost_usd")
+            intrinsic = decomp.get("intrinsic_close_cost_usd")
+            msg_lines = [f"Grid search returned no usable candidates ({reason})."]
+            if tried:
+                msg_lines.append(f"Combinations tried: {tried}.")
+            if close_cost is not None:
+                msg_lines.append(
+                    f"Close cost (deterministic): ${close_cost:,.0f}; intrinsic floor: ${intrinsic:,.0f}."
+                )
+                msg_lines.append(
+                    "Try a wider strike_pcts grid, more expiries, smaller qty_scales, or relax constraints."
+                )
+            return "\n".join(msg_lines), None
+
+        # Build the result payload — frontend already knows how to render
+        # suggestions with close_legs/open_legs.
+        result = {
+            "spot": spot,
+            "spot_ladder": spot_arr.tolist(),
+            "current_payoff": np.round(current_payoff, 2).tolist(),
+            "current_profile": {
+                "at_spot": float(current_payoff[spot_idx]),
+                "min": float(current_payoff.min()),
+                "min_at": float(spot_arr[np.argmin(current_payoff)]),
+                "max": float(current_payoff.max()),
+                "max_at": float(spot_arr[np.argmax(current_payoff)]),
+                "breakeven": breakeven,
+            },
+            "positions": positions_detail,
+            "base_qty": 0,
+            "objective": inp.get("objective"),
+            "parsed_query": {"description": f"Roll grid search — {inp.get('objective')}"},
+            "num_positions": num_positions,
+            "num_instruments": len(close_positions),
+            "num_suggestions": len(top),
+            "available_expiries": _sort_expiry_codes(target_exps),
+            "suggestions": top,
+            "search_decomposition": decomp,
+        }
+
+        # Compact summary for the model
+        lines = [
+            f"Grid search complete — {decomp['tried_combinations']} candidates after constraints, top {len(top)} returned.",
+            f"Positions closed (priced): {decomp['positions_priced']}/{len(close_positions)} requested. "
+            f"IDs: {decomp['positions_priced_ids']}.",
+            f"Close cost (fixed across all candidates): ${decomp['close_cost_usd']:,.0f} "
+            f"(intrinsic floor ${decomp['intrinsic_close_cost_usd']:,.0f}).",
+            f"Best net cost: ${top[0]['net_cost_usd']:,.0f}.  "
+            f"Worst (in returned set): ${top[-1]['net_cost_usd']:,.0f}.  "
+            f"Recoverable savings (best vs worst open): ${decomp['recoverable_savings_usd']:,.0f}.",
+            "",
+            "Top candidates:",
+        ]
+        for i, c in enumerate(top[:10]):
+            strikes_s = "/".join(str(s) for s in c["strikes"])
+            lines.append(
+                f"#{i+1} {strikes_s} @ {c['expiry_code']} qty x{c['qty_scale']:g} | "
+                f"net ${c['net_cost_usd']:,.0f} | floor {c['impact']['min_improvement']:+,.0f} | "
+                f"BE {c['impact'].get('breakeven_improvement', 0):+,.0f}"
+            )
+        lines.append("")
+        lines.append(
+            "Pricing sources for close legs: "
+            + ", ".join(sorted({l["pricing_source"] for l in decomp["close_cost_breakdown"]}))
+        )
+        lines.append(
+            "Report exact net costs to the user.  Cite intrinsic_floor when relevant — that "
+            "portion of the close cost is unavoidable without leaving the position open."
+        )
+        return "\n".join(lines), result
 
     async def _handle_suggest_rolls(inp: dict) -> tuple[str, dict | None]:
         """Structure-aware roll analysis. Detects spreads/condors/collars and rolls them as units."""
@@ -2489,7 +3443,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
         # ── Helper: price a single leg ──
         def _price_leg(strike, opt, exp_code, side, qty, dte_val):
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            inst_name = f"ETH-{exp_code}-{strike_str}-{opt}"
+            inst_name = f"{asset_prefix}-{exp_code}-{strike_str}-{opt}"
             mkt = summaries_map.get(inst_name, {})
             bid = mkt.get("bid_price") or 0
             ask = mkt.get("ask_price") or 0
@@ -2764,21 +3718,15 @@ The match_target tool has been filtered out of your tool list in this mode — y
         return "\n".join(lines), roll_result
 
     async def _handle_build_strategy(inp: dict) -> tuple[str, dict | None]:
-        """Build a custom strategy from specific legs, fetch live prices, return as suggestion data."""
+        """Build a custom GREENFIELD strategy from specific legs (no closes).
+
+        Any close-shaped leg (role="close" or matches an open portfolio position)
+        is rejected with a redirect to run_roll_search. build_strategy is now
+        greenfield-only — rolls live in run_roll_search."""
         strategy_name = inp.get("name", "Custom Strategy")
         legs_input = inp.get("legs", [])
         if not legs_input:
             return "No legs provided.", None
-
-        # Validate: warn if only close legs with no open legs (removing protection without replacing it)
-        roles = [l.get("role") for l in legs_input if l.get("role")]
-        if roles and all(r == "close" for r in roles):
-            return (
-                "REJECTED: This strategy only contains CLOSE legs with no OPEN (reopen) legs. "
-                "Closing positions without reopening equivalent protection removes the portfolio's hedge. "
-                "You MUST include both close legs AND open legs that reopen equivalent protection at better strikes/cost. "
-                "The real profit is the NET DIFFERENCE between close proceeds and reopen cost, not the full close value."
-            ), None
 
         # Use cached Deribit book (one fetch per turn — see turn_book at top of chat handler)
         summaries = turn_book
@@ -2813,6 +3761,40 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 return pd
             return None
 
+        # Greenfield guard. Any leg that closes an open position routes to run_roll_search.
+        matched_close_ids: list[int] = []
+        for leg in legs_input:
+            if leg.get("opt") == "PERP":
+                continue
+            if leg.get("role") == "close":
+                m = _match_close_leg_to_position(leg)
+                matched_close_ids.append(m["id"] if m else -1)
+                continue
+            # Even without role="close", a leg whose side is opposite an open position at
+            # the same (opt, strike, expiry) is functionally a close.
+            m = _match_close_leg_to_position(leg)
+            if m is not None:
+                matched_close_ids.append(m["id"])
+
+        if matched_close_ids:
+            real_ids = [i for i in matched_close_ids if i > 0]
+            ids_str = ", ".join(f"#{i}" for i in real_ids) if real_ids else "(unmatched close legs)"
+            return (
+                "REJECTED: build_strategy is greenfield-only. The legs you submitted close "
+                f"existing portfolio positions ({ids_str}). Use `run_roll_search` instead — "
+                "it enumerates the full strike × qty × expiry grid, prices every candidate "
+                "via the OTC override → portfolio mark → Deribit → intrinsic chain, applies "
+                "constraints, and returns up to 50 ranked alternatives in ONE call.\n\n"
+                "Required inputs for run_roll_search:\n"
+                f"  - close_trade_ids = {real_ids or '[portfolio IDs from the structures block]'}\n"
+                "  - reopen_template.legs = the legs you want to reopen, each with "
+                "{opt, side, base_strike, base_qty, strike_pcts: [...]}\n"
+                "  - reopen_template.target_expiry_codes = [\"<new expiry>\"]\n"
+                "  - reopen_template.qty_scales = [1.0, 0.75, 0.5, 0.33] (optional; server fills defaults if absent)\n"
+                "  - objective = one of minimize_net_cost / maximize_floor / target_net_cost / max_credit_zero_floor_loss\n"
+                "Do not retry build_strategy with the same close legs."
+            ), None
+
         formatted_legs = []
         total_cost = 0.0
         pricing_notes: list[str] = []
@@ -2842,7 +3824,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
 
             # Build instrument name
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            inst_name = f"ETH-{exp_code}-{strike_str}-{opt_type}"
+            inst_name = f"{asset_prefix}-{exp_code}-{strike_str}-{opt_type}"
 
             # Look up live price (used by both branches when available)
             mkt = summaries.get(inst_name, {})
@@ -3045,6 +4027,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
     text = ""
     current_response = response
     narration_retries = 0
+    fabrication_retries = 0
     for _round in range(16):
         if current_response.stop_reason != "tool_use":
             # Narration-without-execution guard: model promised to act but emitted
@@ -3077,6 +4060,52 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 except Exception as e:
                     text = f"**Error:** {e}"
                     break
+
+            # Fabrication guard. Every $ figure in the final response must trace
+            # back to a tool result this turn or the portfolio context block.
+            # Up to 2 re-prompts — the model can fix by calling a tool or by
+            # removing the unverified figures.
+            if fabrication_retries < 2:
+                final_text_blocks = [
+                    getattr(b, "text", "") for b in current_response.content
+                    if b.type == "text"
+                ]
+                final_text = " ".join(final_text_blocks)
+                source_texts = [dynamic_state_block, msg, *_turn_tool_result_texts]
+                # Also include the prior chat history's bot turns — the user may
+                # be following up on a number they were given earlier.
+                source_texts.extend(
+                    h.get("text", "") for h in history if h.get("role") == "bot"
+                )
+                unverified = _verify_dollar_figures(final_text, source_texts)
+                if unverified:
+                    fabrication_retries += 1
+                    messages.append({"role": "assistant", "content": _serialize_content(current_response.content)})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "FABRICATION GUARD: Your response contains dollar figures "
+                            "that do not appear in any tool result this turn or in the "
+                            "portfolio context: "
+                            f"{', '.join(unverified[:8])}. "
+                            "Either call the appropriate tool to verify these numbers, "
+                            "or remove them entirely from your response. Do not present "
+                            "unverified financial numbers — this is a critical failure "
+                            "in an options trading context (rule 13)."
+                        ),
+                    })
+                    try:
+                        current_response = aclient.messages.create(
+                            model=ANTHROPIC_MODEL,
+                            max_tokens=8000,
+                            system=system_blocks,
+                            messages=messages,
+                            tools=tools,
+                        )
+                        continue
+                    except Exception as e:
+                        text = f"**Error during fabrication recheck:** {e}"
+                        break
             break
 
         tool_blocks = [b for b in current_response.content if b.type == "tool_use"]
@@ -3090,6 +4119,8 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     text_, data_ = await _handle_scan_trades(tb.input)
                 elif tb.name == "suggest_rolls":
                     text_, data_ = await _handle_suggest_rolls(tb.input)
+                elif tb.name == "run_roll_search":
+                    text_, data_ = await _handle_run_roll_search(tb.input)
                 elif tb.name == "build_strategy":
                     text_, data_ = await _handle_build_strategy(tb.input)
                 elif tb.name == "match_target":
@@ -3111,6 +4142,10 @@ The match_target tool has been filtered out of your tool list in this mode — y
             tool_results_content.append({
                 "type": "tool_result", "tool_use_id": tb.id, "content": tr_text,
             })
+            # Accumulate every tool result text for the post-response fabrication
+            # check. Numbers the model quotes in prose must trace back here.
+            if tr_text:
+                _turn_tool_result_texts.append(tr_text)
             if not tr_data:
                 continue
             if result_data and "suggestions" in result_data:
@@ -3124,6 +4159,10 @@ The match_target tool has been filtered out of your tool list in this mode — y
                         result_data["available_expiries"] = sorted(existing, key=lambda x: datetime.strptime(x, "%d%b%y"))
                     except ValueError:
                         result_data["available_expiries"] = sorted(existing)
+                # run_roll_search emits a search_decomposition block; keep the
+                # latest one so the UI can show the intrinsic-floor breakdown.
+                if tr_data.get("search_decomposition"):
+                    result_data["search_decomposition"] = tr_data["search_decomposition"]
             else:
                 result_data = tr_data
 
@@ -3151,25 +4190,26 @@ The match_target tool has been filtered out of your tool list in this mode — y
         text = "I ran out of processing steps. Try a simpler request."
 
     # Always include base portfolio data so the frontend can load portfolio on any message (incl. "hello")
-    # Build available_expiries from portfolio expiries + Deribit if possible
+    # Build available_expiries from portfolio expiries + Deribit if possible (ETH only — FIL has no exchange).
     _fallback_expiries = sorted(set(expiry_groups.keys()))
-    try:
-        _fb_summaries = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
-        _fb_exp_set = set()
-        _today_fb = date.today()
-        for _fbs in _fb_summaries:
-            _fbp = _fbs.get("instrument_name", "").split("-")
-            if len(_fbp) == 4 and _fbp[0] == "ETH":
-                try:
-                    _fbd = datetime.strptime(_fbp[1], "%d%b%y").date()
-                    if (_fbd - _today_fb).days >= 7:
-                        _fb_exp_set.add(_fbp[1])
-                except ValueError:
-                    pass
-        if _fb_exp_set:
-            _fallback_expiries = sorted(_fb_exp_set, key=lambda x: datetime.strptime(x, "%d%b%y"))
-    except Exception:
-        pass
+    if not is_fil:
+        try:
+            _fb_summaries = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
+            _fb_exp_set = set()
+            _today_fb = date.today()
+            for _fbs in _fb_summaries:
+                _fbp = _fbs.get("instrument_name", "").split("-")
+                if len(_fbp) == 4 and _fbp[0] == "ETH":
+                    try:
+                        _fbd = datetime.strptime(_fbp[1], "%d%b%y").date()
+                        if (_fbd - _today_fb).days >= 7:
+                            _fb_exp_set.add(_fbp[1])
+                    except ValueError:
+                        pass
+            if _fb_exp_set:
+                _fallback_expiries = sorted(_fb_exp_set, key=lambda x: datetime.strptime(x, "%d%b%y"))
+        except Exception:
+            pass
 
     if not result_data:
         result_data = {

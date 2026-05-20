@@ -1050,6 +1050,13 @@ select { margin-bottom: .5rem; }
 .opt2-msg-suggestion { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: .5rem .75rem; margin-top: .3rem; cursor: pointer; transition: border-color .15s, background .15s; }
 .opt2-msg-suggestion:hover { border-color: var(--accent); background: var(--surface); }
 
+.opt2-decomp { font-size: .76rem; }
+.opt2-decomp-title { font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin-bottom: .35rem; font-size: .7rem; }
+.opt2-decomp-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .25rem .75rem; }
+.opt2-decomp-grid > div { display: flex; justify-content: space-between; gap: .5rem; }
+.opt2-decomp-grid span { color: var(--muted); }
+.opt2-decomp-grid strong { color: var(--fg, inherit); font-variant-numeric: tabular-nums; }
+
 /* Optimizer tables — dark card style */
 #subtab-optimizer .card { background: var(--surface); border: 1px solid var(--border); }
 #subtab-optimizer table { border-collapse: collapse; width: 100%; }

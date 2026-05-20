@@ -44,6 +44,20 @@ class TradeUpdate(BaseModel):
     notional_mm: float | None = None
     premium_per: float | None = None
     premium_usd: float | None = None
+    is_otc: int | None = None
+    last_otc_quote: float | None = None
+    otc_settlement_method: str | None = None
+    otc_override_price: float | None = None
+
+
+_OTC_METHODS = {"intrinsic_at_spot", "agreed_mid", "negotiated"}
+
+
+class TradeOTCUpdate(BaseModel):
+    is_otc: bool | None = None
+    last_otc_quote: float | None = None
+    otc_settlement_method: str | None = None
+    otc_override_price: float | None = None
 
 
 class BulkExpireRequest(BaseModel):
@@ -116,6 +130,27 @@ async def delete_trade(trade_id: int):
 async def expire_trade(trade_id: int):
     db = await get_db()
     trade = await repo.expire_trade(db, trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    return trade
+
+
+@router.put("/{trade_id}/otc")
+async def update_trade_otc(trade_id: int, body: TradeOTCUpdate):
+    """Set OTC metadata on a trade. Used so close-leg pricing can prefer the
+    user's settled OTC price over Deribit/intrinsic fallback."""
+    payload = body.model_dump(exclude_none=True)
+    if not payload:
+        raise HTTPException(status_code=400, detail="No OTC fields provided")
+    if "is_otc" in payload:
+        payload["is_otc"] = 1 if payload["is_otc"] else 0
+    if "otc_settlement_method" in payload and payload["otc_settlement_method"] not in _OTC_METHODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"otc_settlement_method must be one of {sorted(_OTC_METHODS)}",
+        )
+    db = await get_db()
+    trade = await repo.update_trade(db, trade_id, payload)
     if trade is None:
         raise HTTPException(status_code=404, detail="Trade not found")
     return trade
