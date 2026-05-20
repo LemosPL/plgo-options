@@ -913,6 +913,20 @@ class OptimizerV3(BaseOptimizer):
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
                 })
 
+        box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
+            trades=trades,
+            option_legs=option_legs,
+            target_expiry=target_expiry,
+        )
+        trades.extend(box_neutralizer_trades)
+        for trade in box_neutralizer_trades:
+            fitted_payoff += self._trade_value_curve(trade, spot_arr)
+
+        fitted_payoff_cash_shift = float(
+            np.sum(spot_weights * (adjusted_base_payoff - fitted_payoff)) / np.sum(spot_weights)
+        )
+        fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
+
         print("is_replay:" + str(is_replay))
         if is_replay:
             spot = self.eth_spot  # or your reference spot S0
@@ -926,11 +940,15 @@ class OptimizerV3(BaseOptimizer):
             # axes[0].plot(x, base_payoff, label="
             axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
             axes[0].plot(x, target_interp, label="Target Payoff")
-            axes[0].plot(x, fitted_payoff, label="Fitted Payoff")
+            axes[0].plot(x, fitted_payoff_comparable, label="Fitted Payoff, cash-adjusted")
             axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
             axes[0].legend()
 
-            axes[1].plot(x, fitted_payoff - adjusted_base_payoff, label="Fitted - Adjusted Base")
+            axes[1].plot(
+                x,
+                fitted_payoff_comparable - adjusted_base_payoff,
+                label="Fitted - Adjusted Base, cash-adjusted",
+            )
             axes[1].axvline(0, color="gray", linestyle="--", linewidth=1)
             axes[1].set_xlabel("Spot")
             # axes[1].set_ylim(210000, 215000)
@@ -941,15 +959,6 @@ class OptimizerV3(BaseOptimizer):
             axes[2].plot(x, spot_weights, label="Weights")
             axes[2].legend()
             plt.show()
-
-        box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
-            trades=trades,
-            option_legs=option_legs,
-            target_expiry=target_expiry,
-        )
-        trades.extend(box_neutralizer_trades)
-        for trade in box_neutralizer_trades:
-            fitted_payoff += self._trade_value_curve(trade, spot_arr)
 
         trades = self._aggregate_trade_legs(trades)
         premium_summary = self._trade_premium_summary(trades)
@@ -984,15 +993,17 @@ class OptimizerV3(BaseOptimizer):
             "target_expiry": target_expiry,
             "optimizer_converged": True,
             "cash_shift": round(float(cash_shift), 2),
+            "fitted_payoff_cash_shift": round(float(fitted_payoff_cash_shift), 2),
             "premium_summary": premium_summary,
             "net_premium_generated": premium_summary["net_premium_generated"],
             "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
-            "fit_error_after": round(float(np.mean((fitted_payoff - target_interp) ** 2)), 2),
+            "fit_error_after": round(float(np.mean((fitted_payoff_comparable - target_interp) ** 2)), 2),
             "spot_ladder": spot_arr.tolist(),
             "chart_horizons": horizons,
             "target_payoff": np.round(target_interp, 2).tolist(),
             "before_payoff": np.round(adjusted_base_payoff, 2).tolist(),
-            "after_payoff": np.round(fitted_payoff, 2).tolist(),
+            "after_payoff": np.round(fitted_payoff_comparable, 2).tolist(),
+            "raw_after_payoff": np.round(fitted_payoff, 2).tolist(),
             "raw_before_payoff": np.round(base_payoff, 2).tolist(),
             "before": {
                 "payoff_by_horizon": before_payoff_by_horizon,

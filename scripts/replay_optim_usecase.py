@@ -34,7 +34,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260518_105053_ALL.json")
+        path = Path("../data/optimization_snapshots/usecases/20260519_183315_ALL.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)

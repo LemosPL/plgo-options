@@ -7328,6 +7328,85 @@ function optv2RenderGreeks() {
 
 let optv2OptResult = null;  // stores latest optimization result
 
+function optv2CsvEscape(value) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function optv2TimestampForFilename() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return [
+    d.getFullYear(),
+    pad(d.getMonth() + 1),
+    pad(d.getDate()),
+    "_",
+    pad(d.getHours()),
+    pad(d.getMinutes()),
+    pad(d.getSeconds()),
+  ].join("");
+}
+
+function optv2ExportTradesCsv() {
+  const trades = optv2OptResult?.trades || [];
+
+  if (!trades.length) {
+    alert("No optimizer trades to export. Run the optimizer first.");
+    return;
+  }
+
+  const columns = [
+    "strategy",
+    "strategy_instrument",
+    "counterparty",
+    "instrument",
+    "side",
+    "qty",
+    "opt",
+    "strike",
+    "expiry",
+    "dte",
+    "iv_pct",
+    "bs_price_usd",
+    "notional",
+    "is_unwind",
+    "unwind_qty",
+    "new_qty",
+    "estimated_cost",
+    "trade_cost",
+    "normalized_benefit",
+    "net_benefit",
+    "delta_contribution",
+    "gamma_contribution",
+    "vega_contribution",
+  ];
+
+  const csvRows = [
+    columns.join(","),
+    ...trades.map(trade =>
+      columns.map(col => optv2CsvEscape(trade[col])).join(",")
+    ),
+  ];
+
+  const csv = csvRows.join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const filename = `optimizer_v2_trades_${optv2TimestampForFilename()}.csv`;
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  URL.revokeObjectURL(url);
+}
 /* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
 function optv2RenderPayoff() {
   const spots = optv2Data.spot_ladder;
@@ -7608,6 +7687,11 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   }
 });
 
+const optv2ExportBtn = document.getElementById("btn-export-optv2-trades");
+if (optv2ExportBtn) {
+  optv2ExportBtn.addEventListener("click", optv2ExportTradesCsv);
+}
+
 /* ── Render optimization results ───────────────────────────── */
 function optv2RenderResult(data) {
   const $section = document.getElementById("optv2-result-section");
@@ -7622,6 +7706,13 @@ function optv2RenderResult(data) {
 
   // Store result and re-render main payoff chart with before/after overlay
   optv2OptResult = data;
+
+  const exportBtn = document.getElementById("btn-export-optv2-trades");
+  if (exportBtn) {
+    exportBtn.disabled = !(data.status === "ok" && Array.isArray(data.trades) && data.trades.length > 0);
+  }
+
+  document.getElementById("optv2-result-section").style.display = "block";
   optv2RenderPayoff();
 
   // Status badge

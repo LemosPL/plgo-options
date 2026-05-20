@@ -1392,6 +1392,31 @@
         </table>
       </div>
     </section>
+
+    <section class="card">
+        <h3>Suggested Trades</h3>
+        <div style="display:flex;gap:.5rem;align-items:center;justify-content:flex-end;margin-bottom:.5rem">
+          <button id="btn-export-optv2-trades" class="btn-primary" disabled>Export Trades</button>
+        </div>
+        <div class="chain-wrapper" style="max-height:300px">
+          <table id="optv2-trades-table">
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Expiry</th>
+                <th>DTE</th>
+                <th>Qty</th>
+                <th>IV %</th>
+                <th>Mark (USD)</th>
+                <th>Cost (USD)</th>
+              </tr>
+            </thead>
+            <tbody id="optv2-trades-body"></tbody>
+          </table>
+        </div>
+      </section>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -1645,6 +1670,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=40"></script>
+<script src="/static/app.js?v=43"></script>
 </body>
 </html>
