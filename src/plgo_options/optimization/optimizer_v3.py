@@ -134,6 +134,10 @@ class OptimizerV3(BaseOptimizer):
                 "iv_pct": round(float(getattr(p, "iv_pct", 0.0) or 0.0), 1),
                 "bs_price_usd": round(float(getattr(p, "mark_price_usd", 0.0) or 0.0), 2),
                 "vega": round(float(getattr(p, "vega", 0.0) or 0.0), 4),
+                "notional": round(abs(float(unwind_qty)) * float(getattr(p, "mark_price_usd", 0.0) or 0.0), 2),
+                "is_unwind": True,
+                "unwind_qty": abs(int(unwind_qty)),
+                "new_qty": 0,
                 "estimated_cost": 0.0,
                 "normalized_benefit": 0.0,
                 "net_benefit": 0.0,
@@ -344,6 +348,145 @@ class OptimizerV3(BaseOptimizer):
             "net_premium_generated": round(float(net_premium_generated), 2),
         }
 
+    def _trade_premium_summary(self, trades: list[dict]) -> dict:
+        option_trades = [
+            trade for trade in trades
+            if trade.get("opt") in ("C", "P")
+        ]
+
+        gross_premium_bought = sum(
+            float(trade.get("qty", 0.0) or 0.0) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            for trade in option_trades
+            if float(trade.get("qty", 0.0) or 0.0) > 0
+        )
+
+        gross_premium_sold = sum(
+            abs(float(trade.get("qty", 0.0) or 0.0)) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            for trade in option_trades
+            if float(trade.get("qty", 0.0) or 0.0) < 0
+        )
+
+        net_premium_generated = gross_premium_sold - gross_premium_bought
+
+        return {
+            "gross_premium_sold": round(float(gross_premium_sold), 2),
+            "gross_premium_bought": round(float(gross_premium_bought), 2),
+            "net_premium_generated": round(float(net_premium_generated), 2),
+        }
+
+    def _build_box_premium_neutralizer_trades(
+            self,
+            trades: list[dict],
+            option_legs: list[Candidate],
+            target_expiry: str | None,
+            min_abs_premium: float = 10_000.0,
+    ) -> list[dict]:
+        if target_expiry is None:
+            return []
+
+        net_premium_generated = float(self._trade_premium_summary(trades)["net_premium_generated"])
+        if abs(net_premium_generated) < min_abs_premium:
+            return []
+
+        expiry_legs = [
+            c for c in option_legs
+            if c.expiry_code == target_expiry
+               and c.opt in ("C", "P")
+               and float(c.bs_price_usd or 0.0) > 0.0
+        ]
+
+        calls_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "C"}
+        puts_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "P"}
+        common_strikes = sorted(set(calls_by_strike) & set(puts_by_strike))
+
+        if len(common_strikes) < 2:
+            return []
+
+        best_box = None
+        for low_strike in common_strikes:
+            for high_strike in common_strikes:
+                if high_strike <= low_strike:
+                    continue
+
+                low_call = calls_by_strike[low_strike]
+                low_put = puts_by_strike[low_strike]
+                high_call = calls_by_strike[high_strike]
+                high_put = puts_by_strike[high_strike]
+
+                # Long box: +C_low -P_low -C_high +P_high.
+                box_debit = (
+                        float(low_call.bs_price_usd or 0.0)
+                        - float(low_put.bs_price_usd or 0.0)
+                        - float(high_call.bs_price_usd or 0.0)
+                        + float(high_put.bs_price_usd or 0.0)
+                )
+
+                if box_debit <= 0.0:
+                    continue
+
+                target_width = max(self.eth_spot * 0.5, 1.0)
+                width = high_strike - low_strike
+                score = abs(width - target_width) + abs((low_strike + high_strike) / 2.0 - self.eth_spot) * 0.25
+
+                if best_box is None or score < best_box[0]:
+                    best_box = (score, box_debit, low_call, low_put, high_call, high_put)
+
+        if best_box is None:
+            return []
+
+        _score, box_debit, low_call, low_put, high_call, high_put = best_box
+        box_qty = int(round(abs(net_premium_generated) / box_debit))
+        if box_qty == 0:
+            return []
+
+        # Net credit already generated => buy long box to spend it.
+        # Net debit generated => sell box to fund it.
+        direction = 1 if net_premium_generated > 0.0 else -1
+
+        legs = [
+            (low_call, direction * box_qty),
+            (low_put, -direction * box_qty),
+            (high_call, -direction * box_qty),
+            (high_put, direction * box_qty),
+        ]
+
+        strategy_instrument = (
+            f"BOX_NEUTRALIZER: "
+            f"ETH-{target_expiry}-{int(low_call.strike)} / "
+            f"ETH-{target_expiry}-{int(high_call.strike)}"
+        )
+
+        box_trades = []
+        for leg, leg_qty in legs:
+            instrument_name = f"ETH-{leg.expiry_code}-{int(leg.strike)}-{leg.opt}"
+            box_trades.append({
+                "counterparty": leg.counterparty,
+                "instrument": instrument_name,
+                "strategy": "BOX_NEUTRALIZER",
+                "strategy_instrument": strategy_instrument,
+                "expiry": leg.expiry_date,
+                "dte": leg.dte,
+                "strike": leg.strike,
+                "opt": leg.opt,
+                "qty": leg_qty,
+                "side": "Buy" if leg_qty > 0 else "Sell",
+                "iv_pct": round(float(leg.iv_pct or 0.0), 1),
+                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                "vega": round(float(leg.vega or 0.0), 4),
+                "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
+                "is_unwind": False,
+                "unwind_qty": 0,
+                "new_qty": abs(int(leg_qty)),
+                "estimated_cost": 0.0,
+                "normalized_benefit": 0.0,
+                "net_benefit": 0.0,
+                "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
+                "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
+                "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+            })
+
+        return box_trades
+
     def _risk_neutral_spot_weights(
             self,
             spot_arr: np.ndarray,
@@ -448,7 +591,18 @@ class OptimizerV3(BaseOptimizer):
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
+                 counterparties: list[str] | None = None,
             ):
+        selected_counterparties = {
+            c.strip()
+            for c in (counterparties or [])
+            if c and c.strip() and c.strip().upper() != "ALL"
+        }
+        if selected_counterparties:
+            self.positions = [
+                p for p in self.positions
+                if getattr(p, "counterparty", "") in selected_counterparties
+            ]
         print(lam_factor)
         print(target_expiry)
         print(unwind_discount)
@@ -479,6 +633,7 @@ class OptimizerV3(BaseOptimizer):
         )
         candidates = option_legs + spread_candidates + straddle_candidates + iron_condor_candidates
 
+        '''
         roll_replacement_trades = self._build_roll_replacement_trades(
             roll_positions=roll_positions,
             option_legs=option_legs,
@@ -491,8 +646,8 @@ class OptimizerV3(BaseOptimizer):
             roll_replacement_trades=roll_replacement_trades,
         )
         print(f"roll summary: {roll_summary}")
-        
         print(f"roll replacement trades: {len(roll_replacement_trades)}")
+        '''
         print(f"option legs: {len(option_legs)}")
         print(f"spread candidates: {len(spread_candidates)}")
         print(f"straddle candidates: {len(straddle_candidates)}")
@@ -526,8 +681,8 @@ class OptimizerV3(BaseOptimizer):
                 continue
             base_payoff += bs_value
 
-        for trade in roll_replacement_trades:
-            base_payoff += self._trade_value_curve(trade, spot_arr)
+        #for trade in roll_replacement_trades:
+        #    base_payoff += self._trade_value_curve(trade, spot_arr)
         raw_residual = target_interp - base_payoff
         cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
         adjusted_base_payoff = base_payoff + cash_shift
@@ -668,7 +823,7 @@ class OptimizerV3(BaseOptimizer):
 
         scored_trades.sort(key=lambda t: t[0], reverse=True)
 
-        trades = list(roll_unwind_trades) + list(roll_replacement_trades)
+        trades = list(roll_unwind_trades) #+ list(roll_replacement_trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
         fitted_payoff = adjusted_base_payoff.copy()
@@ -676,6 +831,17 @@ class OptimizerV3(BaseOptimizer):
         horizons = sorted(set(self.chart_horizons + [0, 90]))
 
         if not scored_trades:
+            box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
+                trades=trades,
+                option_legs=option_legs,
+                target_expiry=target_expiry,
+            )
+            trades.extend(box_neutralizer_trades)
+
+            adjusted_after_payoff = adjusted_base_payoff.copy()
+            for trade in box_neutralizer_trades:
+                adjusted_after_payoff += self._trade_value_curve(trade, spot_arr)
+
             trades = self._aggregate_trade_legs(trades)
             premium_summary = self._trade_premium_summary(trades)
             before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
@@ -734,6 +900,10 @@ class OptimizerV3(BaseOptimizer):
                     "iv_pct": round(float(leg.iv_pct or 0.0), 1),
                     "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
                     "vega": round(float(leg.vega or 0.0), 4),
+                    "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
+                    "is_unwind": False,
+                    "unwind_qty": 0,
+                    "new_qty": abs(int(leg_qty)),
                     "strike_weight": round(float(w), 4),
                     "estimated_cost": round(float(est_cost), 2),
                     "normalized_benefit": round(float(normalized_benefit), 2),
@@ -771,6 +941,15 @@ class OptimizerV3(BaseOptimizer):
             axes[2].plot(x, spot_weights, label="Weights")
             axes[2].legend()
             plt.show()
+
+        box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
+            trades=trades,
+            option_legs=option_legs,
+            target_expiry=target_expiry,
+        )
+        trades.extend(box_neutralizer_trades)
+        for trade in box_neutralizer_trades:
+            fitted_payoff += self._trade_value_curve(trade, spot_arr)
 
         trades = self._aggregate_trade_legs(trades)
         premium_summary = self._trade_premium_summary(trades)

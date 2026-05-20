@@ -22,6 +22,7 @@ class OptimizerRunParams:
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
     is_replay: bool = False
+    counterparties: list[str] | None = None
 
 
 @dataclass
@@ -119,7 +120,7 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=7, lam_factor=0.3)
+        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=22, lam_factor=0.35)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")
