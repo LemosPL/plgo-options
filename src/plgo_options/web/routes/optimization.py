@@ -20,6 +20,8 @@ router = APIRouter()
 class OptimizationParams(BaseModel):
     lam_factor: float = 1.0
     target_expiry: str | None = None
+    unwind_discount: float = 0.2
+    new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
     save_usecase_snapshot: bool = False
     is_replay: bool = False
@@ -40,6 +42,8 @@ async def run_optimizer(params: OptimizationParams):
     run_params = OptimizerRunParams(
         lam_factor=params.lam_factor,
         target_expiry=params.target_expiry,
+        unwind_discount=params.unwind_discount,
+        new_position_penalty=params.new_position_penalty,
         roll_dte_threshold=params.roll_dte_threshold,
         is_replay=False,
         counterparties=params.counterparties,

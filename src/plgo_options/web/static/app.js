@@ -7628,15 +7628,20 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       return Number.isNaN(v) ? fallback : v;
     }
     const rollDteThreshold = document.getElementById("optv2-roll-dte-threshold").value || null;
-    const selectedCounterparty = document.getElementById("optv2-counterparties")?.value || "ALL";
+    const cptySel = document.getElementById("optv2-counterparties");
+    const selectedCounterparties = cptySel
+      ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
+      : [];
     const data = await post("/api/optimization/run", {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
+      unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
+      new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
       save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
       is_replay: false,
-      counterparties: selectedCounterparty === "ALL" ? null : [selectedCounterparty],
+      counterparties: selectedCounterparties.length ? selectedCounterparties : null,
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -7647,7 +7652,39 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   }
 });
 
-/* ── Render optimization results ───────────────────────────── */
+/* ── Render optimization results (optimizer_v3: LASSO + boxes) ── */
+
+// Human-readable strategy label from the engine's strategy code.
+const OPTV2_STRATEGY_LABELS = {
+  ROLL_UNWIND: "Unwind",
+  ROLL_REPLACEMENT: "Roll replacement",
+  BOX_NEUTRALIZER: "Box (collateral)",
+  CALL_SPREAD: "Call spread",
+  PUT_SPREAD: "Put spread",
+  STRADDLE: "Straddle",
+  IRON_CONDOR: "Iron condor",
+  SINGLE: "Single leg",
+};
+
+function optv2StrategyLabel(code) {
+  return OPTV2_STRATEGY_LABELS[code] || (code || "Single leg");
+}
+
+function optv2OptType(opt) {
+  if (opt === "C") return "Call";
+  if (opt === "P") return "Put";
+  if (opt === "F") return "Perp";
+  return opt || "";
+}
+
+function optv2ExpiryText(t) {
+  // Prefer an embedded Deribit code in the instrument (ETH-29MAY26-2400-C).
+  const parts = String(t.instrument || "").split("-");
+  if (parts.length >= 2 && /\d{1,2}[A-Z]{3}\d{2}/.test(parts[1])) return parts[1];
+  const exp = t.expiry || "";
+  return String(exp).slice(0, 10);
+}
+
 function optv2RenderResult(data) {
   const $section = document.getElementById("optv2-result-section");
 
@@ -7658,75 +7695,154 @@ function optv2RenderResult(data) {
   }
 
   $section.style.display = "";
-
-  // Store result and re-render main payoff chart with before/after overlay
   optv2OptResult = data;
   optv2RenderPayoff();
 
-  // Status badge
   document.getElementById("optv2-result-status").textContent =
     data.optimizer_converged ? "Converged" : "Did not converge";
 
-  // Before
-  const b = data.before;
-  document.getElementById("optv2-before-delta").textContent = optv2Fmt(b.delta, 2);
-  document.getElementById("optv2-before-gamma").textContent = optv2Fmt(b.gamma, 4);
-  document.getElementById("optv2-before-theta").textContent = optv2Fmt(b.theta, 2);
-  document.getElementById("optv2-before-vega").textContent  = optv2Fmt(b.vega, 2);
-  document.getElementById("optv2-before-risk").textContent  = "$" + optv2Fmt(b.daily_risk, 2);
+  // Warnings / errors banner
+  const $warn = document.getElementById("optv2-warnings");
+  if (data.message) {
+    $warn.style.display = "";
+    $warn.textContent = data.message;
+  } else {
+    $warn.style.display = "none";
+  }
 
-  // After
-  const a = data.after;
-  document.getElementById("optv2-after-delta").textContent = optv2Fmt(a.delta, 2);
-  document.getElementById("optv2-after-gamma").textContent = optv2Fmt(a.gamma, 4);
-  document.getElementById("optv2-after-theta").textContent = optv2Fmt(a.theta, 2);
-  document.getElementById("optv2-after-vega").textContent  = optv2Fmt(a.vega, 2);
-  document.getElementById("optv2-after-risk").textContent  = "$" + optv2Fmt(a.daily_risk, 2);
+  const unwinds = data.roll_unwind_trades || [];
+  const replacements = data.replacement_trades || [];
+  const allTrades = data.trades || [];
+  const ps = data.premium_summary || {};
 
-  // Summary stats
-  document.getElementById("optv2-trade-cost").textContent     = "$" + optv2Fmt(data.total_trade_cost, 2);
-  document.getElementById("optv2-risk-reduction").textContent  = "$" + optv2Fmt(b.daily_risk - a.daily_risk, 2);
-  document.getElementById("optv2-utility-gain").textContent    = optv2Fmt(data.utility_improvement, 2);
-  document.getElementById("optv2-candidates").textContent      = data.candidates_evaluated;
+  // ── A. Summary ──
+  document.getElementById("optv2-sum-unwind").textContent = unwinds.length;
+  document.getElementById("optv2-sum-replacement").textContent = replacements.length;
+  const netPrem = data.net_premium_generated ?? ps.net_premium_generated ?? 0;
+  const $netPrem = document.getElementById("optv2-sum-net-premium");
+  $netPrem.textContent = (netPrem >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(netPrem), 0);
+  $netPrem.style.color = netPrem >= 0 ? "var(--green)" : "var(--red)";
+  const cash = data.cash_shift || 0;
+  document.getElementById("optv2-sum-cash-shift").textContent =
+    (cash >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(cash), 0);
+  // Fit error improvement (before - after); positive = better fit
+  const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;
+  const $fit = document.getElementById("optv2-sum-fit");
+  if (fitBefore != null && fitAfter != null) {
+    const pct = fitBefore > 0 ? (100 * (fitBefore - fitAfter) / fitBefore) : 0;
+    $fit.textContent = optv2Fmt(pct, 1) + "%";
+    $fit.style.color = pct >= 0 ? "var(--green)" : "var(--red)";
+  } else {
+    $fit.textContent = "—";
+  }
+  document.getElementById("optv2-candidates").textContent = data.candidates_evaluated ?? "—";
+  document.getElementById("optv2-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
+  document.getElementById("optv2-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
+  document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry || "All";
 
   // Show "After" matrix next to the main P&L Matrix
   const $afterPanel = document.getElementById("optv2-matrix-after-panel");
   const $matrixGrid = document.getElementById("optv2-matrix-grid");
-  $afterPanel.style.display = "";
-  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
+    $afterPanel.style.display = "";
+    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+  }
 
-  // Trades table
-  const $tbody = document.getElementById("optv2-trades-tbody");
+  // ── D. Strategy grouping ──
+  optv2RenderStrategyGroups(allTrades);
+
+  // ── B. Trades to unwind / close ──
+  optv2RenderTradeTable(
+    "optv2-unwind-tbody", unwinds, "optv2-unwind-count",
+    (t) => [
+      `<td>${t.instrument}</td>`,
+      `<td>${optv2ExpiryText(t)}</td>`,
+      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`,
+      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${t.counterparty || "—"}</td>`,
+    ], 9,
+    "No positions flagged for unwind/roll at this DTE threshold."
+  );
+
+  // ── C. Replacement / new trades ──
+  optv2RenderTradeTable(
+    "optv2-replacement-tbody", replacements, "optv2-replacement-count",
+    (t) => [
+      `<td>${t.instrument}</td>`,
+      `<td>${optv2ExpiryText(t)}</td>`,
+      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`,
+      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
+    ], 9,
+    "No replacement or new trades proposed."
+  );
+}
+
+function optv2RenderTradeTable(tbodyId, rows, countId, rowFn, colspan, emptyMsg) {
+  const $tbody = document.getElementById(tbodyId);
   $tbody.innerHTML = "";
-
-  if (data.trades.length === 0) {
+  const $count = countId ? document.getElementById(countId) : null;
+  if ($count) $count.textContent = rows.length ? `(${rows.length})` : "";
+  if (!rows.length) {
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="12" style="text-align:center;opacity:.6">No trades proposed — portfolio is already optimal given cost constraints.</td>';
+    tr.innerHTML = `<td colspan="${colspan}" style="text-align:center;opacity:.6">${emptyMsg}</td>`;
     $tbody.appendChild(tr);
     return;
   }
-
-  data.trades.forEach(t => {
+  rows.forEach(t => {
     const tr = document.createElement("tr");
-    tr.innerHTML = [
-      `<td>${t.counterparty || ""}</td>`,
-      `<td>${t.instrument}</td>`,
-      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td>${Math.abs(t.qty)}</td>`,
-      `<td>${t.strike.toLocaleString()}</td>`,
-      `<td>${t.opt === "C" ? "Call" : "Put"}</td>`,
-      `<td>${t.dte}</td>`,
-      `<td>${optv2Fmt(t.iv_pct, 1)}</td>`,
-      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 2)}</td>`,
-      `<td style="text-align:center"><span style="font-weight:700;font-size:.8rem;color:${t.is_unwind ? 'var(--green)' : 'var(--muted)'}">${t.is_unwind ? '✓ Yes' : '✗ No'}</span></td>`,
-      `<td>${optv2Fmt(t.delta_contribution, 4)}</td>`,
-      `<td>${optv2Fmt(t.gamma_contribution, 6)}</td>`,
-      `<td>${optv2Fmt(t.vega_contribution, 4)}</td>`,
-    ].join("");
+    tr.innerHTML = rowFn(t).join("");
     $tbody.appendChild(tr);
   });
+}
+
+// Group trade legs by their strategy_instrument so multi-leg structures
+// (spreads / straddles / boxes) render as one card instead of loose rows.
+function optv2RenderStrategyGroups(trades) {
+  const $wrap = document.getElementById("optv2-strategy-groups");
+  $wrap.innerHTML = "";
+  if (!trades || !trades.length) {
+    $wrap.innerHTML = '<div style="opacity:.6;font-size:.82rem">No structures proposed.</div>';
+    return;
+  }
+
+  const groups = new Map();
+  trades.forEach(t => {
+    const key = t.strategy_instrument || t.instrument;
+    if (!groups.has(key)) groups.set(key, { key, strategy: t.strategy, legs: [] });
+    groups.get(key).legs.push(t);
+  });
+
+  for (const g of groups.values()) {
+    const isStructure = g.legs.length > 1;
+    const card = document.createElement("div");
+    card.style.cssText =
+      "border:1px solid var(--border);border-radius:6px;padding:.55rem .7rem;background:var(--card-bg)";
+    const legText = g.legs.map(l => {
+      const c = l.side === "Buy" ? "var(--green)" : "var(--red)";
+      return `<span style="white-space:nowrap"><span style="color:${c}">${l.side} ${Math.abs(l.qty)}</span> `
+        + `${optv2OptType(l.opt)} ${optv2Fmt(l.strike, 0)}</span>`;
+    }).join('<span style="opacity:.4"> · </span>');
+    const net = g.legs.reduce((s, l) => s + (l.qty * (l.bs_price_usd || 0)), 0);
+    const netLabel = (net <= 0 ? "credit +$" : "debit -$") + optv2Fmt(Math.abs(net), 0);
+    card.innerHTML =
+      `<div style="display:flex;justify-content:space-between;gap:1rem;align-items:baseline">`
+      + `<div><span style="font-weight:700;font-size:.82rem">${optv2StrategyLabel(g.strategy)}</span>`
+      + (isStructure ? ` <span style="opacity:.5;font-size:.74rem">${g.legs.length} legs · ${g.key}</span>` : ` <span style="opacity:.5;font-size:.74rem">${g.key}</span>`)
+      + `</div>`
+      + `<div style="font-size:.78rem;color:${net <= 0 ? "var(--green)" : "var(--red)"}">${netLabel}</div></div>`
+      + `<div style="margin-top:.35rem;font-size:.8rem;display:flex;flex-wrap:wrap;gap:.5rem">${legText}</div>`;
+    $wrap.appendChild(card);
+  }
 }
 
 /* ── Before/After payoff comparison charts ──────────────────── */
