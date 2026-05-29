@@ -30,13 +30,13 @@ TRADE_COLUMNS = [
 # Primary: bundled data/ directory (works in Docker and local)
 _PROJECT_DATA_PATH = (
     Path(__file__).resolve().parents[3]
-    / "data"
-    / "PLGO_Trades_2026-04-21.xlsx"
+    / "data/positions"
+    / "PLGO_Trades_2026-05-26.xlsx"
 )
 
 # Fallback: user's Downloads folder (local dev)
 _DOWNLOADS_PATH = (
-    Path.home() / "Downloads" / "PLGO_Trades_2026-04-21.xlsx"
+    Path.home() / "Downloads" / "PLGO_Trades_2026-05-26.xlsx"
 )
 
 # --- FIL paths ---
@@ -92,10 +92,19 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
     # Scan for the header row that starts with "Counterparty"
     headers: list[str] | None = None
     for row in rows:
-        if row and str(row[0]).strip().lower() == "counterparty":
+        if not row:
+            continue
+
+        normalized_cells = [
+            str(cell).strip().lower() if cell is not None else ""
+            for cell in row
+        ]
+
+        if "counterparty" in normalized_cells:
+            header_start_idx = normalized_cells.index("counterparty")
             headers = [
                 str(h).strip() if h is not None else f"col_{i}"
-                for i, h in enumerate(row)
+                for i, h in enumerate(row[header_start_idx:], start=header_start_idx)
             ]
             break
 

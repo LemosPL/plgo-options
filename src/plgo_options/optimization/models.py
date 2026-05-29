@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-
-import openpyxl
+from zipfile import ZipFile
+import xml.etree.ElementTree as ET
 
 from plgo_options.optimization.optimizer_utils import _safe_int, _safe_float
 
@@ -256,6 +256,99 @@ class IronCondorCandidate:
 
 
 POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
+
+
+def _xlsx_column_index(cell_ref: str) -> int:
+    letters = "".join(ch for ch in cell_ref if ch.isalpha())
+    index = 0
+    for ch in letters:
+        index = index * 26 + (ord(ch.upper()) - ord("A") + 1)
+    return index - 1
+
+
+def _xlsx_cell_value(cell: ET.Element, shared_strings: list[str], namespace: dict[str, str]):
+    cell_type = cell.attrib.get("t")
+    value_node = cell.find("main:v", namespace)
+
+    if cell_type == "inlineStr":
+        text_node = cell.find("main:is/main:t", namespace)
+        return text_node.text if text_node is not None else None
+
+    if value_node is None or value_node.text is None:
+        return None
+
+    raw_value = value_node.text
+
+    if cell_type == "s":
+        index = int(raw_value)
+        return shared_strings[index] if 0 <= index < len(shared_strings) else raw_value
+
+    if cell_type == "b":
+        return raw_value == "1"
+
+    try:
+        number = float(raw_value)
+        return int(number) if number.is_integer() else number
+    except ValueError:
+        return raw_value
+
+
+def _read_first_xlsx_sheet_rows(path: Path) -> list[list[object]]:
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    with ZipFile(path) as archive:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in shared_root.findall("main:si", namespace):
+                parts = [
+                    node.text or ""
+                    for node in item.findall(".//main:t", namespace)
+                ]
+                shared_strings.append("".join(parts))
+
+        workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+        first_sheet = workbook_root.find("main:sheets/main:sheet", namespace)
+        if first_sheet is None:
+            return []
+
+        relationship_id = first_sheet.attrib[
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        ]
+
+        relationships_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rel_namespace = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
+        sheet_target = None
+
+        for relationship in relationships_root.findall("rel:Relationship", rel_namespace):
+            if relationship.attrib.get("Id") == relationship_id:
+                sheet_target = relationship.attrib["Target"]
+                break
+
+        if sheet_target is None:
+            return []
+
+        sheet_path = "xl/" + sheet_target.lstrip("/")
+        sheet_root = ET.fromstring(archive.read(sheet_path))
+
+        rows: list[list[object]] = []
+        for row_node in sheet_root.findall(".//main:sheetData/main:row", namespace):
+            row_values: list[object] = []
+
+            for cell in row_node.findall("main:c", namespace):
+                cell_ref = cell.attrib.get("r", "")
+                column_index = _xlsx_column_index(cell_ref)
+
+                while len(row_values) <= column_index:
+                    row_values.append(None)
+
+                row_values[column_index] = _xlsx_cell_value(cell, shared_strings, namespace)
+
+            rows.append(row_values)
+
+        return rows
+
+
 def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list[Position]:
     """Load positions from the most recent .xlsx file in data/positions."""
     if not positions_dir.exists() or not positions_dir.is_dir():
@@ -270,11 +363,7 @@ def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list
         return []
 
     latest_file = xlsx_files[0]
-    wb = openpyxl.load_workbook(latest_file, read_only=True, data_only=True)
-
-    # Use the first sheet unless you want to pin this to a specific name.
-    ws = wb[wb.sheetnames[0]]
-    rows = ws.iter_rows(values_only=True)
+    rows = iter(_read_first_xlsx_sheet_rows(latest_file))
 
     headers: list[str] | None = None
     positions: list[Position] = []
@@ -285,7 +374,6 @@ def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list
             break
 
     if headers is None:
-        wb.close()
         return []
 
     for row in rows:
@@ -335,5 +423,4 @@ def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list
             )
         )
 
-    wb.close()
     return positions
