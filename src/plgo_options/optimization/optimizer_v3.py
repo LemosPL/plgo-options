@@ -611,8 +611,8 @@ class OptimizerV3(BaseOptimizer):
         print(new_position_penalty)
         print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
-        #is_replay = (target_expiry is not None)#False
-        #target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
+        # is_replay = (target_expiry is not None)#False
+        # target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
         target_profile = build_parametric_target_profile(
             spot_ladder=self.spot_ladder, current_spot=self.eth_spot)
 
@@ -676,8 +676,10 @@ class OptimizerV3(BaseOptimizer):
             spot_weights = np.ones_like(spot_arr, dtype=float)
 
         base_payoff = np.zeros_like(spot_arr)
+        cash_roll = 0.
         for p in self.positions:
             if id(p) in roll_position_ids:
+                cash_roll += p.current_mtm
                 continue
 
             bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
@@ -783,7 +785,7 @@ class OptimizerV3(BaseOptimizer):
         err_fit_lasso = lasso.err_fit
 
         x = betas_lasso
-        fitted_payoff = adjusted_base_payoff + A @ x
+        #fitted_payoff = adjusted_base_payoff + A @ x
 
         sum_weights = np.sum(spot_weights)
         base_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(adjusted_base_payoff - target_interp, 2))/sum_weights))
@@ -822,7 +824,7 @@ class OptimizerV3(BaseOptimizer):
         trades = list(roll_unwind_trades) #+ list(roll_replacement_trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
-        #fitted_payoff = adjusted_base_payoff.copy()
+        fitted_payoff = adjusted_base_payoff.copy()
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
 
@@ -874,6 +876,7 @@ class OptimizerV3(BaseOptimizer):
                 "candidates_evaluated": len(meta),
             }
 
+        total_cost = sum(est_cost for _, _, est_cost, _, _, _, _, _ in scored_trades)
         for net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name in scored_trades:
             fitted_payoff += curve
 
@@ -911,7 +914,7 @@ class OptimizerV3(BaseOptimizer):
                 })
 
         print("is_replay:" + str(is_replay))
-        if is_replay:
+        if False:#is_replay:
             spot = self.eth_spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
