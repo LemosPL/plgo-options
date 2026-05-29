@@ -11,6 +11,7 @@ TRADE_FIELDS = [
     "asset", "counterparty", "trade_id", "trade_date", "side", "option_type",
     "instrument", "expiry", "strike", "ref_spot", "pct_otm", "qty",
     "notional_mm", "premium_per", "premium_usd", "status",
+    "is_otc", "last_otc_quote", "otc_settlement_method", "otc_override_price",
 ]
 
 

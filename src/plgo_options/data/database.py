@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS trades (
     premium_per REAL DEFAULT 0,
     premium_usd REAL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
+    is_otc INTEGER NOT NULL DEFAULT 0,
+    last_otc_quote REAL,
+    otc_settlement_method TEXT,
+    otc_override_price REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -103,6 +107,21 @@ async def init_db():
         logger.info("Migrating: adding 'asset' column to trades table...")
         await db.execute("ALTER TABLE trades ADD COLUMN asset TEXT NOT NULL DEFAULT 'ETH'")
         await db.commit()
+
+    # Migration: add OTC metadata columns if missing
+    otc_migrations = [
+        ("is_otc", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_otc_quote", "REAL"),
+        ("otc_settlement_method", "TEXT"),
+        ("otc_override_price", "REAL"),
+    ]
+    cursor = await db.execute("PRAGMA table_info(trades)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    for col_name, col_type in otc_migrations:
+        if col_name not in columns:
+            logger.info("Migrating: adding %r column to trades table...", col_name)
+            await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    await db.commit()
 
     # Auto-import from Excel on first run
     cursor = await db.execute("SELECT COUNT(*) FROM trades")

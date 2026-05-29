@@ -1255,15 +1255,25 @@
       <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem">
         <button id="btn-load-optv2" class="btn-primary" style="width:auto">Load Risk Profile</button>
         <label class="pf-filter-label">λ Overall
-          <input type="number" id="optv2-lam-factor" value="1.0" step="0.1" min="0" style="width:5rem">
+          <input type="number" id="optv2-lam-factor" value="1.0" step="0.1" min="0" style="width:5rem"
+            title="LASSO regularization strength. Higher = fewer, larger trades; lower = more, smaller trades.">
         </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
             <option value="">All Maturities</option>
           </select>
         </label>
+        <label class="pf-filter-label">Unwind Discount
+          <input type="number" id="optv2-unwind-discount" value="0.2" step="0.05" min="0" max="1" style="width:5rem"
+            title="Fraction of mark value assumed lost when unwinding an existing position (0.2 = 20% slippage on close).">
+        </label>
+        <label class="pf-filter-label">New Pos. Penalty
+          <input type="number" id="optv2-new-position-penalty" value="0.04" step="0.01" min="0" max="1" style="width:5rem"
+            title="Per-unit cost penalty applied to opening brand-new positions, biasing toward reuse/rolls.">
+        </label>
         <label class="pf-filter-label">Counterparties
-          <select id="optv2-counterparties" style="width:auto;min-width:180px;margin:0">
+          <select id="optv2-counterparties" multiple size="3" style="width:auto;min-width:180px;margin:0"
+            title="Ctrl/Cmd-click to select multiple. None selected = ALL.">
             <option value="ALL" selected>ALL</option>
           </select>
         </label>
@@ -1334,61 +1344,59 @@
         <span id="optv2-result-status" style="float:right;font-size:.85rem;opacity:.7"></span>
       </h2>
 
-      <!-- Before / After comparison -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
-        <div>
-          <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">Before</h3>
-          <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
-            <div><div class="greek-label">Delta</div><div class="greek-value" id="optv2-before-delta">--</div></div>
-            <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv2-before-gamma">--</div></div>
-            <div><div class="greek-label">Theta</div><div class="greek-value" id="optv2-before-theta">--</div></div>
-            <div><div class="greek-label">Vega</div><div class="greek-value" id="optv2-before-vega">--</div></div>
-            <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="optv2-before-risk">--</div></div>
-          </div>
-        </div>
-        <div>
-          <h3 style="margin:0 0 .5rem;font-size:.9rem;opacity:.7">After</h3>
-          <div class="greek-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;text-align:center">
-            <div><div class="greek-label">Delta</div><div class="greek-value" id="optv2-after-delta">--</div></div>
-            <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv2-after-gamma">--</div></div>
-            <div><div class="greek-label">Theta</div><div class="greek-value" id="optv2-after-theta">--</div></div>
-            <div><div class="greek-label">Vega</div><div class="greek-value" id="optv2-after-vega">--</div></div>
-            <div><div class="greek-label">Daily Risk</div><div class="greek-value" id="optv2-after-risk">--</div></div>
-          </div>
-        </div>
-      </div>
+      <!-- Warnings / errors -->
+      <div id="optv2-warnings" style="display:none;margin-bottom:1rem;padding:.6rem .8rem;border-radius:6px;
+           background:rgba(255,193,7,.12);border:1px solid rgba(255,193,7,.4);font-size:.82rem"></div>
 
-      <!-- Summary stats -->
-      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
-        <div><div class="greek-label">Trade Cost</div><div class="greek-value" id="optv2-trade-cost">--</div></div>
-        <div><div class="greek-label">Risk Reduction</div><div class="greek-value" id="optv2-risk-reduction">--</div></div>
-        <div><div class="greek-label">Utility Gain</div><div class="greek-value" id="optv2-utility-gain">--</div></div>
+      <!-- A. Summary -->
+      <h3 style="margin:0 0 .5rem;font-size:.95rem">Summary</h3>
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+        <div><div class="greek-label">Unwind / Roll</div><div class="greek-value" id="optv2-sum-unwind">--</div></div>
+        <div><div class="greek-label">Replacement / New</div><div class="greek-value" id="optv2-sum-replacement">--</div></div>
+        <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv2-sum-net-premium">--</div></div>
+        <div><div class="greek-label">Cash Shift</div><div class="greek-value" id="optv2-sum-cash-shift">--</div></div>
+        <div><div class="greek-label">Fit Error ↓</div><div class="greek-value" id="optv2-sum-fit">--</div></div>
         <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv2-candidates">--</div></div>
       </div>
+      <div style="display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.78rem;opacity:.75;margin:-1rem 0 1.5rem">
+        <span>Premium sold: <strong id="optv2-sum-prem-sold">--</strong></span>
+        <span>Premium bought: <strong id="optv2-sum-prem-bought">--</strong></span>
+        <span>Target expiry: <strong id="optv2-sum-target-expiry">--</strong></span>
+      </div>
 
-      <!-- Proposed trades table -->
-      <h3 style="margin:0 0 .5rem;font-size:.95rem">Proposed Trades</h3>
-      <div class="chain-wrapper" style="max-height:400px">
+      <!-- D. Strategy grouping -->
+      <h3 style="margin:0 0 .5rem;font-size:.95rem">Proposed Structures</h3>
+      <div id="optv2-strategy-groups" style="display:flex;flex-direction:column;gap:.75rem;margin-bottom:1.5rem"></div>
+
+      <!-- B. Trades to unwind / close -->
+      <h3 style="margin:0 0 .5rem;font-size:.95rem">Trades to Unwind / Close
+        <span id="optv2-unwind-count" style="font-size:.8rem;opacity:.6"></span>
+      </h3>
+      <div class="chain-wrapper" style="max-height:340px;margin-bottom:1.5rem">
         <table class="pf-table">
           <thead>
             <tr>
-              <th>Counterparty</th>
-              <th>Instrument</th>
-              <th>Side</th>
-              <th>Qty</th>
-              <th>Strike</th>
-              <th>Type</th>
-              <th>DTE</th>
-              <th>IV %</th>
-              <th>Price ($)</th>
-              <th>Notional ($)</th>
-              <th>Is Unwind</th>
-              <th>Δ Contrib</th>
-              <th>Γ Contrib</th>
-              <th>Vega Contrib</th>
+              <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+              <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind Value ($)</th><th>Counterparty</th>
             </tr>
           </thead>
-          <tbody id="optv2-trades-tbody"></tbody>
+          <tbody id="optv2-unwind-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- C. Replacement / new trades -->
+      <h3 style="margin:0 0 .5rem;font-size:.95rem">Replacement / New Trades
+        <span id="optv2-replacement-count" style="font-size:.8rem;opacity:.6"></span>
+      </h3>
+      <div class="chain-wrapper" style="max-height:340px">
+        <table class="pf-table">
+          <thead>
+            <tr>
+              <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+              <th>Side</th><th>Qty</th><th>Price ($)</th><th>Strategy</th><th>Comment</th>
+            </tr>
+          </thead>
+          <tbody id="optv2-replacement-tbody"></tbody>
         </table>
       </div>
     </section>
