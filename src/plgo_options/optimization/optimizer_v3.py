@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import date, datetime
+
+from matplotlib import figure
 from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
@@ -15,7 +17,7 @@ from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
-from .misc_utils import load_target_profile, shift_target_profile
+from .misc_utils import load_target_profile, shift_target_profile, build_parametric_target_profile
 
 import matplotlib.pyplot as plt
 
@@ -609,8 +611,10 @@ class OptimizerV3(BaseOptimizer):
         print(new_position_penalty)
         print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
-        #is_replay = (target_expiry is not None)#False
-        target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
+        # is_replay = (target_expiry is not None)#False
+        # target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
+        target_profile = build_parametric_target_profile(
+            spot_ladder=self.spot_ladder, current_spot=self.eth_spot)
 
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(roll_dte_threshold)
@@ -631,7 +635,7 @@ class OptimizerV3(BaseOptimizer):
             option_legs,
             target_expiry=target_expiry,
         )
-        candidates = option_legs + spread_candidates + straddle_candidates + iron_condor_candidates
+        candidates = option_legs #+ spread_candidates + straddle_candidates# + iron_condor_candidates
 
         '''
         roll_replacement_trades = self._build_roll_replacement_trades(
@@ -672,8 +676,10 @@ class OptimizerV3(BaseOptimizer):
             spot_weights = np.ones_like(spot_arr, dtype=float)
 
         base_payoff = np.zeros_like(spot_arr)
+        cash_roll = 0.
         for p in self.positions:
             if id(p) in roll_position_ids:
+                cash_roll += p.current_mtm
                 continue
 
             bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
@@ -743,7 +749,7 @@ class OptimizerV3(BaseOptimizer):
             candidate_vega = max(abs(self._candidate_vega(c)), 1e-12)
             lams[i] = base_lam * np.pow(max_vega / candidate_vega, 2)
             if self._is_spread_candidate(c):
-                lams[i] *= 1.0
+                lams[i] *= 1.
             elif self._is_straddle_candidate(c):
                 lams[i] *= 1.5
             elif self._is_iron_condor_candidate(c):
@@ -774,17 +780,13 @@ class OptimizerV3(BaseOptimizer):
 
         A = np.column_stack(A_cols)
         lasso = GeneralizedLasso()
-        '''
-        fit_intercept = False
-        lasso.fit_lin_reg(A, residual * 1.E-6, w=spot_weights, fit_intercept=fit_intercept)
-        betas_lin_reg = lasso.betas * 1.E6
-        err_fit_lin_reg = lasso.err_fit #* 1.E-6
-        '''
         lasso.fit(A, residual*1.E-6, lams, w=spot_weights)
         betas_lasso = lasso.betas * 1.E6
         err_fit_lasso = lasso.err_fit
 
-        x = betas_lasso#betas_lin_reg#
+        x = betas_lasso
+        #fitted_payoff = adjusted_base_payoff + A @ x
+
         sum_weights = np.sum(spot_weights)
         base_rmse = float(np.sqrt(np.sum(spot_weights*np.pow(adjusted_base_payoff - target_interp, 2))/sum_weights))
         scored_trades = []
@@ -814,10 +816,6 @@ class OptimizerV3(BaseOptimizer):
             normalized_benefit = rmse_improvement * payoff_scale * abs(rounded_qty)
 
             net_benefit = normalized_benefit - est_cost
-            min_net_benefit = 50_000.0
-            if net_benefit <= min_net_benefit:
-                k=1#continue
-
             base_rmse = new_rmse
             scored_trades.append((net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name))
 
@@ -878,6 +876,7 @@ class OptimizerV3(BaseOptimizer):
                 "candidates_evaluated": len(meta),
             }
 
+        total_cost = sum(est_cost for _, _, est_cost, _, _, _, _, _ in scored_trades)
         for net_benefit, normalized_benefit, est_cost, rounded_qty, c, w, curve, instrument_name in scored_trades:
             fitted_payoff += curve
 
@@ -929,7 +928,7 @@ class OptimizerV3(BaseOptimizer):
         fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
 
         print("is_replay:" + str(is_replay))
-        if is_replay:
+        if False:#is_replay:
             spot = self.eth_spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
