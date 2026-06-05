@@ -64,7 +64,7 @@ def build_parametric_target_profile(
     high_plateau_ratio: float = 1.7,
     low_floor_payoff: float = -5_000_000.0,
     trough_payoff: float = -19_000_000.0,
-    high_plateau_payoff: float = -5_000_000.0,
+    high_plateau_payoff: float = -10_000_000.0,
 ) -> pd.DataFrame:
     strikes = np.asarray(spot_ladder, dtype=float)
     ratios = strikes / float(current_spot)

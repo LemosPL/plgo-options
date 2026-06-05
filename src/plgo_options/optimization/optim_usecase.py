@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 import pandas as pd
@@ -120,7 +120,7 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.15)#, counterparties=["Flowdesk"])
+        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.75)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")

@@ -31,7 +31,7 @@ TRADE_COLUMNS = [
 _PROJECT_DATA_PATH = (
     Path(__file__).resolve().parents[3]
     / "data/positions"
-    / "PLGO_Trades_2026-05-26.xlsx"
+    / "PLGO_Trades_2026-06-01.xlsx"
 )
 
 # Fallback: user's Downloads folder (local dev)

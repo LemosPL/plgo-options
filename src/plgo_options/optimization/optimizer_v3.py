@@ -635,7 +635,7 @@ class OptimizerV3(BaseOptimizer):
             option_legs,
             target_expiry=target_expiry,
         )
-        candidates = option_legs #+ spread_candidates + straddle_candidates# + iron_condor_candidates
+        candidates = option_legs + spread_candidates + straddle_candidates# + iron_condor_candidates
 
         '''
         roll_replacement_trades = self._build_roll_replacement_trades(
@@ -652,12 +652,6 @@ class OptimizerV3(BaseOptimizer):
         print(f"roll summary: {roll_summary}")
         print(f"roll replacement trades: {len(roll_replacement_trades)}")
         '''
-        print(f"option legs: {len(option_legs)}")
-        print(f"spread candidates: {len(spread_candidates)}")
-        print(f"straddle candidates: {len(straddle_candidates)}")
-        print(f"iron condor candidates: {len(iron_condor_candidates)}")
-        print(f"call spreads: {sum(1 for c in spread_candidates if c.kind == 'CALL_SPREAD')}")
-        print(f"put spreads: {sum(1 for c in spread_candidates if c.kind == 'PUT_SPREAD')}")
 
         target_strikes = np.asarray(target_profile.index, dtype=float)
         target_payoff = np.asarray(target_profile["Payoff($)"], dtype=float)  # - 2000000
@@ -769,7 +763,7 @@ class OptimizerV3(BaseOptimizer):
 
             curves.append(curve)
             weighted_curve = strike_weights[i] * curve
-            A_cols.append(weighted_curve)
+            A_cols.append(curve)#weighted_curve)
             meta.append(c)
 
         if not A_cols:
@@ -852,12 +846,10 @@ class OptimizerV3(BaseOptimizer):
                 "status": "ok",
                 "target_expiry": target_expiry,
                 "optimizer_converged": True,
-                "message": "Optimizer ran successfully, but no trades passed the selection criteria.",
                 "eth_spot": round(float(self.eth_spot), 2),
                 "cash_shift": round(float(cash_shift), 2),
                 "premium_summary": premium_summary,
                 "net_premium_generated": premium_summary["net_premium_generated"],
-                "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),                "fit_error_after": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
                 "spot_ladder": spot_arr.tolist(),
                 "chart_horizons": horizons,
                 "target_payoff": np.round(target_interp, 2).tolist(),
@@ -928,7 +920,7 @@ class OptimizerV3(BaseOptimizer):
         fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
 
         print("is_replay:" + str(is_replay))
-        if False:#is_replay:
+        if is_replay:
             spot = self.eth_spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
@@ -988,6 +980,15 @@ class OptimizerV3(BaseOptimizer):
                 trade["qty"],
             )
 
+        weighted_fit_error_before = float(
+            np.sum(spot_weights * (adjusted_base_payoff - target_interp) ** 2) / np.sum(spot_weights)
+        )
+        weighted_fit_error_after = float(
+            np.sum(spot_weights * (fitted_payoff_comparable - target_interp) ** 2) / np.sum(spot_weights)
+        )
+
+        print("ratio: " + str(weighted_fit_error_after/weighted_fit_error_before))
+
         return {
             "status": "ok",
             "target_expiry": target_expiry,
@@ -997,8 +998,8 @@ class OptimizerV3(BaseOptimizer):
             "fitted_payoff_cash_shift": round(float(fitted_payoff_cash_shift), 2),
             "premium_summary": premium_summary,
             "net_premium_generated": premium_summary["net_premium_generated"],
+            "fit_error_after": round(weighted_fit_error_after, 2),
             "fit_error_before": round(float(np.mean((adjusted_base_payoff - target_interp) ** 2)), 2),
-            "fit_error_after": round(float(np.mean((fitted_payoff_comparable - target_interp) ** 2)), 2),
             "spot_ladder": spot_arr.tolist(),
             "chart_horizons": horizons,
             "target_payoff": np.round(target_interp, 2).tolist(),
