@@ -1892,10 +1892,20 @@ function rcRenderRows() {
   });
 }
 
-function rcPopulateCounterparties() {
+async function rcPopulateCounterparties() {
   const sel = document.getElementById("rc-counterparty");
   const existing = new Set();
-  tmEnriched.forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+
+  // If tmEnriched is empty, fetch trades directly
+  if (tmEnriched.length === 0) {
+    try {
+      const data = await get(`/api/trades/?include_expired=true&asset=${currentAsset}`);
+      (data.trades || []).forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+    } catch (e) { /* ignore */ }
+  } else {
+    tmEnriched.forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+  }
+
   const cur = sel.value;
   sel.innerHTML = '<option value="">-- Select --</option>';
   [...existing].sort().forEach(cp => {
