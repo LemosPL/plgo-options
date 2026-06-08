@@ -1938,6 +1938,26 @@ document.getElementById("rc-download-xlsx").addEventListener("click", (e) => {
 });
 
 // Upload handler
+function rcParseRow(row) {
+  return {
+    trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
+    trade_date: String(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || "").split(" ")[0],
+    side: String(row.side || row.Side || ""),
+    option_type: String(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
+    strike: parseFloat(row.strike || row.Strike || 0),
+    expiry: String(row.expiry || row.Expiry || ""),
+    qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),
+    premium_usd: parseFloat(row.premium_usd || row.Premium_USD || row["Premium USD"] || 0),
+  };
+}
+
+function rcGuessAsset(trades) {
+  // FIL strikes are typically < $50, ETH strikes > $100
+  if (trades.length === 0) return null;
+  const avgStrike = trades.reduce((s, t) => s + Math.abs(t.strike || 0), 0) / trades.length;
+  return avgStrike < 50 ? "FIL" : "ETH";
+}
+
 document.getElementById("rc-upload").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -1945,19 +1965,47 @@ document.getElementById("rc-upload").addEventListener("change", (e) => {
   reader.onload = (evt) => {
     try {
       const wb = XLSX.read(evt.target.result, { type: "array" });
-      // Pick sheet matching current asset, fallback to first
-      const sheetName = wb.SheetNames.find(s => s.toLowerCase() === currentAsset.toLowerCase()) || wb.SheetNames[0];
-      const data = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
-      rcTheirTrades = data.map(row => ({
-        trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
-        trade_date: String(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || "").split(" ")[0],
-        side: String(row.side || row.Side || ""),
-        option_type: String(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
-        strike: parseFloat(row.strike || row.Strike || 0),
-        expiry: String(row.expiry || row.Expiry || ""),
-        qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),
-        premium_usd: parseFloat(row.premium_usd || row.Premium_USD || row["Premium USD"] || 0),
-      }));
+
+      // Strategy 1: find sheet named after current asset
+      let sheetName = wb.SheetNames.find(s => s.toLowerCase() === currentAsset.toLowerCase());
+
+      if (sheetName) {
+        // Exact sheet match for current asset
+        const data = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
+        rcTheirTrades = data.map(rcParseRow);
+      } else if (wb.SheetNames.length === 1) {
+        // Single sheet — parse all rows, then filter by strike-based asset guess
+        const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+        const allTrades = data.map(rcParseRow);
+        const guessed = rcGuessAsset(allTrades);
+        if (guessed && guessed !== currentAsset) {
+          // All trades look like the other asset
+          alert(`These trades appear to be ${guessed} (avg strike ${guessed === "FIL" ? "< $50" : "> $100"}) but you're on the ${currentAsset} view.\n\nSwitch to ${guessed} first, or the reconciliation will not match.`);
+        }
+        rcTheirTrades = allTrades;
+      } else {
+        // Multiple sheets but none match current asset — try to find one by guessing content
+        let found = false;
+        for (const sn of wb.SheetNames) {
+          const data = XLSX.utils.sheet_to_json(wb.Sheets[sn]);
+          const trades = data.map(rcParseRow);
+          const guessed = rcGuessAsset(trades);
+          if (guessed === currentAsset) {
+            rcTheirTrades = trades;
+            sheetName = sn;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          // Fallback: use first sheet
+          const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+          rcTheirTrades = data.map(rcParseRow);
+          sheetName = wb.SheetNames[0];
+          alert(`No sheet found matching ${currentAsset}. Using sheet "${sheetName}". Verify the trades are correct.`);
+        }
+      }
+
       rcRenderRows();
     } catch (err) {
       alert("Error parsing file: " + err.message);
