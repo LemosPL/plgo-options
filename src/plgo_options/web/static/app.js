@@ -2027,24 +2027,31 @@ function rcRenderResults(res) {
     return "";
   }
 
-  html += `<div class="chain-wrapper" style="max-height:600px;margin-top:1rem"><table style="font-size:.78rem">
+  // Store rows for action handlers
+  rows.forEach((r, i) => r._idx = i);
+  container._reconRows = rows;
+  container._reconCounterparty = res.counterparty;
+
+  html += `<div class="chain-wrapper" style="max-height:600px;margin-top:1rem"><table style="font-size:.78rem" id="rc-results-table">
     <thead><tr>
       <th>Status</th>
       <th colspan="5" style="text-align:center;border-bottom:2px solid var(--accent)">OUR BOOK</th>
       <th colspan="5" style="text-align:center;border-bottom:2px solid var(--orange)">THEIR BOOK</th>
+      <th>Action</th>
     </tr><tr>
       <th></th>
       <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
       <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
+      <th></th>
     </tr></thead><tbody>`;
 
-  rows.forEach(r => {
+  rows.forEach((r, i) => {
     const o = r.ours || {};
     const t = r.theirs || {};
     const color = statusColor[r.status];
     const empty = '<td style="color:var(--muted);text-align:center">—</td>';
 
-    html += `<tr>`;
+    html += `<tr id="rc-row-${i}">`;
     html += `<td style="color:${color};white-space:nowrap;font-weight:600" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
 
     // Our side
@@ -2069,14 +2076,25 @@ function rcRenderResults(res) {
       html += empty.repeat(5);
     }
 
-    html += `</tr>`;
+    // Action column
+    html += `<td style="white-space:nowrap">`;
+    if (r.status === "only_ours") {
+      html += `<button class="btn-secondary btn-delete rc-action" data-action="remove" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto" title="Remove from our book">Remove</button>`;
+    } else if (r.status === "only_theirs") {
+      html += `<button class="btn-primary rc-action" data-action="add" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto" title="Add to our book">Add</button>`;
+    } else if (r.status === "break") {
+      html += `<button class="btn-secondary rc-action" data-action="update" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto;color:var(--orange);border-color:var(--orange)" title="Update ours to match theirs">Align</button>`;
+    } else {
+      html += `<span style="color:var(--green);font-size:.7rem">&#10003;</span>`;
+    }
+    html += `</td></tr>`;
 
     // If there are field-level diffs, show detail row
     if (Object.keys(r.diffs).length > 0) {
       const diffText = Object.entries(r.diffs).map(([f, v]) =>
         `<b>${f}</b>: ours=${v.ours}, theirs=${v.theirs}`
       ).join(" &nbsp;|&nbsp; ");
-      html += `<tr><td></td><td colspan="10" style="font-size:.72rem;color:var(--orange);padding:.15rem .5rem">${diffText}</td></tr>`;
+      html += `<tr id="rc-diff-${i}"><td></td><td colspan="11" style="font-size:.72rem;color:var(--orange);padding:.15rem .5rem">${diffText}</td></tr>`;
     }
   });
 
@@ -2094,6 +2112,82 @@ function rcRenderResults(res) {
 
   container.innerHTML = html;
   container._lastResult = res;
+
+  // Wire action buttons
+  container.querySelectorAll(".rc-action").forEach(btn => {
+    btn.addEventListener("click", () => rcHandleAction(btn.dataset.action, parseInt(btn.dataset.idx)));
+  });
+}
+
+async function rcHandleAction(action, idx) {
+  const container = document.getElementById("rc-results");
+  const rows = container._reconRows;
+  const counterparty = container._reconCounterparty;
+  const r = rows[idx];
+  if (!r) return;
+
+  try {
+    if (action === "remove") {
+      // Delete trade from our book
+      const dbId = r.ours.id || r.ours.db_id;
+      if (!dbId) { alert("Cannot find trade ID to remove"); return; }
+      if (!confirm(`Remove ${r.ours.side} ${r.ours.option_type} ${r.ours.strike} ${r.ours.expiry} from our book?`)) return;
+      await api("DELETE", `/api/trades/${dbId}`);
+      rcMarkRowDone(idx, "Removed");
+
+    } else if (action === "add") {
+      // Add their trade to our book
+      const t = r.theirs;
+      if (!confirm(`Add ${t.side} ${t.option_type} ${t.strike} ${t.expiry} x${Math.abs(t.qty)} to our book?`)) return;
+      await post("/api/trades/", {
+        asset: currentAsset,
+        counterparty: counterparty,
+        trade_id: t.trade_id || "",
+        trade_date: t.trade_date || "",
+        side: t.side,
+        option_type: t.option_type,
+        instrument: "",
+        expiry: t.expiry,
+        strike: parseFloat(t.strike) || 0,
+        qty: Math.abs(parseFloat(t.qty) || 0),
+        premium_usd: parseFloat(t.premium_usd) || 0,
+      });
+      rcMarkRowDone(idx, "Added");
+
+    } else if (action === "update") {
+      // Update our trade to match theirs
+      const dbId = r.ours.id || r.ours.db_id;
+      if (!dbId) { alert("Cannot find trade ID to update"); return; }
+      const diffs = r.diffs;
+      const changes = {};
+      for (const [field, vals] of Object.entries(diffs)) {
+        changes[field] = vals.theirs;
+      }
+      const diffDesc = Object.entries(diffs).map(([f, v]) => `${f}: ${v.ours} → ${v.theirs}`).join(", ");
+      if (!confirm(`Align trade to counterparty's values?\n${diffDesc}`)) return;
+      await api("PUT", `/api/trades/${dbId}`, changes);
+      rcMarkRowDone(idx, "Aligned");
+    }
+
+    // Refresh trade management data in background
+    tmLoaded = false;
+  } catch (err) {
+    alert(`Action failed: ${err.message}`);
+  }
+}
+
+function rcMarkRowDone(idx, label) {
+  const row = document.getElementById(`rc-row-${idx}`);
+  if (!row) return;
+  // Replace action button with done label
+  const actionCell = row.querySelector("td:last-child");
+  if (actionCell) {
+    actionCell.innerHTML = `<span style="color:var(--green);font-size:.7rem;font-weight:600">&#10003; ${label}</span>`;
+  }
+  row.style.opacity = "0.5";
+  // Also dim the diff row if present
+  const diffRow = document.getElementById(`rc-diff-${idx}`);
+  if (diffRow) diffRow.style.opacity = "0.5";
 }
 
 // Download report as .md
