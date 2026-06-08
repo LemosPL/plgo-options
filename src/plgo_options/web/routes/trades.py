@@ -11,6 +11,33 @@ from plgo_options.data import trade_repository as repo
 router = APIRouter()
 
 
+# ─── Reconciliation models ──────────────────────────────────
+
+class ReconTrade(BaseModel):
+    trade_id: str = ""
+    trade_date: str = ""
+    side: str = ""
+    option_type: str = ""
+    strike: float = 0
+    expiry: str = ""
+    qty: float = 0
+    premium_usd: float = 0
+
+
+class ReconCollateral(BaseModel):
+    ETH: float = 0
+    FIL: float = 0
+    USD: float = 0
+    USDC: float = 0
+
+
+class ReconRequest(BaseModel):
+    counterparty: str
+    asset: str = "ETH"
+    their_trades: list[ReconTrade] = []
+    their_collateral: ReconCollateral = ReconCollateral()
+
+
 class TradeCreate(BaseModel):
     asset: str = "ETH"
     counterparty: str = ""
@@ -161,3 +188,113 @@ async def get_trade_history(trade_id: int):
     db = await get_db()
     history = await repo.get_trade_history(db, trade_id)
     return {"history": history}
+
+
+# ─── Reconciliation endpoint ────────────────────────────────
+
+def _norm_side(s: str) -> str:
+    s = s.strip().upper()
+    if s in ("BUY", "LONG", "B"):
+        return "BUY"
+    if s in ("SELL", "SHORT", "S"):
+        return "SELL"
+    return s
+
+
+def _norm_type(t: str) -> str:
+    t = t.strip().upper()
+    if t in ("C", "CALL"):
+        return "CALL"
+    if t in ("P", "PUT"):
+        return "PUT"
+    return t
+
+
+def _match_key(t: dict) -> tuple:
+    """Build a matching key from a trade dict: (side, type, strike, expiry, abs_qty)."""
+    return (
+        _norm_side(str(t.get("side", ""))),
+        _norm_type(str(t.get("option_type", ""))),
+        float(t.get("strike", 0)),
+        str(t.get("expiry", "")).strip().upper(),
+        abs(float(t.get("qty", 0))),
+    )
+
+
+@router.post("/reconcile")
+async def reconcile_trades(body: ReconRequest):
+    db = await get_db()
+    our_all = await repo.list_trades(db, include_expired=False, include_deleted=False, asset=body.asset)
+    our_trades = [t for t in our_all if (t.get("counterparty", "") or "").lower() == body.counterparty.lower()]
+
+    # Build keyed lookups
+    our_by_key: dict[tuple, list[dict]] = {}
+    for t in our_trades:
+        k = _match_key(t)
+        our_by_key.setdefault(k, []).append(t)
+
+    their_by_key: dict[tuple, list[dict]] = {}
+    for t in body.their_trades:
+        td = t.model_dump()
+        k = _match_key(td)
+        their_by_key.setdefault(k, []).append(td)
+
+    all_keys = set(our_by_key.keys()) | set(their_by_key.keys())
+
+    matched = []
+    breaks = []
+    only_ours = []
+    only_theirs = []
+
+    for k in all_keys:
+        ours = our_by_key.get(k, [])
+        theirs = their_by_key.get(k, [])
+        if ours and theirs:
+            o = ours[0]
+            th = theirs[0]
+            diffs = {}
+            o_prem = float(o.get("premium_usd", 0) or 0)
+            th_prem = float(th.get("premium_usd", 0) or 0)
+            if abs(o_prem - th_prem) > 0.01:
+                diffs["premium_usd"] = {"ours": o_prem, "theirs": th_prem}
+            o_tid = str(o.get("trade_id", "") or "")
+            th_tid = str(th.get("trade_id", "") or "")
+            if o_tid and th_tid and o_tid != th_tid:
+                diffs["trade_id"] = {"ours": o_tid, "theirs": th_tid}
+            if diffs:
+                breaks.append({
+                    "key": f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}",
+                    "ours": o, "theirs": th, "diffs": diffs,
+                })
+            else:
+                matched.append({
+                    "key": f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}",
+                    "ours": o, "theirs": th,
+                })
+            # Handle extras if multiple trades on same key
+            for extra in ours[1:]:
+                only_ours.append(extra)
+            for extra in theirs[1:]:
+                only_theirs.append(extra)
+        elif ours and not theirs:
+            only_ours.extend(ours)
+        else:
+            only_theirs.extend(theirs)
+
+    return {
+        "counterparty": body.counterparty,
+        "asset": body.asset,
+        "summary": {
+            "our_count": len(our_trades),
+            "their_count": len(body.their_trades),
+            "matched": len(matched),
+            "breaks": len(breaks),
+            "only_ours": len(only_ours),
+            "only_theirs": len(only_theirs),
+        },
+        "matched": matched,
+        "breaks": breaks,
+        "only_ours": only_ours,
+        "only_theirs": only_theirs,
+        "collateral": body.their_collateral.model_dump(),
+    }

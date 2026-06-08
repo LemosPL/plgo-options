@@ -972,6 +972,14 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
       setTimeout(() => { const el = document.getElementById("opt2-ask"); if (el) el.focus(); }, 100);
     }
     if (btn.dataset.subtab === "sb-execution" && !execLoaded) execInit();
+
+    // Populate recon counterparties when switching to recon tab
+    if (btn.dataset.subtab === "tm-recon") {
+      rcPopulateCounterparties();
+      const lbl = document.getElementById("rc-asset-label");
+      if (lbl) lbl.textContent = currentAsset;
+      if (rcTheirTrades.length === 0) rcAddRow();
+    }
   });
 });
 
@@ -1837,6 +1845,296 @@ document.getElementById("btn-tm-export").addEventListener("click", () => {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Trades");
   XLSX.writeFile(wb, `PLGO_Trades_${new Date().toISOString().split("T")[0]}.xlsx`);
+});
+
+// ─── Counterparty Reconciliation ────────────────────────────
+let rcTheirTrades = [];
+
+function rcAddRow(data) {
+  const d = data || { trade_id: "", trade_date: "", side: "Buy", option_type: "Call", strike: "", expiry: "", qty: "", premium_usd: "" };
+  rcTheirTrades.push(d);
+  rcRenderRows();
+}
+
+function rcRenderRows() {
+  const tbody = document.getElementById("rc-their-body");
+  document.getElementById("rc-their-count").textContent = rcTheirTrades.length;
+  tbody.innerHTML = rcTheirTrades.map((t, i) => `<tr>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="trade_id" value="${t.trade_id || ""}" style="width:100%;font-size:.78rem"></td>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="trade_date" value="${t.trade_date || ""}" placeholder="YYYY-MM-DD" style="width:100px;font-size:.78rem"></td>
+    <td><select class="rc-field" data-idx="${i}" data-col="side" style="font-size:.78rem">
+      <option value="Buy" ${(t.side || "").toUpperCase() === "BUY" ? "selected" : ""}>Buy</option>
+      <option value="Sell" ${(t.side || "").toUpperCase() === "SELL" ? "selected" : ""}>Sell</option>
+    </select></td>
+    <td><select class="rc-field" data-idx="${i}" data-col="option_type" style="font-size:.78rem">
+      <option value="Call" ${(t.option_type || "").toUpperCase() === "CALL" ? "selected" : ""}>Call</option>
+      <option value="Put" ${(t.option_type || "").toUpperCase() === "PUT" ? "selected" : ""}>Put</option>
+    </select></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="strike" value="${t.strike || ""}" step="any" style="width:80px;font-size:.78rem"></td>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="expiry" value="${t.expiry || ""}" placeholder="YYYY-MM-DD" style="width:100px;font-size:.78rem"></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="qty" value="${t.qty || ""}" step="any" style="width:80px;font-size:.78rem"></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="premium_usd" value="${t.premium_usd || ""}" step="any" style="width:100px;font-size:.78rem"></td>
+    <td><button class="tm-action-btn btn-delete rc-remove" data-idx="${i}" title="Remove">&times;</button></td>
+  </tr>`).join("");
+
+  tbody.querySelectorAll(".rc-field").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = parseInt(el.dataset.idx);
+      const col = el.dataset.col;
+      rcTheirTrades[idx][col] = el.value;
+    });
+  });
+  tbody.querySelectorAll(".rc-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      rcTheirTrades.splice(parseInt(btn.dataset.idx), 1);
+      rcRenderRows();
+    });
+  });
+}
+
+function rcPopulateCounterparties() {
+  const sel = document.getElementById("rc-counterparty");
+  const existing = new Set();
+  tmEnriched.forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">-- Select --</option>';
+  [...existing].sort().forEach(cp => {
+    const o = document.createElement("option");
+    o.value = cp; o.textContent = cp;
+    if (cp === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+// Template download (CSV)
+document.getElementById("rc-download-csv").addEventListener("click", (e) => {
+  e.preventDefault();
+  const header = "trade_id,trade_date,side,option_type,strike,expiry,qty,premium_usd,price_per_option";
+  const blob = new Blob([header + "\n"], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Trades_Position_Collateral.csv";
+  a.click();
+});
+
+// Template download (XLSX) — two sheets: Eth, Fil
+document.getElementById("rc-download-xlsx").addEventListener("click", (e) => {
+  e.preventDefault();
+  const cols = ["trade_id", "trade_date", "side", "option_type", "strike", "expiry", "qty", "premium_usd", "price per option"];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([cols]), "Eth");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([cols]), "Fil");
+  XLSX.writeFile(wb, "Trades_Position_Collateral.xlsx");
+});
+
+// Upload handler
+document.getElementById("rc-upload").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const wb = XLSX.read(evt.target.result, { type: "array" });
+      // Pick sheet matching current asset, fallback to first
+      const sheetName = wb.SheetNames.find(s => s.toLowerCase() === currentAsset.toLowerCase()) || wb.SheetNames[0];
+      const data = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
+      rcTheirTrades = data.map(row => ({
+        trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
+        trade_date: String(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || "").split(" ")[0],
+        side: String(row.side || row.Side || ""),
+        option_type: String(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
+        strike: parseFloat(row.strike || row.Strike || 0),
+        expiry: String(row.expiry || row.Expiry || ""),
+        qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),
+        premium_usd: parseFloat(row.premium_usd || row.Premium_USD || row["Premium USD"] || 0),
+      }));
+      rcRenderRows();
+    } catch (err) {
+      alert("Error parsing file: " + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = "";
+});
+
+document.getElementById("rc-add-row").addEventListener("click", () => rcAddRow());
+document.getElementById("rc-clear-rows").addEventListener("click", () => {
+  rcTheirTrades = [];
+  rcRenderRows();
+});
+
+// Run reconciliation
+document.getElementById("rc-run").addEventListener("click", async () => {
+  const counterparty = document.getElementById("rc-counterparty").value;
+  if (!counterparty) { alert("Please select a counterparty"); return; }
+
+  const payload = {
+    counterparty,
+    asset: currentAsset,
+    their_trades: rcTheirTrades,
+    their_collateral: {
+      ETH: parseFloat(document.getElementById("rc-coll-eth").value) || 0,
+      FIL: parseFloat(document.getElementById("rc-coll-fil").value) || 0,
+      USD: parseFloat(document.getElementById("rc-coll-usd").value) || 0,
+      USDC: parseFloat(document.getElementById("rc-coll-usdc").value) || 0,
+    },
+  };
+
+  try {
+    const res = await post("/api/trades/reconcile", payload);
+    rcRenderResults(res);
+  } catch (err) {
+    alert("Reconciliation failed: " + err.message);
+  }
+});
+
+function rcRenderResults(res) {
+  const section = document.getElementById("rc-results-section");
+  const container = document.getElementById("rc-results");
+  section.style.display = "";
+
+  const s = res.summary;
+  const fmtMoney = (v) => v != null ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+
+  let html = `
+    <div class="risk-grid" style="margin-bottom:1rem">
+      <div class="risk-metric"><span class="risk-label">Our Trades</span><span class="risk-value">${s.our_count}</span></div>
+      <div class="risk-metric"><span class="risk-label">Their Trades</span><span class="risk-value">${s.their_count}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--green)">Matched</span><span class="risk-value" style="color:var(--green)">${s.matched}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--orange)">Breaks</span><span class="risk-value" style="color:var(--orange)">${s.breaks}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--red)">Only Ours</span><span class="risk-value" style="color:var(--red)">${s.only_ours}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--red)">Only Theirs</span><span class="risk-value" style="color:var(--red)">${s.only_theirs}</span></div>
+    </div>`;
+
+  // Matched
+  if (res.matched.length) {
+    html += `<h3 style="color:var(--green);margin:1rem 0 .5rem">Matched (${res.matched.length})</h3>
+    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium USD</th>
+    </tr></thead><tbody>`;
+    res.matched.forEach(m => {
+      const o = m.ours;
+      html += `<tr>
+        <td>${o.side || ""}</td><td>${o.option_type || ""}</td><td>${o.strike}</td>
+        <td>${o.expiry || ""}</td><td>${Math.abs(o.qty || 0)}</td><td>${fmtMoney(o.premium_usd)}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  // Breaks
+  if (res.breaks.length) {
+    html += `<h3 style="color:var(--orange);margin:1rem 0 .5rem">Breaks (${res.breaks.length})</h3>
+    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
+      <th>Trade</th><th>Field</th><th>Ours</th><th>Theirs</th>
+    </tr></thead><tbody>`;
+    res.breaks.forEach(b => {
+      Object.entries(b.diffs).forEach(([field, vals]) => {
+        html += `<tr style="color:var(--orange)">
+          <td>${b.key}</td><td>${field}</td><td>${vals.ours}</td><td>${vals.theirs}</td>
+        </tr>`;
+      });
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  // Only ours
+  if (res.only_ours.length) {
+    html += `<h3 style="color:var(--red);margin:1rem 0 .5rem">Only in Our Book (${res.only_ours.length})</h3>
+    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium</th>
+    </tr></thead><tbody>`;
+    res.only_ours.forEach(t => {
+      html += `<tr style="color:var(--red)"><td>${t.side}</td><td>${t.option_type}</td><td>${t.strike}</td><td>${t.expiry}</td><td>${Math.abs(t.qty || 0)}</td><td>${fmtMoney(t.premium_usd)}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  // Only theirs
+  if (res.only_theirs.length) {
+    html += `<h3 style="color:var(--red);margin:1rem 0 .5rem">Only in Their Book (${res.only_theirs.length})</h3>
+    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium</th>
+    </tr></thead><tbody>`;
+    res.only_theirs.forEach(t => {
+      html += `<tr style="color:var(--red)"><td>${t.side}</td><td>${t.option_type}</td><td>${t.strike}</td><td>${t.expiry}</td><td>${Math.abs(t.qty || 0)}</td><td>${fmtMoney(t.premium_usd)}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+
+  // Collateral
+  const coll = res.collateral;
+  html += `<h3 style="margin:1rem 0 .5rem">Reported Collateral</h3>
+  <table style="max-width:250px"><thead><tr><th>Asset</th><th>Quantity</th></tr></thead><tbody>
+    <tr><td>ETH</td><td>${coll.ETH}</td></tr>
+    <tr><td>FIL</td><td>${coll.FIL}</td></tr>
+    <tr><td>USD</td><td>${coll.USD}</td></tr>
+    <tr><td>USDC</td><td>${coll.USDC}</td></tr>
+  </tbody></table>`;
+
+  container.innerHTML = html;
+  container._lastResult = res;
+}
+
+// Download report as .md
+document.getElementById("rc-download-report").addEventListener("click", (e) => {
+  e.preventDefault();
+  const container = document.getElementById("rc-results");
+  const res = container._lastResult;
+  if (!res) { alert("Run reconciliation first"); return; }
+
+  const s = res.summary;
+  const fmtMoney = (v) => v != null ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const today = new Date().toISOString().split("T")[0];
+
+  let md = `# Counterparty Reconciliation Report\n\n`;
+  md += `**Counterparty:** ${res.counterparty}  \n`;
+  md += `**Asset:** ${res.asset}  \n`;
+  md += `**Date:** ${today}  \n\n`;
+  md += `## Summary\n\n`;
+  md += `| Metric | Count |\n|--------|-------|\n`;
+  md += `| Our trades | ${s.our_count} |\n`;
+  md += `| Their trades | ${s.their_count} |\n`;
+  md += `| Matched | ${s.matched} |\n`;
+  md += `| Breaks | ${s.breaks} |\n`;
+  md += `| Only ours | ${s.only_ours} |\n`;
+  md += `| Only theirs | ${s.only_theirs} |\n\n`;
+
+  if (res.breaks.length) {
+    md += `## Breaks\n\n| Trade | Field | Ours | Theirs |\n|-------|-------|------|--------|\n`;
+    res.breaks.forEach(b => {
+      Object.entries(b.diffs).forEach(([field, vals]) => {
+        md += `| ${b.key} | ${field} | ${vals.ours} | ${vals.theirs} |\n`;
+      });
+    });
+    md += "\n";
+  }
+
+  if (res.only_ours.length) {
+    md += `## Only in Our Book\n\n| Side | Type | Strike | Expiry | Qty | Premium |\n|------|------|--------|--------|-----|--------|\n`;
+    res.only_ours.forEach(t => {
+      md += `| ${t.side} | ${t.option_type} | ${t.strike} | ${t.expiry} | ${Math.abs(t.qty || 0)} | ${fmtMoney(t.premium_usd)} |\n`;
+    });
+    md += "\n";
+  }
+
+  if (res.only_theirs.length) {
+    md += `## Only in Their Book\n\n| Side | Type | Strike | Expiry | Qty | Premium |\n|------|------|--------|--------|-----|--------|\n`;
+    res.only_theirs.forEach(t => {
+      md += `| ${t.side} | ${t.option_type} | ${t.strike} | ${t.expiry} | ${Math.abs(t.qty || 0)} | ${fmtMoney(t.premium_usd)} |\n`;
+    });
+    md += "\n";
+  }
+
+  const coll = res.collateral;
+  md += `## Reported Collateral\n\n| Asset | Quantity |\n|-------|----------|\n`;
+  md += `| ETH | ${coll.ETH} |\n| FIL | ${coll.FIL} |\n| USD | ${coll.USD} |\n| USDC | ${coll.USDC} |\n`;
+
+  const blob = new Blob([md], { type: "text/markdown" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `Recon_${res.counterparty}_${today}.md`;
+  a.click();
 });
 
 // ─── Positions / Risk ───────────────────────────────────────

@@ -74,6 +74,15 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-trades" class="page active">
 
+    <!-- Sub-tabs: Trades | Counterparty Reconciliation -->
+    <div class="sub-tab-bar">
+      <button class="sub-tab-btn active" data-subtab="tm-trades">Trades</button>
+      <button class="sub-tab-btn" data-subtab="tm-recon">Counterparty Reconciliation</button>
+    </div>
+
+    <!-- ── Trades sub-tab ── -->
+    <div id="subtab-tm-trades" class="sub-tab-pane active">
+
     <!-- Summary banner -->
     <section class="card" id="tm-summary">
       <div class="risk-grid">
@@ -189,6 +198,108 @@
       <h2>Risk Insights</h2>
       <div id="tm-insights" class="insights-grid"></div>
     </section>
+
+    </div><!-- /subtab-tm-trades -->
+
+    <!-- ── Counterparty Reconciliation sub-tab ── -->
+    <div id="subtab-tm-recon" class="sub-tab-pane">
+
+      <section class="card">
+        <h2 style="margin-bottom:.25rem">COUNTERPARTY RECONCILIATION
+          <small style="font-weight:400;color:var(--muted)"> &mdash; COMPARE A COUNTERPARTY'S REPORTED BOOK &amp; COLLATERAL AGAINST OURS (<span id="rc-asset-label">ETH</span>)</small>
+        </h2>
+
+        <!-- Counterparty selector -->
+        <div style="margin:1rem 0">
+          <label style="font-size:.8rem;color:var(--muted)">Counterparty</label><br>
+          <select id="rc-counterparty" style="min-width:200px;margin-top:.25rem">
+            <option value="">-- Select --</option>
+          </select>
+        </div>
+
+        <!-- Template downloads -->
+        <div style="display:flex;flex-direction:column;gap:.5rem;margin:1rem 0">
+          <div style="display:flex;align-items:center;justify-content:flex-end">
+            <a href="#" id="rc-download-csv" style="font-size:.85rem">&darr; Template (.csv)</a>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:flex-end">
+            <a href="#" id="rc-download-xlsx" style="font-size:.85rem">&darr; Template (.xlsx)</a>
+          </div>
+        </div>
+
+        <!-- Upload -->
+        <div style="margin:1rem 0">
+          <label class="btn-primary" style="cursor:pointer;display:block;text-align:center;padding:.6rem">
+            &uarr; Upload filled file
+            <input type="file" id="rc-upload" accept=".csv,.xlsx,.xls" style="display:none">
+          </label>
+          <p style="font-size:.78rem;color:var(--muted);margin-top:.5rem">
+            Send the template to your counterparty. They fill <b>TRADES</b> (one row per option leg; <i>Side</i> = the side PLGO took, so Buy = PLGO bought)
+            and <b>COLLATERAL</b> (what we have stored with them, by asset). Upload the returned file here &mdash; or paste/edit the grids below &mdash; then run reconciliation.
+          </p>
+        </div>
+      </section>
+
+      <!-- Their Reported Trades -->
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="color:var(--accent)">THEIR REPORTED TRADES (<span id="rc-their-count">0</span>)</h2>
+          <div style="display:flex;gap:.5rem">
+            <button class="btn-secondary" style="width:auto" id="rc-add-row">+ Row</button>
+            <button class="btn-secondary" style="width:auto" id="rc-clear-rows">Clear</button>
+          </div>
+        </div>
+        <div class="chain-wrapper" style="max-height:400px;margin-top:.5rem">
+          <table id="rc-their-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Trade ID</th>
+                <th>Date</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Expiry</th>
+                <th>Qty</th>
+                <th>Premium USD</th>
+                <th style="width:30px"></th>
+              </tr>
+            </thead>
+            <tbody id="rc-their-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Their Reported Collateral -->
+      <section class="card">
+        <h2>THEIR REPORTED COLLATERAL <small style="font-weight:400;color:var(--muted)">&mdash; WHAT WE HAVE STORED WITH THEM</small></h2>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:.5rem .75rem;max-width:300px;margin-top:.75rem;align-items:center">
+          <label style="font-weight:600">ETH</label>
+          <input type="number" id="rc-coll-eth" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">FIL</label>
+          <input type="number" id="rc-coll-fil" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">USD</label>
+          <input type="number" id="rc-coll-usd" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">USDC</label>
+          <input type="number" id="rc-coll-usdc" value="0" step="any" style="width:120px">
+        </div>
+      </section>
+
+      <!-- Run reconciliation -->
+      <section class="card">
+        <button class="btn-primary" id="rc-run" style="width:100%;padding:.75rem;font-size:1rem">Run reconciliation</button>
+      </section>
+
+      <!-- Results -->
+      <section class="card" id="rc-results-section" style="display:none">
+        <h2>RECONCILIATION RESULTS</h2>
+        <div id="rc-results"></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:1rem">
+          <a href="#" id="rc-download-report" style="font-size:.85rem">&darr; Download report (.md)</a>
+        </div>
+      </section>
+
+    </div><!-- /subtab-tm-recon -->
+
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
