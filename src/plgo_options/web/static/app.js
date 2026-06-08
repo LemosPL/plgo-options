@@ -1978,6 +1978,25 @@ document.getElementById("rc-run").addEventListener("click", async () => {
   const counterparty = document.getElementById("rc-counterparty").value;
   if (!counterparty) { alert("Please select a counterparty"); return; }
 
+  const btn = document.getElementById("rc-run");
+  const resultsSection = document.getElementById("rc-results-section");
+  const resultsContainer = document.getElementById("rc-results");
+
+  // Show progress log
+  btn.disabled = true;
+  btn.textContent = "Running...";
+  resultsSection.style.display = "";
+  resultsContainer.innerHTML = `
+    <div id="rc-log" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;font-family:monospace;font-size:.78rem;max-height:300px;overflow-y:auto">
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Starting reconciliation...</div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Counterparty: <b>${counterparty}</b></div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Asset: <b>${currentAsset}</b></div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Their trades: <b>${rcTheirTrades.length}</b></div>
+      <div style="color:var(--accent)">[${new Date().toLocaleTimeString()}] Fetching our book & comparing trades...</div>
+      <div id="rc-log-spinner" style="color:var(--accent);margin-top:.5rem">&#9203; Please wait...</div>
+    </div>`;
+  resultsSection.scrollIntoView({ behavior: "smooth" });
+
   const payload = {
     counterparty,
     asset: currentAsset,
@@ -1992,9 +2011,33 @@ document.getElementById("rc-run").addEventListener("click", async () => {
 
   try {
     const res = await post("/api/trades/reconcile", payload);
-    rcRenderResults(res);
+
+    // Append completion to log, then render results after a brief pause
+    const log = document.getElementById("rc-log");
+    const spinner = document.getElementById("rc-log-spinner");
+    if (spinner) spinner.remove();
+    if (log) {
+      const s = res.summary;
+      log.innerHTML += `<div style="color:var(--green)">[${new Date().toLocaleTimeString()}] Reconciliation complete.</div>`;
+      log.innerHTML += `<div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Our trades: ${s.our_count} | Their trades: ${s.their_count}</div>`;
+      log.innerHTML += `<div style="color:var(--green)">[${new Date().toLocaleTimeString()}] Matched: ${s.matched}</div>`;
+      if (s.breaks > 0) log.innerHTML += `<div style="color:var(--orange)">[${new Date().toLocaleTimeString()}] Breaks: ${s.breaks}</div>`;
+      if (s.only_ours > 0) log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] Only ours: ${s.only_ours}</div>`;
+      if (s.only_theirs > 0) log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] Only theirs: ${s.only_theirs}</div>`;
+      log.innerHTML += `<div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Rendering results...</div>`;
+    }
+
+    setTimeout(() => rcRenderResults(res), 600);
   } catch (err) {
-    alert("Reconciliation failed: " + err.message);
+    const log = document.getElementById("rc-log");
+    const spinner = document.getElementById("rc-log-spinner");
+    if (spinner) spinner.remove();
+    if (log) {
+      log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] ERROR: ${err.message}</div>`;
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run reconciliation";
   }
 });
 
