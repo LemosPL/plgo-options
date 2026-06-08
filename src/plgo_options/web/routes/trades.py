@@ -306,8 +306,9 @@ async def reconcile_trades(body: ReconRequest):
             o = ours[0]
             th = theirs[0]
             diffs = {}
-            o_prem = float(o.get("premium_usd", 0) or 0)
-            th_prem = float(th.get("premium_usd", 0) or 0)
+            # Compare premiums by absolute value (sign convention differs)
+            o_prem = abs(float(o.get("premium_usd", 0) or 0))
+            th_prem = abs(float(th.get("premium_usd", 0) or 0))
             if abs(o_prem - th_prem) > 0.01:
                 diffs["premium_usd"] = {"ours": o_prem, "theirs": th_prem}
             o_tid = str(o.get("trade_id", "") or "")

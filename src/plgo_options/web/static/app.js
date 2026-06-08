@@ -2086,17 +2086,20 @@ function rcRenderResults(res) {
   container._reconCounterparty = res.counterparty;
 
   const ourCols = 7, theirCols = 7;
-  html += `<div class="chain-wrapper" style="max-height:700px;margin-top:1rem"><table style="font-size:.76rem;border-collapse:collapse" id="rc-results-table">
-    <thead><tr style="border-bottom:2px solid var(--border)">
-      <th rowspan="2" style="min-width:90px">Status</th>
-      <th colspan="${ourCols}" style="text-align:center;border-bottom:2px solid var(--accent);padding:.5rem;font-size:.82rem">OUR BOOK</th>
-      <th rowspan="2" style="width:4px;background:var(--border);padding:0"></th>
-      <th colspan="${theirCols}" style="text-align:center;border-bottom:2px solid var(--orange);padding:.5rem;font-size:.82rem">THEIR BOOK</th>
-      <th rowspan="2" style="min-width:70px">Action</th>
-    </tr><tr>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Trade Date</th><th>Qty</th><th>Premium</th>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Trade Date</th><th>Qty</th><th>Premium</th>
-    </tr></thead><tbody>`;
+  html += `<div style="max-height:700px;overflow:auto;margin-top:1rem;border:1px solid var(--border);border-radius:var(--radius)">
+  <table style="font-size:.76rem;border-collapse:collapse;width:100%;table-layout:fixed" id="rc-results-table">
+    <thead style="position:sticky;top:0;z-index:2;background:var(--surface)">
+      <tr style="border-bottom:2px solid var(--border)">
+        <th rowspan="2" style="width:95px;position:sticky;top:0;background:var(--surface)">Status</th>
+        <th colspan="${ourCols}" style="text-align:center;border-bottom:2px solid var(--accent);padding:.5rem;font-size:.82rem;background:var(--surface)">OUR BOOK</th>
+        <th rowspan="2" style="width:3px;background:var(--border);padding:0"></th>
+        <th colspan="${theirCols}" style="text-align:center;border-bottom:2px solid var(--orange);padding:.5rem;font-size:.82rem;background:var(--surface)">THEIR BOOK</th>
+        <th rowspan="2" style="width:120px;background:var(--surface)">Action</th>
+      </tr><tr style="background:var(--surface)">
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+      </tr>
+    </thead><tbody>`;
 
   rows.forEach((r, i) => {
     const o = r.ours || {};
@@ -2104,46 +2107,48 @@ function rcRenderResults(res) {
     const color = statusColor[r.status];
     const empty = '<td style="color:var(--muted);text-align:center">—</td>';
     const sep = '<td style="background:var(--border);padding:0"></td>';
+    const cs = "padding:.5rem .4rem";
 
     html += `<tr id="rc-row-${i}" style="border-bottom:1px solid var(--row-border)">`;
-    html += `<td style="color:${color};white-space:nowrap;font-weight:600;padding:.4rem .5rem" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
+    html += `<td style="color:${color};white-space:nowrap;font-weight:600;${cs}" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
 
-    // Our side
+    // Our side — show absolute values for qty & premium
     if (r.ours) {
-      html += `<td${cellStyle("side", r)} style="padding:.4rem .3rem">${o.side || ""}</td>`;
-      html += `<td${cellStyle("option_type", r)} style="padding:.4rem .3rem">${o.option_type || ""}</td>`;
-      html += `<td${cellStyle("strike", r)} style="padding:.4rem .3rem">${o.strike || ""}</td>`;
-      html += `<td${cellStyle("expiry", r)} style="padding:.4rem .3rem">${o.expiry_norm || o.expiry || ""}</td>`;
-      html += `<td${cellStyle("trade_date", r)} style="padding:.4rem .3rem">${o.trade_date_norm || o.trade_date || ""}</td>`;
-      html += `<td${cellStyle("qty", r)} style="padding:.4rem .3rem">${fmtQty(o.qty)}</td>`;
-      html += `<td${cellStyle("premium_usd", r)} style="padding:.4rem .3rem">${fmtMoney(o.premium_usd)}</td>`;
+      html += `<td${cellStyle("side", r)} style="${cs}">${o.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="${cs}">${o.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="${cs}">${o.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="${cs}">${o.expiry_norm || o.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="${cs}">${o.trade_date_norm || o.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(o.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="${cs}">${fmtMoney(Math.abs(o.premium_usd || 0))}</td>`;
     } else {
       html += empty.repeat(ourCols);
     }
 
     html += sep;
 
-    // Their side
+    // Their side — show absolute values for qty & premium
     if (r.theirs) {
-      html += `<td${cellStyle("side", r)} style="padding:.4rem .3rem">${t.side || ""}</td>`;
-      html += `<td${cellStyle("option_type", r)} style="padding:.4rem .3rem">${t.option_type || ""}</td>`;
-      html += `<td${cellStyle("strike", r)} style="padding:.4rem .3rem">${t.strike || ""}</td>`;
-      html += `<td${cellStyle("expiry", r)} style="padding:.4rem .3rem">${t.expiry_norm || t.expiry || ""}</td>`;
-      html += `<td${cellStyle("trade_date", r)} style="padding:.4rem .3rem">${t.trade_date_norm || t.trade_date || ""}</td>`;
-      html += `<td${cellStyle("qty", r)} style="padding:.4rem .3rem">${fmtQty(t.qty)}</td>`;
-      html += `<td${cellStyle("premium_usd", r)} style="padding:.4rem .3rem">${fmtMoney(t.premium_usd)}</td>`;
+      html += `<td${cellStyle("side", r)} style="${cs}">${t.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="${cs}">${t.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="${cs}">${t.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="${cs}">${t.expiry_norm || t.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="${cs}">${t.trade_date_norm || t.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(t.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="${cs}">${fmtMoney(Math.abs(t.premium_usd || 0))}</td>`;
     } else {
       html += empty.repeat(theirCols);
     }
 
     // Action column
-    html += `<td style="white-space:nowrap;padding:.4rem .3rem;text-align:center">`;
+    html += `<td style="white-space:nowrap;${cs};text-align:center">`;
     if (r.status === "only_ours") {
-      html += `<button class="btn-secondary btn-delete rc-action" data-action="remove" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto" title="Remove from our book">Remove</button>`;
+      html += `<button class="btn-secondary btn-delete rc-action" data-action="remove" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto" title="Remove from our book">Remove</button>`;
     } else if (r.status === "only_theirs") {
-      html += `<button class="btn-primary rc-action" data-action="add" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto" title="Add to our book">Add</button>`;
+      html += `<button class="btn-primary rc-action" data-action="add" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto" title="Add to our book">Add</button>`;
     } else if (r.status === "break") {
-      html += `<button class="btn-secondary rc-action" data-action="update" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto;color:var(--orange);border-color:var(--orange)" title="Update ours to match theirs">Align</button>`;
+      html += `<button class="btn-secondary rc-action" data-action="update" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto;color:var(--orange);border-color:var(--orange)" title="Update ours to match theirs">Align</button> `;
+      html += `<button class="btn-secondary rc-action" data-action="keep" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto;color:var(--accent);border-color:var(--accent)" title="Keep our values">Keep Ours</button>`;
     } else {
       html += `<span style="color:var(--green);font-size:.8rem">&#10003;</span>`;
     }
@@ -2227,6 +2232,10 @@ async function rcHandleAction(action, idx) {
       if (!confirm(`Align trade to counterparty's values?\n${diffDesc}`)) return;
       await api("PUT", `/api/trades/${dbId}`, changes);
       rcMarkRowDone(idx, "Aligned");
+
+    } else if (action === "keep") {
+      // Accept our side as correct — just mark the row resolved
+      rcMarkRowDone(idx, "Kept Ours");
     }
 
     // Refresh trade management data in background
