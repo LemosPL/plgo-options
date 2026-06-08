@@ -1994,7 +1994,8 @@ function rcRenderResults(res) {
   section.style.display = "";
 
   const s = res.summary;
-  const fmtMoney = (v) => v != null ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const fmtMoney = (v) => v != null && v !== 0 ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const fmtQty = (v) => v != null && v !== 0 ? Math.abs(Number(v)).toLocaleString() : "--";
 
   let html = `
     <div class="risk-grid" style="margin-bottom:1rem">
@@ -2006,61 +2007,80 @@ function rcRenderResults(res) {
       <div class="risk-metric"><span class="risk-label" style="color:var(--red)">Only Theirs</span><span class="risk-value" style="color:var(--red)">${s.only_theirs}</span></div>
     </div>`;
 
-  // Matched
-  if (res.matched.length) {
-    html += `<h3 style="color:var(--green);margin:1rem 0 .5rem">Matched (${res.matched.length})</h3>
-    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium USD</th>
-    </tr></thead><tbody>`;
-    res.matched.forEach(m => {
-      const o = m.ours;
-      html += `<tr>
-        <td>${o.side || ""}</td><td>${o.option_type || ""}</td><td>${o.strike}</td>
-        <td>${o.expiry || ""}</td><td>${Math.abs(o.qty || 0)}</td><td>${fmtMoney(o.premium_usd)}</td>
-      </tr>`;
-    });
-    html += `</tbody></table></div>`;
+  // Build unified rows: [{status, ours, theirs, diffs}]
+  const rows = [];
+  res.matched.forEach(m => rows.push({ status: "match", ours: m.ours, theirs: m.theirs, diffs: {} }));
+  res.breaks.forEach(b => rows.push({ status: "break", ours: b.ours, theirs: b.theirs, diffs: b.diffs }));
+  res.only_ours.forEach(t => rows.push({ status: "only_ours", ours: t, theirs: null, diffs: {} }));
+  res.only_theirs.forEach(t => rows.push({ status: "only_theirs", ours: null, theirs: t, diffs: {} }));
+
+  // Sort: breaks first, then only_ours, only_theirs, then matched
+  const order = { break: 0, only_ours: 1, only_theirs: 2, match: 3 };
+  rows.sort((a, b) => order[a.status] - order[b.status]);
+
+  const statusIcon = { match: "&#10003;", break: "&#9888;", only_ours: "&#8592;", only_theirs: "&#8594;" };
+  const statusColor = { match: "var(--green)", break: "var(--orange)", only_ours: "var(--red)", only_theirs: "var(--red)" };
+  const statusLabel = { match: "Match", break: "Break", only_ours: "Only Ours", only_theirs: "Only Theirs" };
+
+  function cellStyle(field, row) {
+    if (row.diffs && row.diffs[field]) return ' style="background:rgba(210,153,34,0.15);font-weight:600"';
+    return "";
   }
 
-  // Breaks
-  if (res.breaks.length) {
-    html += `<h3 style="color:var(--orange);margin:1rem 0 .5rem">Breaks (${res.breaks.length})</h3>
-    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
-      <th>Trade</th><th>Field</th><th>Ours</th><th>Theirs</th>
+  html += `<div class="chain-wrapper" style="max-height:600px;margin-top:1rem"><table style="font-size:.78rem">
+    <thead><tr>
+      <th>Status</th>
+      <th colspan="5" style="text-align:center;border-bottom:2px solid var(--accent)">OUR BOOK</th>
+      <th colspan="5" style="text-align:center;border-bottom:2px solid var(--orange)">THEIR BOOK</th>
+    </tr><tr>
+      <th></th>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
     </tr></thead><tbody>`;
-    res.breaks.forEach(b => {
-      Object.entries(b.diffs).forEach(([field, vals]) => {
-        html += `<tr style="color:var(--orange)">
-          <td>${b.key}</td><td>${field}</td><td>${vals.ours}</td><td>${vals.theirs}</td>
-        </tr>`;
-      });
-    });
-    html += `</tbody></table></div>`;
-  }
 
-  // Only ours
-  if (res.only_ours.length) {
-    html += `<h3 style="color:var(--red);margin:1rem 0 .5rem">Only in Our Book (${res.only_ours.length})</h3>
-    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium</th>
-    </tr></thead><tbody>`;
-    res.only_ours.forEach(t => {
-      html += `<tr style="color:var(--red)"><td>${t.side}</td><td>${t.option_type}</td><td>${t.strike}</td><td>${t.expiry}</td><td>${Math.abs(t.qty || 0)}</td><td>${fmtMoney(t.premium_usd)}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
+  rows.forEach(r => {
+    const o = r.ours || {};
+    const t = r.theirs || {};
+    const color = statusColor[r.status];
+    const empty = '<td style="color:var(--muted);text-align:center">—</td>';
 
-  // Only theirs
-  if (res.only_theirs.length) {
-    html += `<h3 style="color:var(--red);margin:1rem 0 .5rem">Only in Their Book (${res.only_theirs.length})</h3>
-    <div class="chain-wrapper" style="max-height:250px"><table><thead><tr>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Premium</th>
-    </tr></thead><tbody>`;
-    res.only_theirs.forEach(t => {
-      html += `<tr style="color:var(--red)"><td>${t.side}</td><td>${t.option_type}</td><td>${t.strike}</td><td>${t.expiry}</td><td>${Math.abs(t.qty || 0)}</td><td>${fmtMoney(t.premium_usd)}</td></tr>`;
-    });
-    html += `</tbody></table></div>`;
-  }
+    html += `<tr>`;
+    html += `<td style="color:${color};white-space:nowrap;font-weight:600" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
+
+    // Our side
+    if (r.ours) {
+      html += `<td${cellStyle("side", r)}>${o.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)}>${o.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)}>${o.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)}>${o.expiry || ""}</td>`;
+      html += `<td${cellStyle("qty", r)}>${fmtQty(o.qty)}</td>`;
+    } else {
+      html += empty.repeat(5);
+    }
+
+    // Their side
+    if (r.theirs) {
+      html += `<td${cellStyle("side", r)}>${t.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)}>${t.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)}>${t.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)}>${t.expiry || ""}</td>`;
+      html += `<td${cellStyle("qty", r)}>${fmtQty(t.qty)}</td>`;
+    } else {
+      html += empty.repeat(5);
+    }
+
+    html += `</tr>`;
+
+    // If there are field-level diffs, show detail row
+    if (Object.keys(r.diffs).length > 0) {
+      const diffText = Object.entries(r.diffs).map(([f, v]) =>
+        `<b>${f}</b>: ours=${v.ours}, theirs=${v.theirs}`
+      ).join(" &nbsp;|&nbsp; ");
+      html += `<tr><td></td><td colspan="10" style="font-size:.72rem;color:var(--orange);padding:.15rem .5rem">${diffText}</td></tr>`;
+    }
+  });
+
+  html += `</tbody></table></div>`;
 
   // Collateral
   const coll = res.collateral;
@@ -2100,31 +2120,28 @@ document.getElementById("rc-download-report").addEventListener("click", (e) => {
   md += `| Only ours | ${s.only_ours} |\n`;
   md += `| Only theirs | ${s.only_theirs} |\n\n`;
 
-  if (res.breaks.length) {
-    md += `## Breaks\n\n| Trade | Field | Ours | Theirs |\n|-------|-------|------|--------|\n`;
-    res.breaks.forEach(b => {
-      Object.entries(b.diffs).forEach(([field, vals]) => {
-        md += `| ${b.key} | ${field} | ${vals.ours} | ${vals.theirs} |\n`;
-      });
-    });
-    md += "\n";
-  }
+  md += `## Trade-by-Trade Comparison\n\n`;
+  md += `| Status | Our Side | Our Type | Our Strike | Our Expiry | Our Qty | Their Side | Their Type | Their Strike | Their Expiry | Their Qty |\n`;
+  md += `|--------|----------|----------|------------|------------|---------|------------|------------|--------------|--------------|----------|\n`;
 
-  if (res.only_ours.length) {
-    md += `## Only in Our Book\n\n| Side | Type | Strike | Expiry | Qty | Premium |\n|------|------|--------|--------|-----|--------|\n`;
-    res.only_ours.forEach(t => {
-      md += `| ${t.side} | ${t.option_type} | ${t.strike} | ${t.expiry} | ${Math.abs(t.qty || 0)} | ${fmtMoney(t.premium_usd)} |\n`;
-    });
-    md += "\n";
-  }
+  const allRows = [];
+  res.matched.forEach(m => allRows.push({ status: "Match", ours: m.ours, theirs: m.theirs, diffs: {} }));
+  res.breaks.forEach(b => allRows.push({ status: "Break", ours: b.ours, theirs: b.theirs, diffs: b.diffs }));
+  res.only_ours.forEach(t => allRows.push({ status: "Only Ours", ours: t, theirs: null, diffs: {} }));
+  res.only_theirs.forEach(t => allRows.push({ status: "Only Theirs", ours: null, theirs: t, diffs: {} }));
+  const mdOrder = { Break: 0, "Only Ours": 1, "Only Theirs": 2, Match: 3 };
+  allRows.sort((a, b) => mdOrder[a.status] - mdOrder[b.status]);
 
-  if (res.only_theirs.length) {
-    md += `## Only in Their Book\n\n| Side | Type | Strike | Expiry | Qty | Premium |\n|------|------|--------|--------|-----|--------|\n`;
-    res.only_theirs.forEach(t => {
-      md += `| ${t.side} | ${t.option_type} | ${t.strike} | ${t.expiry} | ${Math.abs(t.qty || 0)} | ${fmtMoney(t.premium_usd)} |\n`;
-    });
-    md += "\n";
-  }
+  allRows.forEach(r => {
+    const o = r.ours || {};
+    const t = r.theirs || {};
+    md += `| ${r.status} | ${o.side || "—"} | ${o.option_type || "—"} | ${o.strike || "—"} | ${o.expiry || "—"} | ${o.qty ? Math.abs(o.qty) : "—"} | ${t.side || "—"} | ${t.option_type || "—"} | ${t.strike || "—"} | ${t.expiry || "—"} | ${t.qty ? Math.abs(t.qty) : "—"} |\n`;
+    if (Object.keys(r.diffs).length > 0) {
+      const diffDetail = Object.entries(r.diffs).map(([f, v]) => `${f}: ours=${v.ours}, theirs=${v.theirs}`).join("; ");
+      md += `| | *${diffDetail}* | | | | | | | | | |\n`;
+    }
+  });
+  md += "\n";
 
   const coll = res.collateral;
   md += `## Reported Collateral\n\n| Asset | Quantity |\n|-------|----------|\n`;
