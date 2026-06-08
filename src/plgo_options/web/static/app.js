@@ -1938,12 +1938,26 @@ document.getElementById("rc-download-xlsx").addEventListener("click", (e) => {
 });
 
 // Upload handler
+function rcNormSide(s) {
+  s = (s || "").trim().toUpperCase();
+  if (["BUY","BUYS","BOUGHT","LONG","B","L"].includes(s)) return "Buy";
+  if (["SELL","SELLS","SOLD","SHORT","S"].includes(s)) return "Sell";
+  return s.charAt(0) + s.slice(1).toLowerCase();
+}
+
+function rcNormType(t) {
+  t = (t || "").trim().toUpperCase();
+  if (["C","CALL","CALLS"].includes(t)) return "Call";
+  if (["P","PUT","PUTS"].includes(t)) return "Put";
+  return t.charAt(0) + t.slice(1).toLowerCase();
+}
+
 function rcParseRow(row) {
   return {
     trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
     trade_date: String(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || "").split(" ")[0],
-    side: String(row.side || row.Side || ""),
-    option_type: String(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
+    side: rcNormSide(row.side || row.Side || ""),
+    option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
     strike: parseFloat(row.strike || row.Strike || 0),
     expiry: String(row.expiry || row.Expiry || ""),
     qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),

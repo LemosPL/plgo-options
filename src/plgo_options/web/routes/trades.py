@@ -198,18 +198,18 @@ from datetime import datetime, date
 
 def _norm_side(s: str) -> str:
     s = s.strip().upper()
-    if s in ("BUY", "LONG", "B"):
+    if s in ("BUY", "BUYS", "BOUGHT", "LONG", "B", "L"):
         return "BUY"
-    if s in ("SELL", "SHORT", "S"):
+    if s in ("SELL", "SELLS", "SOLD", "SHORT", "S"):
         return "SELL"
     return s
 
 
 def _norm_type(t: str) -> str:
     t = t.strip().upper()
-    if t in ("C", "CALL"):
+    if t in ("C", "CALL", "CALLS"):
         return "CALL"
-    if t in ("P", "PUT"):
+    if t in ("P", "PUT", "PUTS"):
         return "PUT"
     return t
 
