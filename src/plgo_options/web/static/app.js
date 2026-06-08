@@ -1952,14 +1952,38 @@ function rcNormType(t) {
   return t.charAt(0) + t.slice(1).toLowerCase();
 }
 
+function rcNormDate(v) {
+  if (v == null || v === "") return "";
+  // Excel serial date (number like 46185 = days since 1899-12-30)
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (!isNaN(n) && n > 30000 && n < 60000) {
+    const base = new Date(1899, 11, 30); // Dec 30, 1899
+    const d = new Date(base.getTime() + n * 86400000);
+    return d.toISOString().split("T")[0];
+  }
+  const s = String(v).trim();
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+  // DDMMMYY e.g. 04AUG26
+  const m = s.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/i);
+  if (m) {
+    const months = {JAN:"01",FEB:"02",MAR:"03",APR:"04",MAY:"05",JUN:"06",JUL:"07",AUG:"08",SEP:"09",OCT:"10",NOV:"11",DEC:"12"};
+    const mon = months[m[2].toUpperCase()];
+    if (mon) return `20${m[3]}-${mon}-${m[1].padStart(2, "0")}`;
+  }
+  // Timestamp with space
+  if (s.includes(" ")) return s.split(" ")[0];
+  return s;
+}
+
 function rcParseRow(row) {
   return {
     trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
-    trade_date: String(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || "").split(" ")[0],
+    trade_date: rcNormDate(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || ""),
     side: rcNormSide(row.side || row.Side || ""),
     option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
     strike: parseFloat(row.strike || row.Strike || 0),
-    expiry: String(row.expiry || row.Expiry || ""),
+    expiry: rcNormDate(row.expiry || row.Expiry || ""),
     qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),
     premium_usd: parseFloat(row.premium_usd || row.Premium_USD || row["Premium USD"] || 0),
   };

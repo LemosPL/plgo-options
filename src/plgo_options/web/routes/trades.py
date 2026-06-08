@@ -214,11 +214,30 @@ def _norm_type(t: str) -> str:
     return t
 
 
-def _norm_date(d: str) -> str:
+def _norm_date(d) -> str:
     """Normalize date to YYYY-MM-DD regardless of input format."""
+    if d is None:
+        return ""
+    # Handle numeric values (Excel serial dates: days since 1899-12-30)
+    if isinstance(d, (int, float)):
+        serial = int(d)
+        if 30000 < serial < 60000:  # plausible Excel date range (~1982–2064)
+            from datetime import timedelta
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=serial)).strftime("%Y-%m-%d")
+        return str(d)
+    d = str(d).strip()
     if not d:
         return ""
-    d = d.strip()
+    # Check if it's a numeric string (Excel serial date)
+    try:
+        serial = int(float(d))
+        if 30000 < serial < 60000:
+            from datetime import timedelta
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=serial)).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        pass
     # Already YYYY-MM-DD
     if re.match(r"^\d{4}-\d{2}-\d{2}", d):
         return d[:10]
