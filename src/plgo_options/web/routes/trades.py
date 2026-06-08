@@ -192,6 +192,10 @@ async def get_trade_history(trade_id: int):
 
 # ─── Reconciliation endpoint ────────────────────────────────
 
+import re
+from datetime import datetime, date
+
+
 def _norm_side(s: str) -> str:
     s = s.strip().upper()
     if s in ("BUY", "LONG", "B"):
@@ -210,13 +214,51 @@ def _norm_type(t: str) -> str:
     return t
 
 
+def _norm_date(d: str) -> str:
+    """Normalize date to YYYY-MM-DD regardless of input format."""
+    if not d:
+        return ""
+    d = d.strip()
+    # Already YYYY-MM-DD
+    if re.match(r"^\d{4}-\d{2}-\d{2}", d):
+        return d[:10]
+    # DDMMMYY e.g. 04AUG26
+    m = re.match(r"^(\d{1,2})([A-Z]{3})(\d{2})$", d.upper())
+    if m:
+        day, mon, yr = m.groups()
+        try:
+            dt = datetime.strptime(f"{day}{mon}{yr}", "%d%b%y")
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    # DD/MM/YYYY or MM/DD/YYYY — try both
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y",
+                "%d.%m.%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(d, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return d
+
+
+def _is_expired(expiry_str: str) -> bool:
+    """Check if a trade's expiry is in the past."""
+    nd = _norm_date(expiry_str)
+    if not nd:
+        return False
+    try:
+        return datetime.strptime(nd, "%Y-%m-%d").date() < date.today()
+    except ValueError:
+        return False
+
+
 def _match_key(t: dict) -> tuple:
-    """Build a matching key from a trade dict: (side, type, strike, expiry, abs_qty)."""
+    """Build a matching key: (side, type, strike, expiry_normalized, abs_qty)."""
     return (
         _norm_side(str(t.get("side", ""))),
         _norm_type(str(t.get("option_type", ""))),
         float(t.get("strike", 0)),
-        str(t.get("expiry", "")).strip().upper(),
+        _norm_date(str(t.get("expiry", ""))),
         abs(float(t.get("qty", 0))),
     )
 
@@ -227,6 +269,18 @@ async def reconcile_trades(body: ReconRequest):
     our_all = await repo.list_trades(db, include_expired=False, include_deleted=False, asset=body.asset)
     our_trades = [t for t in our_all if (t.get("counterparty", "") or "").lower() == body.counterparty.lower()]
 
+    # Filter out expired trades from both sides
+    our_trades = [t for t in our_trades if not _is_expired(str(t.get("expiry", "")))]
+    their_active = [t.model_dump() for t in body.their_trades if not _is_expired(t.expiry)]
+
+    # Add normalized dates to trade dicts for display
+    for t in our_trades:
+        t["expiry_norm"] = _norm_date(str(t.get("expiry", "")))
+        t["trade_date_norm"] = _norm_date(str(t.get("trade_date", "")))
+    for t in their_active:
+        t["expiry_norm"] = _norm_date(str(t.get("expiry", "")))
+        t["trade_date_norm"] = _norm_date(str(t.get("trade_date", "")))
+
     # Build keyed lookups
     our_by_key: dict[tuple, list[dict]] = {}
     for t in our_trades:
@@ -234,10 +288,9 @@ async def reconcile_trades(body: ReconRequest):
         our_by_key.setdefault(k, []).append(t)
 
     their_by_key: dict[tuple, list[dict]] = {}
-    for t in body.their_trades:
-        td = t.model_dump()
-        k = _match_key(td)
-        their_by_key.setdefault(k, []).append(td)
+    for t in their_active:
+        k = _match_key(t)
+        their_by_key.setdefault(k, []).append(t)
 
     all_keys = set(our_by_key.keys()) | set(their_by_key.keys())
 
@@ -261,6 +314,10 @@ async def reconcile_trades(body: ReconRequest):
             th_tid = str(th.get("trade_id", "") or "")
             if o_tid and th_tid and o_tid != th_tid:
                 diffs["trade_id"] = {"ours": o_tid, "theirs": th_tid}
+            o_td = _norm_date(str(o.get("trade_date", "")))
+            th_td = _norm_date(str(th.get("trade_date", "")))
+            if o_td and th_td and o_td != th_td:
+                diffs["trade_date"] = {"ours": o_td, "theirs": th_td}
             if diffs:
                 breaks.append({
                     "key": f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}",

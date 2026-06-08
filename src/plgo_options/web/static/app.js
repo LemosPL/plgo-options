@@ -2032,17 +2032,17 @@ function rcRenderResults(res) {
   container._reconRows = rows;
   container._reconCounterparty = res.counterparty;
 
-  html += `<div class="chain-wrapper" style="max-height:600px;margin-top:1rem"><table style="font-size:.78rem" id="rc-results-table">
-    <thead><tr>
-      <th>Status</th>
-      <th colspan="5" style="text-align:center;border-bottom:2px solid var(--accent)">OUR BOOK</th>
-      <th colspan="5" style="text-align:center;border-bottom:2px solid var(--orange)">THEIR BOOK</th>
-      <th>Action</th>
+  const ourCols = 7, theirCols = 7;
+  html += `<div class="chain-wrapper" style="max-height:700px;margin-top:1rem"><table style="font-size:.76rem;border-collapse:collapse" id="rc-results-table">
+    <thead><tr style="border-bottom:2px solid var(--border)">
+      <th rowspan="2" style="min-width:90px">Status</th>
+      <th colspan="${ourCols}" style="text-align:center;border-bottom:2px solid var(--accent);padding:.5rem;font-size:.82rem">OUR BOOK</th>
+      <th rowspan="2" style="width:4px;background:var(--border);padding:0"></th>
+      <th colspan="${theirCols}" style="text-align:center;border-bottom:2px solid var(--orange);padding:.5rem;font-size:.82rem">THEIR BOOK</th>
+      <th rowspan="2" style="min-width:70px">Action</th>
     </tr><tr>
-      <th></th>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
-      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Qty</th>
-      <th></th>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Trade Date</th><th>Qty</th><th>Premium</th>
+      <th>Side</th><th>Type</th><th>Strike</th><th>Expiry</th><th>Trade Date</th><th>Qty</th><th>Premium</th>
     </tr></thead><tbody>`;
 
   rows.forEach((r, i) => {
@@ -2050,34 +2050,41 @@ function rcRenderResults(res) {
     const t = r.theirs || {};
     const color = statusColor[r.status];
     const empty = '<td style="color:var(--muted);text-align:center">—</td>';
+    const sep = '<td style="background:var(--border);padding:0"></td>';
 
-    html += `<tr id="rc-row-${i}">`;
-    html += `<td style="color:${color};white-space:nowrap;font-weight:600" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
+    html += `<tr id="rc-row-${i}" style="border-bottom:1px solid var(--row-border)">`;
+    html += `<td style="color:${color};white-space:nowrap;font-weight:600;padding:.4rem .5rem" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
 
     // Our side
     if (r.ours) {
-      html += `<td${cellStyle("side", r)}>${o.side || ""}</td>`;
-      html += `<td${cellStyle("option_type", r)}>${o.option_type || ""}</td>`;
-      html += `<td${cellStyle("strike", r)}>${o.strike || ""}</td>`;
-      html += `<td${cellStyle("expiry", r)}>${o.expiry || ""}</td>`;
-      html += `<td${cellStyle("qty", r)}>${fmtQty(o.qty)}</td>`;
+      html += `<td${cellStyle("side", r)} style="padding:.4rem .3rem">${o.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="padding:.4rem .3rem">${o.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="padding:.4rem .3rem">${o.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="padding:.4rem .3rem">${o.expiry_norm || o.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="padding:.4rem .3rem">${o.trade_date_norm || o.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="padding:.4rem .3rem">${fmtQty(o.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="padding:.4rem .3rem">${fmtMoney(o.premium_usd)}</td>`;
     } else {
-      html += empty.repeat(5);
+      html += empty.repeat(ourCols);
     }
+
+    html += sep;
 
     // Their side
     if (r.theirs) {
-      html += `<td${cellStyle("side", r)}>${t.side || ""}</td>`;
-      html += `<td${cellStyle("option_type", r)}>${t.option_type || ""}</td>`;
-      html += `<td${cellStyle("strike", r)}>${t.strike || ""}</td>`;
-      html += `<td${cellStyle("expiry", r)}>${t.expiry || ""}</td>`;
-      html += `<td${cellStyle("qty", r)}>${fmtQty(t.qty)}</td>`;
+      html += `<td${cellStyle("side", r)} style="padding:.4rem .3rem">${t.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="padding:.4rem .3rem">${t.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="padding:.4rem .3rem">${t.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="padding:.4rem .3rem">${t.expiry_norm || t.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="padding:.4rem .3rem">${t.trade_date_norm || t.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="padding:.4rem .3rem">${fmtQty(t.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="padding:.4rem .3rem">${fmtMoney(t.premium_usd)}</td>`;
     } else {
-      html += empty.repeat(5);
+      html += empty.repeat(theirCols);
     }
 
     // Action column
-    html += `<td style="white-space:nowrap">`;
+    html += `<td style="white-space:nowrap;padding:.4rem .3rem;text-align:center">`;
     if (r.status === "only_ours") {
       html += `<button class="btn-secondary btn-delete rc-action" data-action="remove" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto" title="Remove from our book">Remove</button>`;
     } else if (r.status === "only_theirs") {
@@ -2085,7 +2092,7 @@ function rcRenderResults(res) {
     } else if (r.status === "break") {
       html += `<button class="btn-secondary rc-action" data-action="update" data-idx="${i}" style="font-size:.7rem;padding:.2rem .5rem;width:auto;color:var(--orange);border-color:var(--orange)" title="Update ours to match theirs">Align</button>`;
     } else {
-      html += `<span style="color:var(--green);font-size:.7rem">&#10003;</span>`;
+      html += `<span style="color:var(--green);font-size:.8rem">&#10003;</span>`;
     }
     html += `</td></tr>`;
 
@@ -2093,8 +2100,8 @@ function rcRenderResults(res) {
     if (Object.keys(r.diffs).length > 0) {
       const diffText = Object.entries(r.diffs).map(([f, v]) =>
         `<b>${f}</b>: ours=${v.ours}, theirs=${v.theirs}`
-      ).join(" &nbsp;|&nbsp; ");
-      html += `<tr id="rc-diff-${i}"><td></td><td colspan="11" style="font-size:.72rem;color:var(--orange);padding:.15rem .5rem">${diffText}</td></tr>`;
+      ).join(" &nbsp;&bull;&nbsp; ");
+      html += `<tr id="rc-diff-${i}" style="border-bottom:1px solid var(--row-border)"><td></td><td colspan="${ourCols + theirCols + 1}" style="font-size:.72rem;color:var(--orange);padding:.2rem .5rem;background:rgba(210,153,34,0.05)">${diffText}</td><td></td></tr>`;
     }
   });
 
@@ -2215,8 +2222,8 @@ document.getElementById("rc-download-report").addEventListener("click", (e) => {
   md += `| Only theirs | ${s.only_theirs} |\n\n`;
 
   md += `## Trade-by-Trade Comparison\n\n`;
-  md += `| Status | Our Side | Our Type | Our Strike | Our Expiry | Our Qty | Their Side | Their Type | Their Strike | Their Expiry | Their Qty |\n`;
-  md += `|--------|----------|----------|------------|------------|---------|------------|------------|--------------|--------------|----------|\n`;
+  md += `| Status | Our Side | Our Type | Our Strike | Our Expiry | Our Date | Our Qty | Our Premium | Their Side | Their Type | Their Strike | Their Expiry | Their Date | Their Qty | Their Premium |\n`;
+  md += `|--------|----------|----------|------------|------------|----------|---------|-------------|------------|------------|--------------|--------------|------------|-----------|---------------|\n`;
 
   const allRows = [];
   res.matched.forEach(m => allRows.push({ status: "Match", ours: m.ours, theirs: m.theirs, diffs: {} }));
@@ -2229,10 +2236,14 @@ document.getElementById("rc-download-report").addEventListener("click", (e) => {
   allRows.forEach(r => {
     const o = r.ours || {};
     const t = r.theirs || {};
-    md += `| ${r.status} | ${o.side || "—"} | ${o.option_type || "—"} | ${o.strike || "—"} | ${o.expiry || "—"} | ${o.qty ? Math.abs(o.qty) : "—"} | ${t.side || "—"} | ${t.option_type || "—"} | ${t.strike || "—"} | ${t.expiry || "—"} | ${t.qty ? Math.abs(t.qty) : "—"} |\n`;
+    const oExp = o.expiry_norm || o.expiry || "—";
+    const oDate = o.trade_date_norm || o.trade_date || "—";
+    const tExp = t.expiry_norm || t.expiry || "—";
+    const tDate = t.trade_date_norm || t.trade_date || "—";
+    md += `| ${r.status} | ${o.side || "—"} | ${o.option_type || "—"} | ${o.strike || "—"} | ${oExp} | ${oDate} | ${o.qty ? Math.abs(o.qty) : "—"} | ${fmtMoney(o.premium_usd)} | ${t.side || "—"} | ${t.option_type || "—"} | ${t.strike || "—"} | ${tExp} | ${tDate} | ${t.qty ? Math.abs(t.qty) : "—"} | ${fmtMoney(t.premium_usd)} |\n`;
     if (Object.keys(r.diffs).length > 0) {
       const diffDetail = Object.entries(r.diffs).map(([f, v]) => `${f}: ours=${v.ours}, theirs=${v.theirs}`).join("; ");
-      md += `| | *${diffDetail}* | | | | | | | | | |\n`;
+      md += `| | *${diffDetail}* | | | | | | | | | | | | | |\n`;
     }
   });
   md += "\n";
