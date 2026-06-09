@@ -976,6 +976,7 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
     // Populate recon counterparties when switching to recon tab
     if (btn.dataset.subtab === "tm-recon") {
       rcPopulateCounterparties();
+      rcLoadHistory();
       const lbl = document.getElementById("rc-asset-label");
       if (lbl) lbl.textContent = currentAsset;
       if (rcTheirTrades.length === 0) rcAddRow();
@@ -2131,6 +2132,8 @@ document.getElementById("rc-run").addEventListener("click", async () => {
     }
 
     setTimeout(() => rcRenderResults(res), 600);
+    // Refresh history table
+    rcLoadHistory();
   } catch (err) {
     const log = document.getElementById("rc-log");
     const spinner = document.getElementById("rc-log-spinner");
@@ -2143,6 +2146,58 @@ document.getElementById("rc-run").addEventListener("click", async () => {
     btn.textContent = "Run reconciliation";
   }
 });
+
+// ─── Reconciliation History ─────────────────────────────────
+async function rcLoadHistory() {
+  try {
+    const data = await get(`/api/trades/recon-history?asset=${currentAsset}`);
+    rcRenderHistory(data.history || []);
+  } catch (e) {
+    const tbody = document.getElementById("rc-history-body");
+    if (tbody) tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--muted)">No history yet</td></tr>`;
+  }
+}
+
+function rcRenderHistory(history) {
+  const tbody = document.getElementById("rc-history-body");
+  if (!tbody) return;
+
+  if (history.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:1.5rem;color:var(--muted)">No reconciliation runs yet. Upload a counterparty file and run reconciliation above.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = history.map(h => {
+    const statusColor = h.status === "clean" ? "var(--green)"
+                      : h.status === "breaks" ? "var(--orange)"
+                      : "var(--red)";
+    const statusLabel = h.status === "clean" ? "Clean"
+                      : h.status === "breaks" ? "Breaks"
+                      : "Mismatches";
+    const statusIcon = h.status === "clean" ? "&#10003;"
+                     : h.status === "breaks" ? "&#9888;"
+                     : "&#10007;";
+    // Format date nicely
+    const d = new Date(h.run_date + (h.run_date.includes("Z") || h.run_date.includes("+") ? "" : "Z"));
+    const dateStr = d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const timeStr = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+    const hasIssues = h.breaks > 0 || h.only_ours > 0 || h.only_theirs > 0;
+
+    return `<tr>
+      <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+      <td style="text-align:left;font-weight:600">${h.counterparty}</td>
+      <td>${h.asset}</td>
+      <td>${h.our_count}</td>
+      <td>${h.their_count}</td>
+      <td style="color:var(--green);font-weight:600">${h.matched}</td>
+      <td style="color:${h.breaks > 0 ? 'var(--orange)' : 'var(--muted)'};font-weight:${h.breaks > 0 ? '700' : '400'}">${h.breaks}</td>
+      <td style="color:${h.only_ours > 0 ? 'var(--red)' : 'var(--muted)'};font-weight:${h.only_ours > 0 ? '700' : '400'}">${h.only_ours}</td>
+      <td style="color:${h.only_theirs > 0 ? 'var(--red)' : 'var(--muted)'};font-weight:${h.only_theirs > 0 ? '700' : '400'}">${h.only_theirs}</td>
+      <td style="color:${statusColor};font-weight:700">${statusIcon} ${statusLabel}</td>
+    </tr>`;
+  }).join("");
+}
 
 function rcRenderResults(res) {
   const section = document.getElementById("rc-results-section");

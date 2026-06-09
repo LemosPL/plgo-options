@@ -289,6 +289,32 @@
         <button class="btn-primary" id="rc-run" style="width:100%;padding:.75rem;font-size:1rem">Run reconciliation</button>
       </section>
 
+      <!-- Reconciliation History -->
+      <section class="card" id="rc-history-section">
+        <h2>RECONCILIATION HISTORY</h2>
+        <div class="chain-wrapper" style="max-height:300px;margin-top:.5rem">
+          <table id="rc-history-table" style="width:100%">
+            <thead>
+              <tr style="position:sticky;top:0;background:var(--card-bg);z-index:2">
+                <th>Date / Time</th>
+                <th>Counterparty</th>
+                <th>Asset</th>
+                <th>Ours</th>
+                <th>Theirs</th>
+                <th>Matched</th>
+                <th>Breaks</th>
+                <th>Only Ours</th>
+                <th>Only Theirs</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="rc-history-body">
+              <tr><td colspan="10" style="text-align:center;padding:1.5rem;color:var(--muted)">Loading history...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Results -->
       <section class="card" id="rc-results-section" style="display:none">
         <h2>RECONCILIATION RESULTS</h2>

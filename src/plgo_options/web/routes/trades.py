@@ -370,20 +370,81 @@ async def reconcile_trades(body: ReconRequest):
         for th in theirs[paired:]:
             only_theirs.append(th)
 
+    summary = {
+        "our_count": len(our_trades),
+        "their_count": len(body.their_trades),
+        "matched": len(matched),
+        "breaks": len(breaks),
+        "only_ours": len(only_ours),
+        "only_theirs": len(only_theirs),
+    }
+
+    # Determine overall status
+    if summary["breaks"] == 0 and summary["only_ours"] == 0 and summary["only_theirs"] == 0:
+        status = "clean"
+    elif summary["breaks"] > 0:
+        status = "breaks"
+    else:
+        status = "mismatches"
+
+    # Save to recon history
+    try:
+        await db.execute(
+            """INSERT INTO recon_history
+               (counterparty, asset, our_count, their_count, matched, breaks,
+                only_ours, only_theirs, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (body.counterparty, body.asset, summary["our_count"], summary["their_count"],
+             summary["matched"], summary["breaks"], summary["only_ours"],
+             summary["only_theirs"], status),
+        )
+        await db.commit()
+    except Exception:
+        pass  # Don't fail the recon if history write fails
+
     return {
         "counterparty": body.counterparty,
         "asset": body.asset,
-        "summary": {
-            "our_count": len(our_trades),
-            "their_count": len(body.their_trades),
-            "matched": len(matched),
-            "breaks": len(breaks),
-            "only_ours": len(only_ours),
-            "only_theirs": len(only_theirs),
-        },
+        "summary": summary,
         "matched": matched,
         "breaks": breaks,
         "only_ours": only_ours,
         "only_theirs": only_theirs,
         "collateral": body.their_collateral.model_dump(),
     }
+
+
+@router.get("/recon-history")
+async def get_recon_history(asset: str | None = None, limit: int = 50):
+    """Return recent reconciliation run history."""
+    db = await get_db()
+    # Ensure table exists
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS recon_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_date TEXT NOT NULL DEFAULT (datetime('now')),
+            counterparty TEXT NOT NULL,
+            asset TEXT NOT NULL DEFAULT 'ETH',
+            our_count INTEGER NOT NULL DEFAULT 0,
+            their_count INTEGER NOT NULL DEFAULT 0,
+            matched INTEGER NOT NULL DEFAULT 0,
+            breaks INTEGER NOT NULL DEFAULT 0,
+            only_ours INTEGER NOT NULL DEFAULT 0,
+            only_theirs INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'clean',
+            notes TEXT DEFAULT '',
+            created_by TEXT DEFAULT 'user'
+        )"""
+    )
+    if asset:
+        cursor = await db.execute(
+            "SELECT * FROM recon_history WHERE asset = ? ORDER BY run_date DESC LIMIT ?",
+            (asset.upper(), limit),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM recon_history ORDER BY run_date DESC LIMIT ?",
+            (limit,),
+        )
+    rows = await cursor.fetchall()
+    return {"history": [dict(r) for r in rows]}

@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS trade_audit_log (
 );
 """
 
+RECON_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS recon_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT NOT NULL DEFAULT (datetime('now')),
+    counterparty TEXT NOT NULL,
+    asset TEXT NOT NULL DEFAULT 'ETH',
+    our_count INTEGER NOT NULL DEFAULT 0,
+    their_count INTEGER NOT NULL DEFAULT 0,
+    matched INTEGER NOT NULL DEFAULT 0,
+    breaks INTEGER NOT NULL DEFAULT 0,
+    only_ours INTEGER NOT NULL DEFAULT 0,
+    only_theirs INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'clean',
+    notes TEXT DEFAULT '',
+    created_by TEXT DEFAULT 'user'
+);
+"""
+
 MTM_HISTORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
     snapshot_date TEXT NOT NULL,
@@ -98,6 +116,7 @@ async def init_db():
     await db.execute(TRADES_SCHEMA)
     await db.execute(AUDIT_SCHEMA)
     await db.execute(MTM_HISTORY_SCHEMA)
+    await db.execute(RECON_HISTORY_SCHEMA)
     await db.commit()
 
     # Migration: add 'asset' column if missing (existing DBs)
