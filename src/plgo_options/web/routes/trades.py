@@ -318,45 +318,43 @@ async def reconcile_trades(body: ReconRequest):
     only_ours = []
     only_theirs = []
 
+    def _compare_pair(o: dict, th: dict) -> dict:
+        """Compare two trades and return field-level diffs (empty if match)."""
+        diffs = {}
+        o_prem = abs(float(o.get("premium_usd", 0) or 0))
+        th_prem = abs(float(th.get("premium_usd", 0) or 0))
+        if abs(o_prem - th_prem) > 0.01:
+            diffs["premium_usd"] = {"ours": o_prem, "theirs": th_prem}
+        o_tid = str(o.get("trade_id", "") or "")
+        th_tid = str(th.get("trade_id", "") or "")
+        if o_tid and th_tid and o_tid != th_tid:
+            diffs["trade_id"] = {"ours": o_tid, "theirs": th_tid}
+        o_td = _norm_date(str(o.get("trade_date", "")))
+        th_td = _norm_date(str(th.get("trade_date", "")))
+        if o_td and th_td and o_td != th_td:
+            diffs["trade_date"] = {"ours": o_td, "theirs": th_td}
+        return diffs
+
     for k in all_keys:
         ours = our_by_key.get(k, [])
         theirs = their_by_key.get(k, [])
-        if ours and theirs:
-            o = ours[0]
-            th = theirs[0]
-            diffs = {}
-            # Compare premiums by absolute value (sign convention differs)
-            o_prem = abs(float(o.get("premium_usd", 0) or 0))
-            th_prem = abs(float(th.get("premium_usd", 0) or 0))
-            if abs(o_prem - th_prem) > 0.01:
-                diffs["premium_usd"] = {"ours": o_prem, "theirs": th_prem}
-            o_tid = str(o.get("trade_id", "") or "")
-            th_tid = str(th.get("trade_id", "") or "")
-            if o_tid and th_tid and o_tid != th_tid:
-                diffs["trade_id"] = {"ours": o_tid, "theirs": th_tid}
-            o_td = _norm_date(str(o.get("trade_date", "")))
-            th_td = _norm_date(str(th.get("trade_date", "")))
-            if o_td and th_td and o_td != th_td:
-                diffs["trade_date"] = {"ours": o_td, "theirs": th_td}
+
+        # Match pairwise: zip as many as possible, leftovers are unmatched
+        paired = min(len(ours), len(theirs))
+        for i in range(paired):
+            o, th = ours[i], theirs[i]
+            diffs = _compare_pair(o, th)
+            key_str = f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}"
             if diffs:
-                breaks.append({
-                    "key": f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}",
-                    "ours": o, "theirs": th, "diffs": diffs,
-                })
+                breaks.append({"key": key_str, "ours": o, "theirs": th, "diffs": diffs})
             else:
-                matched.append({
-                    "key": f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}",
-                    "ours": o, "theirs": th,
-                })
-            # Handle extras if multiple trades on same key
-            for extra in ours[1:]:
-                only_ours.append(extra)
-            for extra in theirs[1:]:
-                only_theirs.append(extra)
-        elif ours and not theirs:
-            only_ours.extend(ours)
-        else:
-            only_theirs.extend(theirs)
+                matched.append({"key": key_str, "ours": o, "theirs": th})
+
+        # Leftovers
+        for o in ours[paired:]:
+            only_ours.append(o)
+        for th in theirs[paired:]:
+            only_theirs.append(th)
 
     return {
         "counterparty": body.counterparty,
