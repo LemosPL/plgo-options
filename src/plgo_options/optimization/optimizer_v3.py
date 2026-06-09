@@ -397,9 +397,9 @@ class OptimizerV3(BaseOptimizer):
                and float(c.bs_price_usd or 0.0) > 0.0
         ]
 
-        calls_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "C"}
-        puts_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "P"}
-        common_strikes = sorted(set(calls_by_strike) & set(puts_by_strike))
+        call_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "C"}
+        put_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "P"}
+        common_strikes = sorted(set(call_by_strike) & set(put_by_strike))
 
         if len(common_strikes) < 2:
             return []
@@ -410,10 +410,10 @@ class OptimizerV3(BaseOptimizer):
                 if high_strike <= low_strike:
                     continue
 
-                low_call = calls_by_strike[low_strike]
-                low_put = puts_by_strike[low_strike]
-                high_call = calls_by_strike[high_strike]
-                high_put = puts_by_strike[high_strike]
+                low_call = call_by_strike[low_strike]
+                low_put = put_by_strike[low_strike]
+                high_call = call_by_strike[high_strike]
+                high_put = put_by_strike[high_strike]
 
                 # Long box: +C_low -P_low -C_high +P_high.
                 box_debit = (
@@ -743,9 +743,9 @@ class OptimizerV3(BaseOptimizer):
             candidate_vega = max(abs(self._candidate_vega(c)), 1e-12)
             lams[i] = base_lam * np.pow(max_vega / candidate_vega, 2)
             if self._is_spread_candidate(c):
-                lams[i] *= 1.
+                lams[i] *= 2.
             elif self._is_straddle_candidate(c):
-                lams[i] *= 1.5
+                lams[i] *= 6.
             elif self._is_iron_condor_candidate(c):
                 lams[i] *= 2.0
             else:

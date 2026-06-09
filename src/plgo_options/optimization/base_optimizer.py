@@ -170,9 +170,9 @@ class BaseOptimizer:
 
                 for opt in ("C", "P"):
                     if not include_itm:
-                        if opt == "C" and (strike < S or strike > strike_hi):
+                        if opt == "C" and (strike > strike_hi):# or strike < S):
                             continue
-                        elif opt == "P" and (strike > S or strike < strike_lo):
+                        elif opt == "P" and (strike < strike_lo):# or strike > S):
                             continue
 
                     candidates.append(self.create_candidate(S, strike, 0.0, sigma, opt,
