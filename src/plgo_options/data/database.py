@@ -152,8 +152,74 @@ async def init_db():
             logger.warning("FIL Excel import failed: %s", e)
 
 
+    # Normalize trade fields (side, option_type, counterparty, trade_id) on startup
+    await _normalize_trade_fields(db)
+
     # Auto-expire trades past their expiry date (runs every startup)
     await _auto_expire_trades(db)
+
+
+async def _normalize_trade_fields(db: aiosqlite.Connection):
+    """Normalize side, option_type, counterparty case, and clear UUID-like trade_ids."""
+    import re
+    _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+
+    cursor = await db.execute("SELECT id, side, option_type, counterparty, trade_id FROM trades")
+    rows = await cursor.fetchall()
+
+    # Build canonical counterparty casing: use the most frequent casing per lowercase name
+    cp_counts: dict[str, dict[str, int]] = {}
+    for r in rows:
+        cp = (r["counterparty"] or "").strip()
+        if cp:
+            cp_counts.setdefault(cp.lower(), {})
+            cp_counts[cp.lower()][cp] = cp_counts[cp.lower()].get(cp, 0) + 1
+    canonical_cp: dict[str, str] = {}
+    for lower, variants in cp_counts.items():
+        canonical_cp[lower] = max(variants, key=variants.get)
+
+    changes = 0
+    for r in rows:
+        updates = {}
+        # Normalize side to title case
+        side = (r["side"] or "").strip()
+        side_lower = side.lower()
+        if side_lower in ("buy", "buys", "bought", "long", "b", "l"):
+            if side != "Buy":
+                updates["side"] = "Buy"
+        elif side_lower in ("sell", "sells", "sold", "short", "s"):
+            if side != "Sell":
+                updates["side"] = "Sell"
+
+        # Normalize option_type to title case
+        otype = (r["option_type"] or "").strip()
+        otype_lower = otype.lower()
+        if otype_lower in ("c", "call", "calls"):
+            if otype != "Call":
+                updates["option_type"] = "Call"
+        elif otype_lower in ("p", "put", "puts"):
+            if otype != "Put":
+                updates["option_type"] = "Put"
+
+        # Normalize counterparty to canonical casing
+        cp = (r["counterparty"] or "").strip()
+        if cp and cp.lower() in canonical_cp and cp != canonical_cp[cp.lower()]:
+            updates["counterparty"] = canonical_cp[cp.lower()]
+
+        # Clear UUID-like trade_ids (from counterparty recon imports)
+        tid = (r["trade_id"] or "").strip()
+        if tid and _UUID_RE.match(tid):
+            updates["trade_id"] = ""
+
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [r["id"]]
+            await db.execute(f"UPDATE trades SET {set_clause}, updated_at = datetime('now') WHERE id = ?", values)
+            changes += 1
+
+    if changes:
+        await db.commit()
+        logger.info("Normalized %d trades (side/option_type/counterparty/trade_id)", changes)
 
 
 async def _auto_expire_trades(db: aiosqlite.Connection):

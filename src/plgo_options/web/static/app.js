@@ -2287,16 +2287,28 @@ async function rcHandleAction(action, idx) {
       rcMarkRowDone(idx, "Removed");
 
     } else if (action === "add") {
-      // Add their trade to our book
+      // Add their trade to our book — normalize values to match our conventions
       const t = r.theirs;
       if (!confirm(`Add ${t.side} ${t.option_type} ${t.strike} ${t.expiry} x${Math.abs(t.qty)} to our book?`)) return;
+      // Normalize side: Buy/Sell (title case)
+      const rawSide = (t.side || "").trim().toLowerCase();
+      const normSide = ["buy","buys","bought","long","b","l"].includes(rawSide) ? "Buy"
+                     : ["sell","sells","sold","short","s"].includes(rawSide) ? "Sell" : t.side;
+      // Normalize option type: Call/Put (title case)
+      const rawType = (t.option_type || "").trim().toLowerCase();
+      const normType = ["c","call","calls"].includes(rawType) ? "Call"
+                     : ["p","put","puts"].includes(rawType) ? "Put" : t.option_type;
+      // Normalize counterparty: match existing case from our trades if possible
+      const cpLower = counterparty.toLowerCase();
+      const existingCp = (tmTrades || []).find(x => (x.counterparty || "").toLowerCase() === cpLower);
+      const normCp = existingCp ? existingCp.counterparty : counterparty;
       await post("/api/trades/", {
         asset: currentAsset,
-        counterparty: counterparty,
-        trade_id: t.trade_id || "",
+        counterparty: normCp,
+        trade_id: "",
         trade_date: t.trade_date || "",
-        side: t.side,
-        option_type: t.option_type,
+        side: normSide,
+        option_type: normType,
         instrument: "",
         expiry: t.expiry,
         strike: parseFloat(t.strike) || 0,
