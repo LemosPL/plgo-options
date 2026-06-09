@@ -1569,11 +1569,16 @@ function tmOpenModal(trade = null) {
     document.getElementById("tf-multi-section").style.display = "none";
     tfPreset = "single";
 
-    document.getElementById("tf-id").value = trade.id;
+    document.getElementById("tf-id").value = trade.db_id || trade.id;
     document.getElementById("tf-counterparty").value = trade.counterparty || "";
     document.getElementById("tf-trade-date").value = trade.trade_date || "";
-    document.getElementById("tf-side").value = trade.side || "Buy";
-    document.getElementById("tf-option-type").value = trade.option_type || "Call";
+    // Normalize side/type to match dropdown values (Buy/Sell, Call/Put)
+    const editSide = (trade.side_raw || trade.side || "Buy").trim();
+    const sLower = editSide.toLowerCase();
+    document.getElementById("tf-side").value = ["buy","long","bought"].includes(sLower) ? "Buy" : ["sell","short","sold"].includes(sLower) ? "Sell" : editSide;
+    const editType = (trade.option_type || "Call").trim();
+    const tLower = editType.toLowerCase();
+    document.getElementById("tf-option-type").value = ["call","calls","c"].includes(tLower) ? "Call" : ["put","puts","p"].includes(tLower) ? "Put" : editType;
     document.getElementById("tf-expiry").value = trade.expiry || "";
     document.getElementById("tf-strike").value = trade.strike || "";
     document.getElementById("tf-qty").value = trade.qty || "";
@@ -1690,7 +1695,18 @@ document.getElementById("trade-form").addEventListener("submit", async (e) => {
 });
 
 async function tmEditTrade(id) {
-  const trade = tmTrades.find(t => t.id === id);
+  // Look up from raw trades first, then enriched as fallback
+  let trade = tmTrades.find(t => t.id === id || t.id === Number(id));
+  if (!trade) trade = tmEnriched.find(t => (t.db_id || t.id) === id || (t.db_id || t.id) === Number(id));
+  if (!trade) {
+    // Last resort: fetch directly from API
+    try {
+      trade = await get(`/api/trades/${id}`);
+    } catch (e) {
+      alert(`Could not load trade #${id}: ${e.message}`);
+      return;
+    }
+  }
   if (trade) tmOpenModal(trade);
 }
 
@@ -1977,15 +1993,16 @@ function rcNormDate(v) {
 }
 
 function rcParseRow(row) {
+  const pf = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
   return {
-    trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || ""),
+    trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || row["Trade_ID"] || ""),
     trade_date: rcNormDate(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || ""),
-    side: rcNormSide(row.side || row.Side || ""),
-    option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || ""),
-    strike: parseFloat(row.strike || row.Strike || 0),
-    expiry: rcNormDate(row.expiry || row.Expiry || ""),
-    qty: parseFloat(row.qty || row.Qty || row.Quantity || 0),
-    premium_usd: parseFloat(row.premium_usd || row.Premium_USD || row["Premium USD"] || 0),
+    side: rcNormSide(row.side || row.Side || row["Buy / Sell"] || row["Buy/Sell"] || row["Direction"] || ""),
+    option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || row["Option_Type"] || row["Instrument Type"] || ""),
+    strike: pf(row.strike ?? row.Strike ?? row["Strike Price"] ?? row["Strike_Price"] ?? 0),
+    expiry: rcNormDate(row.expiry ?? row.Expiry ?? row["Expiry Date"] ?? row["Expiry_Date"] ?? row["Option Expiry Date"] ?? ""),
+    qty: pf(row.qty ?? row.Qty ?? row.Quantity ?? row["ETH Options"] ?? row["Quantity"] ?? row["Size"] ?? 0),
+    premium_usd: pf(row.premium_usd ?? row.Premium_USD ?? row["Premium USD"] ?? row["Premium_USD"] ?? row["Premium"] ?? 0),
   };
 }
 
@@ -2302,16 +2319,29 @@ async function rcHandleAction(action, idx) {
       const cpLower = counterparty.toLowerCase();
       const existingCp = (tmTrades || []).find(x => (x.counterparty || "").toLowerCase() === cpLower);
       const normCp = existingCp ? existingCp.counterparty : counterparty;
+      // Normalize dates to YYYY-MM-DD
+      const normExpiry = rcNormDate(t.expiry);
+      const normTradeDate = rcNormDate(t.trade_date);
+      // Build instrument name from expiry/strike/type (e.g. ETH-26JUN26-2375-P)
+      const strikeVal = parseFloat(t.strike) || 0;
+      const optCode = normType === "Put" ? "P" : "C";
+      let instrument = "";
+      if (normExpiry && strikeVal > 0) {
+        const ed = new Date(normExpiry + "T00:00:00");
+        const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+        const prefix = currentAsset === "FIL" ? "FIL" : "ETH";
+        instrument = `${prefix}-${ed.getDate()}${months[ed.getMonth()]}${String(ed.getFullYear()).slice(2)}-${Math.round(strikeVal)}-${optCode}`;
+      }
       await post("/api/trades/", {
         asset: currentAsset,
         counterparty: normCp,
         trade_id: "",
-        trade_date: t.trade_date || "",
+        trade_date: normTradeDate,
         side: normSide,
         option_type: normType,
-        instrument: "",
-        expiry: t.expiry,
-        strike: parseFloat(t.strike) || 0,
+        instrument: instrument,
+        expiry: normExpiry,
+        strike: strikeVal,
         qty: Math.abs(parseFloat(t.qty) || 0),
         premium_usd: parseFloat(t.premium_usd) || 0,
       });

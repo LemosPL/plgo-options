@@ -160,11 +160,13 @@ async def init_db():
 
 
 async def _normalize_trade_fields(db: aiosqlite.Connection):
-    """Normalize side, option_type, counterparty case, and clear UUID-like trade_ids."""
+    """Normalize side, option_type, counterparty case, clear UUID trade_ids, fix expiry dates, build instruments."""
     import re
+    from datetime import datetime as _dt
     _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+    _DDMMMYY_RE = re.compile(r'^(\d{1,2})([A-Z]{3})(\d{2})$', re.I)
 
-    cursor = await db.execute("SELECT id, side, option_type, counterparty, trade_id FROM trades")
+    cursor = await db.execute("SELECT id, asset, side, option_type, counterparty, trade_id, expiry, strike, instrument FROM trades")
     rows = await cursor.fetchall()
 
     # Build canonical counterparty casing: use the most frequent casing per lowercase name
@@ -210,6 +212,31 @@ async def _normalize_trade_fields(db: aiosqlite.Connection):
         tid = (r["trade_id"] or "").strip()
         if tid and _UUID_RE.match(tid):
             updates["trade_id"] = ""
+
+        # Normalize expiry dates: DDMMMYY → YYYY-MM-DD
+        expiry = (r["expiry"] or "").strip()
+        m = _DDMMMYY_RE.match(expiry)
+        if m:
+            try:
+                dt = _dt.strptime(f"{m.group(1)}{m.group(2).upper()}{m.group(3)}", "%d%b%y")
+                updates["expiry"] = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+        # Build missing instrument names
+        instrument = (r["instrument"] or "").strip()
+        final_expiry = updates.get("expiry", expiry)
+        strike = r["strike"] or 0
+        final_otype = updates.get("option_type", otype)
+        if not instrument and final_expiry and strike > 0:
+            try:
+                ed = _dt.strptime(final_expiry, "%Y-%m-%d")
+                prefix = r["asset"] or "ETH"
+                opt_code = "P" if final_otype.lower() == "put" else "C"
+                strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+                updates["instrument"] = f"{prefix}-{ed.day}{ed.strftime('%b').upper()}{ed.strftime('%y')}-{strike_str}-{opt_code}"
+            except ValueError:
+                pass
 
         if updates:
             set_clause = ", ".join(f"{k} = ?" for k in updates)

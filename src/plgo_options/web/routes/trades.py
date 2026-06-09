@@ -18,17 +18,31 @@ class ReconTrade(BaseModel):
     trade_date: str = ""
     side: str = ""
     option_type: str = ""
-    strike: float = 0
+    strike: float | None = 0
     expiry: str = ""
-    qty: float = 0
-    premium_usd: float = 0
+    qty: float | None = 0
+    premium_usd: float | None = 0
+
+    def model_post_init(self, __context):
+        # Coerce None to 0 for numeric fields (JSON null from JS NaN)
+        if self.strike is None:
+            object.__setattr__(self, "strike", 0.0)
+        if self.qty is None:
+            object.__setattr__(self, "qty", 0.0)
+        if self.premium_usd is None:
+            object.__setattr__(self, "premium_usd", 0.0)
 
 
 class ReconCollateral(BaseModel):
-    ETH: float = 0
-    FIL: float = 0
-    USD: float = 0
-    USDC: float = 0
+    ETH: float | None = 0
+    FIL: float | None = 0
+    USD: float | None = 0
+    USDC: float | None = 0
+
+    def model_post_init(self, __context):
+        for f in ("ETH", "FIL", "USD", "USDC"):
+            if getattr(self, f) is None:
+                object.__setattr__(self, f, 0.0)
 
 
 class ReconRequest(BaseModel):
