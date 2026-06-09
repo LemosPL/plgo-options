@@ -1554,6 +1554,15 @@ document.getElementById("tf-side").addEventListener("change", tfEnforcePremiumSi
 document.getElementById("tf-premium-per").addEventListener("input", tfRecalcPremiumUsd);
 document.getElementById("tf-premium-per").addEventListener("change", tfEnforcePremiumSign);
 
+function tfPopulateCounterparties() {
+  const dl = document.getElementById("tf-counterparty-list");
+  if (!dl) return;
+  const cps = [...new Set(
+    (tmTrades || []).map(t => (t.counterparty || "").trim()).filter(Boolean)
+  )].sort();
+  dl.innerHTML = cps.map(c => `<option value="${c}">`).join("");
+}
+
 function tmOpenModal(trade = null) {
   const modal = document.getElementById("modal-trade");
   const title = document.getElementById("modal-trade-title");
