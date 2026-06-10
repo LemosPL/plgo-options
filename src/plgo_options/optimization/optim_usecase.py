@@ -18,7 +18,7 @@ from plgo_options.optimization.snapshot import load_snapshot_dict
 class OptimizerRunParams:
     asset: str = "ETH"
     lam_factor: float = 1.0
-    target_expiry: str | None = "28AUG26"
+    target_expiry: str | None = "31JUL26"
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
@@ -125,7 +125,7 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.1)#, counterparties=["Flowdesk"])
+        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.75)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")
