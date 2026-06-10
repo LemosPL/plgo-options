@@ -5227,7 +5227,12 @@ function opt2RenderWorkbench() {
         `<select class="opt2-wb-side" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
         `<option value="buy" ${leg.side==="buy"?"selected":""}>Buy</option>` +
         `<option value="sell" ${leg.side==="sell"?"selected":""}>Sell</option></select></td>` +
-      `<td style="color:${typeColor}">${isPerp ? "Perp" : (leg.opt === "C" ? "Call" : "Put")}</td>` +
+      `<td style="color:${typeColor}">` +
+        (isPerp ? "Perp" :
+        `<select class="opt2-wb-opt" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
+        `<option value="C" ${leg.opt==="C"?"selected":""}>Call</option>` +
+        `<option value="P" ${leg.opt==="P"?"selected":""}>Put</option></select>`) +
+      `</td>` +
       `<td><input type="number" class="opt2-wb-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><input type="number" class="opt2-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><select class="opt2-wb-expiry" data-idx="${idx}" style="width:95px;font-size:.7rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
@@ -5283,7 +5288,7 @@ function opt2RenderWorkbench() {
       if (l.opt === "PERP") return;  // perps don't rebuild instrument name
       // Rebuild instrument name to match new strike
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
-      l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      l.instrument = `${currentAsset || "ETH"}-${l.expiry_code}-${strikeStr}-${l.opt}`;
       // Update displayed instrument name in the row
       const row = inp.closest("tr");
       if (row) row.cells[1].textContent = l.instrument;
@@ -5291,6 +5296,19 @@ function opt2RenderWorkbench() {
   });
   $tbody.querySelectorAll(".opt2-wb-side").forEach(sel => {
     sel.addEventListener("change", () => { opt2WbLegs[parseInt(sel.dataset.idx)].side = sel.value; });
+  });
+  $tbody.querySelectorAll(".opt2-wb-opt").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const idx = parseInt(sel.dataset.idx);
+      const l = opt2WbLegs[idx];
+      l.opt = sel.value;
+      // Rebuild instrument name
+      const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
+      const asset = currentAsset || "ETH";
+      l.instrument = `${asset}-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      const row = sel.closest("tr");
+      if (row) row.cells[1].textContent = l.instrument;
+    });
   });
   $tbody.querySelectorAll(".opt2-wb-expiry").forEach(sel => {
     sel.addEventListener("change", () => {
@@ -5300,7 +5318,7 @@ function opt2RenderWorkbench() {
       // Update instrument name to match new expiry
       const l = opt2WbLegs[idx];
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
-      l.instrument = `ETH-${newExp}-${strikeStr}-${l.opt}`;
+      l.instrument = `${currentAsset || "ETH"}-${newExp}-${strikeStr}-${l.opt}`;
     });
   });
 
