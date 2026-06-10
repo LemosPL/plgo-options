@@ -858,6 +858,7 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
 
     // Optimizer chat: clear cached portfolio data, baseline, chat history,
     // workbench, and added/closed trade state — they're asset-specific.
+    if (typeof opt2Loaded !== "undefined") opt2Loaded = false;
     if (typeof opt2Data !== "undefined") opt2Data = null;
     if (typeof opt2Baseline !== "undefined") opt2Baseline = null;
     if (typeof opt2ChatHistory !== "undefined") opt2ChatHistory = [];
@@ -912,7 +913,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
     const pricingBanner = document.getElementById("pricing-fil-banner");
     const rollBanner = document.getElementById("roll-fil-banner");
     if (pricingBanner) pricingBanner.style.display = "none";  // no longer needed — FIL pricer works
-    if (rollBanner) rollBanner.style.display = (isFil && pg === "roll") ? "" : "none";
+    if (rollBanner) rollBanner.style.display = "none";
 
     // Hide Deribit option chain for FIL (no exchange-listed FIL options)
     const chainBtn = document.getElementById("btn-load-chain");
@@ -4566,7 +4567,7 @@ let opt2ScenarioTrades = [];  // locally-tracked scenario trades (roll open legs
 
 async function opt2Init() {
   try {
-    const expiries = await get("/api/optimizer/expiries");
+    const expiries = await get(`/api/optimizer/expiries?asset=${currentAsset}`);
     const $sel = document.getElementById("opt2-expiry");
     $sel.innerHTML = '<option value="">All expiries</option>';
     for (const e of expiries) {
@@ -5346,7 +5347,7 @@ async function opt2Calculate() {
   $btn.disabled = true; $btn.textContent = "Calculating...";
 
   try {
-    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: opt2ClosedTradeIds });
+    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: opt2ClosedTradeIds, asset: currentAsset });
     // Update leg costs
     for (let i = 0; i < opt2WbLegs.length && i < result.leg_costs.length; i++) {
       const lc = result.leg_costs[i];
