@@ -838,7 +838,7 @@ document.getElementById("btn-send-to-sb").addEventListener("click", () => {
     sbAddLeg(l.side, l.type, parseFloat(l.strike) || 0, parseFloat(l.quantity) || 1000, l.expiry || "");
   }
   // Switch to Strategy Builder tab
-  document.querySelector('[data-tab="strategy"]').click();
+  document.querySelector('[data-page="structurer"]').click();
   sbRenderLegs();
 });
 $btnLoad.addEventListener("click", loadChain);
