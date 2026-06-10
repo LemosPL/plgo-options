@@ -5678,9 +5678,9 @@ function opt2DrawChart() {
 
   const cc = chartColors();
   Plotly.react("opt2-payoff-chart", traces, {
-    title: { text: "Portfolio Payoff — Baseline vs Current vs Proposed", font: { color: cc.text, size: 14 } },
+    title: { text: `${currentAsset} Portfolio Payoff — Baseline vs Current vs Proposed`, font: { color: cc.text, size: 14 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot (USD)", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
+    xaxis: { title: `${currentAsset} Spot (USD)`, type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio Payoff at Expiry (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 260, b: 50, l: 90 },
     showlegend: true,
@@ -6150,16 +6150,17 @@ function opt2RenderMatrix() {
   const curPnl = opt2Data.current_payoff;
   const wbPnl = opt2Data._wbPayoff || null;
 
-  // Pick key spot levels
+  // Pick key spot levels — asset-aware rounding
   const multipliers = [0.3, 0.5, 0.7, 0.85, 0.95, 1.0, 1.05, 1.15, 1.3, 1.5, 2.0, 3.0];
-  const keySpots = multipliers.map(m => Math.round(spot * m / 50) * 50);
+  const roundStep = currentAsset === "FIL" ? 0.5 : 50;
+  const keySpots = multipliers.map(m => Math.round(spot * m / roundStep) * roundStep);
 
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
   const fmtCls = v => v >= 0 ? "mtm-pos" : "mtm-neg";
 
   const $thead = document.getElementById("opt2-matrix-thead");
   const thStyle = 'style="text-align:center"';
-  let hdr = `<tr><th ${thStyle}>ETH Spot</th><th ${thStyle}>Baseline P&L</th><th ${thStyle}>Current P&L</th><th ${thStyle}>Change</th>`;
+  let hdr = `<tr><th ${thStyle}>${currentAsset} Spot</th><th ${thStyle}>Baseline P&L</th><th ${thStyle}>Current P&L</th><th ${thStyle}>Change</th>`;
   if (wbPnl) hdr += `<th ${thStyle}>With Workbench</th><th ${thStyle}>WB vs Baseline</th>`;
   hdr += "</tr>";
   $thead.innerHTML = hdr;
@@ -6174,11 +6175,11 @@ function opt2RenderMatrix() {
     const bVal = basePnl[bIdx] || 0;
     const cVal = curPnl[cIdx] || 0;
     const diff = cVal - bVal;
-    const isSpot = Math.abs(ks - spot) < 100;
+    const isSpot = Math.abs(ks - spot) < (currentAsset === "FIL" ? 1 : 100);
 
     const cs = "font-family:monospace;text-align:center";
     let row = `<tr${isSpot ? ' style="background:rgba(88,166,255,0.08);font-weight:600"' : ""}>`;
-    row += `<td style="${cs}">$${ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
+    row += `<td style="${cs}">$${currentAsset === "FIL" ? ks.toFixed(2) : ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
     row += `<td style="${cs}" class="${fmtCls(bVal)}">${fmtM(bVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(cVal)}">${fmtM(cVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(diff)}">${fmtM(diff)}</td>`;
