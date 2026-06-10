@@ -831,30 +831,15 @@ document.getElementById("pricing-vol-spread").addEventListener("input", () => up
 updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
 document.getElementById("btn-apply-repl").addEventListener("click", applyReplPremiums);
 
-// Send Pricing legs → Optimizer Workbench
-document.getElementById("btn-send-to-optimizer").addEventListener("click", () => {
+// Send Pricing legs → Strategy Builder
+document.getElementById("btn-send-to-sb").addEventListener("click", () => {
   if (legs.length === 0) { alert("No legs to send — add legs first."); return; }
-  // Convert pricing legs to optimizer workbench format
   for (const l of legs) {
-    const strike = parseFloat(l.strike) || 0;
-    const qty = parseFloat(l.quantity) || 0;
-    const premium = parseFloat(l.premium) || 0;
-    const expCode = l.expiry || "";
-    const dte = _expiryCodeToDte(expCode) || 30;
-    const strikeStr = strike % 1 === 0 ? String(Math.round(strike)) : String(strike);
-    const instrument = `${currentAsset}-${expCode}-${strikeStr}-${l.type}`;
-    opt2WbLegs.push({
-      instrument, side: l.side, qty, strike, opt: l.type,
-      expiry_code: expCode, dte,
-      price_usd: premium, bid_usd: premium * 0.97, ask_usd: premium * 1.03,
-      spread_pct: 0, mark_iv: null,
-    });
+    sbAddLeg(l.side, l.type, parseFloat(l.strike) || 0, parseFloat(l.quantity) || 1000, l.expiry || "");
   }
-  // Switch to Roll & Optimizer tab and show workbench
-  document.querySelector('[data-tab="roll"]').click();
-  document.querySelector('[data-subtab="optimizer2"]')?.click();
-  opt2RenderWorkbench();
-  alert(`${legs.length} leg(s) sent to Optimizer Workbench.`);
+  // Switch to Strategy Builder tab
+  document.querySelector('[data-tab="strategy"]').click();
+  sbRenderLegs();
 });
 $btnLoad.addEventListener("click", loadChain);
 
