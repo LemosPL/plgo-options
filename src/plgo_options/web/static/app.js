@@ -6790,10 +6790,11 @@ function sbRenderRollResults(results, totalCloseValue, totalOpenValue, totalRoll
 function sbAddLeg(side, type, strike, qty, expiry) {
   side = side || "buy";
   type = type || "C";
-  const _step = pfData.eth_spot >= 100 ? 50 : pfData.eth_spot >= 10 ? 1 : 0.1;
-  strike = strike || Math.round(pfData.eth_spot / _step) * _step;
+  const _spot = pfData ? (pfData.eth_spot || pfData.spot || 0) : (ethSpot || 0);
+  const _step = _spot >= 100 ? 50 : _spot >= 10 ? 1 : 0.1;
+  strike = strike || (_spot ? Math.round(_spot / _step) * _step : 0);
   qty = qty || 1000;
-  expiry = expiry || sbGetTargetExpiry() || ((pfData.vol_surface || [])[0] || {}).expiry_code || "";
+  expiry = expiry || sbGetTargetExpiry() || ((pfData ? pfData.vol_surface || [] : [])[0] || {}).expiry_code || "";
   sbLegs.push({ side, type, strike, qty, expiry });
   sbRenderLegs();
 }
