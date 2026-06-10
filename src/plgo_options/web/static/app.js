@@ -8307,6 +8307,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
       : [];
     const data = await post("/api/optimization/run", {
+      asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),

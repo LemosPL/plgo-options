@@ -38,9 +38,10 @@ class OptimizerV3(BaseOptimizer):
         totals: dict,
         snapshot_path: Path,
         today: date,
+        asset: str = "ETH"
     ):
         super().__init__(eth_spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals,
-                         snapshot_path, today)
+                         snapshot_path, today, asset=asset)
         self.cost = None
         self.risk_reduction = None
 
@@ -844,6 +845,7 @@ class OptimizerV3(BaseOptimizer):
 
             return {
                 "status": "ok",
+                "asset": self.asset,
                 "target_expiry": target_expiry,
                 "optimizer_converged": True,
                 "eth_spot": round(float(self.eth_spot), 2),
@@ -991,6 +993,7 @@ class OptimizerV3(BaseOptimizer):
 
         return {
             "status": "ok",
+            "asset": self.asset,
             "target_expiry": target_expiry,
             "optimizer_converged": True,
             "eth_spot": round(float(self.eth_spot), 2),

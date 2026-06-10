@@ -16,6 +16,7 @@ from plgo_options.optimization.snapshot import load_snapshot_dict
 
 @dataclass
 class OptimizerRunParams:
+    asset: str = "ETH"
     lam_factor: float = 1.0
     target_expiry: str | None = "28AUG26"
     unwind_discount: float = 0.2
@@ -38,10 +39,14 @@ class OptimizerUseCase:
         portfolio_payload: dict[str, Any],
         run_params: OptimizerRunParams,
     ) -> "OptimizerUseCase":
+        spot = portfolio_payload.get("spot", portfolio_payload.get("eth_spot"))
+
         return_val = cls(
             today=datetime.today(),
             optimizer_input={
-                "eth_spot": portfolio_payload["eth_spot"],
+                "asset": portfolio_payload.get("asset", run_params.asset).upper(),
+                "spot": spot,
+                "eth_spot": spot,  # backward-compatible alias for current optimizer internals
                 "spot_ladder": portfolio_payload["spot_ladder"],
                 "matrix_horizons": portfolio_payload["matrix_horizons"],
                 "chart_horizons": portfolio_payload["chart_horizons"],

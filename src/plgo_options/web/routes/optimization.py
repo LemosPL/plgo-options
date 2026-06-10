@@ -18,6 +18,7 @@ router = APIRouter()
 
 
 class OptimizationParams(BaseModel):
+    asset: str = "ETH"
     lam_factor: float = 1.0
     target_expiry: str | None = None
     unwind_discount: float = 0.2
@@ -32,7 +33,7 @@ async def run_optimizer(params: OptimizationParams):
     """Gather optimizer inputs, persist a reproducible use case, and run it."""
     print("run_optimizer()")
     try:
-        pnl_data = await portfolio_pnl()
+        pnl_data = await portfolio_pnl(asset=params.asset.upper())
     except HTTPException:
         raise
     except Exception as e:
@@ -40,6 +41,7 @@ async def run_optimizer(params: OptimizationParams):
 
     print(params)
     run_params = OptimizerRunParams(
+        asset=params.asset.upper(),
         lam_factor=params.lam_factor,
         target_expiry=params.target_expiry,
         unwind_discount=params.unwind_discount,

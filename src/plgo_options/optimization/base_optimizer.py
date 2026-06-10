@@ -56,8 +56,11 @@ class BaseOptimizer:
         totals: dict,
         snapshot_path: Path,
         today: date,
+        asset: str = "ETH",
     ):
-        self.eth_spot = eth_spot
+        self.asset = asset.upper()
+        self.spot = eth_spot
+        self.eth_spot = eth_spot  # backward-compatible alias
         self.spot_ladder = spot_ladder
         self.matrix_horizons = matrix_horizons
         self.chart_horizons = chart_horizons
@@ -74,8 +77,10 @@ class BaseOptimizer:
         latest_positions = load_positions_from_latest_xlsx()
         if latest_positions:
             positions = latest_positions
+
+        spot = snapshot_data.get("spot", snapshot_data.get("eth_spot"))
         return cls(
-            eth_spot=snapshot_data["eth_spot"],
+            eth_spot=spot,
             spot_ladder=snapshot_data["spot_ladder"],
             matrix_horizons=snapshot_data["matrix_horizons"],
             chart_horizons=snapshot_data["chart_horizons"],
@@ -84,6 +89,7 @@ class BaseOptimizer:
             totals=snapshot_data["totals"],
             snapshot_path=Path(snapshot_data.get("snapshot_path", "")),
             today=today,
+            asset=snapshot_data.get("asset", "ETH"),
         )
 
     # ------------------------------------------------------------------
