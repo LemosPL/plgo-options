@@ -148,16 +148,17 @@ def _bs_delta(spot: float, strike: float, dte: int, sigma: float, opt: str) -> f
 def _render_positions_md(positions_detail: list[dict]) -> str:
     if not positions_detail:
         return "_(no positions)_"
-    rows = ["| ID | Side | Type | Strike | Expiry | Qty | Δ |",
-            "|----|------|------|--------|--------|-----|---|"]
+    rows = ["| ID | Counterparty | Side | Type | Strike | Expiry | Qty | Δ |",
+            "|----|--------------|------|------|--------|--------|-----|---|"]
     for pd in positions_detail:
         # Position delta = per-contract delta × net_qty (signed by side)
         delta_per = pd.get("delta_per", 0.0)
         net_qty = pd.get("net_qty", 0.0)
         pos_delta = delta_per * net_qty
         strike_s = f"{int(pd['strike']):,}" if pd['strike'] == int(pd['strike']) else f"{pd['strike']:,.2f}"
+        cpty = pd.get("counterparty", "") or ""
         rows.append(
-            f"| #{pd['id']} | {pd['side']} | {pd['type']} | "
+            f"| #{pd['id']} | {cpty} | {pd['side']} | {pd['type']} | "
             f"{strike_s} | {pd['expiry']} | {pd['qty']:.0f} | "
             f"{pos_delta:+,.0f} |"
         )
@@ -496,7 +497,8 @@ async def suggest_trades(req: OptimizeRequest):
         dte = _get_dte(expiry_str)
         sigma = _get_sigma(strike, expiry_str, smiles)
         positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
-                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma,
+                          "counterparty": t.get("counterparty", "")})
         positions_display.append({
             "id": t["id"], "counterparty": t.get("counterparty", ""),
             "side": t["side"], "opt": opt, "strike": strike,
@@ -1045,7 +1047,8 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict], asset: str 
         dte = _get_dte(expiry_str)
         sigma = _get_sigma(strike, expiry_str, smiles)
         positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
-                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma,
+                          "counterparty": t.get("counterparty", "")})
 
     spot_arr, _step = _spot_ladder(spot, asset)
     current_payoff = np.zeros_like(spot_arr)
@@ -1444,15 +1447,18 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict], asset: str 
     if close_positions:
         pos_analysis_text += "POSITIONS TO CLOSE (removing them improves target match):\n"
         for p in close_positions:
-            pos_analysis_text += f"  CLOSE: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing improves match by {p['impact']:+.1f}%\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  CLOSE: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — removing improves match by {p['impact']:+.1f}%\n"
     if roll_positions:
         pos_analysis_text += "POSITIONS TO ROLL (close to expiry, should extend):\n"
         for p in roll_positions:
-            pos_analysis_text += f"  ROLL: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — DTE too short\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  ROLL: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — DTE too short\n"
     if essential_positions:
         pos_analysis_text += "ESSENTIAL POSITIONS (keep — removing them worsens match significantly):\n"
         for p in essential_positions:
-            pos_analysis_text += f"  KEEP: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing worsens match by {abs(p['impact']):.1f}%\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  KEEP: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — removing worsens match by {abs(p['impact']):.1f}%\n"
     if not close_positions and not roll_positions:
         pos_analysis_text += "All existing positions are helping the target match. No closures or rolls recommended.\n"
 
@@ -2028,6 +2034,11 @@ async def chat(req: ChatRequest):
     fmt_ladder = _json.dumps(pnl_ladder)
     positions_md = _render_positions_md(positions_detail)
 
+    # Counterparty summary
+    from collections import Counter as _Counter
+    cpty_counts = _Counter(pd.get("counterparty", "") or "Unknown" for pd in positions_detail)
+    fmt_counterparties = ", ".join(f"{name} ({count})" for name, count in cpty_counts.most_common())
+
     # Section B — live state (always present, dynamic)
     dynamic_parts: list[str] = [
         f"""## Live market
@@ -2035,6 +2046,7 @@ async def chat(req: ChatRequest):
 
 ## Portfolio snapshot
 Positions: {num_positions} | Net calls: {fmt_net_calls} {asset} | Net puts: {fmt_net_puts} {asset}
+Counterparties: {fmt_counterparties}
 Expiries: {fmt_expiries}
 P&L at spot: {fmt_pnl} | Worst: {fmt_worst} at {fmt_worst_at} | Best: {fmt_best} | BE: {fmt_be}
 Ladder: {fmt_ladder}
