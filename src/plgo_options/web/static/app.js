@@ -971,6 +971,7 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
     if (btn.dataset.subtab === "optimizer" && !opt2Loaded) opt2Init();
     if (btn.dataset.subtab === "optimizer") {
       setTimeout(() => { const el = document.getElementById("opt2-ask"); if (el) el.focus(); }, 100);
+      optv2LoadSnapshots();
     }
     if (btn.dataset.subtab === "sb-execution" && !execLoaded) execInit();
 
@@ -8360,6 +8361,41 @@ function optv2ExpiryText(t) {
   const exp = t.expiry || "";
   return String(exp).slice(0, 10);
 }
+
+// ─── Saved Snapshots ────────────────────────────────────────
+async function optv2LoadSnapshots() {
+  const tbody = document.getElementById("optv2-snapshots-body");
+  if (!tbody) return;
+  try {
+    const res = await get("/api/optimization/snapshots");
+    const snaps = res.snapshots || [];
+    if (snaps.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">No saved runs yet. Check "Save usecase snapshot" before running.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = snaps.map(s => {
+      const d = s.modified ? new Date(s.modified * 1000) : null;
+      const dateStr = d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      const timeStr = d ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+      const statusColor = s.status === "ok" ? "var(--green)" : s.status ? "var(--red)" : "var(--muted)";
+      return `<tr>
+        <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+        <td>${s.asset || "ETH"}</td>
+        <td>${s.target_expiry || "--"}</td>
+        <td>${s.lam_factor || "--"}</td>
+        <td>${s.trades_count != null ? s.trades_count : "--"}</td>
+        <td style="color:${statusColor}">${s.status || "--"}</td>
+        <td>${s.size_kb || 0} KB</td>
+        <td><a href="/api/optimization/snapshots/${encodeURIComponent(s.filename)}" download style="font-size:.75rem">&darr;</a></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("btn-optv2-refresh-snapshots")?.addEventListener("click", () => optv2LoadSnapshots());
+
 
 function optv2RenderResult(data) {
   const $section = document.getElementById("optv2-result-section");

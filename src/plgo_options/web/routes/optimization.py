@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import traceback
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from plgo_options.web.routes.portfolio import portfolio_pnl
@@ -67,3 +69,47 @@ async def run_optimizer(params: OptimizationParams):
         )
 
     return result
+
+
+SNAPSHOT_DIR = Path("data/optimization_snapshots/usecases")
+
+
+@router.get("/snapshots")
+async def list_snapshots():
+    """List saved usecase snapshot files."""
+    if not SNAPSHOT_DIR.exists():
+        return {"snapshots": []}
+    files = sorted(SNAPSHOT_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    snapshots = []
+    for f in files[:50]:
+        try:
+            with f.open() as fh:
+                data = json.load(fh)
+            params = data.get("run_params", {})
+            inp = data.get("optimizer_input", {})
+            result = data.get("result", {})
+            snapshots.append({
+                "filename": f.name,
+                "size_kb": round(f.stat().st_size / 1024, 1),
+                "modified": f.stat().st_mtime,
+                "asset": params.get("asset", inp.get("asset", "ETH")),
+                "target_expiry": params.get("target_expiry", ""),
+                "lam_factor": params.get("lam_factor", ""),
+                "status": result.get("status", ""),
+                "trades_count": len(result.get("replacement_trades", result.get("trades", []))),
+            })
+        except Exception:
+            snapshots.append({"filename": f.name, "size_kb": round(f.stat().st_size / 1024, 1)})
+    return {"snapshots": snapshots}
+
+
+@router.get("/snapshots/{filename}")
+async def download_snapshot(filename: str):
+    """Download a saved usecase snapshot file."""
+    path = SNAPSHOT_DIR / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    # Security: ensure the resolved path is inside SNAPSHOT_DIR
+    if not path.resolve().is_relative_to(SNAPSHOT_DIR.resolve()):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return FileResponse(path, media_type="application/json", filename=filename)

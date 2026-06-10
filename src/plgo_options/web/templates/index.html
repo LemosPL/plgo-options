@@ -1538,6 +1538,33 @@
       </div>
     </section>
 
+    <!-- Saved Snapshots -->
+    <section class="card" id="optv2-snapshots-section">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>Saved Runs</h3>
+        <button class="btn-secondary" style="width:auto;font-size:.75rem" id="btn-optv2-refresh-snapshots">Refresh</button>
+      </div>
+      <div class="chain-wrapper" style="max-height:250px;margin-top:.5rem">
+        <table style="width:100%">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--card-bg);z-index:2">
+              <th>Date</th>
+              <th>Asset</th>
+              <th>Expiry</th>
+              <th>Lambda</th>
+              <th>Trades</th>
+              <th>Status</th>
+              <th>Size</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="optv2-snapshots-body">
+            <tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card">
         <h3>Suggested Trades</h3>
         <div style="display:flex;gap:.5rem;align-items:center;justify-content:flex-end;margin-bottom:.5rem">
@@ -1815,6 +1842,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=44"></script>
+<script src="/static/app.js?v=45"></script>
 </body>
 </html>
