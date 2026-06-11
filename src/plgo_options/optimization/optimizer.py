@@ -40,7 +40,7 @@ class OptimizerV2(BaseOptimizer):
 
     def __init__(
         self,
-        eth_spot: float,
+        spot: float,
         spot_ladder: list[float],
         matrix_horizons: list[int],
         chart_horizons: list[int],
@@ -49,13 +49,14 @@ class OptimizerV2(BaseOptimizer):
         totals: dict,
         snapshot_path: Path,
     ):
-        super().__init__(eth_spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals, snapshot_path)
+        print(spot)
+        super().__init__(spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals, snapshot_path)
 
     @classmethod
-    def from_snapshot_dict(cls, data: dict) -> "OptimizerV2":
+    def from_snapshot_dict(cls, data: dict, **kwargs) -> "OptimizerV2":
         snapshot_data, positions = load_snapshot_dict(data)
         return cls(
-            eth_spot=snapshot_data["eth_spot"],
+            spot=snapshot_data["spot"],
             spot_ladder=snapshot_data["spot_ladder"],
             matrix_horizons=snapshot_data["matrix_horizons"],
             chart_horizons=snapshot_data["chart_horizons"],
@@ -92,7 +93,7 @@ class OptimizerV2(BaseOptimizer):
             Extra cost per dollar notional for trades in instruments not already held.
         """
         print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
-        spot = self.eth_spot
+        spot = self.spot
         candidates = self._build_candidates(target_expiry=target_expiry)
 
         if not candidates:
@@ -487,7 +488,7 @@ class OptimizerV2(BaseOptimizer):
         return {
             "status": "ok",
             "snapshot_path": str(self.snapshot_path),
-            "eth_spot": spot,
+            "spot": spot,
             "spot_ladder": self.spot_ladder,
             "chart_horizons": horizons,
             "params": {

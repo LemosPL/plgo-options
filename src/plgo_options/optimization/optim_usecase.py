@@ -39,6 +39,7 @@ class OptimizerUseCase:
         portfolio_payload: dict[str, Any],
         run_params: OptimizerRunParams,
     ) -> "OptimizerUseCase":
+        # print(portfolio_payload)
         spot = portfolio_payload.get("spot", portfolio_payload.get("eth_spot"))
 
         return_val = cls(
@@ -46,7 +47,6 @@ class OptimizerUseCase:
             optimizer_input={
                 "asset": portfolio_payload.get("asset", run_params.asset).upper(),
                 "spot": spot,
-                "eth_spot": spot,  # backward-compatible alias for current optimizer internals
                 "spot_ladder": portfolio_payload["spot_ladder"],
                 "matrix_horizons": portfolio_payload["matrix_horizons"],
                 "chart_horizons": portfolio_payload["chart_horizons"],
@@ -57,7 +57,7 @@ class OptimizerUseCase:
             },
             run_params=run_params,
         )
-        #print(return_val)
+        # print(return_val.optimizer_input)
         return return_val
 
     @classmethod
@@ -65,6 +65,9 @@ class OptimizerUseCase:
         path = Path(path)
         with path.open() as f:
             data = json.load(f)
+        if "eth_spot" in data["optimizer_input"].keys():
+            data["optimizer_input"]["spot"] = data["optimizer_input"]["eth_spot"]
+            del data["optimizer_input"]["eth_spot"]
 
         today_str = path.name.split('_')[0]
         today = datetime.strptime(today_str, "%Y%m%d")
@@ -85,6 +88,9 @@ class OptimizerUseCase:
         return return_val
 
     def save(self, path: str | Path) -> Path:
+        print(self.optimizer_input.keys())
+        print(self.optimizer_input.get("spot"))
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
@@ -125,7 +131,7 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.75)#, counterparties=["Flowdesk"])
+        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=12, lam_factor=0.075)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")

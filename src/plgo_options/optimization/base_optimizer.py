@@ -47,7 +47,7 @@ class BaseOptimizer:
 
     def __init__(
         self,
-        eth_spot: float,
+        spot: float,
         spot_ladder: list[float],
         matrix_horizons: list[int],
         chart_horizons: list[int],
@@ -59,8 +59,8 @@ class BaseOptimizer:
         asset: str = "ETH",
     ):
         self.asset = asset.upper()
-        self.spot = eth_spot
-        self.eth_spot = eth_spot  # backward-compatible alias
+        self.spot = spot
+        #self.spot = spot  # backward-compatible alias
         self.spot_ladder = spot_ladder
         self.matrix_horizons = matrix_horizons
         self.chart_horizons = chart_horizons
@@ -78,9 +78,9 @@ class BaseOptimizer:
         if latest_positions:
             positions = latest_positions
 
-        spot = snapshot_data.get("spot", snapshot_data.get("eth_spot"))
+        spot = snapshot_data.get("spot")
         return cls(
-            eth_spot=spot,
+            spot=spot,
             spot_ladder=snapshot_data["spot_ladder"],
             matrix_horizons=snapshot_data["matrix_horizons"],
             chart_horizons=snapshot_data["chart_horizons"],
@@ -114,7 +114,7 @@ class BaseOptimizer:
         target_expiry : optional expiry code to restrict to (e.g. "29MAY26").
                         If None, uses ALL available expiries.
         """
-        S = self.eth_spot
+        S = self.spot
         candidates = []
 
         # Build a lookup of currently held option positions so that in ALL-maturities
@@ -241,7 +241,7 @@ class BaseOptimizer:
             legs = sorted(legs, key=lambda c: float(c.strike))
 
             if opt == "C":
-                calls = [c for c in legs if float(c.strike) > self.eth_spot]
+                calls = [c for c in legs if float(c.strike) > self.spot]
 
                 for i, lower_call in enumerate(calls):
                     for higher_call in calls[i + 1:]:
@@ -254,7 +254,7 @@ class BaseOptimizer:
                         )
 
             elif opt == "P":
-                puts = [c for c in legs if float(c.strike) < self.eth_spot]
+                puts = [c for c in legs if float(c.strike) < self.spot]
 
                 # For a debit put spread:
                 # long higher-strike put, short lower-strike put.
@@ -407,7 +407,7 @@ class BaseOptimizer:
         """
         atm_ivs = []
         dtes = []
-        S = self.eth_spot
+        S = self.spot
 
         for smile in self.vol_surface:
             if smile["dte"] <= 0:
@@ -493,7 +493,7 @@ class BaseOptimizer:
           - 0.0 => expiries independent, no cross-expiry netting
           - 1.0 => fully shared vol shock, equivalent to total-vega netting
         """
-        S = self.eth_spot
+        S = self.spot
 
         # Delta P&L variance: (Δ · S · σ_daily)²
         var_delta = (port_delta * S * sigma_daily) ** 2

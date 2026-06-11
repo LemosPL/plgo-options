@@ -55,7 +55,7 @@ def load_target_profile():
     smoothed_profile = smooth_target_profile(target_profile)
     return smoothed_profile
 
-def build_parametric_target_profile(
+def build_parametric_target_profile_eth(
     spot_ladder: list[float] | np.ndarray,
     current_spot: float,
     payoff_col: str = "Payoff($)",
@@ -82,3 +82,7 @@ def build_parametric_target_profile(
 
     smoothed_profile = smooth_target_profile(target_profile)
     return smoothed_profile
+
+
+def build_parametric_target_profile_fil():
+    pass

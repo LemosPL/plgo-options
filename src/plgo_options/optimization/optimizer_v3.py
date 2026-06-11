@@ -17,7 +17,7 @@ from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
-from .misc_utils import load_target_profile, shift_target_profile, build_parametric_target_profile
+from .misc_utils import build_parametric_target_profile_eth, build_parametric_target_profile_fil
 
 import matplotlib.pyplot as plt
 
@@ -29,7 +29,7 @@ class OptimizerV3(BaseOptimizer):
 
     def __init__(
         self,
-        eth_spot: float,
+        spot: float,
         spot_ladder: list[float],
         matrix_horizons: list[int],
         chart_horizons: list[int],
@@ -40,7 +40,7 @@ class OptimizerV3(BaseOptimizer):
         today: date,
         asset: str = "ETH"
     ):
-        super().__init__(eth_spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals,
+        super().__init__(spot, spot_ladder, matrix_horizons, chart_horizons, vol_surface, positions, totals,
                          snapshot_path, today, asset=asset)
         self.cost = None
         self.risk_reduction = None
@@ -175,9 +175,9 @@ class OptimizerV3(BaseOptimizer):
                 continue
 
             # Only force replacement for currently ITM rolled positions.
-            if old_opt == "C" and old_strike >= self.eth_spot:
+            if old_opt == "C" and old_strike >= self.spot:
                 continue
-            if old_opt == "P" and old_strike <= self.eth_spot:
+            if old_opt == "P" and old_strike <= self.spot:
                 continue
 
             desired_delta_exposure = old_qty * old_delta
@@ -195,12 +195,12 @@ class OptimizerV3(BaseOptimizer):
             if old_opt == "C":
                 same_opt_candidates = [
                     c for c in same_opt_candidates
-                    if float(c.strike or 0.0) < self.eth_spot
+                    if float(c.strike or 0.0) < self.spot
                 ]
             else:
                 same_opt_candidates = [
                     c for c in same_opt_candidates
-                    if float(c.strike or 0.0) > self.eth_spot
+                    if float(c.strike or 0.0) > self.spot
                 ]
 
             if not same_opt_candidates:
@@ -427,9 +427,9 @@ class OptimizerV3(BaseOptimizer):
                 if box_debit <= 0.0:
                     continue
 
-                target_width = max(self.eth_spot * 0.5, 1.0)
+                target_width = max(self.spot * 0.5, 1.0)
                 width = high_strike - low_strike
-                score = abs(width - target_width) + abs((low_strike + high_strike) / 2.0 - self.eth_spot) * 0.25
+                score = abs(width - target_width) + abs((low_strike + high_strike) / 2.0 - self.spot) * 0.25
 
                 if best_box is None or score < best_box[0]:
                     best_box = (score, box_debit, low_call, low_put, high_call, high_put)
@@ -528,7 +528,7 @@ class OptimizerV3(BaseOptimizer):
         call_prices = np.array(
             [
                 options.bs_price(
-                    self.eth_spot,
+                    self.spot,
                     strike,
                     T,
                     r,
@@ -595,7 +595,12 @@ class OptimizerV3(BaseOptimizer):
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
                  counterparties: list[str] | None = None,
+                 asset: str | None = None,
             ):
+        if asset is not None:
+            self.asset = asset.upper()
+        print(f"asset: {self.asset}")
+
         selected_counterparties = {
             c.strip()
             for c in (counterparties or [])
@@ -612,10 +617,12 @@ class OptimizerV3(BaseOptimizer):
         print(new_position_penalty)
         print(is_replay)
         print(f"roll_dte_threshold: {roll_dte_threshold}")
+        print(self.spot)
+        print(self.spot_ladder)
         # is_replay = (target_expiry is not None)#False
-        # target_profile = shift_target_profile(load_target_profile(), self.eth_spot)
-        target_profile = build_parametric_target_profile(
-            spot_ladder=self.spot_ladder, current_spot=self.eth_spot)
+        # target_profile = shift_target_profile(load_target_profile(), self.spot)
+        target_profile = build_parametric_target_profile_eth(
+            spot_ladder=self.spot_ladder, current_spot=self.spot)
 
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(roll_dte_threshold)
@@ -752,7 +759,7 @@ class OptimizerV3(BaseOptimizer):
             else:
                 strike = float(getattr(c, "strike", 0.0) or 0.0)
                 opt = str(getattr(c, "opt", "") or "")
-                is_itm = (opt == "C" and strike < self.eth_spot) or (opt == "P" and strike > self.eth_spot)
+                is_itm = (opt == "C" and strike < self.spot) or (opt == "P" and strike > self.spot)
                 if is_itm:
                     lams[i] *= 2.0
 
@@ -848,7 +855,7 @@ class OptimizerV3(BaseOptimizer):
                 "asset": self.asset,
                 "target_expiry": target_expiry,
                 "optimizer_converged": True,
-                "eth_spot": round(float(self.eth_spot), 2),
+                "spot": round(float(self.spot), 2),
                 "cash_shift": round(float(cash_shift), 2),
                 "premium_summary": premium_summary,
                 "net_premium_generated": premium_summary["net_premium_generated"],
@@ -923,7 +930,7 @@ class OptimizerV3(BaseOptimizer):
 
         print("is_replay:" + str(is_replay))
         if is_replay:
-            spot = self.eth_spot  # or your reference spot S0
+            spot = self.spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
             spot_ticks = np.array([1000, 1500, 2000, 2500, 3000, 4500, 7000], dtype=float)
@@ -996,7 +1003,7 @@ class OptimizerV3(BaseOptimizer):
             "asset": self.asset,
             "target_expiry": target_expiry,
             "optimizer_converged": True,
-            "eth_spot": round(float(self.eth_spot), 2),
+            "spot": round(float(self.spot), 2),
             "cash_shift": round(float(cash_shift), 2),
             "fitted_payoff_cash_shift": round(float(fitted_payoff_cash_shift), 2),
             "premium_summary": premium_summary,
@@ -1056,7 +1063,7 @@ class OptimizerV3(BaseOptimizer):
             price_i = float(c.bs_price_usd) if c and c.bs_price_usd is not None else 0.0
             dte_i = int(c.dte) if c and c.dte is not None else 0
             cost_rate = float(self.compute_costs(
-                self.eth_spot, [c] if c else [], perp_cost_bps=2.0, brokerage_txn_cost_pct=0.5,
+                self.spot, [c] if c else [], perp_cost_bps=2.0, brokerage_txn_cost_pct=0.5,
                 deribit_txn_cost_pct=0.1,
             )[0]) if c else 0.0
 
@@ -1113,7 +1120,7 @@ class OptimizerV3(BaseOptimizer):
         print(port_gamma)
         print(new_gamma)
 
-        spot = self.eth_spot
+        spot = self.spot
         # Market parameters
         # ATM IV for daily spot vol
         atm_ivs = []
@@ -1161,7 +1168,7 @@ class OptimizerV3(BaseOptimizer):
         return {
             "status": "ok",
             "snapshot_path": str(self.snapshot_path),
-            "eth_spot": spot,
+            "spot": spot,
             "spot_ladder": self.spot_ladder,
             "chart_horizons": horizons,
             "params": {
@@ -1841,7 +1848,7 @@ class OptimizerV3(BaseOptimizer):
             instrument_name = ("ETH-PERPETUAL" if c.opt == "F" else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}")
 
             cost_rate = float(self.compute_costs(
-                self.eth_spot, [c] if c else [], perp_cost_bps=2.0, brokerage_txn_cost_pct=0.5,
+                self.spot, [c] if c else [], perp_cost_bps=2.0, brokerage_txn_cost_pct=0.5,
                 deribit_txn_cost_pct=0.1,
             )[0]) if c else 0.0
 
@@ -1866,285 +1873,3 @@ class OptimizerV3(BaseOptimizer):
 
         return condor_trades, x
 
-    '''
-from scipy.optimize import minimize
-        def run(
-        self,
-        risk_aversion: float = 1.0,
-        brokerage_txn_cost_pct: float = 5.0,
-        deribit_txn_cost_pct: float = 0.1,
-        max_collateral: float = 4_000_000.0,
-        target_expiry: str | None = None,
-        lambda_delta: float = 1.0,
-        lambda_gamma: float = 1.0,
-        lambda_vega: float = 1.0,
-        unwind_discount: float = 0.2,
-        new_position_penalty: float = 0.04,
-        vega_cross_expiry_corr: float = 0.0,
-    ) -> dict:
-        """Run the optimization and return proposed trades.
-
-                Parameters
-                ----------
-                unwind_discount : float
-                    Multiplier on txn cost for closing existing positions (0.2 = 80% cheaper).
-                new_position_penalty : float
-                    Extra cost per dollar notional for trades in instruments not already held.
-                vega_cross_expiry_corr : float
-                    Correlation of vol shocks across expiries. Lower means less cross-expiry
-                    vega netting; higher means more shared vega risk.
-                """
-        self.lambda_delta = lambda_delta
-        self.lambda_gamma = lambda_gamma
-        self.lambda_vega = lambda_vega
-        print(f"Running optimization with risk aversion {risk_aversion:.2f}...")
-        spot = self.eth_spot
-        candidates = self._build_candidates(target_expiry=target_expiry)
-
-        if not candidates:
-            return {
-                "status": "no_candidates",
-                "message": "No tradeable instruments found on the vol surface.",
-            }
-
-        # Current portfolio greeks
-        port_delta, port_gamma, port_theta, port_vega = self._portfolio_greeks()
-        port_vega_by_expiry = self._portfolio_vega_by_expiry()
-
-        # Market parameters
-        # ATM IV for daily spot vol
-        atm_ivs = []
-        for smile in self.vol_surface:
-            if smile["dte"] <= 0:
-                continue
-            strikes = smile["strikes"]
-            ivs = smile["ivs"]
-            best_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
-            atm_ivs.append(ivs[best_idx])
-        atm_iv = float(np.mean(atm_ivs)) / 100.0 if atm_ivs else 0.80
-        sigma_daily = atm_iv / math.sqrt(252)
-        vov_daily = self._estimate_vol_of_vol_daily()  # Vol-of-vol
-
-        # ------------------------------------------------------------------
-        # A negative net_qty means we're short → buying unwinds.
-        # A positive net_qty means we're long → selling unwinds.
-        # ------------------------------------------------------------------
-        held_positions = self.get_held_positions()
-
-        n = len(candidates)
-        # Pre-compute candidate greek arrays (per contract)
-        c_delta = np.array([0.0 if c.delta is None else float(c.delta) for c in candidates], dtype=float)
-        c_gamma = np.array([0.0 if c.gamma is None else float(c.gamma) for c in candidates], dtype=float)
-        c_theta = np.array([safe_num(c.theta) for c in candidates], dtype=float)
-        c_vega = np.array([safe_num(c.vega) for c in candidates], dtype=float)
-        c_price = np.array([max(safe_num(c.bs_price_usd), 0.0) for c in candidates], dtype=float)
-        c_iv_pct = np.array([max(safe_num(c.iv_pct), 0.0) for c in candidates], dtype=float)
-        c_strike = np.array([safe_num(c.strike) for c in candidates], dtype=float)
-        c_dte = np.array([int(safe_num(c.dte)) for c in candidates], dtype=int)
-
-        # ----------------------------------------------------------
-        # Strike weighting: ensure OTM strikes get a minimum weight.
-        # Weighting is done within each expiry bucket, not globally across all candidates.
-        # Otherwise, an all-expiry run can distort the effective greeks of a given expiry versus running that expiry on its own.
-        # ----------------------------------------------------------
-        min_strike_weight_pct = 0.10  # 10% of the max weight per expiry
-        strike_weight = np.ones(n)
-
-        expiry_to_indices: dict[str, list[int]] = {}
-        for i, c in enumerate(candidates):
-            expiry_to_indices.setdefault(c.expiry_code, []).append(i)
-
-        for exp_code, idxs in expiry_to_indices.items():
-            idx_arr = np.array(idxs, dtype=int)
-
-            greek_mag_bucket = np.sqrt(
-                (c_delta[idx_arr] * spot) ** 2
-                + (c_gamma[idx_arr] * spot ** 2) ** 2
-                + c_vega[idx_arr] ** 2
-            )
-
-            bucket_max = greek_mag_bucket.max() if greek_mag_bucket.size > 0 else 0.0
-            if bucket_max <= 0:
-                raw_weight_bucket = np.ones(len(idx_arr))
-            else:
-                raw_weight_bucket = greek_mag_bucket / bucket_max
-
-            strike_weight[idx_arr] = np.maximum(raw_weight_bucket, min_strike_weight_pct)
-
-        # Apply strike weights to the greeks the optimizer sees
-        c_delta = c_delta * strike_weight
-        c_gamma = c_gamma * strike_weight
-        c_theta = c_theta * strike_weight
-        c_vega = c_vega * strike_weight
-
-        # Per-candidate cost rate: 5bps for perp, txn_cost_pct for options
-        perp_cost_bps = 2.0  # 5 basis points = 0.05%
-        c_cost_rate = self.compute_costs(spot, candidates, perp_cost_bps, brokerage_txn_cost_pct, deribit_txn_cost_pct)
-
-        # ------------------------------------------------------------------
-        # Per-candidate: existing position qty and "is_held" flag
-        # ------------------------------------------------------------------
-        c_held_qty = np.array([held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0)
-            for c in candidates
-        ])
-        c_is_held = np.array([abs(q) > 0 for q in c_held_qty], dtype=float)
-
-        expiry_codes = sorted({c.expiry_code for c in candidates if c.expiry_code != "PERP"})
-        c_vega_by_expiry = {
-            exp_code: np.array([c_vega[i] if candidates[i].expiry_code == exp_code else 0.0 for i in range(n)])
-            for exp_code in expiry_codes
-        }
-
-        new_port_vega_by_expiry = {exp_code: port_vega_by_expiry.get(exp_code, 0.0) for exp_code in expiry_codes}
-
-        # Current portfolio risk (before optimization)
-        risk_before = self._compute_risk(port_delta, port_gamma, port_theta, port_vega, sigma_daily, vov_daily,
-                                         self.lambda_delta, self.lambda_gamma, self.lambda_vega,
-                                         port_vega_by_expiry=new_port_vega_by_expiry,
-                                         vega_cross_expiry_corr=vega_cross_expiry_corr, risk_mode=RiskMode.GAMMA_VEGA)
-
-        bounds = []  # Bounds: unwind-only
-        for c, held_qty, price in zip(candidates, c_held_qty, c_price):
-            if c.opt == "F":  # ETH-PERPETUAL stays unrestricted
-                bounds.append((-max_collateral / max(price, 1.0), max_collateral / max(price, 1.0)))
-            elif c.counterparty == "Deribit":
-                bounds.append((-max_collateral / max(price, 1.0), max_collateral / max(price, 1.0)))
-            elif held_qty > 0:  # long option: can only sell to reduce/close
-                bounds.append((-abs(held_qty), 0.0))
-            elif held_qty < 0:  # short option: can only buy to reduce/close
-                bounds.append((0.0, abs(held_qty)))
-            else:  # no existing option position: no trade
-                bounds.append((0.0, 0.0))
-
-        x0 = np.zeros(n)  # Start from zero (no trades)
-        obj = lambda x:self.objective(x, port_delta, port_gamma, port_theta, port_vega, c_delta, c_gamma, c_theta,
-                                      c_vega, c_vega_by_expiry, c_held_qty, c_is_held, c_price, c_cost_rate,
-                                      sigma_daily, vov_daily, port_vega_by_expiry, vega_cross_expiry_corr, expiry_codes,
-                                      risk_aversion, risk_before, unwind_discount, new_position_penalty,
-                                      risk_mode=RiskMode.GAMMA_VEGA)
-        res0 = obj(x0)
-        result = minimize(obj, x0, method="SLSQP", bounds=bounds, options={"maxiter": 2000, "ftol": 1e-10})
-        if not result.success:
-            print(f"Optimization failed: {result.message}")
-        obj_result = obj(result.x)
-        print(f"cost: {self.cost:.2f}, risk_reduction: {self.risk_reduction:.2f}")
-
-        trades = self.extract_trades(result.x, candidates, c_dte, c_strike, c_iv_pct, c_price, c_delta, c_gamma, c_theta,
-                                     c_vega, c_held_qty, unwind_discount, new_position_penalty, strike_weight, c_cost_rate)
-
-        new_delta, new_gamma, new_theta, new_vega, new_vega_by_expiry = (
-            self.compute_greeks(result.x, port_delta, port_gamma, port_theta, port_vega, port_vega_by_expiry,
-                                c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry))
-
-        risk_after = self._compute_risk(
-            new_delta, new_gamma, new_theta, new_vega,
-            sigma_daily, vov_daily, lambda_delta, lambda_gamma, lambda_vega,
-            port_vega_by_expiry=new_vega_by_expiry,
-            vega_cross_expiry_corr=vega_cross_expiry_corr, risk_mode=RiskMode.GAMMA_VEGA,
-        )
-
-        total_cost = sum(t["trade_cost"] for t in trades)
-
-        # ------------------------------------------------------------------
-        # Compute before/after payoff curves and P&L matrix
-        # ------------------------------------------------------------------
-        spot_arr = np.array(self.spot_ladder, dtype=float)
-        horizons = sorted(set(self.chart_horizons + [0]))
-        before_payoff, after_payoff = self.build_payoffs(horizons, spot_arr, trades)
-
-        return {
-            "status": "ok",
-            "snapshot_path": str(self.snapshot_path),
-            "eth_spot": spot,
-            "spot_ladder": self.spot_ladder,
-            "chart_horizons": horizons,
-            "params": {
-                "risk_aversion": risk_aversion,
-                "brokerage_txn_cost_pct": brokerage_txn_cost_pct,
-                "deribit_txn_cost_pct": deribit_txn_cost_pct,
-                "max_collateral": max_collateral,
-                "atm_iv_pct": round(atm_iv * 100, 1),
-                "sigma_daily": round(sigma_daily, 4),
-                "vov_daily": round(vov_daily, 2),
-                "vega_cross_expiry_corr": round(vega_cross_expiry_corr, 2),
-                "lambda_delta": lambda_delta,
-                "lambda_gamma": lambda_gamma,
-                "lambda_vega": lambda_vega,
-            },
-            "before": {
-                "delta": round(port_delta, 2),
-                "gamma": round(port_gamma, 4),
-                "theta": round(port_theta, 2),
-                "vega": round(port_vega, 2),
-                "daily_risk": round(risk_before, 2),
-                "payoff_by_horizon": before_payoff,
-            },
-            "after": {
-                "delta": round(new_delta, 2),
-                "gamma": round(new_gamma, 4),
-                "theta": round(new_theta, 2),
-                "vega": round(new_vega, 2),
-                "daily_risk": round(risk_after, 2),
-                "payoff_by_horizon": after_payoff,
-            },
-            "trades": trades,
-            "total_trade_cost": round(total_cost, 2),
-            "utility_improvement": round(risk_before - risk_after - total_cost, 2),
-            "candidates_evaluated": n,
-            "optimizer_converged": result.success,
-        }
-
-    def objective(self, x: np.ndarray,
-                  port_delta, port_gamma, port_theta, port_vega,
-                  c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry, c_held_qty, c_is_held, c_price, c_cost_rate,
-                  sigma_daily, vov_daily,
-                  port_vega_by_expiry, vega_cross_expiry_corr, expiry_codes,
-                  risk_aversion, risk_before, unwind_discount, new_position_penalty,
-                  risk_mode) -> float:
-        """Negative utility: cost − λ·risk_reduction. At x=0 (no trades), this returns exactly 0.
-        A trade is only proposed if λ·risk_reduction > cost."""
-        new_delta, new_gamma, new_theta, new_vega, new_vega_by_expiry = (
-            self.compute_greeks(x, port_delta, port_gamma, port_theta, port_vega, port_vega_by_expiry,
-                                c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry))
-
-        risk = self._compute_risk(
-            new_delta, new_gamma, new_theta, new_vega,
-            sigma_daily, vov_daily, self.lambda_delta, self.lambda_gamma, self.lambda_vega,
-            port_vega_by_expiry=new_vega_by_expiry,
-            vega_cross_expiry_corr=vega_cross_expiry_corr, risk_mode=risk_mode,
-        )
-
-        risk_reduction = risk_before - risk  # Risk reduction relative to doing nothing
-
-        # ----------------------------------------------------------
-        # Split each trade into "unwind" and "new" portions.
-        #
-        # For a held position with qty H and optimizer trade x:
-        #   - If x goes in the opposite direction of H (reducing exposure),
-        #     that part is an unwind → cheaper cost.
-        #   - Any remainder is a new position → higher cost.
-        # ----------------------------------------------------------
-        opposite = (x * c_held_qty) < 0  # True where trade closes position
-        unwind_abs = np.where(opposite, np.minimum(np.abs(x), np.abs(c_held_qty)), 0.0)
-        new_abs = np.abs(x) - unwind_abs
-
-        cost_unwind = np.sum(c_cost_rate * unwind_discount * unwind_abs * c_price)
-        cost_new = np.sum((c_cost_rate + new_position_penalty * (1.0 - c_is_held)) * new_abs * c_price)
-        self.cost = cost_unwind + cost_new
-
-        self.risk_reduction = risk_reduction
-        return self.cost - risk_aversion * risk_reduction
-
-    def compute_greeks(self, x: np.ndarray,port_delta, port_gamma, port_theta, port_vega, port_vega_by_expiry,
-                       c_delta, c_gamma, c_theta, c_vega, c_vega_by_expiry):
-        new_delta = port_delta + np.dot(x, c_delta)
-        new_gamma = port_gamma + np.dot(x, c_gamma)
-        new_theta = port_theta + np.dot(x, c_theta)
-        new_vega = port_vega + np.dot(x, c_vega)
-        new_vega_by_expiry = {
-            exp_code: port_vega_by_expiry.get(exp_code, 0.0) + np.dot(x, c_vega_by_expiry[exp_code])
-            for exp_code in c_vega_by_expiry.keys()
-        }
-
-        return new_delta, new_gamma, new_theta, new_vega, new_vega_by_expiry
-    '''
