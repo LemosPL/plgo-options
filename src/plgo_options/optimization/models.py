@@ -254,10 +254,6 @@ class IronCondorCandidate:
             + float(self.call_high_leg.iv_pct or 0.0)
         )
 
-
-POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
-
-
 def _xlsx_column_index(cell_ref: str) -> int:
     letters = "".join(ch for ch in cell_ref if ch.isalpha())
     index = 0
@@ -349,7 +345,15 @@ def _read_first_xlsx_sheet_rows(path: Path) -> list[list[object]]:
         return rows
 
 
-def load_positions_from_latest_xlsx(positions_dir: Path = POSITIONS_DIR) -> list[Position]:
+def load_positions_from_latest_xlsx(token) -> list[Position]:
+    # positions_dir: Path = POSITIONS_DIR
+    if token == 'ETH':
+        positions_dir = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
+    else:
+        token_positions_dir = token + "_positions"
+        positions_dir = Path(__file__).resolve().parent.parent.parent.parent / "data" / token_positions_dir
+    #POSITIONS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "positions"
+
     """Load positions from the most recent .xlsx file in data/positions."""
     if not positions_dir.exists() or not positions_dir.is_dir():
         return []

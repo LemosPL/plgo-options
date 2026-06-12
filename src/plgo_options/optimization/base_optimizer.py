@@ -59,6 +59,7 @@ class BaseOptimizer:
         asset: str = "ETH",
     ):
         self.asset = asset.upper()
+        self.asset_precision = 0
         self.spot = spot
         #self.spot = spot  # backward-compatible alias
         self.spot_ladder = spot_ladder
@@ -74,7 +75,7 @@ class BaseOptimizer:
     def from_snapshot_dict(cls, data: dict, today: datetime.date) -> "BaseOptimizer":
         snapshot_data, positions = load_snapshot_dict(data)
 
-        latest_positions = load_positions_from_latest_xlsx()
+        latest_positions = load_positions_from_latest_xlsx(snapshot_data["asset"])
         if latest_positions:
             positions = latest_positions
 

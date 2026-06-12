@@ -55,6 +55,16 @@ def load_target_profile():
     smoothed_profile = smooth_target_profile(target_profile)
     return smoothed_profile
 
+def build_parametric_target_profile(asset: str, spot_ladder: list[float] | np.ndarray, current_spot: float):
+    if asset == "ETH":
+        return build_parametric_target_profile_eth(spot_ladder, current_spot)
+    elif asset == "FIL":
+        return build_parametric_target_profile_fil()
+    else:
+        raise ValueError(
+            f"Unsupported asset: {asset}. Supported assets are 'ETH' and 'FIL'."
+        )
+
 def build_parametric_target_profile_eth(
     spot_ladder: list[float] | np.ndarray,
     current_spot: float,
@@ -83,6 +93,22 @@ def build_parametric_target_profile_eth(
     smoothed_profile = smooth_target_profile(target_profile)
     return smoothed_profile
 
+def build_parametric_target_profile_fil(
+    payoff_col: str = "Payoff($)",
+    min_strike: float = 0.0,
+    max_strike: float = 5.0,
+    strike_step: float = 0.25,
+    payoff_per_strike: float = -5_000_000.0,
+) -> pd.DataFrame:
+    strikes = np.arange(
+        min_strike,
+        max_strike + strike_step / 2,
+        strike_step,
+        dtype=float,
+    )
+    payoffs = payoff_per_strike * strikes
 
-def build_parametric_target_profile_fil():
-    pass
+    return pd.DataFrame(
+        {payoff_col: payoffs},
+        index=pd.Index(strikes, name="Strike($)"),
+    )

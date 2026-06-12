@@ -17,7 +17,7 @@ from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
-from .misc_utils import build_parametric_target_profile_eth, build_parametric_target_profile_fil
+from .misc_utils import build_parametric_target_profile
 
 import matplotlib.pyplot as plt
 
@@ -99,7 +99,7 @@ class OptimizerV3(BaseOptimizer):
 
         return roll_positions
 
-    def _build_roll_unwind_trades(self, roll_positions: list[Position]) -> list[dict]:
+    def _build_roll_unwind_trades(self, token, roll_positions: list[Position]) -> list[dict]:
         trades = []
 
         for p in roll_positions:
@@ -118,10 +118,18 @@ class OptimizerV3(BaseOptimizer):
             strike = float(getattr(p, "strike", 0.0) or 0.0)
             expiry_code = get_expiry_code(getattr(p, "expiry_date", getattr(p, "expiry", "")))
 
-            instrument_name = (
-                "ETH-PERPETUAL" if opt == "F"
-                else f"ETH-{expiry_code}-{int(strike)}-{opt}"
-            )
+            if token == "ETH":
+                instrument_name = (
+                    "ETH-PERPETUAL" if opt == "F"
+                    else f"ETH-{expiry_code}-{int(strike)}-{opt}"
+                )
+            elif token == "FIL":
+                instrument_name = (
+                    "FIL-PERPETUAL" if opt == "F"
+                    else f"FIL-{expiry_code}-{strike}-{opt}"
+                )
+            else:
+                raise ValueError(f"Unsupported token: {token}")
 
             trades.append({
                 "counterparty": getattr(p, "counterparty", ""),
@@ -223,7 +231,7 @@ class OptimizerV3(BaseOptimizer):
 
             replacement_qty = int(math.copysign(replacement_abs_qty, old_qty))
 
-            instrument_name = f"ETH-{replacement.expiry_code}-{int(replacement.strike)}-{replacement.opt}"
+            instrument_name = f"{self.asset}-{replacement.expiry_code}-{np.round(replacement.strike, self.asset_precision)}-{replacement.opt}"
 
             trades.append({
                 "counterparty": replacement.counterparty,
@@ -379,6 +387,7 @@ class OptimizerV3(BaseOptimizer):
 
     def _build_box_premium_neutralizer_trades(
             self,
+            token,
             trades: list[dict],
             option_legs: list[Candidate],
             target_expiry: str | None,
@@ -453,15 +462,26 @@ class OptimizerV3(BaseOptimizer):
             (high_put, direction * box_qty),
         ]
 
-        strategy_instrument = (
-            f"BOX_NEUTRALIZER: "
-            f"ETH-{target_expiry}-{int(low_call.strike)} / "
-            f"ETH-{target_expiry}-{int(high_call.strike)}"
-        )
+        if token == "ETH":
+            strategy_instrument = (
+                f"BOX_NEUTRALIZER: "
+                f"ETH-{target_expiry}-{int(low_call.strike)} / "
+                f"ETH-{target_expiry}-{int(high_call.strike)}"
+            )
+        elif token == "FIL":
+            strategy_instrument = (
+                f"BOX_NEUTRALIZER: "
+                f"FIL-{target_expiry}-{int(low_call.strike)} / "
+                f"FIL-{target_expiry}-{int(high_call.strike)}"
+            )
+        else:
+            raise ValueError(f"Unsupported token: {token}")
 
         box_trades = []
         for leg, leg_qty in legs:
-            instrument_name = f"ETH-{leg.expiry_code}-{int(leg.strike)}-{leg.opt}"
+            strike = int(leg.strike) if token == "ETH" else np.round(leg.strike, 2)
+
+            instrument_name = f"{token}-{leg.expiry_code}-{strike}-{leg.opt}"
             box_trades.append({
                 "counterparty": leg.counterparty,
                 "instrument": instrument_name,
@@ -599,6 +619,13 @@ class OptimizerV3(BaseOptimizer):
             ):
         if asset is not None:
             self.asset = asset.upper()
+            if self.asset == "ETH":
+                self.asset_precision = 0
+            elif self.asset == "FIL":
+                self.asset_precision = 2
+            else:
+                raise ValueError(f"Unsupported asset: {self.asset}")
+
         print(f"asset: {self.asset}")
 
         selected_counterparties = {
@@ -621,8 +648,7 @@ class OptimizerV3(BaseOptimizer):
         print(self.spot_ladder)
         # is_replay = (target_expiry is not None)#False
         # target_profile = shift_target_profile(load_target_profile(), self.spot)
-        target_profile = build_parametric_target_profile_eth(
-            spot_ladder=self.spot_ladder, current_spot=self.spot)
+        target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder, current_spot=self.spot)
 
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(roll_dte_threshold)
@@ -630,7 +656,7 @@ class OptimizerV3(BaseOptimizer):
         is_roll_mode = len(roll_positions) > 0
         
         print(f"roll positions: {len(roll_positions)}")
-        roll_unwind_trades = self._build_roll_unwind_trades(roll_positions)
+        roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
         print(f"roll unwind trades: {len(roll_unwind_trades)}")
 
         option_legs = self._build_candidates(
@@ -832,6 +858,7 @@ class OptimizerV3(BaseOptimizer):
 
         if not scored_trades:
             box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
+                token=self.asset,
                 trades=trades,
                 option_legs=option_legs,
                 target_expiry=target_expiry,
@@ -883,8 +910,8 @@ class OptimizerV3(BaseOptimizer):
 
             for leg, leg_qty, strategy in self._candidate_trade_legs(c, rounded_qty):
                 leg_instrument_name = (
-                    "ETH-PERPETUAL" if leg.opt == "F"
-                    else f"ETH-{leg.expiry_code}-{int(leg.strike)}-{leg.opt}"
+                    f"{self.asset}-PERPETUAL" if leg.opt == "F"
+                    else f"{self.asset}-{leg.expiry_code}-{np.round(leg.strike, self.asset_precision)}-{leg.opt}"
                 )
 
                 trades.append({
@@ -915,6 +942,7 @@ class OptimizerV3(BaseOptimizer):
                 })
 
         box_neutralizer_trades = self._build_box_premium_neutralizer_trades(
+            token=self.asset,
             trades=trades,
             option_legs=option_legs,
             target_expiry=target_expiry,
@@ -1681,26 +1709,26 @@ class OptimizerV3(BaseOptimizer):
         if self._is_spread_candidate(c):
             return (
                 f"{c.kind}: "
-                f"ETH-{c.expiry_code}-{int(c.long_leg.strike)}-{c.long_leg.opt} / "
-                f"ETH-{c.expiry_code}-{int(c.short_leg.strike)}-{c.short_leg.opt}"
+                f"{self.asset}-{c.expiry_code}-{int(c.long_leg.strike)}-{c.long_leg.opt} / "
+                f"{self.asset}-{c.expiry_code}-{int(c.short_leg.strike)}-{c.short_leg.opt}"
             )
         if self._is_straddle_candidate(c):
             return (
                 f"{c.kind}: "
-                f"ETH-{c.expiry_code}-{int(c.strike)}-C / "
-                f"ETH-{c.expiry_code}-{int(c.strike)}-P"
+                f"{self.asset}-{c.expiry_code}-{int(c.strike)}-C / "
+                f"{self.asset}-{c.expiry_code}-{int(c.strike)}-P"
             )
         if self._is_iron_condor_candidate(c):
             return (
                 f"{c.kind}: "
-                f"ETH-{c.expiry_code}-{int(c.put_low_leg.strike)}-P / "
-                f"ETH-{c.expiry_code}-{int(c.put_high_leg.strike)}-P / "
-                f"ETH-{c.expiry_code}-{int(c.call_low_leg.strike)}-C / "
-                f"ETH-{c.expiry_code}-{int(c.call_high_leg.strike)}-C"
+                f"{self.asset}-{c.expiry_code}-{int(c.put_low_leg.strike)}-P / "
+                f"{self.asset}-{c.expiry_code}-{int(c.put_high_leg.strike)}-P / "
+                f"{self.asset}-{c.expiry_code}-{int(c.call_low_leg.strike)}-C / "
+                f"{self.asset}-{c.expiry_code}-{int(c.call_high_leg.strike)}-C"
             )
         return (
-            "ETH-PERPETUAL" if c.opt == "F"
-            else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}"
+            "{self.asset}-PERPETUAL" if c.opt == "F"
+            else f"{self.asset}-{c.expiry_code}-{int(c.strike)}-{c.opt}"
         )
 
     def _estimate_candidate_trade_cost(
@@ -1845,7 +1873,7 @@ class OptimizerV3(BaseOptimizer):
         condor_trades = []
         for k in range(4):
             c = candidates[k] if k < len(candidates) else None
-            instrument_name = ("ETH-PERPETUAL" if c.opt == "F" else f"ETH-{c.expiry_code}-{int(c.strike)}-{c.opt}")
+            instrument_name = (f"{self.asset}-PERPETUAL" if c.opt == "F" else f"{self.asset}-{c.expiry_code}-{int(c.strike)}-{c.opt}")
 
             cost_rate = float(self.compute_costs(
                 self.spot, [c] if c else [], perp_cost_bps=2.0, brokerage_txn_cost_pct=0.5,
