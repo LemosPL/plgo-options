@@ -335,11 +335,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     for idx, t in enumerate(trades):
         # Extract spreadsheet fields
         counterparty = str(t.get("Counterparty") or "").strip()
-        trade_id = t.get("ID")
+        db_id = t.get("ID")
         trade_date = str(t.get("Initial Trade Date") or "").strip()
         side_raw = str(t.get("Buy / Sell / Unwind") or "").strip()
         option_type_raw = str(t.get("Option Type") or "").strip()
-        trade_id_raw = str(t.get("Trade_ID") or "").strip()
+        trade_id_str = str(t.get("Trade_ID") or "").strip()
         expiry_raw = str(t.get("Option Expiry Date") or "").strip()
         strike = _safe_float(t.get("Strike"))
         ref_spot = _safe_float(t.get("Ref. Spot Price"))
@@ -380,7 +380,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             instrument = _build_instrument(expiry_date, strike, opt).replace("ETH-", f"{prefix}-") if not is_fil else f"FIL-{expiry_date.strftime('%d%b%y').upper()}-{int(strike) if strike == int(strike) else strike}-{opt}"
             days_rem = max((expiry_date - today).days, 0)
         else:
-            instrument = trade_id_raw  # fallback
+            instrument = trade_id_str  # fallback
             days_rem = max(_safe_float(t.get("Days Remaining to Expiry")), 0)
 
         # ------------------------------------------------------------------
@@ -478,7 +478,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         enriched.append({
             "id": t.get("ID", idx),
             "counterparty": counterparty,
-            "trade_id": trade_id,
+            "trade_id": trade_id_str,
             "trade_date": trade_date,
             "side_raw": side_raw,
             "option_type": "Call" if opt == "C" else "Put",

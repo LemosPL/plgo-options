@@ -26,7 +26,21 @@ client = DeribitClient()
 
 MIN_DTE = 7
 SPOT_STEP = 50
+SPOT_STEP_FIL = 0.50  # FIL uses $0.50 intervals ($1-$30 range)
 DEFAULT_IV = 0.80  # 80% fallback
+
+
+def _spot_ladder(spot: float, asset: str = "ETH"):
+    """Build a spot price ladder appropriate for the asset."""
+    if asset == "FIL":
+        step = SPOT_STEP_FIL
+        lo = max(0.5, round(spot * 0.2 / step) * step)
+        hi = round(spot * 5.0 / step) * step
+    else:
+        step = SPOT_STEP
+        lo = max(500, int(spot * 0.2))
+        hi = int(spot * 3.5)
+    return np.arange(lo, hi + step, step, dtype=float), step
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,8 +148,8 @@ def _bs_delta(spot: float, strike: float, dte: int, sigma: float, opt: str) -> f
 def _render_positions_md(positions_detail: list[dict]) -> str:
     if not positions_detail:
         return "_(no positions)_"
-    rows = ["| ID | Cpty | Side | Type | Strike | Expiry | Qty | Δ |",
-            "|----|------|------|------|--------|--------|-----|---|"]
+    rows = ["| ID | Counterparty | Side | Type | Strike | Expiry | Qty | Δ |",
+            "|----|--------------|------|------|--------|--------|-----|---|"]
     for pd in positions_detail:
         delta_per = pd.get("delta_per", 0.0)
         net_qty = pd.get("net_qty", 0.0)
@@ -193,6 +207,7 @@ class OptimizeRequest(BaseModel):
     max_spread_pct: float = 40
     target_expiry: str | None = None
     target_payoff: list[dict] | None = None  # drawn target: [{x: spot, y: payoff}, ...]
+    asset: str = "ETH"
 
 
 class ChatRequest(BaseModel):
@@ -247,10 +262,13 @@ def _bs_payoff_vec(spot_arr, strike, opt, qty, T, sigma):
     return qty * _bs_vec(spot_arr, strike, T, 0.0, sigma, opt)
 
 
-async def _fetch_smiles() -> dict[str, VolSmile]:
-    """Fetch all ETH option IVs from Deribit and build vol smiles per expiry."""
+async def _fetch_smiles(asset: str = "ETH") -> dict[str, VolSmile]:
+    """Fetch option IVs from Deribit and build vol smiles per expiry.
+    FIL has no Deribit options — returns empty dict."""
+    if asset.upper() == "FIL":
+        return {}
     summaries = await client._get("get_book_summary_by_currency", {
-        "currency": "ETH", "kind": "option",
+        "currency": asset.upper(), "kind": "option",
     })
     expiry_data: dict[str, dict[float, list[float]]] = {}
     for s in summaries:
@@ -370,8 +388,9 @@ def _T_from_iso(expiry_str: str) -> float:
 def _find_breakeven(spot_arr, payoff):
     for i in range(len(spot_arr) - 1):
         if payoff[i] <= 0 and payoff[i + 1] > 0:
+            step = float(spot_arr[i + 1] - spot_arr[i])
             frac = -payoff[i] / (payoff[i + 1] - payoff[i])
-            return float(spot_arr[i] + frac * SPOT_STEP)
+            return float(spot_arr[i] + frac * step)
     return None
 
 
@@ -452,9 +471,14 @@ async def suggest_trades(req: OptimizeRequest):
 
     # 1. Spot
     try:
-        spot = await client.get_eth_spot_price()
+        if req.asset and req.asset.upper() == "FIL":
+            spot = await client.get_fil_spot_price()
+        else:
+            spot = await client.get_eth_spot_price()
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch spot: {e}")
+
+    asset = req.asset.upper() if req.asset else "ETH"
 
     # 2. Parse query
     parsed = _parse_query(req.query, spot)
@@ -465,16 +489,16 @@ async def suggest_trades(req: OptimizeRequest):
     # 3. Load positions
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset=asset)
     except Exception as e:
         raise HTTPException(500, f"Failed to read trades: {e}")
 
     if not db_trades:
-        raise HTTPException(404, "No active ETH trades found")
+        raise HTTPException(404, f"No active {asset} trades found")
 
-    # Fetch vol surface for BS pricing
+    # Fetch vol surface for BS pricing (FIL has no Deribit options)
     try:
-        smiles = await _fetch_smiles()
+        smiles = await _fetch_smiles(asset)
     except Exception:
         smiles = {}
 
@@ -493,7 +517,8 @@ async def suggest_trades(req: OptimizeRequest):
         dte = _get_dte(expiry_str)
         sigma = _get_sigma(strike, expiry_str, smiles)
         positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
-                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma,
+                          "counterparty": t.get("counterparty", "")})
         positions_display.append({
             "id": t["id"], "counterparty": t.get("counterparty", ""),
             "side": t["side"], "opt": opt, "strike": strike,
@@ -502,9 +527,7 @@ async def suggest_trades(req: OptimizeRequest):
         })
 
     # 4. Spot ladder & current payoff (BS-aware with vol surface)
-    lo = max(500, int(spot * 0.2))
-    hi = int(spot * 3.5)
-    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    spot_arr, _step = _spot_ladder(spot, asset)
     current_payoff = np.zeros_like(spot_arr)
     for p in positions:
         T = max(p["dte"], 0) / 365.25
@@ -521,48 +544,49 @@ async def suggest_trades(req: OptimizeRequest):
         "breakeven": breakeven,
     }
 
-    # 5. Fetch instruments
-    try:
-        summaries = await client._get("get_book_summary_by_currency", {
-            "currency": "ETH", "kind": "option",
-        })
-    except Exception as e:
-        raise HTTPException(502, f"Deribit error: {e}")
-
+    # 5. Fetch instruments (FIL has no Deribit options — skip)
     today = date.today()
     instruments = []
-    for s in summaries:
-        name = s.get("instrument_name", "")
-        parts = name.split("-")
-        if len(parts) != 4 or parts[0] != "ETH":
-            continue
+    if asset != "FIL":
         try:
-            exp_date = datetime.strptime(parts[1], "%d%b%y").date()
-        except ValueError:
-            continue
-        dte = (exp_date - today).days
-        if dte < req.min_dte:
-            continue
-        strike = float(parts[2])
-        opt = parts[3]
-        bid = s.get("bid_price")
-        ask = s.get("ask_price")
-        mark = s.get("mark_price")
-        if not bid or bid <= 0 or not ask or ask <= 0:
-            continue
-        spread = (ask - bid) / ask * 100
-        if spread > req.max_spread_pct:
-            continue
-        if strike < spot * 0.3 or strike > spot * 3.5:
-            continue
-        if req.target_expiry and parts[1] != req.target_expiry:
-            continue
-        instruments.append({
-            "name": name, "expiry_code": parts[1], "expiry_date": exp_date.isoformat(),
-            "dte": dte, "strike": strike, "opt": opt,
-            "bid": bid, "ask": ask, "mark": mark, "mid": (bid + ask) / 2,
-            "spread_pct": round(spread, 1), "mark_iv": s.get("mark_iv"),
-        })
+            summaries = await client._get("get_book_summary_by_currency", {
+                "currency": asset, "kind": "option",
+            })
+        except Exception as e:
+            raise HTTPException(502, f"Deribit error: {e}")
+
+        for s in summaries:
+            name = s.get("instrument_name", "")
+            parts = name.split("-")
+            if len(parts) != 4 or parts[0] != asset:
+                continue
+            try:
+                exp_date = datetime.strptime(parts[1], "%d%b%y").date()
+            except ValueError:
+                continue
+            dte = (exp_date - today).days
+            if dte < req.min_dte:
+                continue
+            strike = float(parts[2])
+            opt = parts[3]
+            bid = s.get("bid_price")
+            ask = s.get("ask_price")
+            mark = s.get("mark_price")
+            if not bid or bid <= 0 or not ask or ask <= 0:
+                continue
+            spread = (ask - bid) / ask * 100
+            if spread > req.max_spread_pct:
+                continue
+            if strike < spot * 0.3 or strike > spot * 3.5:
+                continue
+            if req.target_expiry and parts[1] != req.target_expiry:
+                continue
+            instruments.append({
+                "name": name, "expiry_code": parts[1], "expiry_date": exp_date.isoformat(),
+                "dte": dte, "strike": strike, "opt": opt,
+                "bid": bid, "ask": ask, "mark": mark, "mid": (bid + ask) / 2,
+                "spread_pct": round(spread, 1), "mark_iv": s.get("mark_iv"),
+            })
 
     if not instruments:
         raise HTTPException(404, "No liquid instruments found")
@@ -1005,7 +1029,7 @@ async def calculate_workbench(req: CalculateRequest):
 # Split into DOWNSIDE (below spot) and UPSIDE (above spot) for better matching.
 # ---------------------------------------------------------------------------
 
-async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[str, dict | None]:
+async def _handle_match_target(inp: dict, target_payoff: list[dict], asset: str = "ETH") -> tuple[str, dict | None]:
     """
     Decompose the gap between current portfolio and drawn target into
     tradeable option legs.  Solves TWO independent zones:
@@ -1024,22 +1048,25 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
         return "No target profile provided.", None
 
     try:
-        spot = await client.get_eth_spot_price()
+        if asset.upper() == "FIL":
+            spot = await client.get_fil_spot_price()
+        else:
+            spot = await client.get_eth_spot_price()
     except Exception as e:
         return f"Failed to fetch spot: {e}", None
 
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset=asset.upper())
     except Exception as e:
         return f"Failed to read trades: {e}", None
 
     if not db_trades:
-        return "No active ETH trades found.", None
+        return f"No active {asset.upper()} trades found.", None
 
     smiles = {}
     try:
-        smiles = await _fetch_smiles()
+        smiles = await _fetch_smiles(asset.upper())
     except Exception:
         pass
 
@@ -1057,11 +1084,10 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
         dte = _get_dte(expiry_str)
         sigma = _get_sigma(strike, expiry_str, smiles)
         positions.append({"opt": opt, "strike": strike, "net_qty": sign * qty,
-                          "expiry": expiry_str, "dte": dte, "sigma": sigma})
+                          "expiry": expiry_str, "dte": dte, "sigma": sigma,
+                          "counterparty": t.get("counterparty", "")})
 
-    lo = max(500, int(spot * 0.2))
-    hi = int(spot * 3.5)
-    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    spot_arr, _step = _spot_ladder(spot, asset)
     current_payoff = np.zeros_like(spot_arr)
     for p in positions:
         T = max(p["dte"], 0) / 365.25
@@ -1104,10 +1130,13 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
             "counterparty": p.get("counterparty", ""),
         })
 
-    # ── Fetch tradeable instruments ──
+    # ── Fetch tradeable instruments (FIL has no Deribit options) ──
+    if asset.upper() == "FIL":
+        return "FIL has no exchange-listed options — target matching requires Deribit instruments.", None
+
     try:
         summaries = await client._get("get_book_summary_by_currency", {
-            "currency": "ETH", "kind": "option",
+            "currency": asset.upper(), "kind": "option",
         })
     except Exception as e:
         return f"Deribit error: {e}", None
@@ -1119,7 +1148,7 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     for s in summaries:
         name = s.get("instrument_name", "")
         parts = name.split("-")
-        if len(parts) != 4 or parts[0] != "ETH":
+        if len(parts) != 4 or parts[0] != asset.upper():
             continue
         try:
             exp_date = datetime.strptime(parts[1], "%d%b%y").date()
@@ -1434,7 +1463,7 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
         leg_lines = []
         for l in legs_list:
             sl = "Buy" if l["side"] == "buy" else "Sell"
-            leg_lines.append(f"  {sl} {l['qty']} ETH {l['strike']}{l['opt']} {l['expiry_code']} @ ${l['price_usd']:.2f}")
+            leg_lines.append(f"  {sl} {l['qty']} {asset.upper()} {l['strike']}{l['opt']} {l['expiry_code']} @ ${l['price_usd']:.2f}")
         summary_parts.append(
             f"\n=== {label}: {strat['match_pct']:.1f}% match, {len(legs_list)} legs ===\n"
             f"Legs:\n" + "\n".join(leg_lines) + "\n"
@@ -1455,15 +1484,18 @@ async def _handle_match_target(inp: dict, target_payoff: list[dict]) -> tuple[st
     if close_positions:
         pos_analysis_text += "POSITIONS TO CLOSE (removing them improves target match):\n"
         for p in close_positions:
-            pos_analysis_text += f"  CLOSE: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing improves match by {p['impact']:+.1f}%\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  CLOSE: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — removing improves match by {p['impact']:+.1f}%\n"
     if roll_positions:
         pos_analysis_text += "POSITIONS TO ROLL (close to expiry, should extend):\n"
         for p in roll_positions:
-            pos_analysis_text += f"  ROLL: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — DTE too short\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  ROLL: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — DTE too short\n"
     if essential_positions:
         pos_analysis_text += "ESSENTIAL POSITIONS (keep — removing them worsens match significantly):\n"
         for p in essential_positions:
-            pos_analysis_text += f"  KEEP: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d) — removing worsens match by {abs(p['impact']):.1f}%\n"
+            cpty = f" [{p['counterparty']}]" if p.get('counterparty') else ""
+            pos_analysis_text += f"  KEEP: {p['side']} {p['qty']} {p['opt']} @ {p['strike']} ({p['dte']}d){cpty} — removing worsens match by {abs(p['impact']):.1f}%\n"
     if not close_positions and not roll_positions:
         pos_analysis_text += "All existing positions are helping the target match. No closures or rolls recommended.\n"
 
@@ -1685,7 +1717,7 @@ async def chat(req: ChatRequest):
             mtm_tag += " [UNDERWATER]"
 
         portfolio_structures.append(
-            f"  {stype.replace('_', ' ').upper()} [{ids_str}]: {sides_desc} | exp {slegs[0]['expiry']} ({slegs[0]['dte']}d) | qty {slegs[0]['qty']} ETH | {mtm_tag}"
+            f"  {stype.replace('_', ' ').upper()} [{ids_str}]: {sides_desc} | exp {slegs[0]['expiry']} ({slegs[0]['dte']}d) | qty {slegs[0]['qty']} {asset} | {mtm_tag}"
         )
 
     for _sk, _pool in _struct_groups.items():
@@ -1842,15 +1874,16 @@ async def chat(req: ChatRequest):
     }
 
     # ── Fast path: detect pasted trades and add directly ──
-    # Pattern: "Long/Short Put/Call ETH-DDMMMYY-STRIKE-C/P ... qty"
+    # Pattern: "Long/Short Put/Call ASSET-DDMMMYY-STRIKE-C/P ... qty"
+    _asset_re = re.escape(asset)
     trade_pattern = re.findall(
-        r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP])\s+[\d-]+\s+\d+\s+\d+\s+[-\d.]+\s+(\d+)',
+        rf'(Long|Short)\s+(Put|Call)\s+{_asset_re}-(\d{{1,2}}[A-Z]{{3}}\d{{2}})-(\d+)-([CP])\s+[\d-]+\s+\d+\s+\d+\s+[-\d.]+\s+(\d+)',
         msg, re.IGNORECASE
     )
     if not trade_pattern:
         # Also try simpler format: "Long Put ETH-26JUN26-2400-P qty 3000"
         trade_pattern = re.findall(
-            r'(Long|Short)\s+(Put|Call)\s+ETH-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP]).*?(\d{3,})',
+            rf'(Long|Short)\s+(Put|Call)\s+{_asset_re}-(\d{{1,2}}[A-Z]{{3}}\d{{2}})-(\d+)-([CP]).*?(\d{{3,}})',
             msg, re.IGNORECASE
         )
 
@@ -1912,12 +1945,26 @@ async def chat(req: ChatRequest):
             total_cost = 0.0
             for leg in strat["legs"]:
                 strike_str = str(int(leg["strike"])) if leg["strike"] == int(leg["strike"]) else str(leg["strike"])
-                inst_name = f"ETH-{leg['expiry_code']}-{strike_str}-{leg['opt']}"
+                inst_name = f"{asset}-{leg['expiry_code']}-{strike_str}-{leg['opt']}"
                 mkt = summaries.get(inst_name, {})
                 bid = mkt.get("bid_price") or 0
                 ask = mkt.get("ask_price") or 0
                 mark_iv = mkt.get("mark_iv")
-                price_eth = ask if leg["side"] == "buy" else bid
+                # FIL: no Deribit prices, use BS fallback
+                if is_fil and bid <= 0 and ask <= 0:
+                    try:
+                        exp_date_fp = datetime.strptime(leg["expiry_code"], "%d%b%y").date()
+                        dte_fp = max((exp_date_fp - date.today()).days, 1)
+                        T_fp = dte_fp / 365.25
+                        bs_val = bs_price(spot, leg["strike"], T_fp, 0.0, DEFAULT_IV, leg["opt"])
+                        price_eth = bs_val / spot if spot > 0 else 0
+                        bid = price_eth * 0.97
+                        ask = price_eth * 1.03
+                        mark_iv = DEFAULT_IV * 100
+                    except Exception:
+                        price_eth = 0
+                else:
+                    price_eth = ask if leg["side"] == "buy" else bid
                 try:
                     exp_date = datetime.strptime(leg["expiry_code"], "%d%b%y").date()
                     dte = (exp_date - date.today()).days
@@ -2006,7 +2053,7 @@ async def chat(req: ChatRequest):
     target_match_summary = None
     if req.target_payoff and len(req.target_payoff) >= 2 and not fast_path_data:
         try:
-            mt_text, mt_data = await _handle_match_target({}, req.target_payoff)
+            mt_text, mt_data = await _handle_match_target({}, req.target_payoff, asset=asset)
             if mt_data and mt_data.get("suggestions"):
                 fast_path_data = mt_data
                 target_match_summary = mt_text
@@ -2040,6 +2087,11 @@ async def chat(req: ChatRequest):
             "Instrument names use the FIL- prefix (e.g., FIL-30JUN26-2-C)."
         )
 
+    # Counterparty summary
+    from collections import Counter as _Counter
+    cpty_counts = _Counter(pd.get("counterparty", "") or "Unknown" for pd in positions_detail)
+    fmt_counterparties = ", ".join(f"{name} ({count})" for name, count in cpty_counts.most_common())
+
     # Section B — live state (always present, dynamic)
     dynamic_parts: list[str] = [
         f"""## Live market
@@ -2047,6 +2099,7 @@ async def chat(req: ChatRequest):
 
 ## Portfolio snapshot
 Positions: {num_positions} | Net calls: {fmt_net_calls} {asset} | Net puts: {fmt_net_puts} {asset}
+Counterparties: {fmt_counterparties}
 Expiries: {fmt_expiries}
 P&L at spot: {fmt_pnl} | Worst: {fmt_worst} at {fmt_worst_at} | Best: {fmt_best} | BE: {fmt_be}
 Ladder: {fmt_ladder}
@@ -2101,7 +2154,7 @@ These trades were parsed and priced before this turn. They are already in the Su
     # Section H — Drawn target payoff (conditional)
     if req.target_payoff:
         target_lines = "\n".join(
-            f"  ETH ${pt['x']:,.0f} → P&L ${pt['y']:,.0f}" for pt in req.target_payoff
+            f"  {asset} ${pt['x']:,.0f} → P&L ${pt['y']:,.0f}" for pt in req.target_payoff
         )
         dynamic_parts.append(f"""## Target payoff curve
 
@@ -2133,8 +2186,17 @@ The match_target tool has been filtered out of your tool list in this mode — y
 
     # Final cacheable prefix (A + G) + dynamic suffix. Anthropic caches the
     # blocks up to and including the one marked with cache_control.
+    # Adapt identity section for asset
+    identity_text = SECTION_A_IDENTITY
+    if is_fil:
+        identity_text = identity_text.replace(
+            "ETH derivatives portfolio", f"{asset} derivatives portfolio"
+        ).replace(
+            "ETH options and perpetuals", f"{asset} options (OTC, priced via Black-Scholes)"
+        )
+
     system_blocks = [
-        {"type": "text", "text": SECTION_A_IDENTITY},
+        {"type": "text", "text": identity_text},
         {"type": "text", "text": SECTION_G_RESPONSE_STYLE, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": dynamic_state_block},
     ]
@@ -2169,7 +2231,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             "For grid-search candidates, use a numeric suffix:\n"
             "\"Roll Search #1: PS 1600/3900 → 1900/2400 31JUL26\", \"Roll Search #2: PS 1600/3900 → 1850/2450 31JUL26\", etc.\n\n"
             "Parsing pasted instruments:\n"
-            "\"ETH-26JUN26-2400-P\" → expiry_code=\"26JUN26\", strike=2400, opt=\"P\".\n"
+            f"\"{asset}-26JUN26-2400-P\" → expiry_code=\"26JUN26\", strike=2400, opt=\"P\".\n"
             "Group legs that form a recognizable structure into one call (long+short puts at different strikes = put spread; 4 legs = iron condor).\n\n"
             "This tool prices ANY combination of legs the user asks for, including rolls of positions the portfolio data flags as expired (those may be OTC and still tradable). If the user requests a roll on an expired-flagged position, price it; do not refuse."
         ),
@@ -2187,7 +2249,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
                             "opt": {"type": "string", "enum": ["C", "P", "PERP"], "description": "C=Call, P=Put, PERP=Perpetual"},
                             "strike": {"type": "number", "description": "Strike for options, entry price for perps"},
                             "expiry_code": {"type": "string", "description": "Deribit expiry code e.g. '27JUN25'. Use 'PERP' for perpetuals."},
-                            "qty": {"type": "number", "description": "Quantity in ETH. Default to portfolio's average leg size."},
+                            "qty": {"type": "number", "description": f"Quantity in {asset}. Default to portfolio's average leg size."},
                             "role": {"type": "string", "enum": ["close", "open"], "description": "Tag as 'close' (closing an existing position) or 'open' (opening a new one). Required for roll/close+reopen strategies."}
                         },
                         "required": ["side", "opt", "strike"]
@@ -2308,6 +2370,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 target_expiry=inp.get("target_expiry") or None,
                 min_dte=inp.get("min_dte", 7),
                 target_payoff=req.target_payoff,
+                asset=asset,
             )
             result = await suggest_trades(suggest_req)
             all_sug = result["suggestions"]
@@ -2528,7 +2591,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
         avail_expiries = {}
         for name in summaries_map:
             parts = name.split("-")
-            if len(parts) == 4 and parts[0] == "ETH":
+            if len(parts) == 4 and parts[0] == asset:
                 try:
                     exp_date = datetime.strptime(parts[1], "%d%b%y").date()
                     dte = (exp_date - today_d).days
@@ -2538,8 +2601,22 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     pass
         target_expiries = sorted(avail_expiries.keys(), key=lambda x: avail_expiries[x])
 
+        # FIL has no Deribit options — generate synthetic monthly expiry codes
+        if not target_expiries and is_fil:
+            from datetime import timedelta
+            _fil_today = date.today()
+            for _offset_days in [30, 60, 90, 120, 150, 180]:
+                _exp_d = _fil_today + timedelta(days=_offset_days)
+                # Use last day of the month-ish (28th is safe)
+                _exp_d = _exp_d.replace(day=28)
+                _code = f"{_exp_d.day}{_exp_d.strftime('%b').upper()}{_exp_d.strftime('%y')}"
+                _dte = (_exp_d - _fil_today).days
+                if _dte >= min_dte_target:
+                    avail_expiries[_code] = _dte
+            target_expiries = sorted(avail_expiries.keys(), key=lambda x: avail_expiries[x])
+
         if not target_expiries:
-            return "No suitable target expiries found on Deribit.", None
+            return "No suitable target expiries found.", None
 
         roll_target_codes = target_expiries[:3]
 
@@ -3013,12 +3090,12 @@ The match_target tool has been filtered out of your tool list in this mode — y
             if role == "close" and pricing_source and pricing_source != "deribit_live":
                 pricing_notes.append(
                     f"CLOSE {side} {opt_type}-{strike_str} {exp_code} qty {qty:,.0f}: "
-                    f"${price_eth * spot:,.2f}/ETH from {pricing_source}"
+                    f"${price_eth * spot:,.2f}/{asset} from {pricing_source}"
                 )
             elif role == "open" and pricing_source == "bs_estimate":
                 pricing_notes.append(
                     f"OPEN {side} {opt_type}-{strike_str} {exp_code} qty {qty:,.0f}: "
-                    f"${price_eth * spot:,.2f}/ETH from bs_estimate (no live quote)"
+                    f"${price_eth * spot:,.2f}/{asset} from bs_estimate (no live quote)"
                 )
 
         # Compute payoff impact (BS-aware with market IV) — asset-specific ladder.
@@ -3185,7 +3262,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 elif tb.name == "match_target":
                     if target_match_summary and result_data and result_data.get("suggestions"):
                         return tb, "Target matching was already performed automatically. The strategies are already in the Suggestions table — do NOT add more.", None
-                    text_, data_ = await _handle_match_target(tb.input, req.target_payoff or [])
+                    text_, data_ = await _handle_match_target(tb.input, req.target_payoff or [], asset=asset)
                 else:
                     return tb, "Unknown tool.", None
             except Exception as e:
@@ -3287,10 +3364,15 @@ The match_target tool has been filtered out of your tool list in this mode — y
 
 
 @router.get("/expiries")
-async def get_available_expiries():
+async def get_available_expiries(asset: str = "ETH"):
+    asset = asset.upper()
+    if asset == "FIL":
+        # FIL has no Deribit options — return empty list
+        return []
+
     try:
         summaries = await client._get("get_book_summary_by_currency", {
-            "currency": "ETH", "kind": "option",
+            "currency": asset, "kind": "option",
         })
     except Exception as e:
         raise HTTPException(502, f"Deribit error: {e}")
@@ -3300,7 +3382,7 @@ async def get_available_expiries():
     for s in summaries:
         name = s.get("instrument_name", "")
         parts = name.split("-")
-        if len(parts) != 4 or parts[0] != "ETH":
+        if len(parts) != 4 or parts[0] != asset:
             continue
         try:
             exp_date = datetime.strptime(parts[1], "%d%b%y").date()

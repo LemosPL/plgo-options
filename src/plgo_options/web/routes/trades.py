@@ -11,6 +11,47 @@ from plgo_options.data import trade_repository as repo
 router = APIRouter()
 
 
+# ─── Reconciliation models ──────────────────────────────────
+
+class ReconTrade(BaseModel):
+    trade_id: str = ""
+    trade_date: str = ""
+    side: str = ""
+    option_type: str = ""
+    strike: float | None = 0
+    expiry: str = ""
+    qty: float | None = 0
+    premium_usd: float | None = 0
+
+    def model_post_init(self, __context):
+        # Coerce None to 0 for numeric fields (JSON null from JS NaN)
+        if self.strike is None:
+            object.__setattr__(self, "strike", 0.0)
+        if self.qty is None:
+            object.__setattr__(self, "qty", 0.0)
+        if self.premium_usd is None:
+            object.__setattr__(self, "premium_usd", 0.0)
+
+
+class ReconCollateral(BaseModel):
+    ETH: float | None = 0
+    FIL: float | None = 0
+    USD: float | None = 0
+    USDC: float | None = 0
+
+    def model_post_init(self, __context):
+        for f in ("ETH", "FIL", "USD", "USDC"):
+            if getattr(self, f) is None:
+                object.__setattr__(self, f, 0.0)
+
+
+class ReconRequest(BaseModel):
+    counterparty: str
+    asset: str = "ETH"
+    their_trades: list[ReconTrade] = []
+    their_collateral: ReconCollateral = ReconCollateral()
+
+
 class TradeCreate(BaseModel):
     asset: str = "ETH"
     counterparty: str = ""
@@ -161,3 +202,249 @@ async def get_trade_history(trade_id: int):
     db = await get_db()
     history = await repo.get_trade_history(db, trade_id)
     return {"history": history}
+
+
+# ─── Reconciliation endpoint ────────────────────────────────
+
+import re
+from datetime import datetime, date
+
+
+def _norm_side(s: str) -> str:
+    s = s.strip().upper()
+    if s in ("BUY", "BUYS", "BOUGHT", "LONG", "B", "L"):
+        return "BUY"
+    if s in ("SELL", "SELLS", "SOLD", "SHORT", "S"):
+        return "SELL"
+    return s
+
+
+def _norm_type(t: str) -> str:
+    t = t.strip().upper()
+    if t in ("C", "CALL", "CALLS"):
+        return "CALL"
+    if t in ("P", "PUT", "PUTS"):
+        return "PUT"
+    return t
+
+
+def _norm_date(d) -> str:
+    """Normalize date to YYYY-MM-DD regardless of input format."""
+    if d is None:
+        return ""
+    # Handle numeric values (Excel serial dates: days since 1899-12-30)
+    if isinstance(d, (int, float)):
+        serial = int(d)
+        if 30000 < serial < 60000:  # plausible Excel date range (~1982–2064)
+            from datetime import timedelta
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=serial)).strftime("%Y-%m-%d")
+        return str(d)
+    d = str(d).strip()
+    if not d:
+        return ""
+    # Check if it's a numeric string (Excel serial date)
+    try:
+        serial = int(float(d))
+        if 30000 < serial < 60000:
+            from datetime import timedelta
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=serial)).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError):
+        pass
+    # Already YYYY-MM-DD
+    if re.match(r"^\d{4}-\d{2}-\d{2}", d):
+        return d[:10]
+    # DDMMMYY e.g. 04AUG26
+    m = re.match(r"^(\d{1,2})([A-Z]{3})(\d{2})$", d.upper())
+    if m:
+        day, mon, yr = m.groups()
+        try:
+            dt = datetime.strptime(f"{day}{mon}{yr}", "%d%b%y")
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    # DD/MM/YYYY or MM/DD/YYYY — try both
+    for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y", "%m-%d-%Y",
+                "%d.%m.%Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(d, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return d
+
+
+def _is_expired(expiry_str: str) -> bool:
+    """Check if a trade's expiry is in the past."""
+    nd = _norm_date(expiry_str)
+    if not nd:
+        return False
+    try:
+        return datetime.strptime(nd, "%Y-%m-%d").date() < date.today()
+    except ValueError:
+        return False
+
+
+def _match_key(t: dict) -> tuple:
+    """Build a matching key: (side, type, strike, expiry_normalized, abs_qty)."""
+    return (
+        _norm_side(str(t.get("side", ""))),
+        _norm_type(str(t.get("option_type", ""))),
+        float(t.get("strike", 0)),
+        _norm_date(str(t.get("expiry", ""))),
+        abs(float(t.get("qty", 0))),
+    )
+
+
+@router.post("/reconcile")
+async def reconcile_trades(body: ReconRequest):
+    db = await get_db()
+    our_all = await repo.list_trades(db, include_expired=False, include_deleted=False, asset=body.asset)
+    our_trades = [t for t in our_all if (t.get("counterparty", "") or "").lower() == body.counterparty.lower()]
+
+    # Filter out expired trades from both sides
+    our_trades = [t for t in our_trades if not _is_expired(str(t.get("expiry", "")))]
+    their_active = [t.model_dump() for t in body.their_trades if not _is_expired(t.expiry)]
+
+    # Add normalized dates to trade dicts for display
+    for t in our_trades:
+        t["expiry_norm"] = _norm_date(str(t.get("expiry", "")))
+        t["trade_date_norm"] = _norm_date(str(t.get("trade_date", "")))
+    for t in their_active:
+        t["expiry_norm"] = _norm_date(str(t.get("expiry", "")))
+        t["trade_date_norm"] = _norm_date(str(t.get("trade_date", "")))
+
+    # Build keyed lookups
+    our_by_key: dict[tuple, list[dict]] = {}
+    for t in our_trades:
+        k = _match_key(t)
+        our_by_key.setdefault(k, []).append(t)
+
+    their_by_key: dict[tuple, list[dict]] = {}
+    for t in their_active:
+        k = _match_key(t)
+        their_by_key.setdefault(k, []).append(t)
+
+    all_keys = set(our_by_key.keys()) | set(their_by_key.keys())
+
+    matched = []
+    breaks = []
+    only_ours = []
+    only_theirs = []
+
+    def _compare_pair(o: dict, th: dict) -> dict:
+        """Compare two trades and return field-level diffs (empty if match)."""
+        diffs = {}
+        o_prem = abs(float(o.get("premium_usd", 0) or 0))
+        th_prem = abs(float(th.get("premium_usd", 0) or 0))
+        if abs(o_prem - th_prem) > 0.01:
+            diffs["premium_usd"] = {"ours": o_prem, "theirs": th_prem}
+        o_tid = str(o.get("trade_id", "") or "")
+        th_tid = str(th.get("trade_id", "") or "")
+        if o_tid and th_tid and o_tid != th_tid:
+            diffs["trade_id"] = {"ours": o_tid, "theirs": th_tid}
+        o_td = _norm_date(str(o.get("trade_date", "")))
+        th_td = _norm_date(str(th.get("trade_date", "")))
+        if o_td and th_td and o_td != th_td:
+            diffs["trade_date"] = {"ours": o_td, "theirs": th_td}
+        return diffs
+
+    for k in all_keys:
+        ours = our_by_key.get(k, [])
+        theirs = their_by_key.get(k, [])
+
+        # Match pairwise: zip as many as possible, leftovers are unmatched
+        paired = min(len(ours), len(theirs))
+        for i in range(paired):
+            o, th = ours[i], theirs[i]
+            diffs = _compare_pair(o, th)
+            key_str = f"{k[0]} {k[1]} {k[2]} {k[3]} x{k[4]}"
+            if diffs:
+                breaks.append({"key": key_str, "ours": o, "theirs": th, "diffs": diffs})
+            else:
+                matched.append({"key": key_str, "ours": o, "theirs": th})
+
+        # Leftovers
+        for o in ours[paired:]:
+            only_ours.append(o)
+        for th in theirs[paired:]:
+            only_theirs.append(th)
+
+    summary = {
+        "our_count": len(our_trades),
+        "their_count": len(body.their_trades),
+        "matched": len(matched),
+        "breaks": len(breaks),
+        "only_ours": len(only_ours),
+        "only_theirs": len(only_theirs),
+    }
+
+    # Determine overall status
+    if summary["breaks"] == 0 and summary["only_ours"] == 0 and summary["only_theirs"] == 0:
+        status = "clean"
+    elif summary["breaks"] > 0:
+        status = "breaks"
+    else:
+        status = "mismatches"
+
+    # Save to recon history
+    try:
+        await db.execute(
+            """INSERT INTO recon_history
+               (counterparty, asset, our_count, their_count, matched, breaks,
+                only_ours, only_theirs, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (body.counterparty, body.asset, summary["our_count"], summary["their_count"],
+             summary["matched"], summary["breaks"], summary["only_ours"],
+             summary["only_theirs"], status),
+        )
+        await db.commit()
+    except Exception:
+        pass  # Don't fail the recon if history write fails
+
+    return {
+        "counterparty": body.counterparty,
+        "asset": body.asset,
+        "summary": summary,
+        "matched": matched,
+        "breaks": breaks,
+        "only_ours": only_ours,
+        "only_theirs": only_theirs,
+        "collateral": body.their_collateral.model_dump(),
+    }
+
+
+@router.get("/recon-history")
+async def get_recon_history(asset: str | None = None, limit: int = 50):
+    """Return recent reconciliation run history."""
+    db = await get_db()
+    # Ensure table exists
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS recon_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_date TEXT NOT NULL DEFAULT (datetime('now')),
+            counterparty TEXT NOT NULL,
+            asset TEXT NOT NULL DEFAULT 'ETH',
+            our_count INTEGER NOT NULL DEFAULT 0,
+            their_count INTEGER NOT NULL DEFAULT 0,
+            matched INTEGER NOT NULL DEFAULT 0,
+            breaks INTEGER NOT NULL DEFAULT 0,
+            only_ours INTEGER NOT NULL DEFAULT 0,
+            only_theirs INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'clean',
+            notes TEXT DEFAULT '',
+            created_by TEXT DEFAULT 'user'
+        )"""
+    )
+    if asset:
+        cursor = await db.execute(
+            "SELECT * FROM recon_history WHERE asset = ? ORDER BY run_date DESC LIMIT ?",
+            (asset.upper(), limit),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT * FROM recon_history ORDER BY run_date DESC LIMIT ?",
+            (limit,),
+        )
+    rows = await cursor.fetchall()
+    return {"history": [dict(r) for r in rows]}

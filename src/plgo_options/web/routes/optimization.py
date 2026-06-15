@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import traceback
 from datetime import datetime
@@ -44,6 +45,7 @@ SNAPSHOT_ROOT = _resolve_snapshot_root()
 
 
 class OptimizationParams(BaseModel):
+    asset: str = "ETH"
     lam_factor: float = 1.0
     target_expiry: str | None = None
     unwind_discount: float = 0.2
@@ -58,7 +60,7 @@ async def run_optimizer(params: OptimizationParams):
     """Gather optimizer inputs, persist a reproducible use case, and run it."""
     print("run_optimizer()")
     try:
-        pnl_data = await portfolio_pnl()
+        pnl_data = await portfolio_pnl(asset=params.asset.upper())
     except HTTPException:
         raise
     except Exception as e:
@@ -66,6 +68,7 @@ async def run_optimizer(params: OptimizationParams):
 
     print(params)
     run_params = OptimizerRunParams(
+        asset=params.asset.upper(),
         lam_factor=params.lam_factor,
         target_expiry=params.target_expiry,
         unwind_discount=params.unwind_discount,
@@ -96,51 +99,47 @@ async def run_optimizer(params: OptimizationParams):
     return result
 
 
+# Listing/download read from the same Cloud-Run-aware root the optimizer saves to
+# (SNAPSHOT_ROOT/usecases), so snapshots persist on the GCS FUSE mount in prod.
+SNAPSHOT_DIR = SNAPSHOT_ROOT / "usecases"
+
+
 @router.get("/snapshots")
 async def list_snapshots():
-    """List saved optimizer snapshot JSON files under SNAPSHOT_ROOT (recursively).
-
-    Returns each entry's relative path (POSIX-style), size in bytes, and mtime.
-    Sorted by mtime descending so the most recent appears first.
-    """
-    if not SNAPSHOT_ROOT.exists():
-        return {"snapshots": [], "root": str(SNAPSHOT_ROOT)}
-    items = []
-    for p in SNAPSHOT_ROOT.rglob("*.json"):
-        if not p.is_file():
-            continue
+    """List saved usecase snapshot files."""
+    if not SNAPSHOT_DIR.exists():
+        return {"snapshots": []}
+    files = sorted(SNAPSHOT_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    snapshots = []
+    for f in files[:50]:
         try:
-            stat = p.stat()
-        except OSError:
-            continue
-        items.append({
-            "path": p.relative_to(SNAPSHOT_ROOT).as_posix(),
-            "size": stat.st_size,
-            "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-        })
-    items.sort(key=lambda x: x["mtime"], reverse=True)
-    return {"snapshots": items, "root": str(SNAPSHOT_ROOT)}
+            with f.open() as fh:
+                data = json.load(fh)
+            params = data.get("run_params", {})
+            inp = data.get("optimizer_input", {})
+            result = data.get("result", {})
+            snapshots.append({
+                "filename": f.name,
+                "size_kb": round(f.stat().st_size / 1024, 1),
+                "modified": f.stat().st_mtime,
+                "asset": params.get("asset", inp.get("asset", "ETH")),
+                "target_expiry": params.get("target_expiry", ""),
+                "lam_factor": params.get("lam_factor", ""),
+                "status": result.get("status", ""),
+                "trades_count": len(result.get("replacement_trades", result.get("trades", []))),
+            })
+        except Exception:
+            snapshots.append({"filename": f.name, "size_kb": round(f.stat().st_size / 1024, 1)})
+    return {"snapshots": snapshots}
 
 
-@router.get("/snapshots/download")
-async def download_snapshot(path: str):
-    """Download a single snapshot file by its relative path under SNAPSHOT_ROOT.
-
-    Strict path validation: the resolved target must lie inside SNAPSHOT_ROOT
-    and must be an existing .json file. Rejects traversal attempts.
-    """
-    if not path or "\x00" in path:
-        raise HTTPException(400, "Invalid path")
-    root = SNAPSHOT_ROOT.resolve()
-    candidate = (SNAPSHOT_ROOT / path).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        raise HTTPException(400, "Path escapes snapshot root")
-    if candidate.suffix.lower() != ".json" or not candidate.is_file():
-        raise HTTPException(404, "Snapshot not found")
-    return FileResponse(
-        candidate,
-        media_type="application/json",
-        filename=candidate.name,
-    )
+@router.get("/snapshots/{filename}")
+async def download_snapshot(filename: str):
+    """Download a saved usecase snapshot file."""
+    path = SNAPSHOT_DIR / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    # Security: ensure the resolved path is inside SNAPSHOT_DIR
+    if not path.resolve().is_relative_to(SNAPSHOT_DIR.resolve()):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return FileResponse(path, media_type="application/json", filename=filename)

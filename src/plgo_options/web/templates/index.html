@@ -79,12 +79,14 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-trades" class="page active">
 
+    <!-- Sub-tabs: Trades | Counterparty Reconciliation -->
     <div class="sub-tab-bar">
-      <button class="sub-tab-btn active" data-subtab="tm-main">Trades</button>
+      <button class="sub-tab-btn active" data-subtab="tm-trades">Trades</button>
       <button class="sub-tab-btn" data-subtab="tm-recon">Counterparty Reconciliation</button>
     </div>
 
-    <div id="subtab-tm-main" class="sub-tab-pane active">
+    <!-- ── Trades sub-tab ── -->
+    <div id="subtab-tm-trades" class="sub-tab-pane active">
 
     <!-- Summary banner -->
     <section class="card" id="tm-summary">
@@ -202,72 +204,133 @@
       <div id="tm-insights" class="insights-grid"></div>
     </section>
 
-    </div><!-- /subtab-tm-main -->
+    </div><!-- /subtab-tm-trades -->
 
-    <!-- ══════════════ SUB-TAB: Counterparty Reconciliation ══════════════ -->
+    <!-- ── Counterparty Reconciliation sub-tab ── -->
     <div id="subtab-tm-recon" class="sub-tab-pane">
 
       <section class="card">
-        <h2>Counterparty Reconciliation
-          <small style="color:var(--muted)">— compare a counterparty's reported book &amp; collateral against ours
-          (<span id="recon-asset-label">ETH</span>)</small>
+        <h2 style="margin-bottom:.25rem">COUNTERPARTY RECONCILIATION
+          <small style="font-weight:400;color:var(--muted)"> &mdash; COMPARE A COUNTERPARTY'S REPORTED BOOK &amp; COLLATERAL AGAINST OURS (<span id="rc-asset-label">ETH</span>)</small>
         </h2>
-        <div class="pf-toolbar">
-          <label class="pf-filter-label">Counterparty
-            <input type="text" id="recon-cp" list="recon-cp-list" placeholder="e.g. GSR" autocomplete="off">
-            <datalist id="recon-cp-list"></datalist>
-          </label>
-          <div class="pf-toolbar-spacer"></div>
-          <button id="btn-recon-template" class="btn-secondary">⬇ Template (.csv)</button>
-          <button id="btn-recon-template-xlsx" class="btn-secondary">⬇ Template (.xlsx)</button>
-          <label class="btn-primary" style="cursor:pointer;display:inline-flex;align-items:center">⬆ Upload filled file
-            <input type="file" id="recon-file" accept=".csv,.xlsx,.xls" style="display:none">
-          </label>
-        </div>
-        <p style="font-size:.75rem;color:var(--muted);margin:.4rem 0 0;line-height:1.4">
-          Send the template to your counterparty. They fill <strong>TRADES</strong> (one row per option leg;
-          <em>Side</em> = the side PLGO took, so Buy = PLGO bought) and <strong>COLLATERAL</strong> (what we have stored
-          with them, by asset). Upload the returned file here — or paste/edit the grids below — then run reconciliation.
-        </p>
-      </section>
 
-      <section class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
-          <h2 style="margin:0">Their reported trades <small id="recon-trades-count" style="color:var(--muted)"></small></h2>
-          <div style="display:flex;gap:.4rem">
-            <button id="btn-recon-add-row" class="btn-secondary">+ Row</button>
-            <button id="btn-recon-clear" class="btn-secondary btn-delete">Clear</button>
+        <!-- Counterparty selector -->
+        <div style="margin:1rem 0">
+          <label style="font-size:.8rem;color:var(--muted)">Counterparty</label><br>
+          <select id="rc-counterparty" style="min-width:200px;margin-top:.25rem">
+            <option value="">-- Select --</option>
+          </select>
+        </div>
+
+        <!-- Template downloads -->
+        <div style="display:flex;flex-direction:column;gap:.5rem;margin:1rem 0">
+          <div style="display:flex;align-items:center;justify-content:flex-end">
+            <a href="#" id="rc-download-csv" style="font-size:.85rem">&darr; Template (.csv)</a>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:flex-end">
+            <a href="#" id="rc-download-xlsx" style="font-size:.85rem">&darr; Template (.xlsx)</a>
           </div>
         </div>
-        <div class="chain-wrapper" style="max-height:320px;margin-top:.5rem">
-          <table id="recon-trades-table">
-            <thead><tr>
-              <th>Trade ID</th><th>Date</th><th>Side</th><th>Type</th><th>Strike</th>
-              <th>Expiry</th><th>Qty</th><th>Premium USD</th><th style="width:30px"></th>
-            </tr></thead>
-            <tbody id="recon-trades-body"></tbody>
+
+        <!-- Upload -->
+        <div style="margin:1rem 0">
+          <label class="btn-primary" style="cursor:pointer;display:block;text-align:center;padding:.6rem">
+            &uarr; Upload filled file
+            <input type="file" id="rc-upload" accept=".csv,.xlsx,.xls" style="display:none">
+          </label>
+          <p style="font-size:.78rem;color:var(--muted);margin-top:.5rem">
+            Send the template to your counterparty. They fill <b>TRADES</b> (one row per option leg; <i>Side</i> = the side PLGO took, so Buy = PLGO bought)
+            and <b>COLLATERAL</b> (what we have stored with them, by asset). Upload the returned file here &mdash; or paste/edit the grids below &mdash; then run reconciliation.
+          </p>
+        </div>
+      </section>
+
+      <!-- Their Reported Trades -->
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h2 style="color:var(--accent)">THEIR REPORTED TRADES (<span id="rc-their-count">0</span>)</h2>
+          <div style="display:flex;gap:.5rem">
+            <button class="btn-secondary" style="width:auto" id="rc-add-row">+ Row</button>
+            <button class="btn-secondary" style="width:auto" id="rc-clear-rows">Clear</button>
+          </div>
+        </div>
+        <div class="chain-wrapper" style="max-height:400px;margin-top:.5rem">
+          <table id="rc-their-table">
+            <thead>
+              <tr>
+                <th style="text-align:left">Trade ID</th>
+                <th>Date</th>
+                <th>Side</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Expiry</th>
+                <th>Qty</th>
+                <th>Premium USD</th>
+                <th style="width:30px"></th>
+              </tr>
+            </thead>
+            <tbody id="rc-their-body"></tbody>
           </table>
         </div>
       </section>
 
+      <!-- Their Reported Collateral -->
       <section class="card">
-        <h2>Their reported collateral <small style="color:var(--muted)">— what we have stored with them</small></h2>
-        <table id="recon-collat-table" style="max-width:420px;margin-top:.5rem">
-          <thead><tr><th>Asset</th><th>Quantity</th></tr></thead>
-          <tbody id="recon-collat-body"></tbody>
-        </table>
+        <h2>THEIR REPORTED COLLATERAL <small style="font-weight:400;color:var(--muted)">&mdash; WHAT WE HAVE STORED WITH THEM</small></h2>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:.5rem .75rem;max-width:300px;margin-top:.75rem;align-items:center">
+          <label style="font-weight:600">ETH</label>
+          <input type="number" id="rc-coll-eth" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">FIL</label>
+          <input type="number" id="rc-coll-fil" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">USD</label>
+          <input type="number" id="rc-coll-usd" value="0" step="any" style="width:120px">
+          <label style="font-weight:600">USDC</label>
+          <input type="number" id="rc-coll-usdc" value="0" step="any" style="width:120px">
+        </div>
       </section>
 
+      <!-- Run reconciliation -->
       <section class="card">
-        <div class="pf-toolbar">
-          <button id="btn-recon-run" class="btn-primary">Run reconciliation</button>
-          <div class="pf-toolbar-spacer"></div>
-          <button id="btn-recon-report" class="btn-secondary" disabled>⬇ Download report (.md)</button>
+        <button class="btn-primary" id="rc-run" style="width:100%;padding:.75rem;font-size:1rem">Run reconciliation</button>
+      </section>
+
+      <!-- Reconciliation History -->
+      <section class="card" id="rc-history-section">
+        <h2>RECONCILIATION HISTORY</h2>
+        <div class="chain-wrapper" style="max-height:300px;margin-top:.5rem">
+          <table id="rc-history-table" style="width:100%">
+            <thead>
+              <tr style="position:sticky;top:0;background:var(--card-bg);z-index:2">
+                <th>Date / Time</th>
+                <th>Counterparty</th>
+                <th>Asset</th>
+                <th>Ours</th>
+                <th>Theirs</th>
+                <th>Matched</th>
+                <th>Breaks</th>
+                <th>Only Ours</th>
+                <th>Only Theirs</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="rc-history-body">
+              <tr><td colspan="10" style="text-align:center;padding:1.5rem;color:var(--muted)">Loading history...</td></tr>
+            </tbody>
+          </table>
         </div>
-        <div id="recon-results" style="margin-top:.75rem"></div>
+      </section>
+
+      <!-- Results -->
+      <section class="card" id="rc-results-section" style="display:none">
+        <h2>RECONCILIATION RESULTS</h2>
+        <div id="rc-results"></div>
+        <div style="display:flex;justify-content:flex-end;margin-top:1rem">
+          <a href="#" id="rc-download-report" style="font-size:.85rem">&darr; Download report (.md)</a>
+        </div>
       </section>
 
     </div><!-- /subtab-tm-recon -->
+
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -530,6 +593,7 @@
             </button>
             <button id="btn-compute" class="btn-secondary" style="flex:1">Payoff at Expiry (manual premiums)</button>
             <button id="btn-load-chain" class="btn-secondary" disabled style="flex:1">Load Option Chain</button>
+            <button id="btn-send-to-sb" class="btn-primary" style="flex:1;background:linear-gradient(135deg,#d2a8ff,#8b5cf6);border-color:#8b5cf6">Send to Strategy Builder</button>
           </div>
         </div>
       </section>
@@ -1383,7 +1447,6 @@
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
         </label>
-        <button id="btn-optv2-snapshots" type="button" class="btn-secondary" style="width:auto" title="Browse and download saved usecase snapshots">📁 View snapshots</button>
         <button id="btn-run-optv2" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
       </div>
     </section>
@@ -1492,6 +1555,58 @@
         </table>
       </div>
     </section>
+
+    <!-- Saved Snapshots -->
+    <section class="card" id="optv2-snapshots-section">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h3>Saved Runs</h3>
+        <button class="btn-secondary" style="width:auto;font-size:.75rem" id="btn-optv2-refresh-snapshots">Refresh</button>
+      </div>
+      <div class="chain-wrapper" style="max-height:250px;margin-top:.5rem">
+        <table style="width:100%">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--card-bg);z-index:2">
+              <th>Date</th>
+              <th>Asset</th>
+              <th>Expiry</th>
+              <th>Lambda</th>
+              <th>Trades</th>
+              <th>Status</th>
+              <th>Size</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="optv2-snapshots-body">
+            <tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+        <h3>Suggested Trades</h3>
+        <div style="display:flex;gap:.5rem;align-items:center;justify-content:flex-end;margin-bottom:.5rem">
+          <button id="btn-export-optv2-trades" class="btn-primary" disabled>Export Trades</button>
+        </div>
+        <div class="chain-wrapper" style="max-height:300px">
+          <table id="optv2-trades-table">
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Type</th>
+                <th>Strike</th>
+                <th>Expiry</th>
+                <th>DTE</th>
+                <th>Qty</th>
+                <th>IV %</th>
+                <th>Mark (USD)</th>
+                <th>Cost (USD)</th>
+              </tr>
+            </thead>
+            <tbody id="optv2-trades-body"></tbody>
+          </table>
+        </div>
+      </section>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -1872,33 +1987,6 @@
   </div>
 </div>
 
-<!-- Optimizer v2 Snapshots Browser -->
-<div id="modal-optv2-snapshots" class="modal-overlay" style="display:none">
-  <div class="modal" style="width:760px;max-height:80vh;display:flex;flex-direction:column">
-    <h2 style="margin-bottom:.5rem">Saved Optimizer Snapshots</h2>
-    <div id="optv2-snapshots-meta" style="font-size:.75rem;color:var(--muted);margin-bottom:.6rem"></div>
-    <div style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:4px">
-      <table class="data-table" style="width:100%;font-size:.8rem">
-        <thead>
-          <tr>
-            <th style="text-align:left">File</th>
-            <th style="text-align:right;white-space:nowrap">Size</th>
-            <th style="text-align:left;white-space:nowrap">Modified</th>
-            <th style="text-align:center;width:90px">Download</th>
-          </tr>
-        </thead>
-        <tbody id="optv2-snapshots-body">
-          <tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">Loading…</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="modal-actions" style="margin-top:.8rem">
-      <button id="btn-optv2-snapshots-refresh" type="button" class="btn-secondary" style="width:auto;margin:0">Refresh</button>
-      <button id="btn-optv2-snapshots-close" type="button" class="btn-secondary" style="width:auto;margin:0">Close</button>
-    </div>
-  </div>
-</div>
-
 <!-- Collateral margin edit modal -->
 <div id="collat-modal" class="mtm-modal-backdrop">
   <div class="mtm-modal collat-modal">
@@ -1951,7 +2039,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=50"></script>
-<script src="/static/recon.js?v=1"></script>
+<script src="/static/app.js?v=52"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 import pandas as pd
@@ -16,6 +16,7 @@ from plgo_options.optimization.snapshot import load_snapshot_dict
 
 @dataclass
 class OptimizerRunParams:
+    asset: str = "ETH"
     lam_factor: float = 1.0
     target_expiry: str | None = "31JUL26"
     unwind_discount: float = 0.2
@@ -38,10 +39,14 @@ class OptimizerUseCase:
         portfolio_payload: dict[str, Any],
         run_params: OptimizerRunParams,
     ) -> "OptimizerUseCase":
+        # print(portfolio_payload)
+        spot = portfolio_payload.get("spot", portfolio_payload.get("eth_spot"))
+
         return_val = cls(
             today=datetime.today(),
             optimizer_input={
-                "eth_spot": portfolio_payload["eth_spot"],
+                "asset": portfolio_payload.get("asset", run_params.asset).upper(),
+                "spot": spot,
                 "spot_ladder": portfolio_payload["spot_ladder"],
                 "matrix_horizons": portfolio_payload["matrix_horizons"],
                 "chart_horizons": portfolio_payload["chart_horizons"],
@@ -52,7 +57,7 @@ class OptimizerUseCase:
             },
             run_params=run_params,
         )
-        #print(return_val)
+        # print(return_val.optimizer_input)
         return return_val
 
     @classmethod
@@ -60,6 +65,9 @@ class OptimizerUseCase:
         path = Path(path)
         with path.open() as f:
             data = json.load(f)
+        if "eth_spot" in data["optimizer_input"].keys():
+            data["optimizer_input"]["spot"] = data["optimizer_input"]["eth_spot"]
+            del data["optimizer_input"]["eth_spot"]
 
         today_str = path.name.split('_')[0]
         today = datetime.strptime(today_str, "%Y%m%d")
@@ -80,6 +88,9 @@ class OptimizerUseCase:
         return return_val
 
     def save(self, path: str | Path) -> Path:
+        print(self.optimizer_input.keys())
+        print(self.optimizer_input.get("spot"))
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
@@ -120,7 +131,7 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="31JUL26", is_replay=True, roll_dte_threshold=22, lam_factor=0.35)#, counterparties=["Flowdesk"])
+        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=2, lam_factor=0.00075)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")

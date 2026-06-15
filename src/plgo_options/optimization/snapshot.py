@@ -13,6 +13,8 @@ def save_snapshot(data: dict) -> Path:
     """Write *data* to a timestamped JSON file and return the path."""
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    print('data')
+    print(data)
     path = SNAPSHOT_DIR / f"snapshot_{ts}.json"
     with open(path, "w") as f:
         json.dump(data, f, indent=2, default=str)

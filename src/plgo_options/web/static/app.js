@@ -863,6 +863,17 @@ $btnRepl.addEventListener("click", replicateStrategy);
 document.getElementById("pricing-vol-spread").addEventListener("input", () => updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint"));
 updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
 document.getElementById("btn-apply-repl").addEventListener("click", applyReplPremiums);
+
+// Send Pricing legs → Strategy Builder
+document.getElementById("btn-send-to-sb").addEventListener("click", () => {
+  if (legs.length === 0) { alert("No legs to send — add legs first."); return; }
+  for (const l of legs) {
+    sbAddLeg(l.side, l.type, parseFloat(l.strike) || 0, parseFloat(l.quantity) || 1000, l.expiry || "");
+  }
+  // Switch to Strategy Builder tab
+  document.querySelector('[data-page="structurer"]').click();
+  sbRenderLegs();
+});
 $btnLoad.addEventListener("click", loadChain);
 
 document.querySelectorAll(".btn-template").forEach(btn => {
@@ -891,6 +902,7 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
 
     // Optimizer chat: clear cached portfolio data, baseline, chat history,
     // workbench, and added/closed trade state — they're asset-specific.
+    if (typeof opt2Loaded !== "undefined") opt2Loaded = false;
     if (typeof opt2Data !== "undefined") opt2Data = null;
     if (typeof opt2Baseline !== "undefined") opt2Baseline = null;
     if (typeof opt2ChatHistory !== "undefined") opt2ChatHistory = [];
@@ -945,7 +957,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
     const pricingBanner = document.getElementById("pricing-fil-banner");
     const rollBanner = document.getElementById("roll-fil-banner");
     if (pricingBanner) pricingBanner.style.display = "none";  // no longer needed — FIL pricer works
-    if (rollBanner) rollBanner.style.display = (isFil && pg === "roll") ? "" : "none";
+    if (rollBanner) rollBanner.style.display = "none";
 
     // Hide Deribit option chain for FIL (no exchange-listed FIL options)
     const chainBtn = document.getElementById("btn-load-chain");
@@ -1004,9 +1016,18 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
     if (btn.dataset.subtab === "optimizer" && !opt2Loaded) opt2Init();
     if (btn.dataset.subtab === "optimizer") {
       setTimeout(() => { const el = document.getElementById("opt2-ask"); if (el) el.focus(); }, 100);
+      optv2LoadSnapshots();
     }
     if (btn.dataset.subtab === "sb-execution" && !execLoaded) execInit();
-    if (btn.dataset.subtab === "tm-recon") reconInit();
+
+    // Populate recon counterparties when switching to recon tab
+    if (btn.dataset.subtab === "tm-recon") {
+      rcPopulateCounterparties();
+      rcLoadHistory();
+      const lbl = document.getElementById("rc-asset-label");
+      if (lbl) lbl.textContent = currentAsset;
+      if (rcTheirTrades.length === 0) rcAddRow();
+    }
   });
 });
 
@@ -1617,11 +1638,16 @@ function tmOpenModal(trade = null) {
     document.getElementById("tf-multi-section").style.display = "none";
     tfPreset = "single";
 
-    document.getElementById("tf-id").value = trade.id;
+    document.getElementById("tf-id").value = trade.db_id || trade.id;
     document.getElementById("tf-counterparty").value = trade.counterparty || "";
     document.getElementById("tf-trade-date").value = trade.trade_date || "";
-    document.getElementById("tf-side").value = trade.side || "Buy";
-    document.getElementById("tf-option-type").value = trade.option_type || "Call";
+    // Normalize side/type to match dropdown values (Buy/Sell, Call/Put)
+    const editSide = (trade.side_raw || trade.side || "Buy").trim();
+    const sLower = editSide.toLowerCase();
+    document.getElementById("tf-side").value = ["buy","long","bought"].includes(sLower) ? "Buy" : ["sell","short","sold"].includes(sLower) ? "Sell" : editSide;
+    const editType = (trade.option_type || "Call").trim();
+    const tLower = editType.toLowerCase();
+    document.getElementById("tf-option-type").value = ["call","calls","c"].includes(tLower) ? "Call" : ["put","puts","p"].includes(tLower) ? "Put" : editType;
     document.getElementById("tf-expiry").value = trade.expiry || "";
     document.getElementById("tf-strike").value = trade.strike || "";
     document.getElementById("tf-qty").value = trade.qty || "";
@@ -1738,7 +1764,18 @@ document.getElementById("trade-form").addEventListener("submit", async (e) => {
 });
 
 async function tmEditTrade(id) {
-  const trade = tmTrades.find(t => t.id === id);
+  // Look up from raw trades first, then enriched as fallback
+  let trade = tmTrades.find(t => t.id === id || t.id === Number(id));
+  if (!trade) trade = tmEnriched.find(t => (t.db_id || t.id) === id || (t.db_id || t.id) === Number(id));
+  if (!trade) {
+    // Last resort: fetch directly from API
+    try {
+      trade = await get(`/api/trades/${id}`);
+    } catch (e) {
+      alert(`Could not load trade #${id}: ${e.message}`);
+      return;
+    }
+  }
   if (trade) tmOpenModal(trade);
 }
 
@@ -1893,6 +1930,646 @@ document.getElementById("btn-tm-export").addEventListener("click", () => {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Trades");
   XLSX.writeFile(wb, `PLGO_Trades_${new Date().toISOString().split("T")[0]}.xlsx`);
+});
+
+// ─── Counterparty Reconciliation ────────────────────────────
+let rcTheirTrades = [];
+
+function rcAddRow(data) {
+  const d = data || { trade_id: "", trade_date: "", side: "Buy", option_type: "Call", strike: "", expiry: "", qty: "", premium_usd: "" };
+  rcTheirTrades.push(d);
+  rcRenderRows();
+}
+
+function rcRenderRows() {
+  const tbody = document.getElementById("rc-their-body");
+  document.getElementById("rc-their-count").textContent = rcTheirTrades.length;
+  tbody.innerHTML = rcTheirTrades.map((t, i) => `<tr>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="trade_id" value="${t.trade_id || ""}" style="width:100%;font-size:.78rem"></td>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="trade_date" value="${t.trade_date || ""}" placeholder="YYYY-MM-DD" style="width:100px;font-size:.78rem"></td>
+    <td><select class="rc-field" data-idx="${i}" data-col="side" style="font-size:.78rem">
+      <option value="Buy" ${(t.side || "").toUpperCase() === "BUY" ? "selected" : ""}>Buy</option>
+      <option value="Sell" ${(t.side || "").toUpperCase() === "SELL" ? "selected" : ""}>Sell</option>
+    </select></td>
+    <td><select class="rc-field" data-idx="${i}" data-col="option_type" style="font-size:.78rem">
+      <option value="Call" ${(t.option_type || "").toUpperCase() === "CALL" ? "selected" : ""}>Call</option>
+      <option value="Put" ${(t.option_type || "").toUpperCase() === "PUT" ? "selected" : ""}>Put</option>
+    </select></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="strike" value="${t.strike || ""}" step="any" style="width:80px;font-size:.78rem"></td>
+    <td><input type="text" class="rc-field" data-idx="${i}" data-col="expiry" value="${t.expiry || ""}" placeholder="YYYY-MM-DD" style="width:100px;font-size:.78rem"></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="qty" value="${t.qty || ""}" step="any" style="width:80px;font-size:.78rem"></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="premium_usd" value="${t.premium_usd || ""}" step="any" style="width:100px;font-size:.78rem"></td>
+    <td><button class="tm-action-btn btn-delete rc-remove" data-idx="${i}" title="Remove">&times;</button></td>
+  </tr>`).join("");
+
+  tbody.querySelectorAll(".rc-field").forEach(el => {
+    el.addEventListener("change", () => {
+      const idx = parseInt(el.dataset.idx);
+      const col = el.dataset.col;
+      rcTheirTrades[idx][col] = el.value;
+    });
+  });
+  tbody.querySelectorAll(".rc-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      rcTheirTrades.splice(parseInt(btn.dataset.idx), 1);
+      rcRenderRows();
+    });
+  });
+}
+
+async function rcPopulateCounterparties() {
+  const sel = document.getElementById("rc-counterparty");
+  const existing = new Set();
+
+  // If tmEnriched is empty, fetch trades directly
+  if (tmEnriched.length === 0) {
+    try {
+      const data = await get(`/api/trades/?include_expired=true&asset=${currentAsset}`);
+      (data.trades || []).forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+    } catch (e) { /* ignore */ }
+  } else {
+    tmEnriched.forEach(t => { if (t.counterparty) existing.add(t.counterparty); });
+  }
+
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">-- Select --</option>';
+  [...existing].sort().forEach(cp => {
+    const o = document.createElement("option");
+    o.value = cp; o.textContent = cp;
+    if (cp === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+// Template download (CSV)
+document.getElementById("rc-download-csv").addEventListener("click", (e) => {
+  e.preventDefault();
+  const header = "trade_id,trade_date,side,option_type,strike,expiry,qty,premium_usd,price_per_option";
+  const blob = new Blob([header + "\n"], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "Trades_Position_Collateral.csv";
+  a.click();
+});
+
+// Template download (XLSX) — two sheets: Eth, Fil
+document.getElementById("rc-download-xlsx").addEventListener("click", (e) => {
+  e.preventDefault();
+  const cols = ["trade_id", "trade_date", "side", "option_type", "strike", "expiry", "qty", "premium_usd", "price per option"];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([cols]), "Eth");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([cols]), "Fil");
+  XLSX.writeFile(wb, "Trades_Position_Collateral.xlsx");
+});
+
+// Upload handler
+function rcNormSide(s) {
+  s = (s || "").trim().toUpperCase();
+  if (["BUY","BUYS","BOUGHT","LONG","B","L"].includes(s)) return "Buy";
+  if (["SELL","SELLS","SOLD","SHORT","S"].includes(s)) return "Sell";
+  return s.charAt(0) + s.slice(1).toLowerCase();
+}
+
+function rcNormType(t) {
+  t = (t || "").trim().toUpperCase();
+  if (["C","CALL","CALLS"].includes(t)) return "Call";
+  if (["P","PUT","PUTS"].includes(t)) return "Put";
+  return t.charAt(0) + t.slice(1).toLowerCase();
+}
+
+function rcNormDate(v) {
+  if (v == null || v === "") return "";
+  // Excel serial date (number like 46185 = days since 1899-12-30)
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (!isNaN(n) && n > 30000 && n < 60000) {
+    const base = new Date(1899, 11, 30); // Dec 30, 1899
+    const d = new Date(base.getTime() + n * 86400000);
+    return d.toISOString().split("T")[0];
+  }
+  const s = String(v).trim();
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.substring(0, 10);
+  // DDMMMYY e.g. 04AUG26
+  const m = s.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/i);
+  if (m) {
+    const months = {JAN:"01",FEB:"02",MAR:"03",APR:"04",MAY:"05",JUN:"06",JUL:"07",AUG:"08",SEP:"09",OCT:"10",NOV:"11",DEC:"12"};
+    const mon = months[m[2].toUpperCase()];
+    if (mon) return `20${m[3]}-${mon}-${m[1].padStart(2, "0")}`;
+  }
+  // Timestamp with space
+  if (s.includes(" ")) return s.split(" ")[0];
+  return s;
+}
+
+function rcParseRow(row) {
+  const pf = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  return {
+    trade_id: String(row.trade_id || row.Trade_ID || row["Trade ID"] || row["Trade_ID"] || ""),
+    trade_date: rcNormDate(row.trade_date || row.Trade_Date || row["Trade Date"] || row.Date || ""),
+    side: rcNormSide(row.side || row.Side || row["Buy / Sell"] || row["Buy/Sell"] || row["Direction"] || ""),
+    option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || row["Option_Type"] || row["Instrument Type"] || ""),
+    strike: pf(row.strike ?? row.Strike ?? row["Strike Price"] ?? row["Strike_Price"] ?? 0),
+    expiry: rcNormDate(row.expiry ?? row.Expiry ?? row["Expiry Date"] ?? row["Expiry_Date"] ?? row["Option Expiry Date"] ?? ""),
+    qty: pf(row.qty ?? row.Qty ?? row.Quantity ?? row["ETH Options"] ?? row["Quantity"] ?? row["Size"] ?? 0),
+    premium_usd: pf(row.premium_usd ?? row.Premium_USD ?? row["Premium USD"] ?? row["Premium_USD"] ?? row["Premium"] ?? 0),
+  };
+}
+
+function rcGuessAsset(trades) {
+  // FIL strikes are typically < $50, ETH strikes > $100
+  if (trades.length === 0) return null;
+  const avgStrike = trades.reduce((s, t) => s + Math.abs(t.strike || 0), 0) / trades.length;
+  return avgStrike < 50 ? "FIL" : "ETH";
+}
+
+document.getElementById("rc-upload").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const wb = XLSX.read(evt.target.result, { type: "array" });
+
+      // Strategy 1: find sheet named after current asset
+      let sheetName = wb.SheetNames.find(s => s.toLowerCase() === currentAsset.toLowerCase());
+
+      if (sheetName) {
+        // Exact sheet match for current asset
+        const data = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
+        rcTheirTrades = data.map(rcParseRow);
+      } else if (wb.SheetNames.length === 1) {
+        // Single sheet — parse all rows, then filter by strike-based asset guess
+        const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+        const allTrades = data.map(rcParseRow);
+        const guessed = rcGuessAsset(allTrades);
+        if (guessed && guessed !== currentAsset) {
+          // All trades look like the other asset
+          alert(`These trades appear to be ${guessed} (avg strike ${guessed === "FIL" ? "< $50" : "> $100"}) but you're on the ${currentAsset} view.\n\nSwitch to ${guessed} first, or the reconciliation will not match.`);
+        }
+        rcTheirTrades = allTrades;
+      } else {
+        // Multiple sheets but none match current asset — try to find one by guessing content
+        let found = false;
+        for (const sn of wb.SheetNames) {
+          const data = XLSX.utils.sheet_to_json(wb.Sheets[sn]);
+          const trades = data.map(rcParseRow);
+          const guessed = rcGuessAsset(trades);
+          if (guessed === currentAsset) {
+            rcTheirTrades = trades;
+            sheetName = sn;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          // Fallback: use first sheet
+          const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
+          rcTheirTrades = data.map(rcParseRow);
+          sheetName = wb.SheetNames[0];
+          alert(`No sheet found matching ${currentAsset}. Using sheet "${sheetName}". Verify the trades are correct.`);
+        }
+      }
+
+      rcRenderRows();
+    } catch (err) {
+      alert("Error parsing file: " + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = "";
+});
+
+document.getElementById("rc-add-row").addEventListener("click", () => rcAddRow());
+document.getElementById("rc-clear-rows").addEventListener("click", () => {
+  rcTheirTrades = [];
+  rcRenderRows();
+});
+
+// Run reconciliation
+document.getElementById("rc-run").addEventListener("click", async () => {
+  const counterparty = document.getElementById("rc-counterparty").value;
+  if (!counterparty) { alert("Please select a counterparty"); return; }
+
+  const btn = document.getElementById("rc-run");
+  const resultsSection = document.getElementById("rc-results-section");
+  const resultsContainer = document.getElementById("rc-results");
+
+  // Show progress log
+  btn.disabled = true;
+  btn.textContent = "Running...";
+  resultsSection.style.display = "";
+  resultsContainer.innerHTML = `
+    <div id="rc-log" style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:1rem;font-family:monospace;font-size:.78rem;max-height:300px;overflow-y:auto">
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Starting reconciliation...</div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Counterparty: <b>${counterparty}</b></div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Asset: <b>${currentAsset}</b></div>
+      <div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Their trades: <b>${rcTheirTrades.length}</b></div>
+      <div style="color:var(--accent)">[${new Date().toLocaleTimeString()}] Fetching our book & comparing trades...</div>
+      <div id="rc-log-spinner" style="color:var(--accent);margin-top:.5rem">&#9203; Please wait...</div>
+    </div>`;
+  resultsSection.scrollIntoView({ behavior: "smooth" });
+
+  const payload = {
+    counterparty,
+    asset: currentAsset,
+    their_trades: rcTheirTrades,
+    their_collateral: {
+      ETH: parseFloat(document.getElementById("rc-coll-eth").value) || 0,
+      FIL: parseFloat(document.getElementById("rc-coll-fil").value) || 0,
+      USD: parseFloat(document.getElementById("rc-coll-usd").value) || 0,
+      USDC: parseFloat(document.getElementById("rc-coll-usdc").value) || 0,
+    },
+  };
+
+  try {
+    const res = await post("/api/trades/reconcile", payload);
+
+    // Append completion to log, then render results after a brief pause
+    const log = document.getElementById("rc-log");
+    const spinner = document.getElementById("rc-log-spinner");
+    if (spinner) spinner.remove();
+    if (log) {
+      const s = res.summary;
+      log.innerHTML += `<div style="color:var(--green)">[${new Date().toLocaleTimeString()}] Reconciliation complete.</div>`;
+      log.innerHTML += `<div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Our trades: ${s.our_count} | Their trades: ${s.their_count}</div>`;
+      log.innerHTML += `<div style="color:var(--green)">[${new Date().toLocaleTimeString()}] Matched: ${s.matched}</div>`;
+      if (s.breaks > 0) log.innerHTML += `<div style="color:var(--orange)">[${new Date().toLocaleTimeString()}] Breaks: ${s.breaks}</div>`;
+      if (s.only_ours > 0) log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] Only ours: ${s.only_ours}</div>`;
+      if (s.only_theirs > 0) log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] Only theirs: ${s.only_theirs}</div>`;
+      log.innerHTML += `<div style="color:var(--muted)">[${new Date().toLocaleTimeString()}] Rendering results...</div>`;
+    }
+
+    setTimeout(() => rcRenderResults(res), 600);
+    // Refresh history table
+    rcLoadHistory();
+  } catch (err) {
+    const log = document.getElementById("rc-log");
+    const spinner = document.getElementById("rc-log-spinner");
+    if (spinner) spinner.remove();
+    if (log) {
+      log.innerHTML += `<div style="color:var(--red)">[${new Date().toLocaleTimeString()}] ERROR: ${err.message}</div>`;
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run reconciliation";
+  }
+});
+
+// ─── Reconciliation History ─────────────────────────────────
+async function rcLoadHistory() {
+  try {
+    const data = await get(`/api/trades/recon-history?asset=${currentAsset}`);
+    rcRenderHistory(data.history || []);
+  } catch (e) {
+    const tbody = document.getElementById("rc-history-body");
+    if (tbody) tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:1rem;color:var(--muted)">No history yet</td></tr>`;
+  }
+}
+
+function rcRenderHistory(history) {
+  const tbody = document.getElementById("rc-history-body");
+  if (!tbody) return;
+
+  if (history.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;padding:1.5rem;color:var(--muted)">No reconciliation runs yet. Upload a counterparty file and run reconciliation above.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = history.map(h => {
+    const statusColor = h.status === "clean" ? "var(--green)"
+                      : h.status === "breaks" ? "var(--orange)"
+                      : "var(--red)";
+    const statusLabel = h.status === "clean" ? "Clean"
+                      : h.status === "breaks" ? "Breaks"
+                      : "Mismatches";
+    const statusIcon = h.status === "clean" ? "&#10003;"
+                     : h.status === "breaks" ? "&#9888;"
+                     : "&#10007;";
+    // Format date nicely
+    const d = new Date(h.run_date + (h.run_date.includes("Z") || h.run_date.includes("+") ? "" : "Z"));
+    const dateStr = d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const timeStr = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+    const hasIssues = h.breaks > 0 || h.only_ours > 0 || h.only_theirs > 0;
+
+    return `<tr>
+      <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+      <td style="text-align:left;font-weight:600">${h.counterparty}</td>
+      <td>${h.asset}</td>
+      <td>${h.our_count}</td>
+      <td>${h.their_count}</td>
+      <td style="color:var(--green);font-weight:600">${h.matched}</td>
+      <td style="color:${h.breaks > 0 ? 'var(--orange)' : 'var(--muted)'};font-weight:${h.breaks > 0 ? '700' : '400'}">${h.breaks}</td>
+      <td style="color:${h.only_ours > 0 ? 'var(--red)' : 'var(--muted)'};font-weight:${h.only_ours > 0 ? '700' : '400'}">${h.only_ours}</td>
+      <td style="color:${h.only_theirs > 0 ? 'var(--red)' : 'var(--muted)'};font-weight:${h.only_theirs > 0 ? '700' : '400'}">${h.only_theirs}</td>
+      <td style="color:${statusColor};font-weight:700">${statusIcon} ${statusLabel}</td>
+    </tr>`;
+  }).join("");
+}
+
+function rcRenderResults(res) {
+  const section = document.getElementById("rc-results-section");
+  const container = document.getElementById("rc-results");
+  section.style.display = "";
+
+  const s = res.summary;
+  const fmtMoney = (v) => v != null && v !== 0 ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const fmtQty = (v) => v != null && v !== 0 ? Math.abs(Number(v)).toLocaleString() : "--";
+
+  let html = `
+    <div class="risk-grid" style="margin-bottom:1rem">
+      <div class="risk-metric"><span class="risk-label">Our Trades</span><span class="risk-value">${s.our_count}</span></div>
+      <div class="risk-metric"><span class="risk-label">Their Trades</span><span class="risk-value">${s.their_count}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--green)">Matched</span><span class="risk-value" style="color:var(--green)">${s.matched}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--orange)">Breaks</span><span class="risk-value" style="color:var(--orange)">${s.breaks}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--red)">Only Ours</span><span class="risk-value" style="color:var(--red)">${s.only_ours}</span></div>
+      <div class="risk-metric"><span class="risk-label" style="color:var(--red)">Only Theirs</span><span class="risk-value" style="color:var(--red)">${s.only_theirs}</span></div>
+    </div>`;
+
+  // Build unified rows: [{status, ours, theirs, diffs}]
+  const rows = [];
+  res.matched.forEach(m => rows.push({ status: "match", ours: m.ours, theirs: m.theirs, diffs: {} }));
+  res.breaks.forEach(b => rows.push({ status: "break", ours: b.ours, theirs: b.theirs, diffs: b.diffs }));
+  res.only_ours.forEach(t => rows.push({ status: "only_ours", ours: t, theirs: null, diffs: {} }));
+  res.only_theirs.forEach(t => rows.push({ status: "only_theirs", ours: null, theirs: t, diffs: {} }));
+
+  // Sort: breaks first, then only_ours, only_theirs, then matched
+  const order = { break: 0, only_ours: 1, only_theirs: 2, match: 3 };
+  rows.sort((a, b) => order[a.status] - order[b.status]);
+
+  const statusIcon = { match: "&#10003;", break: "&#9888;", only_ours: "&#8592;", only_theirs: "&#8594;" };
+  const statusColor = { match: "var(--green)", break: "var(--orange)", only_ours: "var(--red)", only_theirs: "var(--red)" };
+  const statusLabel = { match: "Match", break: "Break", only_ours: "Only Ours", only_theirs: "Only Theirs" };
+
+  function cellStyle(field, row) {
+    if (row.diffs && row.diffs[field]) return ' style="background:rgba(210,153,34,0.15);font-weight:600"';
+    return "";
+  }
+
+  // Store rows for action handlers
+  rows.forEach((r, i) => r._idx = i);
+  container._reconRows = rows;
+  container._reconCounterparty = res.counterparty;
+
+  const ourCols = 7, theirCols = 7;
+  html += `<div style="max-height:700px;overflow:auto;margin-top:1rem;border:1px solid var(--border);border-radius:var(--radius)">
+  <table style="font-size:.76rem;border-collapse:collapse;width:100%;table-layout:fixed" id="rc-results-table">
+    <thead style="position:sticky;top:0;z-index:2;background:var(--surface)">
+      <tr style="border-bottom:2px solid var(--border)">
+        <th rowspan="2" style="width:95px;position:sticky;top:0;background:var(--surface)">Status</th>
+        <th colspan="${ourCols}" style="text-align:center;border-bottom:2px solid var(--accent);padding:.5rem;font-size:.82rem;background:var(--surface)">OUR BOOK</th>
+        <th rowspan="2" style="width:3px;background:var(--border);padding:0"></th>
+        <th colspan="${theirCols}" style="text-align:center;border-bottom:2px solid var(--orange);padding:.5rem;font-size:.82rem;background:var(--surface)">THEIR BOOK</th>
+        <th rowspan="2" style="width:120px;background:var(--surface)">Action</th>
+      </tr><tr style="background:var(--surface)">
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+      </tr>
+    </thead><tbody>`;
+
+  rows.forEach((r, i) => {
+    const o = r.ours || {};
+    const t = r.theirs || {};
+    const color = statusColor[r.status];
+    const empty = '<td style="color:var(--muted);text-align:center">—</td>';
+    const sep = '<td style="background:var(--border);padding:0"></td>';
+    const cs = "padding:.5rem .4rem";
+
+    html += `<tr id="rc-row-${i}" style="border-bottom:1px solid var(--row-border)">`;
+    html += `<td style="color:${color};white-space:nowrap;font-weight:600;${cs}" title="${statusLabel[r.status]}">${statusIcon[r.status]} ${statusLabel[r.status]}</td>`;
+
+    // Our side — show absolute values for qty & premium
+    if (r.ours) {
+      html += `<td${cellStyle("side", r)} style="${cs}">${o.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="${cs}">${o.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="${cs}">${o.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="${cs}">${o.expiry_norm || o.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="${cs}">${o.trade_date_norm || o.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(o.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="${cs}">${fmtMoney(Math.abs(o.premium_usd || 0))}</td>`;
+    } else {
+      html += empty.repeat(ourCols);
+    }
+
+    html += sep;
+
+    // Their side — show absolute values for qty & premium
+    if (r.theirs) {
+      html += `<td${cellStyle("side", r)} style="${cs}">${t.side || ""}</td>`;
+      html += `<td${cellStyle("option_type", r)} style="${cs}">${t.option_type || ""}</td>`;
+      html += `<td${cellStyle("strike", r)} style="${cs}">${t.strike || ""}</td>`;
+      html += `<td${cellStyle("expiry", r)} style="${cs}">${t.expiry_norm || t.expiry || ""}</td>`;
+      html += `<td${cellStyle("trade_date", r)} style="${cs}">${t.trade_date_norm || t.trade_date || ""}</td>`;
+      html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(t.qty)}</td>`;
+      html += `<td${cellStyle("premium_usd", r)} style="${cs}">${fmtMoney(Math.abs(t.premium_usd || 0))}</td>`;
+    } else {
+      html += empty.repeat(theirCols);
+    }
+
+    // Action column
+    html += `<td style="white-space:nowrap;${cs};text-align:center">`;
+    if (r.status === "only_ours") {
+      html += `<button class="btn-secondary btn-delete rc-action" data-action="remove" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto" title="Remove from our book">Remove</button>`;
+    } else if (r.status === "only_theirs") {
+      html += `<button class="btn-primary rc-action" data-action="add" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto" title="Add to our book">Add</button>`;
+    } else if (r.status === "break") {
+      html += `<button class="btn-secondary rc-action" data-action="update" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto;color:var(--orange);border-color:var(--orange)" title="Update ours to match theirs">Align</button> `;
+      html += `<button class="btn-secondary rc-action" data-action="keep" data-idx="${i}" style="font-size:.68rem;padding:.2rem .4rem;width:auto;color:var(--accent);border-color:var(--accent)" title="Keep our values">Keep Ours</button>`;
+    } else {
+      html += `<span style="color:var(--green);font-size:.8rem">&#10003;</span>`;
+    }
+    html += `</td></tr>`;
+
+    // If there are field-level diffs, show detail row
+    if (Object.keys(r.diffs).length > 0) {
+      const diffText = Object.entries(r.diffs).map(([f, v]) =>
+        `<b>${f}</b>: ours=${v.ours}, theirs=${v.theirs}`
+      ).join(" &nbsp;&bull;&nbsp; ");
+      html += `<tr id="rc-diff-${i}" style="border-bottom:1px solid var(--row-border)"><td></td><td colspan="${ourCols + theirCols + 1}" style="font-size:.72rem;color:var(--orange);padding:.2rem .5rem;background:rgba(210,153,34,0.05)">${diffText}</td><td></td></tr>`;
+    }
+  });
+
+  html += `</tbody></table></div>`;
+
+  // Collateral
+  const coll = res.collateral;
+  html += `<h3 style="margin:1rem 0 .5rem">Reported Collateral</h3>
+  <table style="max-width:250px"><thead><tr><th>Asset</th><th>Quantity</th></tr></thead><tbody>
+    <tr><td>ETH</td><td>${coll.ETH}</td></tr>
+    <tr><td>FIL</td><td>${coll.FIL}</td></tr>
+    <tr><td>USD</td><td>${coll.USD}</td></tr>
+    <tr><td>USDC</td><td>${coll.USDC}</td></tr>
+  </tbody></table>`;
+
+  container.innerHTML = html;
+  container._lastResult = res;
+
+  // Wire action buttons
+  container.querySelectorAll(".rc-action").forEach(btn => {
+    btn.addEventListener("click", () => rcHandleAction(btn.dataset.action, parseInt(btn.dataset.idx)));
+  });
+}
+
+async function rcHandleAction(action, idx) {
+  const container = document.getElementById("rc-results");
+  const rows = container._reconRows;
+  const counterparty = container._reconCounterparty;
+  const r = rows[idx];
+  if (!r) return;
+
+  try {
+    if (action === "remove") {
+      // Delete trade from our book
+      const dbId = r.ours.id || r.ours.db_id;
+      if (!dbId) { alert("Cannot find trade ID to remove"); return; }
+      if (!confirm(`Remove ${r.ours.side} ${r.ours.option_type} ${r.ours.strike} ${r.ours.expiry} from our book?`)) return;
+      await api("DELETE", `/api/trades/${dbId}`);
+      rcMarkRowDone(idx, "Removed");
+
+    } else if (action === "add") {
+      // Add their trade to our book — normalize values to match our conventions
+      const t = r.theirs;
+      if (!confirm(`Add ${t.side} ${t.option_type} ${t.strike} ${t.expiry} x${Math.abs(t.qty)} to our book?`)) return;
+      // Normalize side: Buy/Sell (title case)
+      const rawSide = (t.side || "").trim().toLowerCase();
+      const normSide = ["buy","buys","bought","long","b","l"].includes(rawSide) ? "Buy"
+                     : ["sell","sells","sold","short","s"].includes(rawSide) ? "Sell" : t.side;
+      // Normalize option type: Call/Put (title case)
+      const rawType = (t.option_type || "").trim().toLowerCase();
+      const normType = ["c","call","calls"].includes(rawType) ? "Call"
+                     : ["p","put","puts"].includes(rawType) ? "Put" : t.option_type;
+      // Normalize counterparty: match existing case from our trades if possible
+      const cpLower = counterparty.toLowerCase();
+      const existingCp = (tmTrades || []).find(x => (x.counterparty || "").toLowerCase() === cpLower);
+      const normCp = existingCp ? existingCp.counterparty : counterparty;
+      // Normalize dates to YYYY-MM-DD
+      const normExpiry = rcNormDate(t.expiry);
+      const normTradeDate = rcNormDate(t.trade_date);
+      // Build instrument name from expiry/strike/type (e.g. ETH-26JUN26-2375-P)
+      const strikeVal = parseFloat(t.strike) || 0;
+      const optCode = normType === "Put" ? "P" : "C";
+      let instrument = "";
+      if (normExpiry && strikeVal > 0) {
+        const ed = new Date(normExpiry + "T00:00:00");
+        const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+        const prefix = currentAsset === "FIL" ? "FIL" : "ETH";
+        instrument = `${prefix}-${ed.getDate()}${months[ed.getMonth()]}${String(ed.getFullYear()).slice(2)}-${Math.round(strikeVal)}-${optCode}`;
+      }
+      await post("/api/trades/", {
+        asset: currentAsset,
+        counterparty: normCp,
+        trade_id: "",
+        trade_date: normTradeDate,
+        side: normSide,
+        option_type: normType,
+        instrument: instrument,
+        expiry: normExpiry,
+        strike: strikeVal,
+        qty: Math.abs(parseFloat(t.qty) || 0),
+        premium_usd: parseFloat(t.premium_usd) || 0,
+      });
+      rcMarkRowDone(idx, "Added");
+
+    } else if (action === "update") {
+      // Update our trade to match theirs
+      const dbId = r.ours.id || r.ours.db_id;
+      if (!dbId) { alert("Cannot find trade ID to update"); return; }
+      const diffs = r.diffs;
+      const changes = {};
+      for (const [field, vals] of Object.entries(diffs)) {
+        changes[field] = vals.theirs;
+      }
+      const diffDesc = Object.entries(diffs).map(([f, v]) => `${f}: ${v.ours} → ${v.theirs}`).join(", ");
+      if (!confirm(`Align trade to counterparty's values?\n${diffDesc}`)) return;
+      await api("PUT", `/api/trades/${dbId}`, changes);
+      rcMarkRowDone(idx, "Aligned");
+
+    } else if (action === "keep") {
+      // Accept our side as correct — just mark the row resolved
+      rcMarkRowDone(idx, "Kept Ours");
+    }
+
+    // Refresh trade management data in background
+    tmLoaded = false;
+  } catch (err) {
+    alert(`Action failed: ${err.message}`);
+  }
+}
+
+function rcMarkRowDone(idx, label) {
+  const row = document.getElementById(`rc-row-${idx}`);
+  if (!row) return;
+  // Replace action button with done label
+  const actionCell = row.querySelector("td:last-child");
+  if (actionCell) {
+    actionCell.innerHTML = `<span style="color:var(--green);font-size:.7rem;font-weight:600">&#10003; ${label}</span>`;
+  }
+  row.style.opacity = "0.5";
+  // Also dim the diff row if present
+  const diffRow = document.getElementById(`rc-diff-${idx}`);
+  if (diffRow) diffRow.style.opacity = "0.5";
+}
+
+// Download report as .md
+document.getElementById("rc-download-report").addEventListener("click", (e) => {
+  e.preventDefault();
+  const container = document.getElementById("rc-results");
+  const res = container._lastResult;
+  if (!res) { alert("Run reconciliation first"); return; }
+
+  const s = res.summary;
+  const fmtMoney = (v) => v != null ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "--";
+  const today = new Date().toISOString().split("T")[0];
+
+  let md = `# Counterparty Reconciliation Report\n\n`;
+  md += `**Counterparty:** ${res.counterparty}  \n`;
+  md += `**Asset:** ${res.asset}  \n`;
+  md += `**Date:** ${today}  \n\n`;
+  md += `## Summary\n\n`;
+  md += `| Metric | Count |\n|--------|-------|\n`;
+  md += `| Our trades | ${s.our_count} |\n`;
+  md += `| Their trades | ${s.their_count} |\n`;
+  md += `| Matched | ${s.matched} |\n`;
+  md += `| Breaks | ${s.breaks} |\n`;
+  md += `| Only ours | ${s.only_ours} |\n`;
+  md += `| Only theirs | ${s.only_theirs} |\n\n`;
+
+  md += `## Trade-by-Trade Comparison\n\n`;
+  md += `| Status | Our Side | Our Type | Our Strike | Our Expiry | Our Date | Our Qty | Our Premium | Their Side | Their Type | Their Strike | Their Expiry | Their Date | Their Qty | Their Premium |\n`;
+  md += `|--------|----------|----------|------------|------------|----------|---------|-------------|------------|------------|--------------|--------------|------------|-----------|---------------|\n`;
+
+  const allRows = [];
+  res.matched.forEach(m => allRows.push({ status: "Match", ours: m.ours, theirs: m.theirs, diffs: {} }));
+  res.breaks.forEach(b => allRows.push({ status: "Break", ours: b.ours, theirs: b.theirs, diffs: b.diffs }));
+  res.only_ours.forEach(t => allRows.push({ status: "Only Ours", ours: t, theirs: null, diffs: {} }));
+  res.only_theirs.forEach(t => allRows.push({ status: "Only Theirs", ours: null, theirs: t, diffs: {} }));
+  const mdOrder = { Break: 0, "Only Ours": 1, "Only Theirs": 2, Match: 3 };
+  allRows.sort((a, b) => mdOrder[a.status] - mdOrder[b.status]);
+
+  allRows.forEach(r => {
+    const o = r.ours || {};
+    const t = r.theirs || {};
+    const oExp = o.expiry_norm || o.expiry || "—";
+    const oDate = o.trade_date_norm || o.trade_date || "—";
+    const tExp = t.expiry_norm || t.expiry || "—";
+    const tDate = t.trade_date_norm || t.trade_date || "—";
+    md += `| ${r.status} | ${o.side || "—"} | ${o.option_type || "—"} | ${o.strike || "—"} | ${oExp} | ${oDate} | ${o.qty ? Math.abs(o.qty) : "—"} | ${fmtMoney(o.premium_usd)} | ${t.side || "—"} | ${t.option_type || "—"} | ${t.strike || "—"} | ${tExp} | ${tDate} | ${t.qty ? Math.abs(t.qty) : "—"} | ${fmtMoney(t.premium_usd)} |\n`;
+    if (Object.keys(r.diffs).length > 0) {
+      const diffDetail = Object.entries(r.diffs).map(([f, v]) => `${f}: ours=${v.ours}, theirs=${v.theirs}`).join("; ");
+      md += `| | *${diffDetail}* | | | | | | | | | | | | | |\n`;
+    }
+  });
+  md += "\n";
+
+  const coll = res.collateral;
+  md += `## Reported Collateral\n\n| Asset | Quantity |\n|-------|----------|\n`;
+  md += `| ETH | ${coll.ETH} |\n| FIL | ${coll.FIL} |\n| USD | ${coll.USD} |\n| USDC | ${coll.USDC} |\n`;
+
+  const blob = new Blob([md], { type: "text/markdown" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `Recon_${res.counterparty}_${today}.md`;
+  a.click();
 });
 
 // ─── Positions / Risk ───────────────────────────────────────
@@ -3948,7 +4625,7 @@ let opt2ScenarioTrades = [];  // locally-tracked scenario trades (roll open legs
 
 async function opt2Init() {
   try {
-    const expiries = await get("/api/optimizer/expiries");
+    const expiries = await get(`/api/optimizer/expiries?asset=${currentAsset}`);
     const $sel = document.getElementById("opt2-expiry");
     $sel.innerHTML = '<option value="">All expiries</option>';
     for (const e of expiries) {
@@ -4665,7 +5342,7 @@ function opt2RenderWorkbench() {
       if (l.opt === "PERP") return;  // perps don't rebuild instrument name
       // Rebuild instrument name to match new strike
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
-      l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      l.instrument = `${currentAsset || "ETH"}-${l.expiry_code}-${strikeStr}-${l.opt}`;
       // Update displayed instrument name in the row
       const row = inp.closest("tr");
       if (row) row.cells[1].textContent = l.instrument;
@@ -4681,7 +5358,8 @@ function opt2RenderWorkbench() {
       l.opt = sel.value;
       // Rebuild instrument name + repaint type-cell color to match new type
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
-      l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      const asset = currentAsset || "ETH";
+      l.instrument = `${asset}-${l.expiry_code}-${strikeStr}-${l.opt}`;
       const row = sel.closest("tr");
       if (row) {
         row.cells[1].textContent = l.instrument;
@@ -4697,7 +5375,7 @@ function opt2RenderWorkbench() {
       // Update instrument name to match new expiry
       const l = opt2WbLegs[idx];
       const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
-      l.instrument = `ETH-${newExp}-${strikeStr}-${l.opt}`;
+      l.instrument = `${currentAsset || "ETH"}-${newExp}-${strikeStr}-${l.opt}`;
     });
   });
 
@@ -5081,9 +5759,9 @@ function opt2DrawChart() {
 
   const cc = chartColors();
   Plotly.react("opt2-payoff-chart", traces, {
-    title: { text: "Portfolio Payoff — Baseline vs Current vs Proposed", font: { color: cc.text, size: 14 } },
+    title: { text: `${currentAsset} Portfolio Payoff — Baseline vs Current vs Proposed`, font: { color: cc.text, size: 14 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-    xaxis: { title: "ETH Spot (USD)", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
+    xaxis: { title: `${currentAsset} Spot (USD)`, type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio Payoff at Expiry (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     margin: { t: 50, r: 260, b: 50, l: 90 },
     showlegend: true,
@@ -5553,16 +6231,17 @@ function opt2RenderMatrix() {
   const curPnl = opt2Data.current_payoff;
   const wbPnl = opt2Data._wbPayoff || null;
 
-  // Pick key spot levels
+  // Pick key spot levels — asset-aware rounding
   const multipliers = [0.3, 0.5, 0.7, 0.85, 0.95, 1.0, 1.05, 1.15, 1.3, 1.5, 2.0, 3.0];
-  const keySpots = multipliers.map(m => Math.round(spot * m / 50) * 50);
+  const roundStep = currentAsset === "FIL" ? 0.5 : 50;
+  const keySpots = multipliers.map(m => Math.round(spot * m / roundStep) * roundStep);
 
   const fmtM = v => (v >= 0 ? "+" : "-") + "$" + Math.abs(Math.round(v)).toLocaleString();
   const fmtCls = v => v >= 0 ? "mtm-pos" : "mtm-neg";
 
   const $thead = document.getElementById("opt2-matrix-thead");
   const thStyle = 'style="text-align:center"';
-  let hdr = `<tr><th ${thStyle}>ETH Spot</th><th ${thStyle}>Baseline P&L</th><th ${thStyle}>Current P&L</th><th ${thStyle}>Change</th>`;
+  let hdr = `<tr><th ${thStyle}>${currentAsset} Spot</th><th ${thStyle}>Baseline P&L</th><th ${thStyle}>Current P&L</th><th ${thStyle}>Change</th>`;
   if (wbPnl) hdr += `<th ${thStyle}>With Workbench</th><th ${thStyle}>WB vs Baseline</th>`;
   hdr += "</tr>";
   $thead.innerHTML = hdr;
@@ -5577,11 +6256,11 @@ function opt2RenderMatrix() {
     const bVal = basePnl[bIdx] || 0;
     const cVal = curPnl[cIdx] || 0;
     const diff = cVal - bVal;
-    const isSpot = Math.abs(ks - spot) < 100;
+    const isSpot = Math.abs(ks - spot) < (currentAsset === "FIL" ? 1 : 100);
 
     const cs = "font-family:monospace;text-align:center";
     let row = `<tr${isSpot ? ' style="background:rgba(88,166,255,0.08);font-weight:600"' : ""}>`;
-    row += `<td style="${cs}">$${ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
+    row += `<td style="${cs}">$${currentAsset === "FIL" ? ks.toFixed(2) : ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
     row += `<td style="${cs}" class="${fmtCls(bVal)}">${fmtM(bVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(cVal)}">${fmtM(cVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(diff)}">${fmtM(diff)}</td>`;
@@ -6214,10 +6893,11 @@ function sbRenderRollResults(results, totalCloseValue, totalOpenValue, totalRoll
 function sbAddLeg(side, type, strike, qty, expiry) {
   side = side || "buy";
   type = type || "C";
-  const _step = pfData.eth_spot >= 100 ? 50 : pfData.eth_spot >= 10 ? 1 : 0.1;
-  strike = strike || Math.round(pfData.eth_spot / _step) * _step;
+  const _spot = pfData ? (pfData.eth_spot || pfData.spot || 0) : (ethSpot || 0);
+  const _step = _spot >= 100 ? 50 : _spot >= 10 ? 1 : 0.1;
+  strike = strike || (_spot ? Math.round(_spot / _step) * _step : 0);
   qty = qty || 1000;
-  expiry = expiry || sbGetTargetExpiry() || ((pfData.vol_surface || [])[0] || {}).expiry_code || "";
+  expiry = expiry || sbGetTargetExpiry() || ((pfData ? pfData.vol_surface || [] : [])[0] || {}).expiry_code || "";
   sbLegs.push({ side, type, strike, qty, expiry });
   sbRenderLegs();
 }
@@ -7746,42 +8426,6 @@ function optv2FmtSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function optv2LoadSnapshots() {
-  const $body = document.getElementById("optv2-snapshots-body");
-  const $meta = document.getElementById("optv2-snapshots-meta");
-  $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">Loading…</td></tr>`;
-  try {
-    const data = await get("/api/optimization/snapshots");
-    const items = data.snapshots || [];
-    $meta.textContent = `Root: ${data.root || ""} — ${items.length} file${items.length === 1 ? "" : "s"}`;
-    if (items.length === 0) {
-      $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">No snapshots saved yet. Tick "Save usecase snapshot" before Run Optimizer to create one.</td></tr>`;
-      return;
-    }
-    $body.innerHTML = items.map(it => {
-      const url = `/api/optimization/snapshots/download?path=${encodeURIComponent(it.path)}`;
-      const safePath = it.path.replace(/</g, "&lt;");
-      return `<tr>
-        <td style="font-family:monospace">${safePath}</td>
-        <td style="text-align:right;white-space:nowrap">${optv2FmtSize(it.size)}</td>
-        <td style="white-space:nowrap">${it.mtime.replace("T", " ")}</td>
-        <td style="text-align:center"><a href="${url}" download>⬇ Download</a></td>
-      </tr>`;
-    }).join("");
-  } catch (e) {
-    $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--red)">Error: ${e.message}</td></tr>`;
-  }
-}
-
-document.getElementById("btn-optv2-snapshots").addEventListener("click", () => {
-  document.getElementById("modal-optv2-snapshots").style.display = "flex";
-  optv2LoadSnapshots();
-});
-document.getElementById("btn-optv2-snapshots-close").addEventListener("click", () => {
-  document.getElementById("modal-optv2-snapshots").style.display = "none";
-});
-document.getElementById("btn-optv2-snapshots-refresh").addEventListener("click", () => optv2LoadSnapshots());
-
 /* ── Run Optimizer ──────────────────────────────────────────── */
 document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   console.log("[OPT-FE] btn-run-optv2 clicked");
@@ -7806,6 +8450,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
       : [];
     const data = await post("/api/optimization/run", {
+      asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
@@ -7857,6 +8502,41 @@ function optv2ExpiryText(t) {
   const exp = t.expiry || "";
   return String(exp).slice(0, 10);
 }
+
+// ─── Saved Snapshots ────────────────────────────────────────
+async function optv2LoadSnapshots() {
+  const tbody = document.getElementById("optv2-snapshots-body");
+  if (!tbody) return;
+  try {
+    const res = await get("/api/optimization/snapshots");
+    const snaps = res.snapshots || [];
+    if (snaps.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">No saved runs yet. Check "Save usecase snapshot" before running.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = snaps.map(s => {
+      const d = s.modified ? new Date(s.modified * 1000) : null;
+      const dateStr = d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      const timeStr = d ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+      const statusColor = s.status === "ok" ? "var(--green)" : s.status ? "var(--red)" : "var(--muted)";
+      return `<tr>
+        <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+        <td>${s.asset || "ETH"}</td>
+        <td>${s.target_expiry || "--"}</td>
+        <td>${s.lam_factor || "--"}</td>
+        <td>${s.trades_count != null ? s.trades_count : "--"}</td>
+        <td style="color:${statusColor}">${s.status || "--"}</td>
+        <td>${s.size_kb || 0} KB</td>
+        <td><a href="/api/optimization/snapshots/${encodeURIComponent(s.filename)}" download style="font-size:.75rem">&darr;</a></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("btn-optv2-refresh-snapshots")?.addEventListener("click", () => optv2LoadSnapshots());
+
 
 function optv2RenderResult(data) {
   const $section = document.getElementById("optv2-result-section");

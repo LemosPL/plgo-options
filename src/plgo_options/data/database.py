@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS trade_audit_log (
 );
 """
 
+RECON_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS recon_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT NOT NULL DEFAULT (datetime('now')),
+    counterparty TEXT NOT NULL,
+    asset TEXT NOT NULL DEFAULT 'ETH',
+    our_count INTEGER NOT NULL DEFAULT 0,
+    their_count INTEGER NOT NULL DEFAULT 0,
+    matched INTEGER NOT NULL DEFAULT 0,
+    breaks INTEGER NOT NULL DEFAULT 0,
+    only_ours INTEGER NOT NULL DEFAULT 0,
+    only_theirs INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'clean',
+    notes TEXT DEFAULT '',
+    created_by TEXT DEFAULT 'user'
+);
+"""
+
 MTM_HISTORY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
     snapshot_date TEXT NOT NULL,
@@ -126,6 +144,7 @@ async def init_db():
     await db.execute(MTM_HISTORY_SCHEMA)
     await db.execute(COLLATERAL_SCHEMA)
     await db.execute(MARGIN_SCHEMA)
+    await db.execute(RECON_HISTORY_SCHEMA)
     await db.commit()
 
     # Migration: add 'asset' column if missing (existing DBs)
@@ -180,8 +199,101 @@ async def init_db():
             logger.warning("FIL Excel import failed: %s", e)
 
 
+    # Normalize trade fields (side, option_type, counterparty, trade_id) on startup
+    await _normalize_trade_fields(db)
+
     # Auto-expire trades past their expiry date (runs every startup)
     await _auto_expire_trades(db)
+
+
+async def _normalize_trade_fields(db: aiosqlite.Connection):
+    """Normalize side, option_type, counterparty case, clear UUID trade_ids, fix expiry dates, build instruments."""
+    import re
+    from datetime import datetime as _dt
+    _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+    _DDMMMYY_RE = re.compile(r'^(\d{1,2})([A-Z]{3})(\d{2})$', re.I)
+
+    cursor = await db.execute("SELECT id, asset, side, option_type, counterparty, trade_id, expiry, strike, instrument FROM trades")
+    rows = await cursor.fetchall()
+
+    # Build canonical counterparty casing: use the most frequent casing per lowercase name
+    cp_counts: dict[str, dict[str, int]] = {}
+    for r in rows:
+        cp = (r["counterparty"] or "").strip()
+        if cp:
+            cp_counts.setdefault(cp.lower(), {})
+            cp_counts[cp.lower()][cp] = cp_counts[cp.lower()].get(cp, 0) + 1
+    canonical_cp: dict[str, str] = {}
+    for lower, variants in cp_counts.items():
+        canonical_cp[lower] = max(variants, key=variants.get)
+
+    changes = 0
+    for r in rows:
+        updates = {}
+        # Normalize side to title case
+        side = (r["side"] or "").strip()
+        side_lower = side.lower()
+        if side_lower in ("buy", "buys", "bought", "long", "b", "l"):
+            if side != "Buy":
+                updates["side"] = "Buy"
+        elif side_lower in ("sell", "sells", "sold", "short", "s"):
+            if side != "Sell":
+                updates["side"] = "Sell"
+
+        # Normalize option_type to title case
+        otype = (r["option_type"] or "").strip()
+        otype_lower = otype.lower()
+        if otype_lower in ("c", "call", "calls"):
+            if otype != "Call":
+                updates["option_type"] = "Call"
+        elif otype_lower in ("p", "put", "puts"):
+            if otype != "Put":
+                updates["option_type"] = "Put"
+
+        # Normalize counterparty to canonical casing
+        cp = (r["counterparty"] or "").strip()
+        if cp and cp.lower() in canonical_cp and cp != canonical_cp[cp.lower()]:
+            updates["counterparty"] = canonical_cp[cp.lower()]
+
+        # Clear UUID-like trade_ids (from counterparty recon imports)
+        tid = (r["trade_id"] or "").strip()
+        if tid and _UUID_RE.match(tid):
+            updates["trade_id"] = ""
+
+        # Normalize expiry dates: DDMMMYY → YYYY-MM-DD
+        expiry = (r["expiry"] or "").strip()
+        m = _DDMMMYY_RE.match(expiry)
+        if m:
+            try:
+                dt = _dt.strptime(f"{m.group(1)}{m.group(2).upper()}{m.group(3)}", "%d%b%y")
+                updates["expiry"] = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+        # Build missing instrument names
+        instrument = (r["instrument"] or "").strip()
+        final_expiry = updates.get("expiry", expiry)
+        strike = r["strike"] or 0
+        final_otype = updates.get("option_type", otype)
+        if not instrument and final_expiry and strike > 0:
+            try:
+                ed = _dt.strptime(final_expiry, "%Y-%m-%d")
+                prefix = r["asset"] or "ETH"
+                opt_code = "P" if final_otype.lower() == "put" else "C"
+                strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+                updates["instrument"] = f"{prefix}-{ed.day}{ed.strftime('%b').upper()}{ed.strftime('%y')}-{strike_str}-{opt_code}"
+            except ValueError:
+                pass
+
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [r["id"]]
+            await db.execute(f"UPDATE trades SET {set_clause}, updated_at = datetime('now') WHERE id = ?", values)
+            changes += 1
+
+    if changes:
+        await db.commit()
+        logger.info("Normalized %d trades (side/option_type/counterparty/trade_id)", changes)
 
 
 async def _auto_expire_trades(db: aiosqlite.Connection):
