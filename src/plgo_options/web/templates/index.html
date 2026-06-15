@@ -55,6 +55,11 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M0 0h1v16H0V0zm15 0v1H1V0h14zM4 11h2v3H4v-3zm5-4h2v7H9V7zm4-3h2v10h-2V4z"/></svg>
       MTM History
     </li>
+    <li class="nav-item" data-page="collateral">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM1 8a7 7 0 1114 0A7 7 0 011 8zm7-3a.5.5 0 01.5.5v.5h1a.5.5 0 010 1h-2a.5.5 0 100 1h1a1.5 1.5 0 010 3v.5a.5.5 0 01-1 0v-.5h-1a.5.5 0 010-1h2a.5.5 0 100-1h-1a1.5 1.5 0 010-3V5.5A.5.5 0 018 5z"/></svg>
+      Collateral
+      <span class="nav-badge" id="nav-badge-collateral"></span>
+    </li>
   </ul>
   <div class="sidebar-bottom">
     <button id="btn-theme-toggle" class="theme-toggle" title="Toggle light/dark theme">
@@ -73,6 +78,13 @@
   <!-- PAGE: Trade Management                                     -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-trades" class="page active">
+
+    <div class="sub-tab-bar">
+      <button class="sub-tab-btn active" data-subtab="tm-main">Trades</button>
+      <button class="sub-tab-btn" data-subtab="tm-recon">Counterparty Reconciliation</button>
+    </div>
+
+    <div id="subtab-tm-main" class="sub-tab-pane active">
 
     <!-- Summary banner -->
     <section class="card" id="tm-summary">
@@ -189,6 +201,73 @@
       <h2>Risk Insights</h2>
       <div id="tm-insights" class="insights-grid"></div>
     </section>
+
+    </div><!-- /subtab-tm-main -->
+
+    <!-- ══════════════ SUB-TAB: Counterparty Reconciliation ══════════════ -->
+    <div id="subtab-tm-recon" class="sub-tab-pane">
+
+      <section class="card">
+        <h2>Counterparty Reconciliation
+          <small style="color:var(--muted)">— compare a counterparty's reported book &amp; collateral against ours
+          (<span id="recon-asset-label">ETH</span>)</small>
+        </h2>
+        <div class="pf-toolbar">
+          <label class="pf-filter-label">Counterparty
+            <input type="text" id="recon-cp" list="recon-cp-list" placeholder="e.g. GSR" autocomplete="off">
+            <datalist id="recon-cp-list"></datalist>
+          </label>
+          <div class="pf-toolbar-spacer"></div>
+          <button id="btn-recon-template" class="btn-secondary">⬇ Template (.csv)</button>
+          <button id="btn-recon-template-xlsx" class="btn-secondary">⬇ Template (.xlsx)</button>
+          <label class="btn-primary" style="cursor:pointer;display:inline-flex;align-items:center">⬆ Upload filled file
+            <input type="file" id="recon-file" accept=".csv,.xlsx,.xls" style="display:none">
+          </label>
+        </div>
+        <p style="font-size:.75rem;color:var(--muted);margin:.4rem 0 0;line-height:1.4">
+          Send the template to your counterparty. They fill <strong>TRADES</strong> (one row per option leg;
+          <em>Side</em> = the side PLGO took, so Buy = PLGO bought) and <strong>COLLATERAL</strong> (what we have stored
+          with them, by asset). Upload the returned file here — or paste/edit the grids below — then run reconciliation.
+        </p>
+      </section>
+
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+          <h2 style="margin:0">Their reported trades <small id="recon-trades-count" style="color:var(--muted)"></small></h2>
+          <div style="display:flex;gap:.4rem">
+            <button id="btn-recon-add-row" class="btn-secondary">+ Row</button>
+            <button id="btn-recon-clear" class="btn-secondary btn-delete">Clear</button>
+          </div>
+        </div>
+        <div class="chain-wrapper" style="max-height:320px;margin-top:.5rem">
+          <table id="recon-trades-table">
+            <thead><tr>
+              <th>Trade ID</th><th>Date</th><th>Side</th><th>Type</th><th>Strike</th>
+              <th>Expiry</th><th>Qty</th><th>Premium USD</th><th style="width:30px"></th>
+            </tr></thead>
+            <tbody id="recon-trades-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Their reported collateral <small style="color:var(--muted)">— what we have stored with them</small></h2>
+        <table id="recon-collat-table" style="max-width:420px;margin-top:.5rem">
+          <thead><tr><th>Asset</th><th>Quantity</th></tr></thead>
+          <tbody id="recon-collat-body"></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <div class="pf-toolbar">
+          <button id="btn-recon-run" class="btn-primary">Run reconciliation</button>
+          <div class="pf-toolbar-spacer"></div>
+          <button id="btn-recon-report" class="btn-secondary" disabled>⬇ Download report (.md)</button>
+        </div>
+        <div id="recon-results" style="margin-top:.75rem"></div>
+      </section>
+
+    </div><!-- /subtab-tm-recon -->
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -436,7 +515,8 @@
               <thead>
                 <tr>
                   <th>Expiry</th><th>Side</th><th>Type</th><th>Strike</th>
-                  <th>DTE</th><th>IV %</th><th>Qty</th><th>Price USD</th><th>Total USD</th><th>Source</th>
+                  <th>DTE</th><th>IV %</th><th>Qty</th><th>Price USD</th><th>Total USD</th>
+                  <th title="Per-contract option delta">δ</th><th title="Position delta this leg creates (signed qty × delta), in underlying units">Pos Δ</th><th>Source</th>
                 </tr>
               </thead>
               <tbody id="repl-body"></tbody>
@@ -1119,7 +1199,16 @@
             </div>
             <div style="display:flex;gap:.5rem;flex-wrap:wrap">
               <button id="btn-opt2-calc" class="btn-primary" style="width:auto">Calculate</button>
-              <button id="btn-opt2-add-leg" class="btn-secondary" style="width:auto;margin:0">+ Add Leg</button>
+              <select id="opt2-add-template" title="Choose what to add" style="width:auto;margin:0;padding:.3rem .4rem;font-size:.75rem;background:var(--surface);color:inherit;border:1px solid var(--border);border-radius:4px">
+                <option value="put">Put</option>
+                <option value="call">Call</option>
+                <option value="call_spread">Call Spread</option>
+                <option value="put_spread">Put Spread</option>
+                <option value="straddle">Straddle</option>
+                <option value="strangle">Strangle</option>
+                <option value="iron_condor">Iron Condor</option>
+              </select>
+              <button id="btn-opt2-add-leg" class="btn-secondary" style="width:auto;margin:0">+ Add</button>
               <button id="btn-opt2-clear-wb" class="btn-secondary" style="width:auto;margin:0">Clear</button>
               <div class="pf-toolbar-spacer"></div>
               <button id="btn-opt2-add-to-portfolio" class="btn-primary" style="width:auto;background:linear-gradient(135deg,#238636,#2ea043);border-color:#238636">Add to Scenario</button>
@@ -1149,7 +1238,8 @@
 
       <!-- ROW 2: Scenario Trades (full width) -->
       <section class="card" id="opt2-portfolio-section" style="display:none;margin-top:1rem">
-        <h2>Scenario Trades <small id="opt2-port-count"></small></h2>
+        <h2 style="cursor:pointer" id="opt2-portfolio-toggle">Scenario Trades <small id="opt2-port-count"></small><span id="opt2-portfolio-toggle-icon" style="float:right;font-size:.7rem;color:var(--muted)">[ - ]</span></h2>
+        <div id="opt2-portfolio-body">
         <div class="risk-grid" style="margin-bottom:.5rem">
           <div class="risk-metric"><span class="risk-label">ETH Spot</span><span class="risk-value" id="opt2-spot-val">--</span></div>
           <div class="risk-metric"><span class="risk-label">P&amp;L at Spot</span><span class="risk-value" id="opt2-pnl-spot">--</span></div>
@@ -1201,14 +1291,15 @@
             <tfoot id="opt2-port-foot"></tfoot>
           </table>
         </div>
+        </div><!-- /opt2-portfolio-body -->
       </section>
 
       <!-- ROW 3: Payoff chart (full width) -->
       <!-- Saved Curves section -->
       <section class="card" id="opt2-curves-section" style="margin-top:1rem">
         <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-          <h2 style="margin:0;font-size:.95rem">Target Curves</h2>
-          <small style="color:var(--muted)">check = display on chart, radio = send to chat</small>
+          <h2 style="margin:0;font-size:.95rem;cursor:pointer" id="opt2-curves-toggle" title="Collapse / expand">Target Curves <span id="opt2-curves-toggle-icon" style="font-size:.7rem;color:var(--muted)">[ - ]</span></h2>
+          <small id="opt2-curves-hint" style="color:var(--muted)">check = display on chart, radio = send to chat</small>
           <div style="flex:1"></div>
           <button id="btn-opt2-curve-save" class="btn-secondary" style="width:auto;padding:4px 12px;font-size:.75rem;border-radius:8px;border-color:#f0883e;color:#f0883e" title="Save current drawn curve">Save Current</button>
           <button id="btn-opt2-curve-delete" class="btn-secondary" style="width:auto;padding:4px 12px;font-size:.75rem;border-radius:8px;color:var(--red)" title="Delete selected">Delete</button>
@@ -1292,6 +1383,7 @@
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
         </label>
+        <button id="btn-optv2-snapshots" type="button" class="btn-secondary" style="width:auto" title="Browse and download saved usecase snapshots">📁 View snapshots</button>
         <button id="btn-run-optv2" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
       </div>
     </section>
@@ -1505,6 +1597,133 @@
     </section>
   </div>
 
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Collateral & Margin                                  -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-collateral" class="page">
+
+    <section class="card collat-controls">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Collateral & Margin</h2>
+          <span id="collat-spot-pill" class="collat-spot-pill"></span>
+        </div>
+        <div class="collat-header-right">
+          <div class="collat-filter-group" role="tablist" aria-label="Filter by portfolio">
+            <button class="collat-filter-pill active" data-filter="all">All books</button>
+            <button class="collat-filter-pill" data-filter="ETH">ETH only</button>
+            <button class="collat-filter-pill" data-filter="FIL">FIL only</button>
+          </div>
+          <label class="collat-toggle">
+            <input type="checkbox" id="collat-haircut-toggle" checked>
+            <span>Apply haircuts (ETH 10% · FIL 50%)</span>
+          </label>
+          <button id="btn-collat-refresh" class="btn-secondary collat-refresh-btn" title="Refresh from latest MtM">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div class="collat-summary-grid">
+        <div class="collat-metric">
+          <div class="collat-metric-label">Liability (our calc)</div>
+          <div class="collat-metric-value" id="collat-liability">--</div>
+          <div class="collat-metric-sub">Σ max(0, −MtM) USD · BS pricing</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Collateral Posted</div>
+          <div class="collat-metric-value" id="collat-value">--</div>
+          <div class="collat-metric-sub" id="collat-value-sub"></div>
+        </div>
+        <div class="collat-metric collat-metric-ratio">
+          <div class="collat-metric-label">Margin Ratio</div>
+          <div class="collat-metric-value" id="collat-ratio">--</div>
+          <div class="collat-metric-sub">Target ≥ 100%</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Shortfall to 100%</div>
+          <div class="collat-metric-value" id="collat-shortfall">--</div>
+          <div class="collat-metric-sub">Additional USD needed</div>
+        </div>
+        <div class="collat-metric collat-metric-compare" id="collat-compare-card" style="display:none">
+          <div class="collat-metric-label">Counterparty Ask</div>
+          <div class="collat-metric-value" id="collat-requested">--</div>
+          <div class="collat-metric-sub" id="collat-diff-sub">Diff vs ours: <span id="collat-diff">--</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="collat-section-header">
+        <h3 class="collat-section-title">Per-counterparty</h3>
+        <div class="collat-section-actions">
+          <button id="btn-collat-add" class="btn-primary collat-add-btn">+ New entry</button>
+        </div>
+      </div>
+
+      <div class="collat-table-scroll">
+        <table class="collat-table" id="collat-table">
+          <thead>
+            <tr>
+              <th style="text-align:left">Counterparty</th>
+              <th style="text-align:left" class="collat-col-book">Book</th>
+              <th title="Open option positions" class="num">Pos</th>
+              <th class="num">Liability (Ours)</th>
+              <th class="num collat-col-collposted" title="Collateral posted: ETH qty / FIL qty">Posted</th>
+              <th class="num" id="collat-th-coll-usd">Coll USD</th>
+              <th class="num" id="collat-th-ratio">Margin %</th>
+              <th class="num" title="What the counterparty is asking from us">Their Ask</th>
+              <th class="num" title="Our liability − their ask. Negative = they are calling more than our calc.">Diff</th>
+              <th class="num" id="collat-th-shortfall">Shortfall</th>
+              <th class="collat-col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="collat-tbody"></tbody>
+          <tfoot id="collat-tfoot"></tfoot>
+        </table>
+      </div>
+
+      <div class="collat-help">
+        <strong>How to read this:</strong> each row is one counterparty × options book.
+        <em>Liability (Ours)</em> = Σ max(0, −MtM) on that book using our Black-Scholes calc.
+        <em>Coll USD</em> applies haircuts to ETH/FIL collateral when the toggle above is on.
+        <em>Their Ask</em> is what the counterparty says we owe — enter it via the row's <strong>Edit</strong> button.
+        <em>Diff</em> = Ours − Theirs. <span style="color:var(--red)">Negative</span> means they're calling more collateral than our model says is needed.
+      </div>
+    </section>
+
+    <!-- Scenario / stress ladder — only when ETH or FIL is selected -->
+    <section class="card" id="collat-scenario-card" style="display:none">
+      <div class="collat-section-header">
+        <div>
+          <h3 class="collat-section-title">Scenario — <span id="collat-scenario-asset">ETH</span> spot ladder</h3>
+          <div class="collat-section-sub" id="collat-scenario-sub">Liability, collateral, and residual repriced at each spot. IV frozen at today's; horizon = today.</div>
+        </div>
+      </div>
+
+      <div id="collat-scenario-chart" style="width:100%;height:420px"></div>
+
+      <div id="collat-scenario-summary" class="collat-scenario-summary"></div>
+
+      <details class="collat-scenario-details">
+        <summary>Show full table</summary>
+        <div class="collat-table-scroll" style="max-height:420px;margin-top:.6rem">
+          <table class="collat-table" id="collat-scenario-table">
+            <thead>
+              <tr>
+                <th class="num">Spot</th>
+                <th class="num">Δ %</th>
+                <th class="num">Liability</th>
+                <th class="num" id="collat-scen-th-coll">Collateral</th>
+                <th class="num" id="collat-scen-th-res">Residual</th>
+                <th class="num" id="collat-scen-th-ratio">Margin %</th>
+              </tr>
+            </thead>
+            <tbody id="collat-scenario-tbody"></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+  </div>
+
 </div><!-- end #app-content -->
 
 <!-- MTM history modal (triggered from Portfolio MTM card) -->
@@ -1585,7 +1804,7 @@
           <label class="modal-field">Strike
             <input type="number" id="tf-strike" step="any" min="0">
           </label>
-          <label class="modal-field">Qty (ETH)
+          <label class="modal-field">Qty (<span id="tf-qty-unit">ETH</span>)
             <input type="number" id="tf-qty" step="100" min="0">
           </label>
           <label class="modal-field">Premium per Contract
@@ -1653,6 +1872,86 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=40"></script>
+<!-- Optimizer v2 Snapshots Browser -->
+<div id="modal-optv2-snapshots" class="modal-overlay" style="display:none">
+  <div class="modal" style="width:760px;max-height:80vh;display:flex;flex-direction:column">
+    <h2 style="margin-bottom:.5rem">Saved Optimizer Snapshots</h2>
+    <div id="optv2-snapshots-meta" style="font-size:.75rem;color:var(--muted);margin-bottom:.6rem"></div>
+    <div style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:4px">
+      <table class="data-table" style="width:100%;font-size:.8rem">
+        <thead>
+          <tr>
+            <th style="text-align:left">File</th>
+            <th style="text-align:right;white-space:nowrap">Size</th>
+            <th style="text-align:left;white-space:nowrap">Modified</th>
+            <th style="text-align:center;width:90px">Download</th>
+          </tr>
+        </thead>
+        <tbody id="optv2-snapshots-body">
+          <tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="modal-actions" style="margin-top:.8rem">
+      <button id="btn-optv2-snapshots-refresh" type="button" class="btn-secondary" style="width:auto;margin:0">Refresh</button>
+      <button id="btn-optv2-snapshots-close" type="button" class="btn-secondary" style="width:auto;margin:0">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Collateral margin edit modal -->
+<div id="collat-modal" class="mtm-modal-backdrop">
+  <div class="mtm-modal collat-modal">
+    <div class="mtm-modal-header">
+      <h3 id="collat-modal-title">Edit Margin</h3>
+      <button class="mtm-modal-close" id="collat-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="mtm-modal-body">
+      <div class="collat-form">
+        <div class="collat-form-row">
+          <label class="collat-form-label">Counterparty
+            <input type="text" id="collat-modal-cp" placeholder="e.g. FlowDesk">
+          </label>
+          <label class="collat-form-label">Book
+            <select id="collat-modal-portfolio">
+              <option value="ETH">ETH options</option>
+              <option value="FIL">FIL options</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="collat-form-section">Collateral posted against this book</div>
+        <div class="collat-form-row">
+          <label class="collat-form-label">ETH qty
+            <input type="number" step="any" min="0" id="collat-modal-eth" placeholder="0">
+          </label>
+          <label class="collat-form-label">FIL qty
+            <input type="number" step="any" min="0" id="collat-modal-fil" placeholder="0">
+          </label>
+        </div>
+        <div class="collat-form-preview" id="collat-modal-preview"></div>
+
+        <div class="collat-form-section">Counterparty's ask (compare vs our calc)</div>
+        <div class="collat-form-row">
+          <label class="collat-form-label">Requested USD
+            <input type="number" step="any" min="0" id="collat-modal-requested" placeholder="leave blank if not provided">
+          </label>
+          <label class="collat-form-label">Notes (optional)
+            <input type="text" id="collat-modal-notes" placeholder="e.g. as of 2026-06-01">
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top:1rem">
+        <button id="btn-collat-modal-save" class="btn-primary" style="width:auto">Save</button>
+        <button id="btn-collat-modal-cancel" class="btn-secondary" style="width:auto">Cancel</button>
+        <span style="flex:1"></span>
+        <button id="btn-collat-modal-delete" class="btn-secondary collat-modal-delete" style="width:auto;display:none">Delete row</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=50"></script>
+<script src="/static/recon.js?v=1"></script>
 </body>
 </html>

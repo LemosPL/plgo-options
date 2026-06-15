@@ -134,16 +134,16 @@ def _bs_delta(spot: float, strike: float, dte: int, sigma: float, opt: str) -> f
 def _render_positions_md(positions_detail: list[dict]) -> str:
     if not positions_detail:
         return "_(no positions)_"
-    rows = ["| ID | Side | Type | Strike | Expiry | Qty | Δ |",
-            "|----|------|------|--------|--------|-----|---|"]
+    rows = ["| ID | Cpty | Side | Type | Strike | Expiry | Qty | Δ |",
+            "|----|------|------|------|--------|--------|-----|---|"]
     for pd in positions_detail:
-        # Position delta = per-contract delta × net_qty (signed by side)
         delta_per = pd.get("delta_per", 0.0)
         net_qty = pd.get("net_qty", 0.0)
         pos_delta = delta_per * net_qty
         strike_s = f"{int(pd['strike']):,}" if pd['strike'] == int(pd['strike']) else f"{pd['strike']:,.2f}"
+        cpty = (pd.get("counterparty") or "—").strip() or "—"
         rows.append(
-            f"| #{pd['id']} | {pd['side']} | {pd['type']} | "
+            f"| #{pd['id']} | {cpty} | {pd['side']} | {pd['type']} | "
             f"{strike_s} | {pd['expiry']} | {pd['qty']:.0f} | "
             f"{pos_delta:+,.0f} |"
         )
@@ -202,11 +202,13 @@ class ChatRequest(BaseModel):
     added_trades: list[dict] = []  # trades already added to portfolio from optimizer
     closed_trade_ids: list[int] = []  # trades "closed" in the optimizer working portfolio (for rolls)
     target_payoff: list[dict] | None = None  # drawn target: [{x: spot, y: payoff}, ...]
+    asset: str = "ETH"  # "ETH" | "FIL" — FIL has no Deribit options, pricing falls back to BS/proxy smile
 
 
 class CalculateRequest(BaseModel):
     legs: list[dict]
     closed_trade_ids: list[int] = []  # trades "closed" via rolls — exclude from base payoff
+    asset: str = "ETH"  # "ETH" | "FIL" — FIL has no Deribit options; price via BS/proxy smile
 
 
 def _safe_float(v) -> float:
@@ -267,6 +269,27 @@ async def _fetch_smiles() -> dict[str, VolSmile]:
         ivs = [float(np.mean(strike_ivs[k])) for k in strikes]
         if len(strikes) >= 2:
             smiles[exp] = VolSmile(strikes, ivs)
+    return smiles
+
+
+async def _fetch_fil_smiles(fil_spot: float) -> dict[str, VolSmile]:
+    """FIL has no exchange-listed options; build a proxy vol surface by
+    scaling the ETH smile by the HV(FIL)/HV(ETH) ratio and projecting
+    strikes from ETH moneyness onto FIL price space. Mirrors portfolio.py."""
+    try:
+        eth_smiles = await _fetch_smiles()
+        vol_ratio = await client.get_historical_vol_ratio(days=30)
+        eth_spot_ref = await client.get_eth_spot_price()
+    except Exception:
+        return {}
+    if eth_spot_ref <= 0 or fil_spot <= 0:
+        return {}
+    smiles: dict[str, VolSmile] = {}
+    for exp_code, smile in eth_smiles.items():
+        scaled_ivs = [iv * vol_ratio for iv in smile.ivs.tolist()]
+        fil_strikes = [k / eth_spot_ref * fil_spot for k in smile.strikes.tolist()]
+        if len(fil_strikes) >= 2:
+            smiles[exp_code] = VolSmile(fil_strikes, scaled_ivs)
     return smiles
 
 
@@ -805,28 +828,46 @@ def _score_suggestion(name, category, legs, net_cost, dte, spot, spot_arr,
 @router.post("/calculate")
 async def calculate_workbench(req: CalculateRequest):
     """Re-calculate payoff impact for edited workbench legs against current portfolio."""
+    # Asset routing — must mirror the roll-search / chat path. FIL has no Deribit
+    # options market, so spot, smile, ladder and instrument names are all O($1)
+    # rather than O($1K). Trust req.asset, but infer FIL from leg instrument
+    # prefixes as a safety net (legs always carry e.g. "FIL-30JUN26-2.2-P").
+    asset = (req.asset or "ETH").strip().upper()
+    if asset not in ("ETH", "FIL"):
+        asset = "ETH"
+    if any(str(l.get("instrument", "")).upper().startswith("FIL-") for l in req.legs):
+        asset = "FIL"
+    is_fil = asset == "FIL"
+    asset_prefix = "FIL" if is_fil else "ETH"
+
     try:
-        spot = await client.get_eth_spot_price()
+        spot = await (client.get_fil_spot_price() if is_fil else client.get_eth_spot_price())
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch spot: {e}")
 
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset=asset)
     except Exception as e:
         raise HTTPException(500, f"DB error: {e}")
 
-    # Fetch vol surface for BS pricing
+    # Fetch vol surface for BS pricing (FIL uses a proxy smile scaled off ETH)
     try:
-        smiles = await _fetch_smiles()
+        smiles = await (_fetch_fil_smiles(spot) if is_fil else _fetch_smiles())
     except Exception:
         smiles = {}
 
-    # Current payoff (BS-aware) — exclude trades "closed" via rolls
+    # Current payoff (BS-aware) — exclude trades "closed" via rolls.
+    # Ladder is asset-specific: FIL strikes/prices are O($1), ETH O($1K).
     closed_ids = set(req.closed_trade_ids)
-    lo = max(500, int(spot * 0.2))
-    hi = int(spot * 3.5)
-    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    if is_fil:
+        lo = max(0.2, spot * 0.2) if spot > 0 else 0.2
+        hi = max(spot * 3.5, 3.0) if spot > 0 else 3.0
+        spot_arr = np.arange(lo, hi + 0.05, 0.05, dtype=float)
+    else:
+        lo = max(500, int(spot * 0.2))
+        hi = int(spot * 3.5)
+        spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
     current_payoff = np.zeros_like(spot_arr)
     for t in db_trades:
         if t["id"] in closed_ids:
@@ -847,14 +888,16 @@ async def calculate_workbench(req: CalculateRequest):
     total_cost = 0.0
     leg_costs = []
 
-    # Fetch live prices for the instruments
+    # Fetch live prices for the instruments. FIL has no exchange-listed options,
+    # so there is no book summary to fetch — leave it empty and price via BS.
     summaries = {}
-    try:
-        raw = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
-        for s in raw:
-            summaries[s.get("instrument_name", "")] = s
-    except Exception:
-        pass
+    if not is_fil:
+        try:
+            raw = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
+            for s in raw:
+                summaries[s.get("instrument_name", "")] = s
+        except Exception:
+            pass
 
     for leg in req.legs:
         side = leg.get("side", "buy")
@@ -869,7 +912,7 @@ async def calculate_workbench(req: CalculateRequest):
             if strike > 0 and qty > 0:
                 wb_payoff += _payoff_vec(spot_arr, strike, "PERP", sign * qty)
             leg_costs.append({
-                "instrument": "ETH-PERPETUAL", "side": side, "qty": qty,
+                "instrument": f"{asset_prefix}-PERPETUAL", "side": side, "qty": qty,
                 "strike": strike, "opt": "PERP",
                 "bid_usd": 0, "ask_usd": 0, "price_usd": 0,
                 "leg_cost": 0, "spread_pct": 0, "mark_iv": None,
@@ -879,7 +922,7 @@ async def calculate_workbench(req: CalculateRequest):
         # Rebuild instrument name from actual strike/expiry/opt (don't trust stale name)
         if strike > 0 and expiry_code:
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            inst_name = f"ETH-{expiry_code}-{strike_str}-{opt}"
+            inst_name = f"{asset_prefix}-{expiry_code}-{strike_str}-{opt}"
         else:
             inst_name = leg.get("instrument", "")
 
@@ -1480,32 +1523,42 @@ async def chat(req: ChatRequest):
     msg = req.message.strip()
     history = req.history
 
+    # Asset routing — chat is asset-aware. FIL has no Deribit options market,
+    # so we skip the chain fetch and use a proxy vol surface (ETH smile scaled
+    # by HV ratio). Instrument names use the FIL prefix for display.
+    asset = (req.asset or "ETH").strip().upper()
+    if asset not in ("ETH", "FIL"):
+        asset = "ETH"
+    is_fil = asset == "FIL"
+    asset_prefix = "FIL" if is_fil else "ETH"
+
     # ── Load live portfolio context ──
     try:
-        spot = await client.get_eth_spot_price()
+        spot = await (client.get_fil_spot_price() if is_fil else client.get_eth_spot_price())
     except Exception:
         spot = 0
 
-    # Per-turn Deribit option-book cache. All tool handlers read from this so
-    # parallel build_strategy / suggest_rolls invocations don't each refetch
-    # the ~2k-row book. Built once per chat turn; closure-captured by handlers.
-    try:
-        _turn_book_raw = await client._get("get_book_summary_by_currency", {
-            "currency": "ETH", "kind": "option",
-        })
-        turn_book: dict[str, dict] = {s.get("instrument_name", ""): s for s in _turn_book_raw}
-    except Exception:
-        turn_book = {}
+    # Per-turn Deribit option-book cache (ETH only — FIL has no exchange book).
+    turn_book: dict[str, dict] = {}
+    if not is_fil:
+        try:
+            _turn_book_raw = await client._get("get_book_summary_by_currency", {
+                "currency": "ETH", "kind": "option",
+            })
+            turn_book = {s.get("instrument_name", ""): s for s in _turn_book_raw}
+        except Exception:
+            turn_book = {}
 
     try:
         db = await get_db()
-        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset="ETH")
+        db_trades = await list_trades(db, include_expired=False, include_deleted=False, asset=asset)
     except Exception:
         db_trades = []
 
-    # Fetch vol surface for BS pricing
+    # Vol surface — FIL uses ETH smile scaled by HV(FIL)/HV(ETH) ratio with
+    # strikes projected onto FIL price space.
     try:
-        smiles = await _fetch_smiles()
+        smiles = await (_fetch_fil_smiles(spot) if is_fil else _fetch_smiles())
     except Exception:
         smiles = {}
 
@@ -1722,9 +1775,16 @@ async def chat(req: ChatRequest):
     if _dte_warnings:
         structures_text += "\n\n=== EXPIRY ALERTS ===\n" + "\n".join(_dte_warnings)
 
-    lo = max(500, int(spot * 0.2)) if spot > 0 else 500
-    hi = int(spot * 3.5) if spot > 0 else 8000
-    spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
+    # Asset-specific spot ladder. ETH lives in $500-$20K with $50 steps; FIL
+    # lives in $0.20-$10 with $0.05 steps. Same shape, very different magnitudes.
+    if is_fil:
+        fil_lo = max(0.2, spot * 0.2) if spot > 0 else 0.2
+        fil_hi = max(spot * 3.5, 3.0) if spot > 0 else 3.0
+        spot_arr = np.arange(fil_lo, fil_hi + 0.05, 0.05, dtype=float)
+    else:
+        lo = max(500, int(spot * 0.2)) if spot > 0 else 500
+        hi = int(spot * 3.5) if spot > 0 else 8000
+        spot_arr = np.arange(lo, hi + SPOT_STEP, SPOT_STEP, dtype=float)
     current_payoff = np.zeros_like(spot_arr)
     for p in positions:
         T = max(p["dte"], 0) / 365.25
@@ -1956,7 +2016,8 @@ async def chat(req: ChatRequest):
             target_match_summary = f"Target matching failed: {e}"
 
     # ── Build system prompt (v2: cacheable A+G + dynamic state) ──
-    fmt_spot = f"${spot:,.2f}"
+    # FIL strikes/prices are O($1); ETH O($1K). Spot format follows asset.
+    fmt_spot = f"${spot:,.4f}" if is_fil else f"${spot:,.2f}"
     fmt_net_calls = f"{net_calls:+,.0f}"
     fmt_net_puts = f"{net_puts:+,.0f}"
     fmt_pnl = f"${pnl_at_spot:,.0f}"
@@ -1968,13 +2029,24 @@ async def chat(req: ChatRequest):
     fmt_ladder = _json.dumps(pnl_ladder)
     positions_md = _render_positions_md(positions_detail)
 
+    asset_note = ""
+    if is_fil:
+        asset_note = (
+            "\n\n**ASSET = FIL.** FIL has no exchange-listed options (no Deribit market). "
+            "All pricing comes from portfolio mark / BS-estimate / intrinsic / OTC override. "
+            "Strikes and spot are on the order of $1 (not $1,000 like ETH) — use FIL-scale "
+            "magnitudes when proposing strikes. Vol surface is the ETH smile scaled by the "
+            "FIL/ETH historical-vol ratio with strikes projected onto FIL price space. "
+            "Instrument names use the FIL- prefix (e.g., FIL-30JUN26-2-C)."
+        )
+
     # Section B — live state (always present, dynamic)
     dynamic_parts: list[str] = [
         f"""## Live market
-ETH spot: {fmt_spot}
+{asset} spot: {fmt_spot}{asset_note}
 
 ## Portfolio snapshot
-Positions: {num_positions} | Net calls: {fmt_net_calls} ETH | Net puts: {fmt_net_puts} ETH
+Positions: {num_positions} | Net calls: {fmt_net_calls} {asset} | Net puts: {fmt_net_puts} {asset}
 Expiries: {fmt_expiries}
 P&L at spot: {fmt_pnl} | Worst: {fmt_worst} at {fmt_worst_at} | Best: {fmt_best} | BE: {fmt_be}
 Ladder: {fmt_ladder}
@@ -2207,7 +2279,10 @@ The match_target tool has been filtered out of your tool list in this mode — y
     # ── Call Claude ──
     try:
         aclient = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = aclient.messages.create(
+        # Run the (synchronous) SDK call off the event loop so the whole worker
+        # isn't frozen for the duration of the model call.
+        response = await asyncio.to_thread(
+            aclient.messages.create,
             model=ANTHROPIC_MODEL,
             max_tokens=8000,
             system=system_blocks,
@@ -2489,7 +2564,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
         # ── Helper: price a single leg ──
         def _price_leg(strike, opt, exp_code, side, qty, dte_val):
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            inst_name = f"ETH-{exp_code}-{strike_str}-{opt}"
+            inst_name = f"{asset_prefix}-{exp_code}-{strike_str}-{opt}"
             mkt = summaries_map.get(inst_name, {})
             bid = mkt.get("bid_price") or 0
             ask = mkt.get("ask_price") or 0
@@ -2517,10 +2592,15 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 "cost": cost,
             }
 
-        # ── 5. Build roll suggestions per structure ──
-        lo_val = max(500, int(spot * 0.2))
-        hi_val = int(spot * 3.5)
-        spot_arr_roll = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
+        # ── 5. Build roll suggestions per structure ── (asset-aware ladder)
+        if is_fil:
+            fil_lo = max(0.2, spot * 0.2) if spot > 0 else 0.2
+            fil_hi = max(spot * 3.5, 3.0) if spot > 0 else 3.0
+            spot_arr_roll = np.arange(fil_lo, fil_hi + 0.05, 0.05, dtype=float)
+        else:
+            lo_val = max(500, int(spot * 0.2))
+            hi_val = int(spot * 3.5)
+            spot_arr_roll = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
         spot_idx_roll = int(np.argmin(np.abs(spot_arr_roll - spot)))
 
         roll_suggestions = []
@@ -2828,7 +2908,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             if opt_type == "PERP":
                 entry_price = strike
                 leg_data = {
-                    "instrument": "ETH-PERPETUAL", "side": side, "qty": qty,
+                    "instrument": f"{asset_prefix}-PERPETUAL", "side": side, "qty": qty,
                     "strike": entry_price, "opt": "PERP",
                     "expiry_code": "PERP", "dte": 0,
                     "price_eth": 0, "price_usd": 0,
@@ -2840,9 +2920,9 @@ The match_target tool has been filtered out of your tool list in this mode — y
                 formatted_legs.append(leg_data)
                 continue
 
-            # Build instrument name
+            # Build instrument name (asset-aware)
             strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-            inst_name = f"ETH-{exp_code}-{strike_str}-{opt_type}"
+            inst_name = f"{asset_prefix}-{exp_code}-{strike_str}-{opt_type}"
 
             # Look up live price (used by both branches when available)
             mkt = summaries.get(inst_name, {})
@@ -2941,10 +3021,15 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     f"${price_eth * spot:,.2f}/ETH from bs_estimate (no live quote)"
                 )
 
-        # Compute payoff impact (BS-aware with market IV)
-        lo_val = max(500, int(spot * 0.2))
-        hi_val = int(spot * 3.5)
-        spot_arr_local = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
+        # Compute payoff impact (BS-aware with market IV) — asset-specific ladder.
+        if is_fil:
+            fil_lo = max(0.2, spot * 0.2) if spot > 0 else 0.2
+            fil_hi = max(spot * 3.5, 3.0) if spot > 0 else 3.0
+            spot_arr_local = np.arange(fil_lo, fil_hi + 0.05, 0.05, dtype=float)
+        else:
+            lo_val = max(500, int(spot * 0.2))
+            hi_val = int(spot * 3.5)
+            spot_arr_local = np.arange(lo_val, hi_val + SPOT_STEP, SPOT_STEP, dtype=float)
         candidate = np.zeros_like(spot_arr_local)
         for fl in formatted_legs:
             s = 1.0 if fl["side"] == "buy" else -1.0
@@ -3055,7 +3140,7 @@ The match_target tool has been filtered out of your tool list in this mode — y
             ).lower()
             is_narration_only = (
                 not has_tool_use
-                and narration_retries < 1
+                and narration_retries < 2
                 and any(p in response_text for p in NARRATION_PATTERNS)
             )
             if is_narration_only:
@@ -3066,12 +3151,17 @@ The match_target tool has been filtered out of your tool list in this mode — y
                     "content": "You said you would run that action but emitted no tool calls. Emit the tool_use blocks now in this turn — do not narrate again.",
                 })
                 try:
-                    current_response = aclient.messages.create(
+                    # Force a tool call this turn (tool_choice=any) so the model
+                    # cannot narrate a second time and stall with no results — the
+                    # root cause of "Testing N candidates" followed by silence.
+                    current_response = await asyncio.to_thread(
+                        aclient.messages.create,
                         model=ANTHROPIC_MODEL,
                         max_tokens=8000,
                         system=system_blocks,
                         messages=messages,
                         tools=tools,
+                        tool_choice={"type": "any"},
                     )
                     continue
                 except Exception as e:
@@ -3132,7 +3222,8 @@ The match_target tool has been filtered out of your tool list in this mode — y
         messages.append({"role": "user", "content": tool_results_content})
 
         try:
-            current_response = aclient.messages.create(
+            current_response = await asyncio.to_thread(
+                aclient.messages.create,
                 model=ANTHROPIC_MODEL,
                 max_tokens=8000,
                 system=system_blocks,
@@ -3153,23 +3244,25 @@ The match_target tool has been filtered out of your tool list in this mode — y
     # Always include base portfolio data so the frontend can load portfolio on any message (incl. "hello")
     # Build available_expiries from portfolio expiries + Deribit if possible
     _fallback_expiries = sorted(set(expiry_groups.keys()))
-    try:
-        _fb_summaries = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
-        _fb_exp_set = set()
-        _today_fb = date.today()
-        for _fbs in _fb_summaries:
-            _fbp = _fbs.get("instrument_name", "").split("-")
-            if len(_fbp) == 4 and _fbp[0] == "ETH":
-                try:
-                    _fbd = datetime.strptime(_fbp[1], "%d%b%y").date()
-                    if (_fbd - _today_fb).days >= 7:
-                        _fb_exp_set.add(_fbp[1])
-                except ValueError:
-                    pass
-        if _fb_exp_set:
-            _fallback_expiries = sorted(_fb_exp_set, key=lambda x: datetime.strptime(x, "%d%b%y"))
-    except Exception:
-        pass
+    # FIL has no exchange; only use portfolio expiries as fallback.
+    if not is_fil:
+        try:
+            _fb_summaries = await client._get("get_book_summary_by_currency", {"currency": "ETH", "kind": "option"})
+            _fb_exp_set = set()
+            _today_fb = date.today()
+            for _fbs in _fb_summaries:
+                _fbp = _fbs.get("instrument_name", "").split("-")
+                if len(_fbp) == 4 and _fbp[0] == "ETH":
+                    try:
+                        _fbd = datetime.strptime(_fbp[1], "%d%b%y").date()
+                        if (_fbd - _today_fb).days >= 7:
+                            _fb_exp_set.add(_fbp[1])
+                    except ValueError:
+                        pass
+            if _fb_exp_set:
+                _fallback_expiries = sorted(_fb_exp_set, key=lambda x: datetime.strptime(x, "%d%b%y"))
+        except Exception:
+            pass
 
     if not result_data:
         result_data = {

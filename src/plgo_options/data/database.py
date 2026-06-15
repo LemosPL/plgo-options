@@ -79,6 +79,32 @@ CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
 );
 """
 
+COLLATERAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS counterparty_collateral (
+    counterparty TEXT NOT NULL COLLATE NOCASE,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    qty REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (counterparty, asset)
+);
+"""
+
+# One row per (counterparty, portfolio_asset). Tracks collateral posted (in
+# ETH and FIL) against that asset's options book, plus the USD figure the
+# counterparty themselves are asking for (for side-by-side comparison).
+MARGIN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS counterparty_margin (
+    counterparty TEXT NOT NULL COLLATE NOCASE,
+    portfolio_asset TEXT NOT NULL COLLATE NOCASE,
+    eth_qty REAL NOT NULL DEFAULT 0,
+    fil_qty REAL NOT NULL DEFAULT 0,
+    requested_usd REAL,
+    notes TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (counterparty, portfolio_asset)
+);
+"""
+
 
 async def get_db() -> aiosqlite.Connection:
     global _db
@@ -98,6 +124,8 @@ async def init_db():
     await db.execute(TRADES_SCHEMA)
     await db.execute(AUDIT_SCHEMA)
     await db.execute(MTM_HISTORY_SCHEMA)
+    await db.execute(COLLATERAL_SCHEMA)
+    await db.execute(MARGIN_SCHEMA)
     await db.commit()
 
     # Migration: add 'asset' column if missing (existing DBs)

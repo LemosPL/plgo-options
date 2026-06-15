@@ -173,6 +173,58 @@ def _match_expiry(pos_expiry: str, deribit_map: dict[str, date]) -> str | None:
     return best if best_diff <= 7 else None
 
 
+def _iv_from_surface(
+    pos_expiry: str, strike: float,
+    smiles: dict[str, VolSmile], deribit_dates: dict[str, date], today: date,
+) -> float | None:
+    """IV (in %) for any expiry, matching the Pricing tab's lookupSmileIv.
+
+    Exact expiry-date match -> that smile directly. Otherwise interpolate IV
+    LINEARLY IN DTE between the two bracketing expiries (term structure), flat
+    beyond the ends. Returns None only when the surface is empty, so the caller
+    can fall back to DEFAULT_IV.
+
+    This replaces the old "snap to nearest expiry within 7 days, else flat 80%"
+    logic, which mispriced off-cycle / long-dated FIL legs by 100%+ versus the
+    Pricing tab (FIL IVs run 130-380%, so the 80% fallback was wildly off).
+    """
+    if not smiles or not deribit_dates:
+        return None
+    pos_date = _iso_to_date(pos_expiry)
+    if pos_date is None:
+        return None
+    target_dte = (pos_date - today).days
+
+    # Exact expiry-date match -> use that smile (strike interpolation only).
+    for code, ddate in deribit_dates.items():
+        if ddate == pos_date and code in smiles:
+            return float(smiles[code].iv_at(strike))
+
+    pts = sorted(
+        ((ddate - today).days, code)
+        for code, ddate in deribit_dates.items() if code in smiles
+    )
+    if not pts:
+        return None
+    before = after = None
+    for dte, code in pts:
+        if dte <= target_dte:
+            before = (dte, code)
+        if dte >= target_dte and after is None:
+            after = (dte, code)
+    if before is None:
+        before = after
+    if after is None:
+        after = before
+    if before == after:
+        return float(smiles[before[1]].iv_at(strike))
+    rng = after[0] - before[0]
+    w = (target_dte - before[0]) / rng if rng > 0 else 0.5
+    iv_b = float(smiles[before[1]].iv_at(strike))
+    iv_a = float(smiles[after[1]].iv_at(strike))
+    return iv_b * (1.0 - w) + iv_a * w
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -347,11 +399,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         else:
             # No Deribit ticker — compute from BS / smile
             deribit_mark_usd = None
-            iv_pct = DEFAULT_IV * 100
-            # Try smile interpolation
-            matched = _match_expiry(expiry_raw, deribit_dates)
-            if matched and matched in smiles:
-                iv_pct = smiles[matched].iv_at(strike)
+            # IV from the vol surface, interpolated across the term structure —
+            # same method as the Pricing tab. Fall back to DEFAULT_IV only when
+            # the surface is entirely empty.
+            surf_iv = _iv_from_surface(expiry_raw, strike, smiles, deribit_dates, today)
+            iv_pct = surf_iv if surf_iv is not None else DEFAULT_IV * 100
             # Compute BS greeks as fallback
             T_bs = max(days_rem, 0) / 365.25
             delta, gamma, theta, vega = bs_greeks(eth_spot, strike, T_bs, 0.0, iv_pct / 100.0, opt)
@@ -392,9 +444,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         # ------------------------------------------------------------------
         scenario_sigma = sigma
         if not (ticker and ticker.mark_iv):
-            matched = _match_expiry(expiry_raw, deribit_dates)
-            if matched and matched in smiles:
-                scenario_sigma = smiles[matched].iv_at(strike) / 100.0
+            surf_iv = _iv_from_surface(expiry_raw, strike, smiles, deribit_dates, today)
+            if surf_iv is not None:
+                scenario_sigma = surf_iv / 100.0
 
         # ------------------------------------------------------------------
         # MTM at each matrix horizon (at current spot) — FIXED formula
@@ -429,7 +481,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "trade_id": trade_id,
             "trade_date": trade_date,
             "side_raw": side_raw,
-            "option_type": option_type_raw,
+            "option_type": "Call" if opt == "C" else "Put",
             "instrument": instrument,
             "expiry": expiry_display,
             "days_remaining": days_rem,

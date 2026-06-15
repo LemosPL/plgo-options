@@ -12,8 +12,9 @@ const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v)
 const fmtStrike = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 const fmtPrem = (v) => {
   const n = Number(v);
-  if (currentAsset === "FIL") return n.toFixed(4);
-  return n < 0.01 ? n.toPrecision(2) : n.toFixed(2);
+  if (currentAsset === "FIL") return n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  if (Math.abs(n) < 0.01) return n.toPrecision(2);
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
 const fmtPremTotal = (v) => {
   const d = currentAsset === "FIL" ? 4 : 2;
@@ -172,6 +173,16 @@ function pricerBs(S, K, T, r, sigma, type) {
   }
   if (type === "C") return S * _ncdf(d1) - K * Math.exp(-r * T) * _ncdf(d2);
   return K * Math.exp(-r * T) * _ncdf(-d2) - S * _ncdf(-d1);
+}
+
+// Per-contract BS delta. Call ∈ [0,1], Put ∈ [-1,0]. At/past expiry → intrinsic delta.
+function pricerDelta(S, K, T, r, sigma, type) {
+  if (T <= 0 || sigma <= 0) {
+    if (type === "C") return S > K ? 1 : 0;
+    return S < K ? -1 : 0;
+  }
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  return type === "C" ? normCdf(d1) : normCdf(d1) - 1;
 }
 
 // ─── Bootstrap ──────────────────────────────────────────────
@@ -592,6 +603,10 @@ function replicateStrategy() {
     const prem = pricerBs(spot, K, T, 0, sigma, l.type);
     const premEth = spot > 0 ? prem / spot : 0;
 
+    // Delta this position creates: per-contract delta × signed quantity (underlying units).
+    const deltaPer = pricerDelta(spot, K, T, 0, sigma, l.type);
+    const posDelta = dir * qty * deltaPer;
+
     for (let i = 0; i < nPts; i++) {
       const intrinsic = l.type === "C" ? Math.max(spots[i] - K, 0) : Math.max(K - spots[i], 0);
 
@@ -617,6 +632,7 @@ function replicateStrategy() {
     legDetails.push({
       expiry: l.expiry, dte, strike: K, type: l.type, side: l.side, quantity: qty,
       iv_pct: ivPct, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
+      delta_per: deltaPer, position_delta: posDelta,
       _synthetic: isSynthetic,
     });
   }
@@ -632,6 +648,10 @@ function replicateStrategy() {
   }
   const net = totalReceive - totalPay;
   const netEth = spot > 0 ? net / spot : 0;
+
+  // Net delta the whole structure creates, in underlying units and USD notional.
+  const totalDelta = legDetails.reduce((s, d) => s + d.position_delta, 0);
+  const totalDeltaUsd = totalDelta * spot;
 
   // Summary
   const expiryLabel = uniqueExpiries.length === 1
@@ -668,6 +688,7 @@ function replicateStrategy() {
     `<span>Pay: <strong style="color:${payColor}">${fmtUsd(totalPay)}</strong></span>` +
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
     `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
+    `<span>Net Δ: <strong style="color:${totalDelta >= 0 ? 'var(--green)' : 'var(--red)'}">${totalDelta >= 0 ? '+' : ''}${totalDelta.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${currentAsset}</strong> <span style="color:var(--muted)">(${fmtUsd(totalDeltaUsd)})</span></span>` +
     (volSpreadPts > 0 ? `<span style="font-size:.7rem;color:var(--muted)">vol &plusmn;${volSpreadPts}pts</span>` : "") +
     `</span></div>` + sourceNote;
 
@@ -685,16 +706,28 @@ function replicateStrategy() {
       <td style="font-size:.75rem">${d.expiry}</td>
       <td style="color:${sideColor}">${d.side.toUpperCase()}</td>
       <td style="color:${typeColor}">${d.type === "C" ? "Call" : "Put"}</td>
-      <td>${d.strike}</td>
+      <td>${fmtStrike(d.strike)}</td>
       <td>${d.dte}d</td>
       <td>${d.iv_pct.toFixed(1)}%</td>
-      <td style="font-family:monospace">${d.quantity.toLocaleString()}</td>
+      <td style="font-family:monospace">${d.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
       <td style="font-family:monospace">$${fmtPrem(d.bs_premium_usd)}</td>
       <td style="font-family:monospace;color:${d.side === 'sell' ? 'var(--green)' : 'var(--red)'}">$${fmtPremTotal(d.quantity * d.bs_premium_usd)}</td>
+      <td style="font-family:monospace;color:var(--muted)">${d.delta_per.toFixed(3)}</td>
+      <td style="font-family:monospace;color:${d.position_delta >= 0 ? 'var(--green)' : 'var(--red)'}">${d.position_delta >= 0 ? '+' : ''}${d.position_delta.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
       <td style="font-size:.68rem">${srcLabel}</td>
     `;
     $body.appendChild(tr);
   }
+  // Totals footer — net delta across all priced legs
+  const $foot = document.createElement("tr");
+  $foot.style.borderTop = "2px solid var(--border)";
+  $foot.style.fontWeight = "600";
+  $foot.innerHTML =
+    `<td colspan="8" style="text-align:right;color:var(--muted)">Total position delta &rarr;</td>` +
+    `<td></td><td></td>` +
+    `<td style="font-family:monospace;color:${totalDelta >= 0 ? 'var(--green)' : 'var(--red)'}">${totalDelta >= 0 ? '+' : ''}${totalDelta.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${currentAsset}</td>` +
+    `<td style="font-size:.68rem;color:var(--muted)">${fmtUsd(totalDeltaUsd)}</td>`;
+  $body.appendChild($foot);
   document.getElementById("repl-results-section").style.display = "block";
 
   // Payoff chart
@@ -722,7 +755,7 @@ function replicateStrategy() {
   const uniqueStrikes = [...new Set(legDetails.map(l => l.strike))];
   for (const k of uniqueStrikes) {
     traces.push({ x: [k, k], y: [yMin, yMax], type: "scatter", mode: "lines",
-      name: `K=${k}`, showlegend: false, line: { color: "#8b949e", width: 1, dash: "dot" } });
+      name: `K=${fmtStrike(k)}`, showlegend: false, line: { color: "#8b949e", width: 1, dash: "dot" } });
   }
 
   traces.push({ x: [spot, spot], y: [yMin, yMax], type: "scatter", mode: "lines",
@@ -952,6 +985,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
         if (c && c.data) Plotly.Plots.resize(c);
       }, 60);
     }
+    if (pg === "collateral") { collatLoad(); collatLoadScenario(); }
     // execution is now a subtab inside structurer, not a standalone page
   });
 });
@@ -972,6 +1006,7 @@ document.querySelectorAll(".sub-tab-btn").forEach(btn => {
       setTimeout(() => { const el = document.getElementById("opt2-ask"); if (el) el.focus(); }, 100);
     }
     if (btn.dataset.subtab === "sb-execution" && !execLoaded) execInit();
+    if (btn.dataset.subtab === "tm-recon") reconInit();
   });
 });
 
@@ -1473,7 +1508,10 @@ function tfRecomputeAllLegsUsd() {
 }
 
 document.getElementById("btn-tf-add-leg").addEventListener("click", () => {
-  tfLegs.push({ side: "Buy", type: "Call", strike: Math.round(ethSpot || 2000), qty: 1000, premium_per: 0, premium_usd: 0 });
+  // Default leg strike at-the-money, rounded sensibly per asset.
+  const spot = ethSpot || (currentAsset === "FIL" ? 2.5 : 2000);
+  const strike = currentAsset === "FIL" ? Math.round(spot * 20) / 20 : Math.round(spot);
+  tfLegs.push({ side: "Buy", type: "Call", strike, qty: 1000, premium_per: 0, premium_usd: 0 });
   tfRenderLegs();
 });
 
@@ -1545,6 +1583,20 @@ document.getElementById("tf-side").addEventListener("change", tfEnforcePremiumSi
 document.getElementById("tf-premium-per").addEventListener("input", tfRecalcPremiumUsd);
 document.getElementById("tf-premium-per").addEventListener("change", tfEnforcePremiumSign);
 
+// Populate the trade-modal counterparty datalist from currently loaded trades.
+function tfPopulateCounterparties() {
+  const list = document.getElementById("tf-counterparty-list");
+  if (!list) return;
+  const counterparties = [...new Set(
+    (tmTrades || [])
+      .map(t => (t.counterparty || "").trim())
+      .filter(Boolean)
+  )].sort();
+  list.innerHTML = counterparties
+    .map(c => `<option value="${c.replace(/"/g, "&quot;")}"></option>`)
+    .join("");
+}
+
 function tmOpenModal(trade = null) {
   const modal = document.getElementById("modal-trade");
   const title = document.getElementById("modal-trade-title");
@@ -1552,6 +1604,10 @@ function tmOpenModal(trade = null) {
   const stratBar = document.getElementById("tf-strategy-bar");
 
   tfPopulateCounterparties();
+
+  // Qty is denominated in the current asset's units.
+  const qtyUnit = document.getElementById("tf-qty-unit");
+  if (qtyUnit) qtyUnit.textContent = currentAsset;
 
   if (trade) {
     // Edit mode — single leg only, hide strategy bar
@@ -4551,7 +4607,9 @@ function opt2RenderWorkbench() {
         `<select class="opt2-wb-side" data-idx="${idx}" style="width:55px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
         `<option value="buy" ${leg.side==="buy"?"selected":""}>Buy</option>` +
         `<option value="sell" ${leg.side==="sell"?"selected":""}>Sell</option></select></td>` +
-      `<td style="color:${typeColor}">${isPerp ? "Perp" : (leg.opt === "C" ? "Call" : "Put")}</td>` +
+      (isPerp
+        ? `<td style="color:${typeColor}">Perp</td>`
+        : `<td style="color:${typeColor}"><select class="opt2-wb-opt" data-idx="${idx}" style="width:62px;font-size:.72rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)"><option value="C" ${leg.opt === "C" ? "selected" : ""}>Call</option><option value="P" ${leg.opt === "P" ? "selected" : ""}>Put</option></select></td>`) +
       `<td><input type="number" class="opt2-wb-strike" data-idx="${idx}" value="${leg.strike}" step="50" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><input type="number" class="opt2-wb-qty" data-idx="${idx}" value="${leg.qty}" step="100" min="1" style="width:80px;font-size:.75rem;padding:2px 4px;font-family:monospace;background:var(--surface);color:inherit;border:1px solid var(--border)"></td>` +
       `<td><select class="opt2-wb-expiry" data-idx="${idx}" style="width:95px;font-size:.7rem;padding:1px 2px;background:var(--surface);color:inherit;border:1px solid var(--border)">` +
@@ -4616,6 +4674,21 @@ function opt2RenderWorkbench() {
   $tbody.querySelectorAll(".opt2-wb-side").forEach(sel => {
     sel.addEventListener("change", () => { opt2WbLegs[parseInt(sel.dataset.idx)].side = sel.value; });
   });
+  $tbody.querySelectorAll(".opt2-wb-opt").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const idx = parseInt(sel.dataset.idx);
+      const l = opt2WbLegs[idx];
+      l.opt = sel.value;
+      // Rebuild instrument name + repaint type-cell color to match new type
+      const strikeStr = l.strike % 1 === 0 ? String(Math.round(l.strike)) : String(l.strike);
+      l.instrument = `ETH-${l.expiry_code}-${strikeStr}-${l.opt}`;
+      const row = sel.closest("tr");
+      if (row) {
+        row.cells[1].textContent = l.instrument;
+        row.cells[3].style.color = l.opt === "C" ? "#3fb950" : "#f85149";
+      }
+    });
+  });
   $tbody.querySelectorAll(".opt2-wb-expiry").forEach(sel => {
     sel.addEventListener("change", () => {
       const idx = parseInt(sel.dataset.idx);
@@ -4672,7 +4745,7 @@ async function opt2Calculate() {
   $btn.disabled = true; $btn.textContent = "Calculating...";
 
   try {
-    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: opt2ClosedTradeIds });
+    const result = await post("/api/optimizer/calculate", { legs, closed_trade_ids: opt2ClosedTradeIds, asset: currentAsset });
     // Update leg costs
     for (let i = 0; i < opt2WbLegs.length && i < result.leg_costs.length; i++) {
       const lc = result.leg_costs[i];
@@ -4889,6 +4962,26 @@ document.getElementById("btn-opt2-refresh-chart").addEventListener("click", asyn
   $btn.disabled = false; $btn.textContent = "\u21bb Refresh Chart";
 });
 
+// ── Collapsible cards (Scenario, Target Curves) ──────────
+// Lightweight toggle: click the header to fold/unfold the body. Used to keep
+// the optimizer screen tidy when those panels aren't actively in use.
+function opt2WireCollapsible(toggleId, bodyId, iconId) {
+  const $t = document.getElementById(toggleId);
+  const $b = document.getElementById(bodyId);
+  const $i = iconId ? document.getElementById(iconId) : null;
+  if (!$t || !$b) return;
+  $t.addEventListener("click", (ev) => {
+    // Ignore clicks that originated inside an interactive child (e.g. a button
+    // sitting in the same flex row as a clickable header).
+    if (ev.target.closest("button, input, select, a")) return;
+    const isCollapsed = $b.style.display === "none";
+    $b.style.display = isCollapsed ? "" : "none";
+    if ($i) $i.textContent = isCollapsed ? "[ - ]" : "[ + ]";
+  });
+}
+opt2WireCollapsible("opt2-portfolio-toggle", "opt2-portfolio-body", "opt2-portfolio-toggle-icon");
+opt2WireCollapsible("opt2-curves-toggle", "opt2-curves-list", "opt2-curves-toggle-icon");
+
 // ── Chart ────────────────────────────────────────────────
 
 function opt2DrawChart() {
@@ -4896,6 +4989,10 @@ function opt2DrawChart() {
   const $wrapper = document.getElementById("opt2-chart-wrapper");
   if ($wrapper) $wrapper.style.display = "block";
   const $chart = document.getElementById("opt2-payoff-chart");
+  // Reset any stale display:none on the inner chart div (Refresh / Reset All
+  // hide it directly; without this the chart stays invisible even after a
+  // fresh Plotly.react call).
+  if ($chart) $chart.style.display = "";
 
   const spots = opt2Data.spot_ladder;
   const spot = opt2Data.spot;
@@ -5570,7 +5667,9 @@ document.getElementById("btn-opt2-refresh").addEventListener("click", async () =
   document.getElementById("opt2-workbench-section").style.display = "none";
   document.getElementById("opt2-results-section").style.display = "none";
   document.getElementById("opt2-portfolio-section").style.display = "none";
-  document.getElementById("opt2-payoff-chart").style.display = "none";
+  // Hide the chart wrapper — hiding the inner Plotly div directly causes the
+  // chart to stay invisible across subsequent redraws.
+  document.getElementById("opt2-chart-wrapper").style.display = "none";
   // Re-trigger a greeting to reload portfolio context
   document.getElementById("opt2-ask").value = "hello";
   await opt2Run();
@@ -5602,7 +5701,8 @@ document.getElementById("btn-opt2-delete-all").addEventListener("click", async (
   opt2Baseline = null;
   document.getElementById("opt2-results-section").style.display = "none";
   document.getElementById("opt2-portfolio-section").style.display = "none";
-  document.getElementById("opt2-payoff-chart").style.display = "none";
+  // Hide the chart wrapper — see note in btn-opt2-refresh.
+  document.getElementById("opt2-chart-wrapper").style.display = "none";
   const $matrix = document.getElementById("opt2-matrix-section");
   if ($matrix) $matrix.style.display = "none";
 
@@ -5627,14 +5727,44 @@ document.getElementById("opt2-ask").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); opt2Run(); }
 });
 
-// Add empty leg
+// Add leg(s) — strategy-template driven (Put / Call / Spread / Straddle / Strangle / Iron Condor).
+// Strikes are rounded to the asset's strike step (ETH=50, FIL=0.05). The Type cell on each
+// resulting row is editable, so users can still flip Call<->Put after the fact.
+function opt2RoundStrike(s) {
+  const step = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 0.05 : 50;
+  return Math.round(s / step) * step;
+}
+
 document.getElementById("btn-opt2-add-leg").addEventListener("click", () => {
   if (!opt2Data) return;
-  opt2WbLegs.push({
-    instrument: "", side: "buy", qty: opt2Data.base_qty, strike: Math.round(opt2Data.spot / 50) * 50,
-    opt: "P", expiry_code: opt2Data.available_expiries?.[0] || "", dte: 30,
-    price_usd: 0, bid_usd: 0, ask_usd: 0, spread_pct: 0, mark_iv: null,
-  });
+  const tpl = document.getElementById("opt2-add-template")?.value || "put";
+  const spot = opt2Data.spot || 0;
+  const qty = opt2Data.base_qty;
+  const expiry = opt2Data.available_expiries?.[0] || "";
+  const atm   = opt2RoundStrike(spot);
+  const up10  = opt2RoundStrike(spot * 1.10);
+  const dn10  = opt2RoundStrike(spot * 0.90);
+  const up20  = opt2RoundStrike(spot * 1.20);
+  const dn20  = opt2RoundStrike(spot * 0.80);
+  const blank = { instrument: "", expiry_code: expiry, dte: 30, price_usd: 0, bid_usd: 0, ask_usd: 0, spread_pct: 0, mark_iv: null };
+  const mk = (side, opt, strike) => ({ ...blank, side, opt, strike, qty });
+  let added;
+  switch (tpl) {
+    case "call":         added = [mk("buy", "C", atm)]; break;
+    case "call_spread":  added = [mk("buy", "C", atm),  mk("sell", "C", up10)]; break;
+    case "put_spread":   added = [mk("buy", "P", atm),  mk("sell", "P", dn10)]; break;
+    case "straddle":     added = [mk("buy", "C", atm),  mk("buy",  "P", atm)]; break;
+    case "strangle":     added = [mk("buy", "C", up10), mk("buy",  "P", dn10)]; break;
+    case "iron_condor":  added = [
+      mk("buy",  "P", dn20),
+      mk("sell", "P", dn10),
+      mk("sell", "C", up10),
+      mk("buy",  "C", up20),
+    ]; break;
+    case "put":
+    default:             added = [mk("buy", "P", atm)]; break;
+  }
+  opt2WbLegs.push(...added);
   opt2RenderWorkbench();
 });
 
@@ -7609,6 +7739,49 @@ function optv2NearestIdx(arr, val) {
   return best;
 }
 
+/* ── Optimizer v2 — Saved Snapshots Browser ───────────────── */
+function optv2FmtSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function optv2LoadSnapshots() {
+  const $body = document.getElementById("optv2-snapshots-body");
+  const $meta = document.getElementById("optv2-snapshots-meta");
+  $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">Loading…</td></tr>`;
+  try {
+    const data = await get("/api/optimization/snapshots");
+    const items = data.snapshots || [];
+    $meta.textContent = `Root: ${data.root || ""} — ${items.length} file${items.length === 1 ? "" : "s"}`;
+    if (items.length === 0) {
+      $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--muted)">No snapshots saved yet. Tick "Save usecase snapshot" before Run Optimizer to create one.</td></tr>`;
+      return;
+    }
+    $body.innerHTML = items.map(it => {
+      const url = `/api/optimization/snapshots/download?path=${encodeURIComponent(it.path)}`;
+      const safePath = it.path.replace(/</g, "&lt;");
+      return `<tr>
+        <td style="font-family:monospace">${safePath}</td>
+        <td style="text-align:right;white-space:nowrap">${optv2FmtSize(it.size)}</td>
+        <td style="white-space:nowrap">${it.mtime.replace("T", " ")}</td>
+        <td style="text-align:center"><a href="${url}" download>⬇ Download</a></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    $body.innerHTML = `<tr><td colspan="4" style="text-align:center;padding:1rem;color:var(--red)">Error: ${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("btn-optv2-snapshots").addEventListener("click", () => {
+  document.getElementById("modal-optv2-snapshots").style.display = "flex";
+  optv2LoadSnapshots();
+});
+document.getElementById("btn-optv2-snapshots-close").addEventListener("click", () => {
+  document.getElementById("modal-optv2-snapshots").style.display = "none";
+});
+document.getElementById("btn-optv2-snapshots-refresh").addEventListener("click", () => optv2LoadSnapshots());
+
 /* ── Run Optimizer ──────────────────────────────────────────── */
 document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   console.log("[OPT-FE] btn-run-optv2 clicked");
@@ -8356,6 +8529,570 @@ function mtmhCloseModal() {
 
     const range = document.getElementById("mtmh-range");
     if (range) range.addEventListener("change", mtmhLoadPage);
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setup);
+  } else {
+    setup();
+  }
+})();
+
+// ════════════════════════════════════════════════════════════════
+// Collateral & Margin
+// ════════════════════════════════════════════════════════════════
+let collatLast = null;
+let collatAssetFilter = "all";  // "all" | "ETH" | "FIL"
+let collatEditKey = null;       // {counterparty, portfolio_asset} when editing existing row
+
+const _collatFmtUsd = (v, opts = {}) => {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const sign = v < 0 ? "-" : "";
+  const abs = Math.abs(Number(v));
+  const digits = opts.digits ?? 0;
+  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+};
+const _collatFmtPct = (v) => {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+};
+const _collatFmtQty = (v, asset) => {
+  if (v === null || v === undefined || !isFinite(v) || v === 0) return null;
+  const digits = asset === "FIL" ? 0 : 2;
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+};
+const _collatRatioClass = (r) => {
+  if (r === null || r === undefined || !isFinite(r)) return "";
+  if (r >= 1.0) return "collat-ratio-good";
+  if (r >= 0.9) return "collat-ratio-warn";
+  return "collat-ratio-bad";
+};
+
+async function collatLoad() {
+  const $tbody = document.getElementById("collat-tbody");
+  if ($tbody) $tbody.innerHTML = `<tr class="collat-row-empty"><td colspan="11" style="text-align:center;padding:1rem">Loading…</td></tr>`;
+  try {
+    const data = await get(`/api/collateral/summary?asset=${collatAssetFilter}`);
+    collatLast = data;
+    collatRender();
+  } catch (e) {
+    console.error("Collateral summary load failed:", e);
+    if ($tbody) $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--red);padding:1rem">Failed to load: ${e.message || e}</td></tr>`;
+  }
+}
+
+function collatSetFilter(filter) {
+  collatAssetFilter = filter;
+  document.querySelectorAll(".collat-filter-pill").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.filter === filter);
+  });
+  collatLoad();
+  collatLoadScenario();
+}
+
+let collatScenarioData = null;
+
+async function collatLoadScenario() {
+  const $card = document.getElementById("collat-scenario-card");
+  if (!$card) return;
+  // Show only when a single asset is selected
+  if (collatAssetFilter !== "ETH" && collatAssetFilter !== "FIL") {
+    $card.style.display = "none";
+    collatScenarioData = null;
+    return;
+  }
+  $card.style.display = "";
+  document.getElementById("collat-scenario-asset").textContent = collatAssetFilter;
+
+  const $sub = document.getElementById("collat-scenario-sub");
+  if ($sub) $sub.textContent = "Loading scenario…";
+
+  try {
+    collatScenarioData = await get(`/api/collateral/scenario?asset=${collatAssetFilter}`);
+    collatRenderScenario();
+  } catch (e) {
+    console.error("Scenario load failed:", e);
+    if ($sub) $sub.textContent = `Scenario unavailable: ${e.message || e}`;
+    document.getElementById("collat-scenario-chart").innerHTML = "";
+    document.getElementById("collat-scenario-tbody").innerHTML = "";
+    document.getElementById("collat-scenario-summary").innerHTML = "";
+  }
+}
+
+function _collatNearestIdx(ladder, target) {
+  let best = 0, bestDiff = Infinity;
+  for (let i = 0; i < ladder.length; i++) {
+    const d = Math.abs(ladder[i].spot - target);
+    if (d < bestDiff) { bestDiff = d; best = i; }
+  }
+  return best;
+}
+
+function _collatBreakevenSpot(ladder, useHaircut) {
+  // Find spot where residual crosses zero (sign change between adjacent rows).
+  const key = useHaircut ? "residual_haircut" : "residual_no_haircut";
+  for (let i = 1; i < ladder.length; i++) {
+    const a = ladder[i - 1][key], b = ladder[i][key];
+    if (a === null || b === null) continue;
+    if ((a >= 0 && b < 0) || (a < 0 && b >= 0)) {
+      // Linear interpolate
+      const t = a / (a - b);
+      const spot = ladder[i - 1].spot + t * (ladder[i].spot - ladder[i - 1].spot);
+      return spot;
+    }
+  }
+  return null;
+}
+
+function collatRenderScenario() {
+  if (!collatScenarioData) return;
+  const haircutOn = document.getElementById("collat-haircut-toggle")?.checked ?? true;
+  const d = collatScenarioData;
+  const ladder = d.ladder || [];
+  const $sub = document.getElementById("collat-scenario-sub");
+
+  const collKey = haircutOn ? "collateral_usd_haircut" : "collateral_usd_no_haircut";
+  const resKey  = haircutOn ? "residual_haircut" : "residual_no_haircut";
+  const ratKey  = haircutOn ? "margin_ratio_haircut" : "margin_ratio_no_haircut";
+
+  // Table column labels
+  document.getElementById("collat-scen-th-coll").textContent  = haircutOn ? "Collateral (haircut)" : "Collateral";
+  document.getElementById("collat-scen-th-res").textContent   = haircutOn ? "Residual (haircut)"   : "Residual";
+  document.getElementById("collat-scen-th-ratio").textContent = haircutOn ? "Margin % (haircut)"   : "Margin %";
+
+  // Sub line
+  const otherInfo = (d.other_spot && d.other_spot > 0)
+    ? ` · ${d.other_asset} collateral held flat at $${Number(d.other_spot).toLocaleString(undefined, { maximumFractionDigits: 3 })}`
+    : "";
+  if ($sub) $sub.textContent = `Current ${d.asset} spot $${Number(d.current_spot).toLocaleString(undefined, { maximumFractionDigits: 2 })}${otherInfo}. IV & time-to-expiry held at today.`;
+
+  // ─── Chart ────────────────────────────────────────────────
+  const spots = ladder.map(r => r.spot);
+  const liability = ladder.map(r => r.liability_usd);
+  const collateral = ladder.map(r => r[collKey]);
+  const residual = ladder.map(r => r[resKey]);
+
+  const c = chartColors();
+
+  const traces = [
+    {
+      x: spots, y: liability, type: "scatter", mode: "lines",
+      name: "Liability", line: { color: "#f85149", width: 2.2 },
+      hovertemplate: "$%{x:,.2f} → $%{y:,.0f}<extra>Liability</extra>",
+    },
+    {
+      x: spots, y: collateral, type: "scatter", mode: "lines",
+      name: haircutOn ? "Collateral (haircut)" : "Collateral",
+      line: { color: "#3fb950", width: 2.2 },
+      hovertemplate: "$%{x:,.2f} → $%{y:,.0f}<extra>Collateral</extra>",
+    },
+    {
+      x: spots, y: residual, type: "scatter", mode: "lines",
+      name: "Residual (Coll − Liab)",
+      line: { color: "#58a6ff", width: 2.4, dash: "solid" },
+      hovertemplate: "$%{x:,.2f} → $%{y:,.0f}<extra>Residual</extra>",
+    },
+  ];
+
+  // Vertical line at current spot
+  const shapes = [
+    {
+      type: "line", x0: d.current_spot, x1: d.current_spot,
+      y0: 0, y1: 1, yref: "paper",
+      line: { color: c.muted, width: 1, dash: "dot" },
+    },
+    {
+      type: "line", x0: spots[0], x1: spots[spots.length - 1],
+      y0: 0, y1: 0,
+      line: { color: c.zeroline, width: 1 },
+    },
+  ];
+
+  const annotations = [
+    {
+      x: d.current_spot, y: 1, yref: "paper", xref: "x",
+      text: `Spot $${Number(d.current_spot).toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+      showarrow: false, font: { size: 10, color: c.muted },
+      xanchor: "left", yanchor: "top",
+      bgcolor: c.paper, bordercolor: c.grid, borderwidth: 1, borderpad: 3,
+    },
+  ];
+
+  // Break-even (residual = 0) annotation if it lies within ladder
+  const breakEven = _collatBreakevenSpot(ladder, haircutOn);
+  if (breakEven !== null) {
+    shapes.push({
+      type: "line", x0: breakEven, x1: breakEven,
+      y0: 0, y1: 1, yref: "paper",
+      line: { color: "#d29922", width: 1, dash: "dash" },
+    });
+    annotations.push({
+      x: breakEven, y: 0.92, yref: "paper", xref: "x",
+      text: `100% margin @ $${Number(breakEven).toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+      showarrow: false, font: { size: 10, color: "#d29922" },
+      xanchor: "left", yanchor: "top",
+      bgcolor: c.paper, bordercolor: "#d29922", borderwidth: 1, borderpad: 3,
+    });
+  }
+
+  const layout = {
+    paper_bgcolor: c.paper, plot_bgcolor: c.plot,
+    font: { color: c.text, family: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", size: 11 },
+    margin: { t: 30, r: 20, b: 50, l: 70 },
+    xaxis: { title: `${d.asset} spot (USD)`, gridcolor: c.grid, zerolinecolor: c.zeroline, tickformat: ",.0f" },
+    yaxis: { title: "USD", gridcolor: c.grid, zerolinecolor: c.zeroline, tickformat: ",.0f" },
+    hovermode: "x unified",
+    legend: { orientation: "h", x: 0.5, xanchor: "center", y: 1.08, bgcolor: c.legendBg, bordercolor: c.legendBorder, borderwidth: 1 },
+    shapes, annotations,
+  };
+
+  Plotly.react("collat-scenario-chart", traces, layout, { responsive: true, displayModeBar: false });
+
+  // ─── Summary pills ────────────────────────────────────────
+  const curIdx = _collatNearestIdx(ladder, d.current_spot);
+  const cur = ladder[curIdx] || {};
+  const minRes = ladder.reduce((m, r) => (r[resKey] !== null && r[resKey] < m.v) ? { v: r[resKey], r } : m, { v: Infinity, r: null });
+  const $sum = document.getElementById("collat-scenario-summary");
+  const beTxt = breakEven !== null
+    ? `<span class="pill"><span class="label">Break-even (margin = 100%)</span><strong>$${Number(breakEven).toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong> <span style="color:var(--muted)">(${((breakEven / d.current_spot - 1) * 100).toFixed(1)}%)</span></span>`
+    : `<span class="pill"><span class="label">Break-even</span><strong>—</strong> <span style="color:var(--muted)">no zero crossing in ladder</span></span>`;
+  const minResTxt = minRes.r
+    ? `<span class="pill"><span class="label">Worst residual in ladder</span><strong style="color:${minRes.v < 0 ? 'var(--red)' : 'var(--green)'}">${_collatFmtUsd(minRes.v)}</strong> <span style="color:var(--muted)">@ $${Number(minRes.r.spot).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span></span>`
+    : ``;
+  $sum.innerHTML = `
+    <span class="pill"><span class="label">At current spot</span> Liab ${_collatFmtUsd(cur.liability_usd)} · Coll ${_collatFmtUsd(cur[collKey])} · <strong style="color:${(cur[resKey] || 0) >= 0 ? 'var(--green)' : 'var(--red)'}">Residual ${_collatFmtUsd(cur[resKey])}</strong></span>
+    ${beTxt}
+    ${minResTxt}
+  `;
+
+  // ─── Table ────────────────────────────────────────────────
+  const $tbody = document.getElementById("collat-scenario-tbody");
+  const curSpot = d.current_spot;
+  // Find break-even row index (closest to crossing) for visual marker
+  let beIdx = -1;
+  if (breakEven !== null) {
+    beIdx = _collatNearestIdx(ladder, breakEven);
+  }
+  $tbody.innerHTML = ladder.map((r, i) => {
+    const ratioCls = _collatRatioClass(r[ratKey]);
+    const resCls = r[resKey] === null ? "" : r[resKey] >= 0 ? "collat-diff-pos" : "collat-diff-neg";
+    const rowCls = (i === curIdx ? " collat-scenario-current" : "") + (i === beIdx && beIdx !== curIdx ? " collat-scenario-breakeven" : "");
+    const pctTxt = r.spot_pct >= 0 ? `+${r.spot_pct.toFixed(1)}%` : `${r.spot_pct.toFixed(1)}%`;
+    const spotFmt = d.asset === "FIL"
+      ? `$${Number(r.spot).toFixed(3)}`
+      : `$${Number(r.spot).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+    return `<tr class="${rowCls.trim()}">
+      <td class="num">${spotFmt}</td>
+      <td class="num" style="color:var(--muted)">${pctTxt}</td>
+      <td class="num">${_collatFmtUsd(r.liability_usd)}</td>
+      <td class="num">${_collatFmtUsd(r[collKey])}</td>
+      <td class="num ${resCls}">${_collatFmtUsd(r[resKey])}</td>
+      <td class="num ${ratioCls}">${_collatFmtPct(r[ratKey])}</td>
+    </tr>`;
+  }).join("");
+}
+
+function collatRender() {
+  if (!collatLast) return;
+  const haircutOn = document.getElementById("collat-haircut-toggle")?.checked ?? true;
+  const p = collatLast.portfolio;
+  const spots = collatLast.spots || {};
+  const rows = collatLast.rows || [];
+
+  // Spot pill
+  const spotParts = [];
+  if (spots.ETH) spotParts.push(`ETH $${Number(spots.ETH).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+  if (spots.FIL) spotParts.push(`FIL $${Number(spots.FIL).toFixed(3)}`);
+  const $pill = document.getElementById("collat-spot-pill");
+  if ($pill) $pill.textContent = spotParts.length ? spotParts.join(" · ") : "";
+
+  // Portfolio summary cards
+  const totalColl = haircutOn ? p.collateral_usd_haircut : p.collateral_usd_no_haircut;
+  const totalRatio = haircutOn ? p.margin_ratio_haircut : p.margin_ratio_no_haircut;
+  const totalShort = haircutOn ? p.shortfall_haircut : p.shortfall_no_haircut;
+  const otherColl = haircutOn ? p.collateral_usd_no_haircut : p.collateral_usd_haircut;
+
+  document.getElementById("collat-liability").textContent = _collatFmtUsd(p.liability_usd);
+
+  document.getElementById("collat-value").textContent = _collatFmtUsd(totalColl);
+  const $valueSub = document.getElementById("collat-value-sub");
+  if ($valueSub) {
+    const lbl = haircutOn ? "no-haircut" : "with haircuts";
+    $valueSub.textContent = `${lbl}: ${_collatFmtUsd(otherColl)}`;
+  }
+
+  const $ratio = document.getElementById("collat-ratio");
+  $ratio.textContent = _collatFmtPct(totalRatio);
+  $ratio.className = "collat-metric-value " + _collatRatioClass(totalRatio);
+
+  const $short = document.getElementById("collat-shortfall");
+  $short.textContent = _collatFmtUsd(totalShort);
+  $short.className = "collat-metric-value " + (totalShort > 0 ? "collat-ratio-bad" : "collat-ratio-good");
+
+  // Compare card — only if any row has a counterparty ask
+  const $compareCard = document.getElementById("collat-compare-card");
+  if (p.requested_usd !== null && p.requested_usd !== undefined) {
+    $compareCard.style.display = "";
+    document.getElementById("collat-requested").textContent = _collatFmtUsd(p.requested_usd);
+    const diff = p.diff_usd;
+    const $diff = document.getElementById("collat-diff");
+    const diffCls = diff > 0 ? "collat-diff-pos" : diff < 0 ? "collat-diff-neg" : "collat-diff-zero";
+    const diffSign = diff > 0 ? "+" : "";
+    $diff.textContent = `${diffSign}${_collatFmtUsd(diff)}`;
+    $diff.className = diffCls;
+  } else {
+    $compareCard.style.display = "none";
+  }
+
+  // Table headers (haircut labelling)
+  document.getElementById("collat-th-coll-usd").textContent = haircutOn ? "Coll USD (haircut)" : "Coll USD";
+  document.getElementById("collat-th-ratio").textContent = haircutOn ? "Margin % (haircut)" : "Margin %";
+  document.getElementById("collat-th-shortfall").textContent = haircutOn ? "Shortfall (haircut)" : "Shortfall";
+
+  const $tbody = document.getElementById("collat-tbody");
+  if (!rows.length) {
+    $tbody.innerHTML = `<tr class="collat-row-empty"><td colspan="11" style="text-align:center;padding:1.5rem">
+      No counterparties with positions or collateral in this view.
+      ${collatAssetFilter !== "all" ? `Try the "All books" filter, or click <strong>+ New entry</strong> to add one.` : ""}
+    </td></tr>`;
+  } else {
+    $tbody.innerHTML = rows.map(r => {
+      const coll = haircutOn ? r.collateral_usd_haircut : r.collateral_usd_no_haircut;
+      const ratio = haircutOn ? r.margin_ratio_haircut : r.margin_ratio_no_haircut;
+      const short = haircutOn ? r.shortfall_haircut : r.shortfall_no_haircut;
+      const ratioCls = _collatRatioClass(ratio);
+
+      const ethQ = _collatFmtQty(r.eth_qty, "ETH");
+      const filQ = _collatFmtQty(r.fil_qty, "FIL");
+      const postedHtml = (!ethQ && !filQ)
+        ? `<span class="qty-zero">—</span>`
+        : `<div class="collat-posted-cell">
+             ${ethQ ? `<span class="qty-eth">${ethQ} ETH</span>` : ``}
+             ${filQ ? `<span class="qty-fil">${filQ} FIL</span>` : ``}
+           </div>`;
+
+      const diff = r.diff_usd;
+      const diffHtml = (diff === null || diff === undefined)
+        ? `<span class="collat-diff-zero">—</span>`
+        : `<span class="${diff > 0 ? 'collat-diff-pos' : diff < 0 ? 'collat-diff-neg' : 'collat-diff-zero'}">${diff > 0 ? '+' : ''}${_collatFmtUsd(diff)}</span>`;
+
+      const requestedHtml = (r.requested_usd === null || r.requested_usd === undefined)
+        ? `<span class="collat-diff-zero">—</span>`
+        : _collatFmtUsd(r.requested_usd);
+
+      const shortHtml = short > 0
+        ? `<span class="collat-shortfall-pos">${_collatFmtUsd(short)}</span>`
+        : `<span class="collat-shortfall-zero">—</span>`;
+
+      return `<tr>
+        <td><strong>${r.counterparty}</strong></td>
+        <td><span class="collat-book-pill ${r.portfolio_asset.toLowerCase()}">${r.portfolio_asset}</span></td>
+        <td class="num">${r.position_count}</td>
+        <td class="num">${_collatFmtUsd(r.liability_usd)}</td>
+        <td class="num">${postedHtml}</td>
+        <td class="num">${_collatFmtUsd(coll)}</td>
+        <td class="num ${ratioCls}" style="font-weight:600">${_collatFmtPct(ratio)}</td>
+        <td class="num">${requestedHtml}</td>
+        <td class="num">${diffHtml}</td>
+        <td class="num">${shortHtml}</td>
+        <td class="collat-col-actions">
+          <button class="collat-edit-btn" data-cp="${encodeURIComponent(r.counterparty)}" data-pa="${r.portfolio_asset}"
+                  data-eth="${r.eth_qty}" data-fil="${r.fil_qty}"
+                  data-req="${r.requested_usd ?? ''}" data-notes="${(r.notes || '').replace(/"/g, '&quot;')}">
+            Edit
+          </button>
+        </td>
+      </tr>`;
+    }).join("");
+
+    $tbody.querySelectorAll(".collat-edit-btn").forEach(btn => {
+      btn.addEventListener("click", () => collatOpenModal({
+        counterparty: decodeURIComponent(btn.dataset.cp),
+        portfolio_asset: btn.dataset.pa,
+        eth_qty: parseFloat(btn.dataset.eth) || 0,
+        fil_qty: parseFloat(btn.dataset.fil) || 0,
+        requested_usd: btn.dataset.req ? parseFloat(btn.dataset.req) : null,
+        notes: btn.dataset.notes || "",
+        existing: true,
+      }));
+    });
+  }
+
+  // Footer total row
+  const $tfoot = document.getElementById("collat-tfoot");
+  const totalPosCount = rows.reduce((a, r) => a + (r.position_count || 0), 0);
+  const totalEthQty = rows.reduce((a, r) => a + (r.eth_qty || 0), 0);
+  const totalFilQty = rows.reduce((a, r) => a + (r.fil_qty || 0), 0);
+  const ratioCls = _collatRatioClass(totalRatio);
+
+  const totalEthQStr = _collatFmtQty(totalEthQty, "ETH");
+  const totalFilQStr = _collatFmtQty(totalFilQty, "FIL");
+  const totalPostedHtml = (!totalEthQStr && !totalFilQStr)
+    ? `<span class="qty-zero">—</span>`
+    : `<div class="collat-posted-cell">
+         ${totalEthQStr ? `<span class="qty-eth">${totalEthQStr} ETH</span>` : ``}
+         ${totalFilQStr ? `<span class="qty-fil">${totalFilQStr} FIL</span>` : ``}
+       </div>`;
+
+  const portfolioReq = p.requested_usd;
+  const portfolioDiff = p.diff_usd;
+  const reqFootHtml = (portfolioReq === null || portfolioReq === undefined)
+    ? `<span class="collat-diff-zero">—</span>` : _collatFmtUsd(portfolioReq);
+  const diffFootHtml = (portfolioDiff === null || portfolioDiff === undefined)
+    ? `<span class="collat-diff-zero">—</span>`
+    : `<span class="${portfolioDiff > 0 ? 'collat-diff-pos' : portfolioDiff < 0 ? 'collat-diff-neg' : 'collat-diff-zero'}">${portfolioDiff > 0 ? '+' : ''}${_collatFmtUsd(portfolioDiff)}</span>`;
+  const shortFootHtml = totalShort > 0
+    ? `<span class="collat-shortfall-pos">${_collatFmtUsd(totalShort)}</span>`
+    : `<span class="collat-shortfall-zero">—</span>`;
+
+  const filterLabel = collatAssetFilter === "all" ? "Portfolio" : `Portfolio (${collatAssetFilter} only)`;
+  $tfoot.innerHTML = `<tr>
+    <td>${filterLabel}</td>
+    <td></td>
+    <td class="num">${totalPosCount}</td>
+    <td class="num">${_collatFmtUsd(p.liability_usd)}</td>
+    <td class="num">${totalPostedHtml}</td>
+    <td class="num">${_collatFmtUsd(totalColl)}</td>
+    <td class="num ${ratioCls}">${_collatFmtPct(totalRatio)}</td>
+    <td class="num">${reqFootHtml}</td>
+    <td class="num">${diffFootHtml}</td>
+    <td class="num">${shortFootHtml}</td>
+    <td></td>
+  </tr>`;
+
+  // Nav badge
+  const $badge = document.getElementById("nav-badge-collateral");
+  if ($badge) {
+    if (totalShort > 0) {
+      const m = totalShort >= 1e6 ? `${(totalShort / 1e6).toFixed(1)}M` : `${Math.round(totalShort / 1000)}k`;
+      $badge.textContent = `-$${m}`;
+      $badge.style.background = "var(--red)";
+      $badge.style.color = "#fff";
+    } else {
+      $badge.textContent = "";
+      $badge.style.background = "";
+    }
+  }
+}
+
+function collatOpenModal(prefill = {}) {
+  const $modal = document.getElementById("collat-modal");
+  const isEdit = !!prefill.existing;
+  collatEditKey = isEdit ? { counterparty: prefill.counterparty, portfolio_asset: prefill.portfolio_asset } : null;
+
+  document.getElementById("collat-modal-title").textContent = isEdit
+    ? `Edit — ${prefill.counterparty} · ${prefill.portfolio_asset} book`
+    : "New margin entry";
+
+  document.getElementById("collat-modal-cp").value = prefill.counterparty || "";
+  document.getElementById("collat-modal-portfolio").value = prefill.portfolio_asset || "ETH";
+  document.getElementById("collat-modal-eth").value = prefill.eth_qty || "";
+  document.getElementById("collat-modal-fil").value = prefill.fil_qty || "";
+  document.getElementById("collat-modal-requested").value = (prefill.requested_usd ?? "");
+  document.getElementById("collat-modal-notes").value = prefill.notes || "";
+
+  // Lock counterparty/book when editing — keeps the row identity stable
+  document.getElementById("collat-modal-cp").disabled = isEdit;
+  document.getElementById("collat-modal-portfolio").disabled = isEdit;
+
+  document.getElementById("btn-collat-modal-delete").style.display = isEdit ? "" : "none";
+
+  collatUpdateModalPreview();
+  $modal.classList.add("open");
+  if (!isEdit) document.getElementById("collat-modal-cp").focus();
+}
+
+function collatCloseModal() {
+  document.getElementById("collat-modal").classList.remove("open");
+  collatEditKey = null;
+}
+
+function collatUpdateModalPreview() {
+  const spots = (collatLast && collatLast.spots) || {};
+  const haircuts = (collatLast && collatLast.haircuts) || { ETH: 0.10, FIL: 0.50 };
+  const eth = parseFloat(document.getElementById("collat-modal-eth").value) || 0;
+  const fil = parseFloat(document.getElementById("collat-modal-fil").value) || 0;
+  const ethUsd = eth * (spots.ETH || 0);
+  const filUsd = fil * (spots.FIL || 0);
+  const totalNh = ethUsd + filUsd;
+  const totalHc = ethUsd * (1 - haircuts.ETH) + filUsd * (1 - haircuts.FIL);
+  const $preview = document.getElementById("collat-modal-preview");
+  if (!$preview) return;
+  if (totalNh === 0) {
+    $preview.textContent = "";
+    return;
+  }
+  $preview.innerHTML = `= ${_collatFmtUsd(totalNh)} <span style="opacity:.6">no haircut</span> · <strong>${_collatFmtUsd(totalHc)}</strong> with haircuts`;
+}
+
+async function collatSaveModal() {
+  const cp = document.getElementById("collat-modal-cp").value.trim();
+  const pa = document.getElementById("collat-modal-portfolio").value;
+  const eth = parseFloat(document.getElementById("collat-modal-eth").value) || 0;
+  const fil = parseFloat(document.getElementById("collat-modal-fil").value) || 0;
+  const reqRaw = document.getElementById("collat-modal-requested").value.trim();
+  const requested = reqRaw === "" ? null : parseFloat(reqRaw);
+  const notes = document.getElementById("collat-modal-notes").value.trim() || null;
+
+  if (!cp) { alert("Counterparty required"); return; }
+  if (eth < 0 || fil < 0) { alert("Quantities must be ≥ 0"); return; }
+  if (requested !== null && (!isFinite(requested) || requested < 0)) { alert("Requested USD must be ≥ 0"); return; }
+
+  try {
+    await api("PUT", "/api/collateral/margin", {
+      counterparty: cp,
+      portfolio_asset: pa,
+      eth_qty: eth,
+      fil_qty: fil,
+      requested_usd: requested,
+      notes,
+    });
+    collatCloseModal();
+    await collatLoad();
+  } catch (e) {
+    alert(`Save failed: ${e.message || e}`);
+  }
+}
+
+async function collatDeleteModal() {
+  if (!collatEditKey) return;
+  if (!confirm(`Delete margin row for ${collatEditKey.counterparty} · ${collatEditKey.portfolio_asset}?`)) return;
+  try {
+    await api("DELETE", `/api/collateral/margin?counterparty=${encodeURIComponent(collatEditKey.counterparty)}&portfolio_asset=${collatEditKey.portfolio_asset}`);
+    collatCloseModal();
+    await collatLoad();
+  } catch (e) {
+    alert(`Delete failed: ${e.message || e}`);
+  }
+}
+
+(function initCollateralUi() {
+  const setup = () => {
+    const refresh = document.getElementById("btn-collat-refresh");
+    if (refresh) refresh.addEventListener("click", () => { collatLoad(); collatLoadScenario(); });
+
+    const toggle = document.getElementById("collat-haircut-toggle");
+    if (toggle) toggle.addEventListener("change", () => { collatRender(); collatRenderScenario(); });
+
+    document.querySelectorAll(".collat-filter-pill").forEach(btn => {
+      btn.addEventListener("click", () => collatSetFilter(btn.dataset.filter));
+    });
+
+    const addBtn = document.getElementById("btn-collat-add");
+    if (addBtn) addBtn.addEventListener("click", () => collatOpenModal());
+
+    document.getElementById("collat-modal-close")?.addEventListener("click", collatCloseModal);
+    document.getElementById("btn-collat-modal-cancel")?.addEventListener("click", collatCloseModal);
+    document.getElementById("btn-collat-modal-save")?.addEventListener("click", collatSaveModal);
+    document.getElementById("btn-collat-modal-delete")?.addEventListener("click", collatDeleteModal);
+
+    ["collat-modal-eth", "collat-modal-fil"].forEach(id => {
+      document.getElementById(id)?.addEventListener("input", collatUpdateModalPreview);
+    });
+
+    const backdrop = document.getElementById("collat-modal");
+    if (backdrop) backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) collatCloseModal();
+    });
   };
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", setup);

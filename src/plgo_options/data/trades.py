@@ -192,7 +192,10 @@ def aggregate_positions(trades: list[dict]) -> list[dict]:
     positions: dict[str, dict] = {}
 
     for t in trades:
-        opt_type = str(t.get("Option Type") or "").strip()
+        # Canonicalise option type — raw data mixes "puts"/"Put"/"calls"/"Call".
+        # Must normalise BEFORE building the group key, otherwise spelling
+        # variants of the same option split into separate positions.
+        opt_type = "Call" if "call" in str(t.get("Option Type") or "").lower() else "Put"
         strike = _safe_float(t.get("Strike"))
         expiry = str(t.get("Option Expiry Date") or "").strip()
         key = f"{opt_type}|{strike}|{expiry}"
