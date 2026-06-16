@@ -60,9 +60,12 @@ async def run_optimizer(params: OptimizationParams):
     """Gather optimizer inputs, persist a reproducible use case, and run it."""
     print("run_optimizer()")
     try:
-        pnl_data = await portfolio_pnl(asset=params.asset.upper())
-    except HTTPException:
-        raise
+        pnl_data = await portfolio_pnl(asset=params.asset.upper(), include_expired=True)
+    except HTTPException as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"Failed to gather portfolio data for asset {params.asset.upper()}: {e.detail}",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to gather portfolio data: {e}")
 

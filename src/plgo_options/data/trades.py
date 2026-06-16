@@ -46,6 +46,12 @@ _FIL_PROJECT_DATA_PATH = (
     / "FIL - Dashboard Risk+PnL Improvement Proposal.xlsx"
 )
 
+_FIL_POSITIONS_DIR = (
+    Path(__file__).resolve().parents[3]
+    / "data"
+    / "FIL_positions"
+)
+
 _FIL_DOWNLOADS_PATH = (
     Path.home() / "Downloads" / "FIL - Dashboard Risk+PnL Improvement Proposal (2).xlsx"
 )
@@ -132,6 +138,11 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
     return trades
 
 
+def _latest_trade_file(directory: Path) -> Path | None:
+    files = sorted(directory.glob("PLGO_Trades_*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else None
+
+
 def read_fil_trades(file_path: Path | None = None) -> list[dict]:
     """Return a list of trade dicts from the FIL 'Trades' tab.
 
@@ -140,7 +151,10 @@ def read_fil_trades(file_path: Path | None = None) -> list[dict]:
     """
     fp = file_path
     if fp is None:
-        if _FIL_PROJECT_DATA_PATH.exists():
+        latest_positions_file = _latest_trade_file(_FIL_POSITIONS_DIR)
+        if latest_positions_file is not None:
+            fp = latest_positions_file
+        elif _FIL_PROJECT_DATA_PATH.exists():
             fp = _FIL_PROJECT_DATA_PATH
         else:
             fp = _FIL_DOWNLOADS_PATH
@@ -158,13 +172,22 @@ def read_fil_trades(file_path: Path | None = None) -> list[dict]:
     ws = wb["Trades"]
     rows = ws.iter_rows(values_only=True)
 
-    # Scan for the header row that starts with "Counterparty"
+    # Scan for the header row containing "Counterparty", even if not in column A.
     headers: list[str] | None = None
     for row in rows:
-        if row and str(row[0]).strip().lower() == "counterparty":
+        if not row:
+            continue
+
+        normalized_cells = [
+            str(cell).strip().lower() if cell is not None else ""
+            for cell in row
+        ]
+
+        if "counterparty" in normalized_cells:
+            header_start_idx = normalized_cells.index("counterparty")
             headers = [
                 str(h).strip() if h is not None else f"col_{i}"
-                for i, h in enumerate(row)
+                for i, h in enumerate(row[header_start_idx:], start=header_start_idx)
             ]
             break
 

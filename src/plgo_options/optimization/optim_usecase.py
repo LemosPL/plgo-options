@@ -131,7 +131,8 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=2, lam_factor=0.00075)#, counterparties=["Flowdesk"])
+        lam_factor = 0.3
+        result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, lam_factor=lam_factor)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
         print(f"replacement_trades: {len(result.get('replacement_trades', []))}")

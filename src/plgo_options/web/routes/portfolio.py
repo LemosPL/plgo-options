@@ -12,6 +12,7 @@ from scipy.stats import norm
 
 from plgo_options.data.database import get_db
 from plgo_options.data.trade_repository import list_trades
+from plgo_options.data.trades import read_eth_trades, read_fil_trades
 from plgo_options.pricing.options import bs_price
 from plgo_options.pricing.vol_surface import VolSmile
 from plgo_options.market_data.deribit_client import DeribitClient
@@ -258,6 +259,19 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
                 "Premium USD": t["premium_usd"],
                 "_db_status": t["status"],
             })
+
+        if not trades:
+            trades = read_fil_trades() if is_fil else read_eth_trades()
+
+            if not include_expired:
+                today = date.today()
+                trades = [
+                    trade for trade in trades
+                    if (
+                        _iso_to_date(str(trade.get("Option Expiry Date") or ""))
+                        and _iso_to_date(str(trade.get("Option Expiry Date") or "")) >= today
+                    )
+                ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read trades: {e}")
 

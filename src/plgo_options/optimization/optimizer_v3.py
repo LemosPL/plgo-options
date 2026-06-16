@@ -607,6 +607,24 @@ class OptimizerV3(BaseOptimizer):
         r = 0.0
         return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
 
+    @staticmethod
+    def nice_spot_ticks(spot: float) -> np.ndarray:
+        tick_multipliers = np.array([0.4, 0.6, 0.8, 1.0, 1.2, 1.8, 2.8], dtype=float)
+        raw_ticks = spot * tick_multipliers
+
+        if spot >= 1000:
+            step = 100.0
+        elif spot >= 100:
+            step = 10.0
+        elif spot >= 10:
+            step = 1.0
+        elif spot >= 1:
+            step = 0.1
+        else:
+            step = 0.01
+
+        return np.round(raw_ticks / step) * step
+
     def run(self,
                  lam_factor: float = 0.5,
                  target_expiry: str | None = None,
@@ -617,6 +635,8 @@ class OptimizerV3(BaseOptimizer):
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
             ):
+        lam_factor *= self.spot/1000.0
+        print(self.spot)
         if asset is not None:
             self.asset = asset.upper()
             if self.asset == "ETH":
@@ -961,8 +981,18 @@ class OptimizerV3(BaseOptimizer):
             spot = self.spot  # or your reference spot S0
             x = np.log(spot_arr / spot)
 
-            spot_ticks = np.array([1000, 1500, 2000, 2500, 3000, 4500, 7000], dtype=float)
+            spot_ticks = self.nice_spot_ticks(spot)
+            spot_ticks = spot_ticks[(spot_ticks >= spot_arr.min()) & (spot_ticks <= spot_arr.max())]
             tick_positions = np.log(spot_ticks / spot)
+
+            if spot >= 100:
+                spot_tick_labels = [f"{s:,.0f}" for s in spot_ticks]
+            elif spot >= 10:
+                spot_tick_labels = [f"{s:,.1f}" for s in spot_ticks]
+            elif spot >= 1:
+                spot_tick_labels = [f"{s:,.2f}" for s in spot_ticks]
+            else:
+                spot_tick_labels = [f"{s:,.3f}" for s in spot_ticks]
 
             fig, axes = plt.subplots(3, 1, sharex=True)
 
@@ -983,7 +1013,7 @@ class OptimizerV3(BaseOptimizer):
             # axes[1].set_ylim(210000, 215000)
             axes[1].legend()
             axes[1].set_xticks(tick_positions)
-            axes[1].set_xticklabels([f"{s:,.0f}" for s in spot_ticks])
+            axes[1].set_xticklabels(spot_tick_labels)
 
             axes[2].plot(x, spot_weights, label="Weights")
             axes[2].legend()
