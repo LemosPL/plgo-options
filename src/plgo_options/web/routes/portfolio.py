@@ -518,6 +518,10 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "vega": round(vega, 4) if vega is not None else None,
             "mark_price_usd": round(cur_value_per, 2),
             "current_mtm": round(cur_mtm, 2),
+            # Collateral the counterparty would call us for on this position:
+            # only negative MtM (we owe them) is callable. Matches the
+            # per-counterparty liability = Σ max(0, −MtM) used in collateral.py.
+            "collateral_call_usd": round(max(0.0, -cur_mtm), 2),
             "notional_live": notional_live,
             "mtm_by_horizon": mtm_horizon,
             "payoff_by_horizon": trade_payoff,
@@ -540,6 +544,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     total_gamma = sum((ep["gamma"] or 0) * ep["net_qty"] for ep in enriched)
     total_theta = sum((ep["theta"] or 0) * ep["net_qty"] for ep in enriched)
     total_vega = sum((ep["vega"] or 0) * ep["net_qty"] for ep in enriched)
+
+    # Total collateral counterparties would call across the book (Σ max(0, −MtM)).
+    total_collateral_call = sum(ep["collateral_call_usd"] for ep in enriched)
 
     # 5. Serialize vol smiles for frontend roll pricing
     vol_surface = []
@@ -619,6 +626,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "portfolio_gamma": round(total_gamma, 4),
             "portfolio_theta": round(total_theta, 2),
             "portfolio_vega": round(total_vega, 2),
+            "collateral_call": round(total_collateral_call, 2),
         },
     }
 

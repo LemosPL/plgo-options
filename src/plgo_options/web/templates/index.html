@@ -461,11 +461,8 @@
               <th class="sortable" data-col="premium_per">Entry Prem</th>
               <th class="sortable" data-col="premium_usd">Entry USD</th>
               <th class="sortable" data-col="iv_pct" title="Deribit implied vol">IV%</th>
-              <th class="sortable" data-col="delta" title="Delta">&Delta;</th>
-              <th class="sortable" data-col="gamma" title="Gamma">&Gamma;</th>
-              <th class="sortable" data-col="theta" title="Theta">&Theta;</th>
-              <th class="sortable" data-col="vega" title="Vega">&nu;</th>
               <th class="sortable" data-col="current_mtm" title="Mark-to-market value (qty x mark)">MTM</th>
+              <th class="sortable" data-col="collateral_call_usd" title="Collateral the counterparty would call on this position = max(0, -MTM). Only negative MtM (we owe them) is callable.">Coll. Call</th>
               <th style="width:40px;text-align:center">Roll</th>
               <th style="width:65px">New DTE</th>
               <th title="Current Deribit mark price per contract (USD)">Cur Mark</th>
@@ -2039,6 +2036,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=52"></script>
+<script src="/static/app.js?v=53"></script>
 </body>
 </html>

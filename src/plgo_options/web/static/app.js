@@ -3035,12 +3035,11 @@ function pfRenderTable() {
       `<td style="font-family:monospace">${fmtNum(pos.premium_per, 2)}</td>` +
       `<td style="font-family:monospace">$${fmtNum(pos.premium_usd)}</td>` +
       `<td>${pos.iv_pct.toFixed(1)}%</td>` +
-      `<td style="font-family:monospace">${fmtGreek(pos.delta, 3)}</td>` +
-      `<td style="font-family:monospace">${fmtGreek(pos.gamma, 5)}</td>` +
-      `<td style="font-family:monospace">${fmtGreek(pos.theta, 4)}</td>` +
-      `<td style="font-family:monospace">${fmtGreek(pos.vega, 4)}</td>` +
       `<td class="${pos.current_mtm >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace">` +
         `$${fmtNum(pos.current_mtm)}</td>` +
+      `<td class="${(pos.collateral_call_usd || 0) > 0 ? 'mtm-neg' : ''}" style="font-family:monospace" ` +
+        `title="Collateral the counterparty would call on this position">` +
+        `${(pos.collateral_call_usd || 0) > 0 ? '$' + fmtNum(pos.collateral_call_usd) : '—'}</td>` +
       `<td style="text-align:center"><input type="checkbox" class="pf-roll" data-id="${pos.id}" ${rolled ? "checked" : ""}></td>` +
       `<td><input type="number" class="roll-dte-input" data-id="${pos.id}" value="${rollDte}" ` +
         `${rolled ? "" : "disabled"} min="1" step="1"></td>` +
@@ -3566,12 +3565,9 @@ document.getElementById("btn-pf-export-xlsx").addEventListener("click", () => {
       "Entry Prem/Contract": pos.premium_per,
       "Entry USD": pos.premium_usd,
       "IV%": pos.iv_pct,
-      "Delta": pos.delta,
-      "Gamma": pos.gamma,
-      "Theta": pos.theta,
-      "Vega": pos.vega,
       "Mark Price USD": pos.mark_price_usd,
       "MTM": pos.current_mtm,
+      "Collateral Call": pos.collateral_call_usd,
       "Roll": rolled ? "Yes" : "",
       "New DTE": newDte,
       "Cur Mark (Close)": rollCurMark,
@@ -3585,6 +3581,7 @@ document.getElementById("btn-pf-export-xlsx").addEventListener("click", () => {
   // Summary row
   const totalMtm = positions.reduce((s, p) => s + (p.current_mtm || 0), 0);
   const totalEntry = positions.reduce((s, p) => s + Math.abs(p.premium_usd || 0), 0);
+  const totalCollCall = positions.reduce((s, p) => s + (p.collateral_call_usd || 0), 0);
   const totalRollCost = rows.reduce((s, r) => s + (r["Roll Cost"] || 0), 0);
   rows.push({});  // blank row
   rows.push({
@@ -3593,6 +3590,7 @@ document.getElementById("btn-pf-export-xlsx").addEventListener("click", () => {
     "Net Qty": positions.reduce((s, p) => s + p.net_qty, 0),
     "Entry USD": totalEntry,
     "MTM": totalMtm,
+    "Collateral Call": totalCollCall,
     "Roll Cost": totalRollCost || null,
     "Roll Direction": totalRollCost ? (totalRollCost >= 0 ? "Net Receive" : "Net Pay") : "",
   });
