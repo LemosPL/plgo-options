@@ -85,6 +85,11 @@ class DeribitClient:
         ticker = await self._get("ticker", {"instrument_name": "ETH-PERPETUAL"})
         return float(ticker["last_price"])
 
+    async def get_btc_spot_price(self) -> float:
+        """Return BTC spot price from the perpetual last price."""
+        ticker = await self._get("ticker", {"instrument_name": "BTC-PERPETUAL"})
+        return float(ticker["last_price"])
+
     async def get_fil_spot_price(self) -> float:
         """Return FIL spot price from cryptoprices.cc."""
         url = "https://cryptoprices.cc/FIL/"

@@ -32,9 +32,13 @@ _client = DeribitClient()
 
 router = APIRouter()
 
-# Haircuts: ETH counted at 90% of spot, FIL at 50%.
-HAIRCUTS = {"ETH": 0.10, "FIL": 0.50}
+# Haircuts applied to posted collateral. ETH counted at 90% of spot, FIL at
+# 50%, BTC at 85%, WAVE at 50% (illiquid), USD/USDC at face (no haircut).
+HAIRCUTS = {"ETH": 0.10, "FIL": 0.50, "BTC": 0.15, "WAVE": 0.50, "USDC": 0.0}
 TARGET_MARGIN = 1.00
+
+# Collateral asset legs (other than USDC, which is always face value).
+_TOKEN_ASSETS = ("ETH", "FIL", "BTC", "WAVE")
 
 
 async def _gather_portfolio(asset: str) -> dict | None:
@@ -46,20 +50,40 @@ async def _gather_portfolio(asset: str) -> dict | None:
         raise
 
 
-def _haircut_value(eth_qty: float, fil_qty: float, eth_spot: float, fil_spot: float) -> tuple[float, float]:
-    """Return (no_haircut_usd, haircut_usd)."""
-    nh = eth_qty * eth_spot + fil_qty * fil_spot
-    hc = (
-        eth_qty * eth_spot * (1 - HAIRCUTS["ETH"])
-        + fil_qty * fil_spot * (1 - HAIRCUTS["FIL"])
-    )
+def _haircut_value(qtys: dict[str, float], prices: dict[str, float]) -> tuple[float, float]:
+    """Value a bundle of collateral in USD.
+
+    qtys keyed by asset (ETH/FIL/BTC/WAVE/USDC). prices is USD per unit for
+    each token (USDC is always 1.0). Returns (no_haircut_usd, haircut_usd).
+    """
+    nh = hc = 0.0
+    for asset, qty in qtys.items():
+        if not qty:
+            continue
+        px = 1.0 if asset == "USDC" else prices.get(asset, 0.0)
+        usd = qty * px
+        nh += usd
+        hc += usd * (1 - HAIRCUTS.get(asset, 0.0))
     return nh, hc
+
+
+def _row_qtys(row: dict) -> dict[str, float]:
+    """Collateral quantities posted on a single margin row."""
+    return {
+        "ETH": float(row.get("eth_qty") or 0),
+        "FIL": float(row.get("fil_qty") or 0),
+        "BTC": float(row.get("btc_qty") or 0),
+        "WAVE": float(row.get("wave_qty") or 0),
+        "USDC": float(row.get("usdc_usd") or 0),
+    }
 
 
 async def _load_margin_rows() -> list[dict]:
     db = await get_db()
     cursor = await db.execute(
-        """SELECT counterparty, portfolio_asset, eth_qty, fil_qty, requested_usd, notes, updated_at
+        """SELECT counterparty, portfolio_asset, eth_qty, fil_qty, usdc_usd,
+                  btc_qty, wave_qty, wave_price, margin_req_tokens,
+                  requested_usd, notes, updated_at
            FROM counterparty_margin"""
     )
     rows = await cursor.fetchall()
@@ -69,6 +93,11 @@ async def _load_margin_rows() -> list[dict]:
             "portfolio_asset": (r["portfolio_asset"] or "").upper(),
             "eth_qty": float(r["eth_qty"] or 0),
             "fil_qty": float(r["fil_qty"] or 0),
+            "usdc_usd": float(r["usdc_usd"] or 0),
+            "btc_qty": float(r["btc_qty"] or 0),
+            "wave_qty": float(r["wave_qty"] or 0),
+            "wave_price": float(r["wave_price"] or 0),
+            "margin_req_tokens": float(r["margin_req_tokens"] or 0),
             "requested_usd": (None if r["requested_usd"] is None else float(r["requested_usd"])),
             "notes": r["notes"] or "",
             "updated_at": r["updated_at"],
@@ -157,6 +186,16 @@ async def collateral_summary(asset: str = "all"):
     eth_spot = spots.get("ETH", 0.0)
     fil_spot = spots.get("FIL", 0.0)
 
+    # BTC spot for any BTC collateral (WAVE is valued at its stored manual price).
+    btc_spot = 0.0
+    if any(m["btc_qty"] for m in margin_rows):
+        try:
+            btc_spot = float(await _client.get_btc_spot_price())
+        except Exception:
+            btc_spot = 0.0
+    if btc_spot:
+        spots["BTC"] = btc_spot
+
     # Build per-(counterparty, portfolio_asset) rows.
     out_rows: list[dict] = []
     for k in sorted(all_display.keys()):
@@ -176,19 +215,31 @@ async def collateral_summary(asset: str = "all"):
                 pos_count = fil_count.get(k, 0)
 
             stored = by_key.get((k, pa))
-            eth_qty = float(stored["eth_qty"]) if stored else 0.0
-            fil_qty = float(stored["fil_qty"]) if stored else 0.0
+            qtys = _row_qtys(stored) if stored else _row_qtys({})
+            wave_price = float(stored["wave_price"]) if stored else 0.0
+            margin_req_tokens = float(stored["margin_req_tokens"]) if stored else 0.0
             requested = (stored["requested_usd"] if stored else None)
             notes = (stored["notes"] if stored else "")
             updated_at = (stored["updated_at"] if stored else None)
 
             # Skip pure-empty rows when filter is "all" and there's nothing here.
-            if pos_count == 0 and eth_qty == 0 and fil_qty == 0 and not requested:
+            if (pos_count == 0 and not any(qtys.values())
+                    and not requested and margin_req_tokens == 0):
                 continue
 
-            nh, hc = _haircut_value(eth_qty, fil_qty, eth_spot, fil_spot)
+            prices = {"ETH": eth_spot, "FIL": fil_spot, "BTC": btc_spot, "WAVE": wave_price}
+            nh, hc = _haircut_value(qtys, prices)
             ratio_nh = (nh / liability) if liability > 0 else None
             ratio_hc = (hc / liability) if liability > 0 else None
+
+            # Counterparty's margin requirement, in the book's native token,
+            # valued at that token's spot.
+            book_spot = eth_spot if pa == "ETH" else fil_spot
+            margin_req_usd = margin_req_tokens * book_spot
+
+            # Balance (surplus) / debit (to post): post-haircut collateral minus
+            # our MtM liability. Positive = balance; negative = we owe more.
+            balance_usd = hc - liability
 
             diff_usd = None if requested is None else round(liability - float(requested), 2)
 
@@ -197,15 +248,22 @@ async def collateral_summary(asset: str = "all"):
                 "portfolio_asset": pa,
                 "position_count": pos_count,
                 "liability_usd": round(liability, 2),
-                "eth_qty": round(eth_qty, 4),
-                "fil_qty": round(fil_qty, 4),
+                "eth_qty": round(qtys["ETH"], 4),
+                "fil_qty": round(qtys["FIL"], 4),
+                "btc_qty": round(qtys["BTC"], 6),
+                "wave_qty": round(qtys["WAVE"], 4),
+                "wave_price": round(wave_price, 6),
+                "usdc_usd": round(qtys["USDC"], 2),
                 "collateral_usd_no_haircut": round(nh, 2),
                 "collateral_usd_haircut": round(hc, 2),
                 "margin_ratio_no_haircut": ratio_nh,
                 "margin_ratio_haircut": ratio_hc,
+                "margin_req_tokens": round(margin_req_tokens, 4),
+                "margin_req_usd": round(margin_req_usd, 2),
                 "requested_usd": (None if requested is None else round(float(requested), 2)),
                 "diff_usd": diff_usd,
                 "notes": notes,
+                "balance_usd": round(balance_usd, 2),
                 "shortfall_no_haircut": round(max(0.0, liability - nh), 2),
                 "shortfall_haircut": round(max(0.0, liability - hc), 2),
                 "updated_at": updated_at,
@@ -225,10 +283,15 @@ async def collateral_summary(asset: str = "all"):
         "liability_usd": round(total_liab, 2),
         "eth_qty": round(_sum("eth_qty"), 4),
         "fil_qty": round(_sum("fil_qty"), 4),
+        "btc_qty": round(_sum("btc_qty"), 6),
+        "wave_qty": round(_sum("wave_qty"), 4),
+        "usdc_usd": round(_sum("usdc_usd"), 2),
         "collateral_usd_no_haircut": round(total_nh, 2),
         "collateral_usd_haircut": round(total_hc, 2),
         "margin_ratio_no_haircut": (total_nh / total_liab) if total_liab > 0 else None,
         "margin_ratio_haircut": (total_hc / total_liab) if total_liab > 0 else None,
+        "margin_req_usd": round(_sum("margin_req_usd"), 2),
+        "balance_usd": round(_sum("balance_usd"), 2),
         "shortfall_no_haircut": round(max(0.0, total_liab - total_nh), 2),
         "shortfall_haircut": round(max(0.0, total_liab - total_hc), 2),
         "requested_usd": round(total_req, 2) if any_request else None,
@@ -250,6 +313,11 @@ class MarginUpdate(BaseModel):
     portfolio_asset: str
     eth_qty: float = 0.0
     fil_qty: float = 0.0
+    usdc_usd: float = 0.0
+    btc_qty: float = 0.0
+    wave_qty: float = 0.0
+    wave_price: float = 0.0
+    margin_req_tokens: float = 0.0
     requested_usd: float | None = None
     notes: str | None = None
 
@@ -262,8 +330,10 @@ async def upsert_margin(payload: MarginUpdate):
         raise HTTPException(status_code=400, detail="counterparty required")
     if pa not in ("ETH", "FIL"):
         raise HTTPException(status_code=400, detail="portfolio_asset must be ETH or FIL")
-    if payload.eth_qty < 0 or payload.fil_qty < 0:
-        raise HTTPException(status_code=400, detail="qty must be >= 0")
+    if min(payload.eth_qty, payload.fil_qty, payload.usdc_usd,
+           payload.btc_qty, payload.wave_qty, payload.wave_price,
+           payload.margin_req_tokens) < 0:
+        raise HTTPException(status_code=400, detail="quantities must be >= 0")
     if payload.requested_usd is not None and payload.requested_usd < 0:
         raise HTTPException(status_code=400, detail="requested_usd must be >= 0")
 
@@ -271,11 +341,17 @@ async def upsert_margin(payload: MarginUpdate):
     now = datetime.utcnow().isoformat()
     await db.execute(
         """INSERT INTO counterparty_margin
-              (counterparty, portfolio_asset, eth_qty, fil_qty, requested_usd, notes, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+              (counterparty, portfolio_asset, eth_qty, fil_qty, usdc_usd, btc_qty,
+               wave_qty, wave_price, margin_req_tokens, requested_usd, notes, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(counterparty, portfolio_asset) DO UPDATE SET
               eth_qty = excluded.eth_qty,
               fil_qty = excluded.fil_qty,
+              usdc_usd = excluded.usdc_usd,
+              btc_qty = excluded.btc_qty,
+              wave_qty = excluded.wave_qty,
+              wave_price = excluded.wave_price,
+              margin_req_tokens = excluded.margin_req_tokens,
               requested_usd = excluded.requested_usd,
               notes = excluded.notes,
               updated_at = excluded.updated_at""",
@@ -283,6 +359,11 @@ async def upsert_margin(payload: MarginUpdate):
             cp, pa,
             float(payload.eth_qty),
             float(payload.fil_qty),
+            float(payload.usdc_usd),
+            float(payload.btc_qty),
+            float(payload.wave_qty),
+            float(payload.wave_price),
+            float(payload.margin_req_tokens),
             (None if payload.requested_usd is None else float(payload.requested_usd)),
             payload.notes,
             now,
@@ -294,6 +375,11 @@ async def upsert_margin(payload: MarginUpdate):
         "portfolio_asset": pa,
         "eth_qty": float(payload.eth_qty),
         "fil_qty": float(payload.fil_qty),
+        "usdc_usd": float(payload.usdc_usd),
+        "btc_qty": float(payload.btc_qty),
+        "wave_qty": float(payload.wave_qty),
+        "wave_price": float(payload.wave_price),
+        "margin_req_tokens": float(payload.margin_req_tokens),
         "requested_usd": payload.requested_usd,
         "notes": payload.notes,
         "updated_at": now,
@@ -345,6 +431,18 @@ async def collateral_scenario(asset: str = "ETH"):
     rows_for_book = [m for m in margin_rows if m["portfolio_asset"] == a]
     total_eth_qty = sum(m["eth_qty"] for m in rows_for_book)
     total_fil_qty = sum(m["fil_qty"] for m in rows_for_book)
+    total_btc_qty = sum(m["btc_qty"] for m in rows_for_book)
+    total_usdc = sum(m["usdc_usd"] for m in rows_for_book)
+    # WAVE has no price feed — value each row at its stored manual price, in USD.
+    total_wave_usd = sum(m["wave_qty"] * m["wave_price"] for m in rows_for_book)
+
+    # BTC spot is fixed across the ladder (no BTC options book to move it).
+    btc_spot = 0.0
+    if total_btc_qty:
+        try:
+            btc_spot = float(await _client.get_btc_spot_price())
+        except Exception:
+            btc_spot = 0.0
 
     # For each spot in the ladder, sum liability and value the collateral.
     scenarios = []
@@ -362,7 +460,13 @@ async def collateral_scenario(asset: str = "ETH"):
 
         eth_px = s if a == "ETH" else other_spot
         fil_px = s if a == "FIL" else other_spot
-        nh, hc = _haircut_value(total_eth_qty, total_fil_qty, eth_px, fil_px)
+        nh, hc = _haircut_value(
+            {"ETH": total_eth_qty, "FIL": total_fil_qty, "BTC": total_btc_qty, "USDC": total_usdc},
+            {"ETH": eth_px, "FIL": fil_px, "BTC": btc_spot},
+        )
+        # WAVE already in USD; apply its haircut.
+        nh += total_wave_usd
+        hc += total_wave_usd * (1 - HAIRCUTS["WAVE"])
 
         residual_nh = nh - liability
         residual_hc = hc - liability
@@ -389,6 +493,10 @@ async def collateral_scenario(asset: str = "ETH"):
         "haircuts": HAIRCUTS,
         "total_eth_qty": round(total_eth_qty, 4),
         "total_fil_qty": round(total_fil_qty, 4),
+        "total_btc_qty": round(total_btc_qty, 6),
+        "total_usdc_usd": round(total_usdc, 2),
+        "total_wave_usd": round(total_wave_usd, 2),
+        "btc_spot": round(btc_spot, 2),
         "ladder": scenarios,
     }
 
@@ -403,6 +511,225 @@ async def delete_margin(counterparty: str, portfolio_asset: str):
     await db.execute(
         "DELETE FROM counterparty_margin WHERE counterparty = ? COLLATE NOCASE AND portfolio_asset = ? COLLATE NOCASE",
         (cp, pa),
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+# ───────────────────────── Collateral Map ─────────────────────────
+# Matrix of token holdings per (counterparty, asset). USD value = qty × price.
+# Stored in counterparty_collateral. Prices default to live market, overridable
+# per asset via collateral_price.
+
+MAP_ASSETS = ["USDC", "ETH", "FIL", "BTC"]
+MAP_ASSET_LABELS = {"USDC": "USD / USDC", "ETH": "ETH", "FIL": "FIL", "BTC": "BTC"}
+
+
+async def _live_prices() -> dict[str, float]:
+    """Live USD price per collateral asset (USDC is always 1.0)."""
+    out = {"USDC": 1.0, "ETH": 0.0, "FIL": 0.0, "BTC": 0.0}
+    try:
+        out["ETH"] = float(await _client.get_eth_spot_price())
+    except Exception:
+        pass
+    try:
+        out["FIL"] = float(await _client.get_fil_spot_price())
+    except Exception:
+        pass
+    try:
+        out["BTC"] = float(await _client.get_btc_spot_price())
+    except Exception:
+        pass
+    return out
+
+
+async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
+    """Return (effective_prices, manual_overrides, live_prices) for `assets`.
+
+    Effective = manual override if set, else live market (USDC always 1.0).
+    """
+    live = await _live_prices()
+    db = await get_db()
+    cur = await db.execute("SELECT asset, price FROM collateral_price")
+    overrides = {r["asset"].upper(): float(r["price"]) for r in await cur.fetchall()}
+    prices: dict[str, float] = {}
+    for a in assets:
+        if a in overrides:
+            prices[a] = overrides[a]
+        elif a == "USDC":
+            prices[a] = 1.0
+        else:
+            prices[a] = live.get(a, 0.0)
+    return prices, overrides, live
+
+
+async def _liability_by_cp() -> tuple[dict[str, float], dict[str, str]]:
+    """Per-counterparty MtM liability summed across both option books."""
+    eth = await _gather_portfolio("ETH")
+    fil = await _gather_portfolio("FIL")
+    el, ed, _ = _compute_liabilities(eth)
+    fl, fd, _ = _compute_liabilities(fil)
+    liab: dict[str, float] = {}
+    for src in (el, fl):
+        for k, v in src.items():
+            liab[k] = liab.get(k, 0.0) + v
+    disp: dict[str, str] = {}
+    for src in (ed, fd):
+        for k, n in src.items():
+            disp.setdefault(k, n)
+    return liab, disp
+
+
+@router.get("/map")
+async def collateral_map():
+    """Collateral map: USD value of each asset sitting at each counterparty.
+
+    Cells are token quantities (counterparty_collateral); USD = qty × price.
+    Also returns, per counterparty, our MtM liability and the post-haircut
+    balance (surplus) / debit (to post) = haircut collateral − liability.
+    """
+    db = await get_db()
+    cur = await db.execute("SELECT counterparty, asset, qty FROM counterparty_collateral")
+    rows = await cur.fetchall()
+
+    assets = list(MAP_ASSETS)
+    for r in rows:
+        a = (r["asset"] or "").upper()
+        if a and a not in assets:
+            assets.append(a)
+
+    prices, overrides, live = await _effective_prices(assets)
+
+    cps: dict[str, dict] = {}
+    for r in rows:
+        k = r["counterparty"].lower()
+        entry = cps.setdefault(k, {"display": r["counterparty"], "qtys": {}})
+        entry["qtys"][(r["asset"] or "").upper()] = float(r["qty"] or 0)
+
+    liab, liab_disp = await _liability_by_cp()
+    for k, n in liab_disp.items():
+        cps.setdefault(k, {"display": n, "qtys": {}})
+
+    out_cps = []
+    for k, info in cps.items():
+        qtys = {a: float(info["qtys"].get(a, 0) or 0) for a in assets}
+        usd = {a: round(qtys[a] * prices[a], 2) for a in assets}
+        total = round(sum(usd.values()), 2)
+        _nh, hc = _haircut_value(qtys, prices)
+        l = liab.get(k, 0.0)
+        out_cps.append({
+            "counterparty": info["display"],
+            "qtys": qtys,
+            "usd": usd,
+            "total_usd": total,
+            "liability_usd": round(l, 2),
+            "collateral_haircut_usd": round(hc, 2),
+            "balance_usd": round(hc - l, 2),
+        })
+    out_cps.sort(key=lambda c: c["total_usd"], reverse=True)
+
+    asset_totals = {a: round(sum(c["usd"][a] for c in out_cps), 2) for a in assets}
+    grand_total = round(sum(asset_totals.values()), 2)
+
+    return {
+        "assets": assets,
+        "asset_labels": {a: MAP_ASSET_LABELS.get(a, a) for a in assets},
+        "prices": prices,
+        "price_overrides": overrides,
+        "live_prices": live,
+        "haircuts": HAIRCUTS,
+        "counterparties": out_cps,
+        "asset_totals": asset_totals,
+        "grand_total_usd": grand_total,
+        "total_liability_usd": round(sum(liab.values()), 2),
+        "total_balance_usd": round(sum(c["balance_usd"] for c in out_cps), 2),
+    }
+
+
+class MapCell(BaseModel):
+    counterparty: str
+    asset: str
+    qty: float = 0.0
+
+
+@router.put("/map/cell")
+async def upsert_map_cell(payload: MapCell):
+    cp = payload.counterparty.strip()
+    a = payload.asset.strip().upper()
+    if not cp:
+        raise HTTPException(status_code=400, detail="counterparty required")
+    if not a:
+        raise HTTPException(status_code=400, detail="asset required")
+    if payload.qty < 0:
+        raise HTTPException(status_code=400, detail="qty must be >= 0")
+    db = await get_db()
+    now = datetime.utcnow().isoformat()
+    await db.execute(
+        """INSERT INTO counterparty_collateral (counterparty, asset, qty, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(counterparty, asset) DO UPDATE SET
+              qty = excluded.qty, updated_at = excluded.updated_at""",
+        (cp, a, float(payload.qty), now),
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+class PriceUpdate(BaseModel):
+    asset: str
+    price: float | None = None  # null clears the override (revert to live)
+
+
+@router.put("/price")
+async def upsert_price(payload: PriceUpdate):
+    a = payload.asset.strip().upper()
+    if not a:
+        raise HTTPException(status_code=400, detail="asset required")
+    db = await get_db()
+    if payload.price is None:
+        await db.execute("DELETE FROM collateral_price WHERE asset = ? COLLATE NOCASE", (a,))
+    else:
+        if payload.price < 0:
+            raise HTTPException(status_code=400, detail="price must be >= 0")
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            """INSERT INTO collateral_price (asset, price, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(asset) DO UPDATE SET price = excluded.price, updated_at = excluded.updated_at""",
+            (a, float(payload.price), now),
+        )
+    await db.commit()
+    return {"ok": True}
+
+
+class CounterpartyAdd(BaseModel):
+    counterparty: str
+
+
+@router.post("/counterparty")
+async def add_map_counterparty(payload: CounterpartyAdd):
+    cp = payload.counterparty.strip()
+    if not cp:
+        raise HTTPException(status_code=400, detail="counterparty required")
+    db = await get_db()
+    now = datetime.utcnow().isoformat()
+    # A zero USDC row makes the counterparty appear as a column in the map.
+    await db.execute(
+        """INSERT OR IGNORE INTO counterparty_collateral (counterparty, asset, qty, updated_at)
+           VALUES (?, 'USDC', 0, ?)""",
+        (cp, now),
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/counterparty")
+async def delete_map_counterparty(counterparty: str):
+    cp = counterparty.strip()
+    if not cp:
+        raise HTTPException(status_code=400, detail="counterparty required")
+    db = await get_db()
+    await db.execute(
+        "DELETE FROM counterparty_collateral WHERE counterparty = ? COLLATE NOCASE", (cp,)
     )
     await db.commit()
     return {"ok": True}

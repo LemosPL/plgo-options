@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS counterparty_collateral (
 );
 """
 
+# Manual per-asset price overrides for the collateral map. When a row exists,
+# it overrides the live market price for that asset; otherwise the live feed
+# (or 1.0 for USDC) is used.
+COLLATERAL_PRICE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collateral_price (
+    asset TEXT PRIMARY KEY COLLATE NOCASE,
+    price REAL NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 # One row per (counterparty, portfolio_asset). Tracks collateral posted (in
 # ETH and FIL) against that asset's options book, plus the USD figure the
 # counterparty themselves are asking for (for side-by-side comparison).
@@ -116,6 +127,11 @@ CREATE TABLE IF NOT EXISTS counterparty_margin (
     portfolio_asset TEXT NOT NULL COLLATE NOCASE,
     eth_qty REAL NOT NULL DEFAULT 0,
     fil_qty REAL NOT NULL DEFAULT 0,
+    usdc_usd REAL NOT NULL DEFAULT 0,
+    btc_qty REAL NOT NULL DEFAULT 0,
+    wave_qty REAL NOT NULL DEFAULT 0,
+    wave_price REAL NOT NULL DEFAULT 0,
+    margin_req_tokens REAL NOT NULL DEFAULT 0,
     requested_usd REAL,
     notes TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -133,6 +149,10 @@ async def get_db() -> aiosqlite.Connection:
         # Use DELETE journal mode for GCS FUSE compatibility (WAL doesn't sync reliably)
         await _db.execute("PRAGMA journal_mode=DELETE")
         await _db.execute("PRAGMA foreign_keys=ON")
+        # Wait up to 5s for a write lock instead of failing immediately with
+        # "database is locked" (can happen if another process/connection is
+        # mid-write, e.g. a stray dev server or a seed script).
+        await _db.execute("PRAGMA busy_timeout=5000")
     return _db
 
 
@@ -143,6 +163,7 @@ async def init_db():
     await db.execute(AUDIT_SCHEMA)
     await db.execute(MTM_HISTORY_SCHEMA)
     await db.execute(COLLATERAL_SCHEMA)
+    await db.execute(COLLATERAL_PRICE_SCHEMA)
     await db.execute(MARGIN_SCHEMA)
     await db.execute(RECON_HISTORY_SCHEMA)
     await db.commit()
@@ -168,6 +189,24 @@ async def init_db():
         if col_name not in columns:
             logger.info("Migrating: adding %r column to trades table...", col_name)
             await db.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+    await db.commit()
+
+    # Migration: richer collateral on counterparty_margin (USD/USDC cash, BTC,
+    # WAVE token + manual price, and the counterparty's margin requirement in
+    # the book's native token). Existing DBs only had eth_qty/fil_qty.
+    margin_migrations = [
+        ("usdc_usd", "REAL NOT NULL DEFAULT 0"),
+        ("btc_qty", "REAL NOT NULL DEFAULT 0"),
+        ("wave_qty", "REAL NOT NULL DEFAULT 0"),
+        ("wave_price", "REAL NOT NULL DEFAULT 0"),
+        ("margin_req_tokens", "REAL NOT NULL DEFAULT 0"),
+    ]
+    cursor = await db.execute("PRAGMA table_info(counterparty_margin)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    for col_name, col_type in margin_migrations:
+        if col_name not in columns:
+            logger.info("Migrating: adding %r column to counterparty_margin...", col_name)
+            await db.execute(f"ALTER TABLE counterparty_margin ADD COLUMN {col_name} {col_type}")
     await db.commit()
 
     # Auto-import from Excel on first run

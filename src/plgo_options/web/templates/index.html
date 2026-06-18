@@ -1721,84 +1721,78 @@
           <span id="collat-spot-pill" class="collat-spot-pill"></span>
         </div>
         <div class="collat-header-right">
-          <div class="collat-filter-group" role="tablist" aria-label="Filter by portfolio">
-            <button class="collat-filter-pill active" data-filter="all">All books</button>
-            <button class="collat-filter-pill" data-filter="ETH">ETH only</button>
-            <button class="collat-filter-pill" data-filter="FIL">FIL only</button>
-          </div>
           <label class="collat-toggle">
             <input type="checkbox" id="collat-haircut-toggle" checked>
-            <span>Apply haircuts (ETH 10% · FIL 50%)</span>
+            <span>Apply haircuts (ETH 10% · FIL/WAVE 50% · BTC 15% · USDC 0%)</span>
           </label>
-          <button id="btn-collat-refresh" class="btn-secondary collat-refresh-btn" title="Refresh from latest MtM">↻ Refresh</button>
+          <button id="btn-collat-add-cp" class="btn-secondary" title="Add a counterparty column">+ Counterparty</button>
+          <button id="btn-collat-refresh" class="btn-secondary collat-refresh-btn" title="Refresh prices &amp; MtM">↻ Refresh</button>
         </div>
       </div>
 
       <div class="collat-summary-grid">
         <div class="collat-metric">
+          <div class="collat-metric-label">Total Collateral (market)</div>
+          <div class="collat-metric-value" id="collat-total-market">--</div>
+          <div class="collat-metric-sub">USD value at current prices</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Collateral (post-haircut)</div>
+          <div class="collat-metric-value" id="collat-total-haircut">--</div>
+          <div class="collat-metric-sub">haircut-adjusted</div>
+        </div>
+        <div class="collat-metric">
           <div class="collat-metric-label">Liability (our calc)</div>
-          <div class="collat-metric-value" id="collat-liability">--</div>
+          <div class="collat-metric-value" id="collat-total-liability">--</div>
           <div class="collat-metric-sub">Σ max(0, −MtM) USD · BS pricing</div>
         </div>
-        <div class="collat-metric">
-          <div class="collat-metric-label">Collateral Posted</div>
-          <div class="collat-metric-value" id="collat-value">--</div>
-          <div class="collat-metric-sub" id="collat-value-sub"></div>
-        </div>
         <div class="collat-metric collat-metric-ratio">
-          <div class="collat-metric-label">Margin Ratio</div>
-          <div class="collat-metric-value" id="collat-ratio">--</div>
-          <div class="collat-metric-sub">Target ≥ 100%</div>
-        </div>
-        <div class="collat-metric">
-          <div class="collat-metric-label">Shortfall to 100%</div>
-          <div class="collat-metric-value" id="collat-shortfall">--</div>
-          <div class="collat-metric-sub">Additional USD needed</div>
-        </div>
-        <div class="collat-metric collat-metric-compare" id="collat-compare-card" style="display:none">
-          <div class="collat-metric-label">Counterparty Ask</div>
-          <div class="collat-metric-value" id="collat-requested">--</div>
-          <div class="collat-metric-sub" id="collat-diff-sub">Diff vs ours: <span id="collat-diff">--</span></div>
+          <div class="collat-metric-label">Net Balance / Debit</div>
+          <div class="collat-metric-value" id="collat-total-balance">--</div>
+          <div class="collat-metric-sub">+ surplus · − to post</div>
         </div>
       </div>
     </section>
 
     <section class="card">
       <div class="collat-section-header">
-        <h3 class="collat-section-title">Per-counterparty</h3>
-        <div class="collat-section-actions">
-          <button id="btn-collat-add" class="btn-primary collat-add-btn">+ New entry</button>
+        <div>
+          <h3 class="collat-section-title">Collateral Map — USD value by asset × counterparty</h3>
+          <div class="collat-section-sub">Type a token quantity in any cell; USD = qty × price. Edit a price to stress a price move — totals and balance update live. USD/USDC is fixed at 1.</div>
         </div>
       </div>
 
       <div class="collat-table-scroll">
-        <table class="collat-table" id="collat-table">
+        <table class="collat-table collat-map-table" id="collat-map-table">
+          <thead id="collat-map-thead"></thead>
+          <tbody id="collat-map-tbody"></tbody>
+          <tfoot id="collat-map-tfoot"></tfoot>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="collat-section-header">
+        <h3 class="collat-section-title">Balance vs liability — per counterparty</h3>
+      </div>
+      <div class="collat-table-scroll">
+        <table class="collat-table" id="collat-balance-table">
           <thead>
             <tr>
               <th style="text-align:left">Counterparty</th>
-              <th style="text-align:left" class="collat-col-book">Book</th>
-              <th title="Open option positions" class="num">Pos</th>
-              <th class="num">Liability (Ours)</th>
-              <th class="num collat-col-collposted" title="Collateral posted: ETH qty / FIL qty">Posted</th>
-              <th class="num" id="collat-th-coll-usd">Coll USD</th>
-              <th class="num" id="collat-th-ratio">Margin %</th>
-              <th class="num" title="What the counterparty is asking from us">Their Ask</th>
-              <th class="num" title="Our liability − their ask. Negative = they are calling more than our calc.">Diff</th>
-              <th class="num" id="collat-th-shortfall">Shortfall</th>
-              <th class="collat-col-actions"></th>
+              <th class="num">Collateral (market)</th>
+              <th class="num" id="collat-bal-th-coll">Collateral (haircut)</th>
+              <th class="num">Liability (ours)</th>
+              <th class="num" title="Post-haircut collateral − our liability. Positive = surplus balance; negative = a debit we must post.">Balance / Debit</th>
             </tr>
           </thead>
-          <tbody id="collat-tbody"></tbody>
-          <tfoot id="collat-tfoot"></tfoot>
+          <tbody id="collat-balance-tbody"></tbody>
+          <tfoot id="collat-balance-tfoot"></tfoot>
         </table>
       </div>
-
       <div class="collat-help">
-        <strong>How to read this:</strong> each row is one counterparty × options book.
-        <em>Liability (Ours)</em> = Σ max(0, −MtM) on that book using our Black-Scholes calc.
-        <em>Coll USD</em> applies haircuts to ETH/FIL collateral when the toggle above is on.
-        <em>Their Ask</em> is what the counterparty says we owe — enter it via the row's <strong>Edit</strong> button.
-        <em>Diff</em> = Ours − Theirs. <span style="color:var(--red)">Negative</span> means they're calling more collateral than our model says is needed.
+        <strong>How to read this:</strong> the map above is what USD value of each asset sits at each counterparty.
+        <em>Balance / Debit</em> = post-haircut collateral − our MtM liability: <span style="color:var(--green)">positive</span> = surplus we could pull back, <span style="color:var(--red)">negative</span> = a debit we must post. Lower a price in the map to see who flips to a debit on a price drop.
       </div>
     </section>
 
@@ -2014,7 +2008,30 @@
             <input type="number" step="any" min="0" id="collat-modal-fil" placeholder="0">
           </label>
         </div>
+        <div class="collat-form-row">
+          <label class="collat-form-label">USD / USDC cash
+            <input type="number" step="any" min="0" id="collat-modal-usdc" placeholder="0">
+          </label>
+          <label class="collat-form-label">BTC qty
+            <input type="number" step="any" min="0" id="collat-modal-btc" placeholder="0">
+          </label>
+        </div>
+        <div class="collat-form-row">
+          <label class="collat-form-label">WAVE qty
+            <input type="number" step="any" min="0" id="collat-modal-wave" placeholder="0">
+          </label>
+          <label class="collat-form-label">WAVE price (USD)
+            <input type="number" step="any" min="0" id="collat-modal-wave-price" placeholder="no feed — set manually">
+          </label>
+        </div>
         <div class="collat-form-preview" id="collat-modal-preview"></div>
+
+        <div class="collat-form-section">Counterparty margin requirement</div>
+        <div class="collat-form-row">
+          <label class="collat-form-label">Margin (tokens, in book asset)
+            <input type="number" step="any" min="0" id="collat-modal-margin-req" placeholder="0">
+          </label>
+        </div>
 
         <div class="collat-form-section">Counterparty's ask (compare vs our calc)</div>
         <div class="collat-form-row">
@@ -2036,6 +2053,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=53"></script>
+<script src="/static/app.js?v=56"></script>
 </body>
 </html>

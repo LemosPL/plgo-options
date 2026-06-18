@@ -997,7 +997,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
         if (c && c.data) Plotly.Plots.resize(c);
       }, 60);
     }
-    if (pg === "collateral") { collatLoad(); collatLoadScenario(); }
+    if (pg === "collateral") { collatLoad(); }
     // execution is now a subtab inside structurer, not a standalone page
   });
 });
@@ -9244,27 +9244,154 @@ const _collatRatioClass = (r) => {
   if (r >= 0.9) return "collat-ratio-warn";
   return "collat-ratio-bad";
 };
+// Posted-collateral cell: tokens (ETH/FIL/BTC/WAVE) + USD/USDC cash.
+function _collatPostedCell(r) {
+  const parts = [];
+  const ethQ = _collatFmtQty(r.eth_qty, "ETH");
+  const filQ = _collatFmtQty(r.fil_qty, "FIL");
+  if (ethQ) parts.push(`<span class="qty-eth">${ethQ} ETH</span>`);
+  if (filQ) parts.push(`<span class="qty-fil">${filQ} FIL</span>`);
+  if (r.btc_qty) parts.push(`<span class="qty-eth">${Number(r.btc_qty).toLocaleString(undefined, { maximumFractionDigits: 4 })} BTC</span>`);
+  if (r.wave_qty) parts.push(`<span class="qty-fil">${Number(r.wave_qty).toLocaleString(undefined, { maximumFractionDigits: 0 })} WAVE${r.wave_price ? "" : " (no px)"}</span>`);
+  if (r.usdc_usd) parts.push(`<span class="qty-eth">$${Number(r.usdc_usd).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDC</span>`);
+  return parts.length ? `<div class="collat-posted-cell">${parts.join("")}</div>` : `<span class="qty-zero">—</span>`;
+}
+
+let collatMap = null;
 
 async function collatLoad() {
-  const $tbody = document.getElementById("collat-tbody");
-  if ($tbody) $tbody.innerHTML = `<tr class="collat-row-empty"><td colspan="11" style="text-align:center;padding:1rem">Loading…</td></tr>`;
+  const tb = document.getElementById("collat-map-tbody");
+  if (tb) tb.innerHTML = `<tr><td style="padding:1rem;color:var(--muted)">Loading…</td></tr>`;
   try {
-    const data = await get(`/api/collateral/summary?asset=${collatAssetFilter}`);
-    collatLast = data;
-    collatRender();
+    collatMap = await get("/api/collateral/map");
+    collatRenderMap();
   } catch (e) {
-    console.error("Collateral summary load failed:", e);
-    if ($tbody) $tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--red);padding:1rem">Failed to load: ${e.message || e}</td></tr>`;
+    console.error("Collateral map load failed:", e);
+    if (tb) tb.innerHTML = `<tr><td style="padding:1rem;color:var(--red)">Failed to load: ${e.message || e}</td></tr>`;
   }
 }
 
-function collatSetFilter(filter) {
-  collatAssetFilter = filter;
-  document.querySelectorAll(".collat-filter-pill").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.filter === filter);
+function collatRenderMap() {
+  if (!collatMap) return;
+  const haircutOn = document.getElementById("collat-haircut-toggle")?.checked ?? true;
+  const m = collatMap;
+  const assets = m.assets || [];
+  const cps = m.counterparties || [];
+  const prices = m.prices || {};
+  const overrides = m.price_overrides || {};
+  const labels = m.asset_labels || {};
+
+  // Spot pill (live reference prices)
+  const lp = m.live_prices || {};
+  const $pill = document.getElementById("collat-spot-pill");
+  if ($pill) $pill.textContent = `ETH $${(lp.ETH || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · FIL $${(lp.FIL || 0).toFixed(3)} · BTC $${(lp.BTC || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · as of ${new Date().toLocaleTimeString()}`;
+
+  // Summary tiles
+  const totHc = cps.reduce((s, c) => s + (c.collateral_haircut_usd || 0), 0);
+  document.getElementById("collat-total-market").textContent = _collatFmtUsd(m.grand_total_usd);
+  document.getElementById("collat-total-haircut").textContent = _collatFmtUsd(totHc);
+  document.getElementById("collat-total-liability").textContent = _collatFmtUsd(m.total_liability_usd);
+  const $bal = document.getElementById("collat-total-balance");
+  $bal.textContent = `${m.total_balance_usd > 0 ? "+" : ""}${_collatFmtUsd(m.total_balance_usd)}`;
+  $bal.className = "collat-metric-value " + (m.total_balance_usd >= 0 ? "collat-ratio-good" : "collat-ratio-bad");
+
+  // Matrix header: Asset | Price | CP… | Total
+  document.getElementById("collat-map-thead").innerHTML = `<tr>
+    <th style="text-align:left">Asset</th>
+    <th class="num">Price (USD)</th>
+    ${cps.map(c => `<th class="num">${c.counterparty} <button class="collat-del-cp" data-cp="${encodeURIComponent(c.counterparty)}" title="Remove counterparty" style="border:none;background:none;color:var(--muted);cursor:pointer;font-size:.9rem">×</button></th>`).join("")}
+    <th class="num">Total</th>
+  </tr>`;
+
+  // Matrix body: one row per asset
+  document.getElementById("collat-map-tbody").innerHTML = assets.map(a => {
+    const isUsdc = a === "USDC";
+    const overridden = (a in overrides);
+    const priceCell = isUsdc
+      ? `<td class="num">1.00</td>`
+      : `<td class="num"><input type="number" step="any" min="0" class="collat-price-input" data-asset="${a}" value="${prices[a] ?? 0}" title="${overridden ? "manual override — clear to revert to live" : "live price — type to override"}" style="width:90px;${overridden ? "color:var(--accent);font-weight:600" : ""}"></td>`;
+    const cells = cps.map(c => {
+      const qty = c.qtys[a] || 0;
+      const usd = c.usd[a] || 0;
+      return `<td class="num">
+        <input type="number" step="any" min="0" class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" value="${qty || ""}" placeholder="0" style="width:110px">
+        <div style="font-size:.72rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>
+      </td>`;
+    }).join("");
+    const rowTotal = m.asset_totals[a] || 0;
+    return `<tr>
+      <td style="text-align:left"><strong>${labels[a] || a}</strong></td>
+      ${priceCell}
+      ${cells}
+      <td class="num">${rowTotal ? _collatFmtUsd(rowTotal) : "—"}</td>
+    </tr>`;
+  }).join("");
+
+  // Matrix footer: per-CP totals
+  document.getElementById("collat-map-tfoot").innerHTML = `<tr>
+    <td style="text-align:left"><strong>Total</strong></td>
+    <td></td>
+    ${cps.map(c => `<td class="num"><strong>${_collatFmtUsd(c.total_usd)}</strong></td>`).join("")}
+    <td class="num"><strong>${_collatFmtUsd(m.grand_total_usd)}</strong></td>
+  </tr>`;
+
+  // Balance vs liability table
+  document.getElementById("collat-bal-th-coll").textContent = haircutOn ? "Collateral (haircut)" : "Collateral (market)";
+  document.getElementById("collat-balance-tbody").innerHTML = cps.map(c => {
+    const bal = haircutOn ? c.balance_usd : (c.total_usd - c.liability_usd);
+    const balCls = bal > 0 ? "collat-diff-pos" : bal < 0 ? "collat-diff-neg" : "collat-diff-zero";
+    return `<tr>
+      <td style="text-align:left"><strong>${c.counterparty}</strong></td>
+      <td class="num">${_collatFmtUsd(c.total_usd)}</td>
+      <td class="num">${_collatFmtUsd(c.collateral_haircut_usd)}</td>
+      <td class="num">${_collatFmtUsd(c.liability_usd)}</td>
+      <td class="num ${balCls}" style="font-weight:600">${bal > 0 ? "+" : ""}${_collatFmtUsd(bal)}</td>
+    </tr>`;
+  }).join("");
+  const totMarket = cps.reduce((s, c) => s + (c.total_usd || 0), 0);
+  document.getElementById("collat-balance-tfoot").innerHTML = `<tr>
+    <td style="text-align:left"><strong>Total</strong></td>
+    <td class="num"><strong>${_collatFmtUsd(totMarket)}</strong></td>
+    <td class="num"><strong>${_collatFmtUsd(totHc)}</strong></td>
+    <td class="num"><strong>${_collatFmtUsd(m.total_liability_usd)}</strong></td>
+    <td class="num ${m.total_balance_usd >= 0 ? "collat-diff-pos" : "collat-diff-neg"}" style="font-weight:600">${m.total_balance_usd > 0 ? "+" : ""}${_collatFmtUsd(m.total_balance_usd)}</td>
+  </tr>`;
+
+  // Wire inputs
+  document.querySelectorAll("#collat-map-tbody .collat-qty-input").forEach(inp => {
+    inp.addEventListener("change", () => collatSaveCell(decodeURIComponent(inp.dataset.cp), inp.dataset.asset, parseFloat(inp.value) || 0));
   });
-  collatLoad();
-  collatLoadScenario();
+  document.querySelectorAll("#collat-map-tbody .collat-price-input").forEach(inp => {
+    inp.addEventListener("change", () => {
+      const v = inp.value.trim();
+      collatSavePrice(inp.dataset.asset, v === "" ? null : (parseFloat(v) || 0));
+    });
+  });
+  document.querySelectorAll("#collat-map-thead .collat-del-cp").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const cp = decodeURIComponent(btn.dataset.cp);
+      if (confirm(`Remove counterparty "${cp}" and all its collateral?`)) collatDeleteCp(cp);
+    });
+  });
+}
+
+async function collatSaveCell(counterparty, asset, qty) {
+  try { await api("PUT", "/api/collateral/map/cell", { counterparty, asset, qty }); await collatLoad(); }
+  catch (e) { alert("Save failed: " + (e.message || e)); }
+}
+async function collatSavePrice(asset, price) {
+  try { await api("PUT", "/api/collateral/price", { asset, price }); await collatLoad(); }
+  catch (e) { alert("Save failed: " + (e.message || e)); }
+}
+async function collatAddCp() {
+  const name = prompt("Counterparty name:");
+  if (!name || !name.trim()) return;
+  try { await api("POST", "/api/collateral/counterparty", { counterparty: name.trim() }); await collatLoad(); }
+  catch (e) { alert("Add failed: " + (e.message || e)); }
+}
+async function collatDeleteCp(counterparty) {
+  try { await api("DELETE", `/api/collateral/counterparty?counterparty=${encodeURIComponent(counterparty)}`); await collatLoad(); }
+  catch (e) { alert("Delete failed: " + (e.message || e)); }
 }
 
 let collatScenarioData = null;
@@ -9528,7 +9655,7 @@ function collatRender() {
 
   const $tbody = document.getElementById("collat-tbody");
   if (!rows.length) {
-    $tbody.innerHTML = `<tr class="collat-row-empty"><td colspan="11" style="text-align:center;padding:1.5rem">
+    $tbody.innerHTML = `<tr class="collat-row-empty"><td colspan="13" style="text-align:center;padding:1.5rem">
       No counterparties with positions or collateral in this view.
       ${collatAssetFilter !== "all" ? `Try the "All books" filter, or click <strong>+ New entry</strong> to add one.` : ""}
     </td></tr>`;
@@ -9539,14 +9666,16 @@ function collatRender() {
       const short = haircutOn ? r.shortfall_haircut : r.shortfall_no_haircut;
       const ratioCls = _collatRatioClass(ratio);
 
-      const ethQ = _collatFmtQty(r.eth_qty, "ETH");
-      const filQ = _collatFmtQty(r.fil_qty, "FIL");
-      const postedHtml = (!ethQ && !filQ)
-        ? `<span class="qty-zero">—</span>`
-        : `<div class="collat-posted-cell">
-             ${ethQ ? `<span class="qty-eth">${ethQ} ETH</span>` : ``}
-             ${filQ ? `<span class="qty-fil">${filQ} FIL</span>` : ``}
-           </div>`;
+      const postedHtml = _collatPostedCell(r);
+
+      const marginReqHtml = r.margin_req_usd
+        ? _collatFmtUsd(r.margin_req_usd)
+        : `<span class="collat-diff-zero">—</span>`;
+
+      const bal = r.balance_usd;
+      const balHtml = (bal === null || bal === undefined)
+        ? `<span class="collat-diff-zero">—</span>`
+        : `<span class="${bal > 0 ? 'collat-diff-pos' : bal < 0 ? 'collat-diff-neg' : 'collat-diff-zero'}" style="font-weight:600">${bal > 0 ? '+' : ''}${_collatFmtUsd(bal)}</span>`;
 
       const diff = r.diff_usd;
       const diffHtml = (diff === null || diff === undefined)
@@ -9569,12 +9698,16 @@ function collatRender() {
         <td class="num">${postedHtml}</td>
         <td class="num">${_collatFmtUsd(coll)}</td>
         <td class="num ${ratioCls}" style="font-weight:600">${_collatFmtPct(ratio)}</td>
+        <td class="num">${marginReqHtml}</td>
         <td class="num">${requestedHtml}</td>
         <td class="num">${diffHtml}</td>
         <td class="num">${shortHtml}</td>
+        <td class="num">${balHtml}</td>
         <td class="collat-col-actions">
           <button class="collat-edit-btn" data-cp="${encodeURIComponent(r.counterparty)}" data-pa="${r.portfolio_asset}"
                   data-eth="${r.eth_qty}" data-fil="${r.fil_qty}"
+                  data-usdc="${r.usdc_usd}" data-btc="${r.btc_qty}" data-wave="${r.wave_qty}"
+                  data-wavepx="${r.wave_price}" data-marginreq="${r.margin_req_tokens}"
                   data-req="${r.requested_usd ?? ''}" data-notes="${(r.notes || '').replace(/"/g, '&quot;')}">
             Edit
           </button>
@@ -9588,6 +9721,11 @@ function collatRender() {
         portfolio_asset: btn.dataset.pa,
         eth_qty: parseFloat(btn.dataset.eth) || 0,
         fil_qty: parseFloat(btn.dataset.fil) || 0,
+        usdc_usd: parseFloat(btn.dataset.usdc) || 0,
+        btc_qty: parseFloat(btn.dataset.btc) || 0,
+        wave_qty: parseFloat(btn.dataset.wave) || 0,
+        wave_price: parseFloat(btn.dataset.wavepx) || 0,
+        margin_req_tokens: parseFloat(btn.dataset.marginreq) || 0,
         requested_usd: btn.dataset.req ? parseFloat(btn.dataset.req) : null,
         notes: btn.dataset.notes || "",
         existing: true,
@@ -9598,18 +9736,19 @@ function collatRender() {
   // Footer total row
   const $tfoot = document.getElementById("collat-tfoot");
   const totalPosCount = rows.reduce((a, r) => a + (r.position_count || 0), 0);
-  const totalEthQty = rows.reduce((a, r) => a + (r.eth_qty || 0), 0);
-  const totalFilQty = rows.reduce((a, r) => a + (r.fil_qty || 0), 0);
   const ratioCls = _collatRatioClass(totalRatio);
 
-  const totalEthQStr = _collatFmtQty(totalEthQty, "ETH");
-  const totalFilQStr = _collatFmtQty(totalFilQty, "FIL");
-  const totalPostedHtml = (!totalEthQStr && !totalFilQStr)
-    ? `<span class="qty-zero">—</span>`
-    : `<div class="collat-posted-cell">
-         ${totalEthQStr ? `<span class="qty-eth">${totalEthQStr} ETH</span>` : ``}
-         ${totalFilQStr ? `<span class="qty-fil">${totalFilQStr} FIL</span>` : ``}
-       </div>`;
+  const totalPostedHtml = _collatPostedCell({
+    eth_qty: p.eth_qty, fil_qty: p.fil_qty, btc_qty: p.btc_qty,
+    wave_qty: p.wave_qty, wave_price: 1, usdc_usd: p.usdc_usd,
+  });
+
+  const marginReqFootHtml = p.margin_req_usd
+    ? _collatFmtUsd(p.margin_req_usd) : `<span class="collat-diff-zero">—</span>`;
+  const balFoot = p.balance_usd;
+  const balFootHtml = (balFoot === null || balFoot === undefined)
+    ? `<span class="collat-diff-zero">—</span>`
+    : `<span class="${balFoot > 0 ? 'collat-diff-pos' : balFoot < 0 ? 'collat-diff-neg' : 'collat-diff-zero'}" style="font-weight:600">${balFoot > 0 ? '+' : ''}${_collatFmtUsd(balFoot)}</span>`;
 
   const portfolioReq = p.requested_usd;
   const portfolioDiff = p.diff_usd;
@@ -9631,9 +9770,11 @@ function collatRender() {
     <td class="num">${totalPostedHtml}</td>
     <td class="num">${_collatFmtUsd(totalColl)}</td>
     <td class="num ${ratioCls}">${_collatFmtPct(totalRatio)}</td>
+    <td class="num">${marginReqFootHtml}</td>
     <td class="num">${reqFootHtml}</td>
     <td class="num">${diffFootHtml}</td>
     <td class="num">${shortFootHtml}</td>
+    <td class="num">${balFootHtml}</td>
     <td></td>
   </tr>`;
 
@@ -9665,6 +9806,11 @@ function collatOpenModal(prefill = {}) {
   document.getElementById("collat-modal-portfolio").value = prefill.portfolio_asset || "ETH";
   document.getElementById("collat-modal-eth").value = prefill.eth_qty || "";
   document.getElementById("collat-modal-fil").value = prefill.fil_qty || "";
+  document.getElementById("collat-modal-usdc").value = prefill.usdc_usd || "";
+  document.getElementById("collat-modal-btc").value = prefill.btc_qty || "";
+  document.getElementById("collat-modal-wave").value = prefill.wave_qty || "";
+  document.getElementById("collat-modal-wave-price").value = prefill.wave_price || "";
+  document.getElementById("collat-modal-margin-req").value = prefill.margin_req_tokens || "";
   document.getElementById("collat-modal-requested").value = (prefill.requested_usd ?? "");
   document.getElementById("collat-modal-notes").value = prefill.notes || "";
 
@@ -9686,13 +9832,17 @@ function collatCloseModal() {
 
 function collatUpdateModalPreview() {
   const spots = (collatLast && collatLast.spots) || {};
-  const haircuts = (collatLast && collatLast.haircuts) || { ETH: 0.10, FIL: 0.50 };
-  const eth = parseFloat(document.getElementById("collat-modal-eth").value) || 0;
-  const fil = parseFloat(document.getElementById("collat-modal-fil").value) || 0;
-  const ethUsd = eth * (spots.ETH || 0);
-  const filUsd = fil * (spots.FIL || 0);
-  const totalNh = ethUsd + filUsd;
-  const totalHc = ethUsd * (1 - haircuts.ETH) + filUsd * (1 - haircuts.FIL);
+  const haircuts = (collatLast && collatLast.haircuts) || { ETH: 0.10, FIL: 0.50, BTC: 0.15, WAVE: 0.50, USDC: 0.0 };
+  const num = (id) => parseFloat(document.getElementById(id).value) || 0;
+  const legs = [
+    [num("collat-modal-eth") * (spots.ETH || 0), haircuts.ETH ?? 0.10],
+    [num("collat-modal-fil") * (spots.FIL || 0), haircuts.FIL ?? 0.50],
+    [num("collat-modal-btc") * (spots.BTC || 0), haircuts.BTC ?? 0.15],
+    [num("collat-modal-wave") * num("collat-modal-wave-price"), haircuts.WAVE ?? 0.50],
+    [num("collat-modal-usdc"), haircuts.USDC ?? 0.0],
+  ];
+  const totalNh = legs.reduce((s, [v]) => s + v, 0);
+  const totalHc = legs.reduce((s, [v, h]) => s + v * (1 - h), 0);
   const $preview = document.getElementById("collat-modal-preview");
   if (!$preview) return;
   if (totalNh === 0) {
@@ -9705,14 +9855,20 @@ function collatUpdateModalPreview() {
 async function collatSaveModal() {
   const cp = document.getElementById("collat-modal-cp").value.trim();
   const pa = document.getElementById("collat-modal-portfolio").value;
-  const eth = parseFloat(document.getElementById("collat-modal-eth").value) || 0;
-  const fil = parseFloat(document.getElementById("collat-modal-fil").value) || 0;
+  const num = (id) => parseFloat(document.getElementById(id).value) || 0;
+  const eth = num("collat-modal-eth");
+  const fil = num("collat-modal-fil");
+  const usdc = num("collat-modal-usdc");
+  const btc = num("collat-modal-btc");
+  const wave = num("collat-modal-wave");
+  const wavePrice = num("collat-modal-wave-price");
+  const marginReq = num("collat-modal-margin-req");
   const reqRaw = document.getElementById("collat-modal-requested").value.trim();
   const requested = reqRaw === "" ? null : parseFloat(reqRaw);
   const notes = document.getElementById("collat-modal-notes").value.trim() || null;
 
   if (!cp) { alert("Counterparty required"); return; }
-  if (eth < 0 || fil < 0) { alert("Quantities must be ≥ 0"); return; }
+  if (Math.min(eth, fil, usdc, btc, wave, wavePrice, marginReq) < 0) { alert("Quantities must be ≥ 0"); return; }
   if (requested !== null && (!isFinite(requested) || requested < 0)) { alert("Requested USD must be ≥ 0"); return; }
 
   try {
@@ -9721,6 +9877,11 @@ async function collatSaveModal() {
       portfolio_asset: pa,
       eth_qty: eth,
       fil_qty: fil,
+      usdc_usd: usdc,
+      btc_qty: btc,
+      wave_qty: wave,
+      wave_price: wavePrice,
+      margin_req_tokens: marginReq,
       requested_usd: requested,
       notes,
     });
@@ -9746,24 +9907,31 @@ async function collatDeleteModal() {
 (function initCollateralUi() {
   const setup = () => {
     const refresh = document.getElementById("btn-collat-refresh");
-    if (refresh) refresh.addEventListener("click", () => { collatLoad(); collatLoadScenario(); });
+    if (refresh) refresh.addEventListener("click", () => collatLoad());
 
     const toggle = document.getElementById("collat-haircut-toggle");
-    if (toggle) toggle.addEventListener("change", () => { collatRender(); collatRenderScenario(); });
+    if (toggle) toggle.addEventListener("change", () => collatRenderMap());
 
-    document.querySelectorAll(".collat-filter-pill").forEach(btn => {
-      btn.addEventListener("click", () => collatSetFilter(btn.dataset.filter));
-    });
+    const addCp = document.getElementById("btn-collat-add-cp");
+    if (addCp) addCp.addEventListener("click", () => collatAddCp());
 
-    const addBtn = document.getElementById("btn-collat-add");
-    if (addBtn) addBtn.addEventListener("click", () => collatOpenModal());
+    // Auto-refresh live prices while the Collateral tab is open. Skips when a
+    // map input is focused so it never clobbers a value you're typing.
+    setInterval(() => {
+      const page = document.getElementById("page-collateral");
+      if (!page || !page.classList.contains("active")) return;
+      const ae = document.activeElement;
+      if (ae && ae.closest && ae.closest("#collat-map-table")) return;
+      collatLoad();
+    }, 30000);
 
     document.getElementById("collat-modal-close")?.addEventListener("click", collatCloseModal);
     document.getElementById("btn-collat-modal-cancel")?.addEventListener("click", collatCloseModal);
     document.getElementById("btn-collat-modal-save")?.addEventListener("click", collatSaveModal);
     document.getElementById("btn-collat-modal-delete")?.addEventListener("click", collatDeleteModal);
 
-    ["collat-modal-eth", "collat-modal-fil"].forEach(id => {
+    ["collat-modal-eth", "collat-modal-fil", "collat-modal-usdc", "collat-modal-btc",
+     "collat-modal-wave", "collat-modal-wave-price"].forEach(id => {
       document.getElementById(id)?.addEventListener("input", collatUpdateModalPreview);
     });
 
