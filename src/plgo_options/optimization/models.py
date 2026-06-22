@@ -48,6 +48,8 @@ class Candidate:
     theta: float
     vega: float
     bs_price_usd: float
+    existing_qty: float = 0.0
+    unwind_only: bool = False
 
 @dataclass(frozen=True)
 class SpreadCandidate:

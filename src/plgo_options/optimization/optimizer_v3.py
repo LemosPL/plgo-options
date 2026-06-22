@@ -10,6 +10,7 @@ from matplotlib import figure
 from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode
+from .collateral_optimization import CollateralOptimization
 from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
 from .math_utils import bs_vec
@@ -91,10 +92,15 @@ class OptimizerV3(BaseOptimizer):
 
         roll_positions = []
         for p in self.positions:
-            dte = int(getattr(p, "days_remaining", 0) or 0)
             opt = str(getattr(p, "opt", "") or "")
-
-            if opt in ("C", "P", "F") and dte <= roll_dte_threshold:
+            if opt not in ("C", "P", "F"):
+                continue
+            try:
+                expiry_dt = datetime.combine(p.expiry_date, datetime.min.time())
+                dte = (expiry_dt - self.today).days
+            except Exception:
+                dte = int(getattr(p, "days_remaining", 0) or 0)
+            if dte <= roll_dte_threshold:
                 roll_positions.append(p)
 
         return roll_positions
@@ -625,6 +631,289 @@ class OptimizerV3(BaseOptimizer):
 
         return np.round(raw_ticks / step) * step
 
+    def run_lp(self,
+                 lam_factor: float = 0.5,
+                 mu_factor: float = 0.0,
+                 target_expiry: str | None = None,
+                 unwind_discount: float = 0.2,
+                 new_position_penalty: float = 0.04,
+                 is_replay: bool = False,
+                 roll_dte_threshold: int | None = 7,
+                 counterparties: list[str] | None = None,
+                 asset: str | None = None,
+                 max_exposure_by_counterparty: dict | None = None,
+            ):
+        if asset is not None:
+            self.asset = asset.upper()
+            if self.asset == "ETH":
+                self.asset_precision = 0
+            elif self.asset == "FIL":
+                self.asset_precision = 2
+            else:
+                raise ValueError(f"Unsupported asset: {self.asset}")
+        print(f"asset: {self.asset}")
+
+        target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder,
+                                                         current_spot=self.spot)
+
+        held_positions = self.get_held_positions()
+        roll_positions = self._get_roll_positions(roll_dte_threshold)
+        roll_position_ids = {id(p) for p in roll_positions}
+
+        option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
+
+        option_smile = self._build_option_smile()
+        if option_smile is None:
+            return {"status": "no_smile", "message": "No valid vol surface slices available."}
+
+        # Inject candidates for held positions whose counterparty is not in the requested list,
+        # so they can be unwound even when counterparties=["Flowdesk", "KeyRock"].
+        option_leg_keys = {(c.expiry_code, c.strike, c.opt, c.counterparty) for c in option_legs}
+        held_expiries = set()
+        for p in self.positions:
+            if id(p) in roll_position_ids:
+                continue
+            exp_code = getattr(p, "expiry_code", "") or ""
+            if not exp_code:
+                parts = p.instrument.split("-")
+                exp_code = parts[1] if len(parts) >= 4 else ""
+            if not exp_code:
+                continue
+            held_expiries.add(exp_code)
+            cp = getattr(p, "counterparty", "")
+            strike = float(getattr(p, "strike", 0.0) or 0.0)
+            opt = str(getattr(p, "opt", "") or "")
+            if opt not in ("C", "P") or (exp_code, strike, opt, cp) in option_leg_keys:
+                continue
+            try:
+                expiry_dt = datetime.combine(p.expiry_date, datetime.min.time())
+                dte = (expiry_dt - self.today).days
+                if dte < 0:
+                    continue
+                sigma = option_smile.compute_vol(expiry_dt, strike)
+                expiry_date_str = p.expiry_date.strftime("%Y-%m-%d")
+                c = self.create_candidate(self.spot, strike, 0., sigma, opt, exp_code, expiry_date_str, dte, cp)
+                c.unwind_only = True
+                option_legs.append(c)
+                option_leg_keys.add((exp_code, strike, opt, cp))
+            except Exception as e:
+                print(f"  [inject candidate error] {exp_code} {strike} {opt} {cp}: {e}")
+                continue
+
+
+        for c in option_legs:
+            c.existing_qty = held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0)
+        candidates = option_legs
+
+        n_with_existing = sum(1 for c in candidates if c.existing_qty != 0.0)
+        n_unwind_only = sum(1 for c in candidates if c.unwind_only)
+        print(f"candidates: {len(candidates)} total, {n_with_existing} with existing_qty≠0, {n_unwind_only} unwind_only")
+
+        target_strikes = np.asarray(target_profile.index, dtype=float)
+        target_payoff_arr = np.asarray(target_profile["Payoff($)"], dtype=float)
+
+        spot_arr = np.array(self.spot_ladder, dtype=float)
+        target_interp = np.interp(spot_arr, target_strikes, target_payoff_arr)
+
+        if target_expiry is not None:
+            spot_weights = self._risk_neutral_spot_weights(
+                spot_arr=spot_arr,
+                option_smile=option_smile,
+                target_expiry=target_expiry,
+            )
+        else:
+            spot_weights = np.ones_like(spot_arr, dtype=float)
+        spot_weights /= np.sum(spot_weights)
+
+        base_payoff = np.zeros_like(spot_arr)
+        for p in self.positions:
+            if id(p) in roll_position_ids:
+                continue
+            bs_value = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
+            if np.isnan(bs_value.sum()):
+                continue
+            base_payoff += bs_value
+
+        raw_residual = target_interp - base_payoff
+        cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
+        adjusted_base_payoff = base_payoff + cash_shift
+        residual = target_interp - adjusted_base_payoff
+
+        c_payoffs = [self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile) for c in candidates]
+
+        lp = CollateralOptimization(self.asset, counterparties)
+        lp_result = lp.optimize(
+            spot_arr, spot_weights, residual, candidates, c_payoffs,
+            lam_factor=lam_factor,
+            mu_factor=mu_factor,
+            max_exposure_by_counterparty=max_exposure_by_counterparty,
+        )
+
+        if lp_result is None:
+            return {"status": "lp_failed", "message": "LP solver did not find an optimal solution."}
+
+        net_qty = lp_result["net_qty"]
+
+        # "Before" = full portfolio from held_positions (all expiries, all counterparties).
+        # Prices come from candidates where available, fall back to 0.
+        price_by_key: dict[tuple, float] = {
+            (c.expiry_code, c.strike, c.opt, c.counterparty): float(c.bs_price_usd or 0.0)
+            for c in candidates
+        }
+        before_coll: dict[str, float] = {}
+        for (exp_code, strike, opt, cp), qty in held_positions.items():
+            price = price_by_key.get((exp_code, strike, opt, cp), 0.0)
+            before_coll[cp] = before_coll.get(cp, 0.0) + abs(qty) * price
+
+        # "After" = existing positions adjusted by LP net_qty, plus any new positions opened.
+        existing_qty_arr = np.array([float(getattr(c, "existing_qty", 0.0) or 0.0) for c in candidates])
+        after_coll: dict[str, float] = {}
+        for c, eq, nq in zip(candidates, existing_qty_arr, net_qty):
+            cp = getattr(c, "counterparty", "")
+            price = float(c.bs_price_usd or 0.0)
+            after_coll[cp] = after_coll.get(cp, 0.0) + abs(eq + nq) * price
+
+        all_cps = sorted(set(before_coll) | set(after_coll))
+        print("=== Collateral by counterparty ===")
+        for cp in all_cps:
+            b = before_coll.get(cp, 0.0)
+            a = after_coll.get(cp, 0.0)
+            print(f"  {cp:20s}  before={b:>12,.0f}  after={a:>12,.0f}  change={a - b:>+12,.0f}")
+
+        roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
+        trades = list(roll_unwind_trades)
+        fitted_payoff = adjusted_base_payoff.copy()
+
+        for j, (qty, c) in enumerate(zip(net_qty, candidates)):
+            rounded_qty = int(np.round(qty))
+            if rounded_qty == 0:
+                continue
+
+            est_cost = self._estimate_candidate_trade_cost(
+                c=c,
+                qty=rounded_qty,
+                held_positions=held_positions,
+                unwind_discount=unwind_discount,
+                new_position_penalty=new_position_penalty,
+            )
+            instrument_name = self._candidate_instrument_name(c)
+            fitted_payoff += rounded_qty * np.array(c_payoffs[j])
+
+            for leg, leg_qty, strategy in self._candidate_trade_legs(c, rounded_qty):
+                leg_instrument_name = (
+                    f"{self.asset}-PERPETUAL" if leg.opt == "F"
+                    else f"{self.asset}-{leg.expiry_code}-{np.round(leg.strike, self.asset_precision)}-{leg.opt}"
+                )
+                trades.append({
+                    "counterparty": leg.counterparty,
+                    "instrument": leg_instrument_name,
+                    "strategy": strategy,
+                    "strategy_instrument": instrument_name,
+                    "expiry": leg.expiry_date,
+                    "dte": leg.dte,
+                    "strike": leg.strike,
+                    "opt": leg.opt,
+                    "qty": leg_qty,
+                    "side": "Buy" if leg_qty > 0 else "Sell",
+                    "iv_pct": round(float(leg.iv_pct or 0.0), 1),
+                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                    "vega": round(float(leg.vega or 0.0), 4),
+                    "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
+                    "is_unwind": bool(rounded_qty * c.existing_qty < 0),
+                    "unwind_qty": abs(int(leg_qty)) if rounded_qty * c.existing_qty < 0 else 0,
+                    "new_qty": 0 if rounded_qty * c.existing_qty < 0 else abs(int(leg_qty)),
+                    "estimated_cost": round(float(est_cost), 2),
+                    "normalized_benefit": 0.0,
+                    "net_benefit": 0.0,
+                    "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
+                    "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
+                    "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+                })
+
+        trades = self._aggregate_trade_legs(trades)
+        premium_summary = self._trade_premium_summary(trades)
+        roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
+        replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
+
+        horizons = sorted(set(self.chart_horizons + [0, 90]))
+        before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(horizons, spot_arr, trades)
+
+        fitted_payoff_cash_shift = float(
+            np.sum(spot_weights * (adjusted_base_payoff - fitted_payoff)) / np.sum(spot_weights)
+        )
+        fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
+
+        sum_weights = np.sum(spot_weights)
+        weighted_fit_error_before = float(
+            np.sum(spot_weights * (adjusted_base_payoff - target_interp) ** 2) / sum_weights
+        )
+        weighted_fit_error_after = float(
+            np.sum(spot_weights * (fitted_payoff_comparable - target_interp) ** 2) / sum_weights
+        )
+        print(f"fit error ratio: {weighted_fit_error_after / max(weighted_fit_error_before, 1e-12):.3f}")
+
+        if is_replay:
+            spot = self.spot
+            x = np.log(spot_arr / spot)
+
+            spot_ticks = self.nice_spot_ticks(spot)
+            spot_ticks = spot_ticks[(spot_ticks >= spot_arr.min()) & (spot_ticks <= spot_arr.max())]
+            tick_positions = np.log(spot_ticks / spot)
+
+            if spot >= 100:
+                spot_tick_labels = [f"{s:,.0f}" for s in spot_ticks]
+            elif spot >= 10:
+                spot_tick_labels = [f"{s:,.1f}" for s in spot_ticks]
+            elif spot >= 1:
+                spot_tick_labels = [f"{s:,.2f}" for s in spot_ticks]
+            else:
+                spot_tick_labels = [f"{s:,.3f}" for s in spot_ticks]
+
+            fig, axes = plt.subplots(3, 1, sharex=True)
+            axes[0].plot(x, adjusted_base_payoff, label="Adjusted Base Payoff")
+            axes[0].plot(x, target_interp, label="Target Payoff")
+            axes[0].plot(x, fitted_payoff_comparable, label="Fitted Payoff, cash-adjusted")
+            axes[0].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[0].legend()
+
+            axes[1].plot(x, fitted_payoff_comparable - adjusted_base_payoff, label="Fitted - Adjusted Base")
+            axes[1].axvline(0, color="gray", linestyle="--", linewidth=1)
+            axes[1].legend()
+            axes[1].set_xticks(tick_positions)
+            axes[1].set_xticklabels(spot_tick_labels)
+
+            axes[2].plot(x, spot_weights, label="Weights")
+            axes[2].legend()
+            plt.show()
+
+        return {
+            "status": "ok",
+            "asset": self.asset,
+            "target_expiry": target_expiry,
+            "optimizer_converged": True,
+            "spot": round(float(self.spot), 2),
+            "cash_shift": round(float(cash_shift), 2),
+            "fitted_payoff_cash_shift": round(float(fitted_payoff_cash_shift), 2),
+            "premium_summary": premium_summary,
+            "net_premium_generated": premium_summary["net_premium_generated"],
+            "fit_error_before": round(weighted_fit_error_before, 2),
+            "fit_error_after": round(weighted_fit_error_after, 2),
+            "spot_ladder": spot_arr.tolist(),
+            "chart_horizons": horizons,
+            "target_payoff": np.round(target_interp, 2).tolist(),
+            "before_payoff": np.round(adjusted_base_payoff, 2).tolist(),
+            "after_payoff": np.round(fitted_payoff_comparable, 2).tolist(),
+            "raw_after_payoff": np.round(fitted_payoff, 2).tolist(),
+            "raw_before_payoff": np.round(base_payoff, 2).tolist(),
+            "before": {"payoff_by_horizon": before_payoff_by_horizon},
+            "after": {"payoff_by_horizon": after_payoff_by_horizon},
+            "roll_unwind_trades": roll_unwind_output,
+            "replacement_trades": replacement_output,
+            "trades": trades,
+            "candidates_evaluated": len(candidates),
+        }
+
+
     def run(self,
                  lam_factor: float = 0.5,
                  target_expiry: str | None = None,
@@ -645,7 +934,6 @@ class OptimizerV3(BaseOptimizer):
                 self.asset_precision = 2
             else:
                 raise ValueError(f"Unsupported asset: {self.asset}")
-
         print(f"asset: {self.asset}")
 
         selected_counterparties = {
@@ -658,6 +946,7 @@ class OptimizerV3(BaseOptimizer):
                 p for p in self.positions
                 if getattr(p, "counterparty", "") in selected_counterparties
             ]
+
         print(lam_factor)
         print(target_expiry)
         print(unwind_discount)
@@ -679,16 +968,10 @@ class OptimizerV3(BaseOptimizer):
         roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
         print(f"roll unwind trades: {len(roll_unwind_trades)}")
 
-        option_legs = self._build_candidates(
-            target_expiry=target_expiry,
-            include_itm=is_roll_mode
-        )
+        option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=is_roll_mode)
         spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
         straddle_candidates = self._build_straddle_candidates(option_legs, target_expiry=target_expiry)
-        iron_condor_candidates = self._build_iron_condor_candidates(
-            option_legs,
-            target_expiry=target_expiry,
-        )
+        iron_condor_candidates = self._build_iron_condor_candidates(option_legs, target_expiry=target_expiry)
         candidates = option_legs + spread_candidates + straddle_candidates# + iron_condor_candidates
 
         '''
@@ -809,22 +1092,14 @@ class OptimizerV3(BaseOptimizer):
                 if is_itm:
                     lams[i] *= 2.0
 
-            curve = self._candidate_curve(
-                c=c,
-                spot_arr=spot_arr,
-                option_smile=option_smile,
-            )
-
+            curve = self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile)
             curves.append(curve)
             weighted_curve = strike_weights[i] * curve
             A_cols.append(curve)#weighted_curve)
             meta.append(c)
 
         if not A_cols:
-            return {
-                "status": "no_fit_candidates",
-                "message": "No call/put candidates available for payoff fitting.",
-            }
+            return {"status": "no_fit_candidates", "message": "No candidates available for payoff fitting."}
 
         A = np.column_stack(A_cols)
         lasso = GeneralizedLasso()

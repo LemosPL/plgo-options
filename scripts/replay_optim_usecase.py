@@ -34,7 +34,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260616_172255_ALL_FIL.json")
+        path = Path("../data/optimization_snapshots/usecases/20260622_154459_ALL_ETH.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -58,7 +58,8 @@ def main() -> None:
     print(len(trades))
     print(f"trades: {len(trades or [])}")
     for trade in trades:
-        print(trade["instrument"], trade["qty"])
+        kind = "unwind" if trade.get("is_unwind") else "new"
+        print(trade["instrument"], trade["qty"], trade.get("counterparty", ""), kind)
     # print(np.array(trades, dtype=object))
 
 if __name__ == "__main__":

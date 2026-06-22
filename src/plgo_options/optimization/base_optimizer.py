@@ -159,6 +159,9 @@ class BaseOptimizer:
             held_keys_by_expiry[datetime.strptime(exp_code, "%d%b%y")].add((exp_code, strike, opt, counterparty))
         held_keys_by_expiry = dict(sorted(held_keys_by_expiry.items(), key=lambda kv: kv[0]))
 
+        if counterparties is None:
+            counterparties = ["Deribit"]
+
         tt = 0
         for smile in matching_smiles:
             expiry_code = smile["expiry_code"]
@@ -166,7 +169,6 @@ class BaseOptimizer:
             dte = (datetime.strptime(expiry_date, "%Y-%m-%d") - self.today).days
             strikes = smile["strikes"]
             ivs = smile["ivs"]
-            counterparty = "Deribit"
 
             for strike, iv_pct in zip(strikes, ivs):
                 if strike < strike_lo or strike > strike_hi:
@@ -182,8 +184,9 @@ class BaseOptimizer:
                         elif opt == "P" and (strike > S or strike < strike_lo):
                             continue
 
-                    candidates.append(self.create_candidate(S, strike, 0.0, sigma, opt,
-                                                            expiry_code, expiry_date, dte, counterparty))
+                    for counterparty in counterparties:
+                        c = self.create_candidate(S, strike, 0., sigma, opt, expiry_code, expiry_date, dte, counterparty)
+                        candidates.append(c)
 
             expiry = datetime.strptime(expiry_code, "%d%b%y")
             while list(held_keys_by_expiry.keys())[tt] <= expiry and tt < len(held_keys_by_expiry.keys())-1:
