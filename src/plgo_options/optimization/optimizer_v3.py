@@ -86,7 +86,7 @@ class OptimizerV3(BaseOptimizer):
             return signed_qty * (spot_arr - strike)
         return np.zeros_like(spot_arr)
 
-    def _get_roll_positions(self, roll_dte_threshold: int | None) -> list[Position]:
+    def _get_roll_positions(self, roll_dte_threshold: int | None, roll_itm_only: bool = False) -> list[Position]:
         if roll_dte_threshold is None:
             return []
 
@@ -100,8 +100,14 @@ class OptimizerV3(BaseOptimizer):
                 dte = (expiry_dt - self.today).days
             except Exception:
                 dte = int(getattr(p, "days_remaining", 0) or 0)
-            if dte <= roll_dte_threshold:
-                roll_positions.append(p)
+            if dte > roll_dte_threshold:
+                continue
+            if roll_itm_only and opt in ("C", "P"):
+                strike = float(getattr(p, "strike", 0.0) or 0.0)
+                is_itm = (opt == "C" and strike < self.spot) or (opt == "P" and strike > self.spot)
+                if not is_itm:
+                    continue
+            roll_positions.append(p)
 
         return roll_positions
 
@@ -636,11 +642,14 @@ class OptimizerV3(BaseOptimizer):
                  mu_factor: float = 0.0,
                  bid_ask_atm_pct: float = 0.03,
                  bid_ask_min_delta: float = 0.05,
+                 min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
+                 roll_itm_only: bool = False,
+                 collateral_budget_pct: float | None = None,
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
                  max_exposure_by_counterparty: dict | None = None,
@@ -659,7 +668,7 @@ class OptimizerV3(BaseOptimizer):
                                                          current_spot=self.spot)
 
         held_positions = self.get_held_positions()
-        roll_positions = self._get_roll_positions(roll_dte_threshold)
+        roll_positions = self._get_roll_positions(roll_dte_threshold, roll_itm_only=roll_itm_only)
         roll_position_ids = {id(p) for p in roll_positions}
 
         option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
@@ -743,6 +752,22 @@ class OptimizerV3(BaseOptimizer):
 
         c_payoffs = [self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile) for c in candidates]
 
+        # Gross collateral cap: sum(|final_qty| × price) per counterparty ≤ current × (1 + budget).
+        # budget=0.0 → no increase allowed; budget=-0.1 → must shrink by 10%.
+        max_gross_exposure_by_counterparty: dict | None = None
+        if collateral_budget_pct is not None:
+            cand_gross: dict[str, float] = {}
+            for c in candidates:
+                cp = getattr(c, "counterparty", "")
+                price = float(c.bs_price_usd or 0.0)
+                eq = float(getattr(c, "existing_qty", 0.0) or 0.0)
+                cand_gross[cp] = cand_gross.get(cp, 0.0) + abs(eq) * price
+            max_gross_exposure_by_counterparty = {
+                cp: gross * (1.0 + collateral_budget_pct)
+                for cp, gross in cand_gross.items() if gross > 0
+            }
+            print(f"  gross collateral caps: { {cp: f'{v:,.0f}' for cp, v in max_gross_exposure_by_counterparty.items()} }")
+
         lp = CollateralOptimization(self.asset, counterparties)
         lp_result = lp.optimize(
             spot_arr, spot_weights, residual, candidates, c_payoffs,
@@ -750,7 +775,9 @@ class OptimizerV3(BaseOptimizer):
             mu_factor=mu_factor,
             bid_ask_atm_pct=bid_ask_atm_pct,
             bid_ask_min_delta=bid_ask_min_delta,
+            min_trade_delta=min_trade_delta,
             max_exposure_by_counterparty=max_exposure_by_counterparty,
+            max_gross_exposure_by_counterparty=max_gross_exposure_by_counterparty,
         )
 
         if lp_result is None:
@@ -933,6 +960,7 @@ class OptimizerV3(BaseOptimizer):
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
                  roll_dte_threshold: int | None = 7,
+                 roll_itm_only: bool = False,
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
             ):
@@ -972,7 +1000,7 @@ class OptimizerV3(BaseOptimizer):
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder, current_spot=self.spot)
 
         held_positions = self.get_held_positions()
-        roll_positions = self._get_roll_positions(roll_dte_threshold)
+        roll_positions = self._get_roll_positions(roll_dte_threshold, roll_itm_only=roll_itm_only)
         roll_position_ids = {id(p) for p in roll_positions}
         is_roll_mode = len(roll_positions) > 0
         

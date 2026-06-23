@@ -20,13 +20,18 @@ class CollateralOptimization:
         mu_factor=0.0,
         bid_ask_atm_pct=0.03,
         bid_ask_min_delta=0.05,
+        min_trade_delta=0.10,
         max_exposure_by_counterparty=None,
+        max_gross_exposure_by_counterparty=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
 
         existing_qty = np.array([float(getattr(c, "existing_qty", 0.0) or 0.0) for c in candidates])
         unwind_only = np.array([bool(getattr(c, "unwind_only", False)) for c in candidates])
+        c_deltas = np.array([abs(float(getattr(c, "delta", 0.5) or 0.5)) for c in candidates])
+        # Candidates below min_trade_delta are too illiquid to trade: freeze their bounds at 0.
+        tradeable = c_deltas >= min_trade_delta
 
         prob = pulp.LpProblem("CollateralOptimization", pulp.LpMinimize)
 
@@ -35,7 +40,8 @@ class CollateralOptimization:
                 f"buy_qty_{j}",
                 lowBound=0,
                 upBound=(
-                    0.0 if (unwind_only[j] and existing_qty[j] >= 0)   # long unwind-only: no new buying
+                    0.0 if not tradeable[j]                              # below liquidity threshold
+                    else 0.0 if (unwind_only[j] and existing_qty[j] >= 0)   # long unwind-only: no new buying
                     else float(-existing_qty[j]) if existing_qty[j] < 0  # short: cover only
                     else None
                 ),
@@ -48,7 +54,8 @@ class CollateralOptimization:
                 f"sell_qty_{j}",
                 lowBound=0,
                 upBound=(
-                    float(existing_qty[j]) if existing_qty[j] > 0      # long: unwind only
+                    0.0 if not tradeable[j]                              # below liquidity threshold
+                    else float(existing_qty[j]) if existing_qty[j] > 0  # long: unwind only
                     else 0.0 if (unwind_only[j] and existing_qty[j] <= 0)  # short unwind-only: no new shorting
                     else None
                 ),
@@ -74,9 +81,8 @@ class CollateralOptimization:
 
         c_prices = np.array([max(float(getattr(c, "bs_price_usd", 0.0) or 0.0), 1e-8) for c in candidates])
         # Delta-based bid-ask spread: wider for lower-delta options, same formula for all candidates.
-        # bid_ask_pct(δ) = bid_ask_atm_pct / (2 × |δ|), floored at min_delta to cap the spread.
+        # bid_ask_pct(δ) = bid_ask_atm_pct / (2 × |δ|), floored at bid_ask_min_delta to cap the spread.
         # Deep ITM options (|δ| → 1) naturally get tighter spreads (they behave like forwards).
-        c_deltas = np.array([abs(float(getattr(c, "delta", 0.5) or 0.5)) for c in candidates])
         c_deltas_floored = np.maximum(c_deltas, bid_ask_min_delta)
         bid_ask_pct = bid_ask_atm_pct / (2.0 * c_deltas_floored)
         c_costs = bid_ask_pct * c_prices
@@ -89,18 +95,23 @@ class CollateralOptimization:
 
         profile_error = pulp.lpSum(float(spot_weights[i]) * abs_error_vars[i] for i in range(n_spots))
         trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
+        # Use c_costs (bid_ask_pct × price) so holding cost and trading cost share the same scale.
+        # Since effective_mu < 1 always, holding cost < trading cost for every candidate,
+        # so the LP never unwinds purely for collateral — only when profile improvement covers
+        # the residual net cost (1 − effective_mu) × bid_ask_pct × price × qty.
         collateral_cost = pulp.lpSum(
-            effective_mu * float(c_prices[j]) * abs_net_pos_vars[j] for j in range(n_candidates)
+            effective_mu * float(c_costs[j]) * abs_net_pos_vars[j] for j in range(n_candidates)
         )
         prob += lam_factor * profile_error + trading_cost + collateral_cost
 
-        # Per-counterparty net notional exposure constraints (existing + net new <= max)
-        if max_exposure_by_counterparty:
-            cp_indices = {}
-            for j, c in enumerate(candidates):
-                cp = getattr(c, "counterparty", "")
-                cp_indices.setdefault(cp, []).append(j)
+        # Build cp → candidate index map (shared by both constraint types below).
+        cp_indices: dict[str, list[int]] = {}
+        for j, c in enumerate(candidates):
+            cp = getattr(c, "counterparty", "")
+            cp_indices.setdefault(cp, []).append(j)
 
+        # Per-counterparty signed net notional constraint (existing + net new <= max).
+        if max_exposure_by_counterparty:
             for cp, max_exp in max_exposure_by_counterparty.items():
                 indices = cp_indices.get(cp, [])
                 if not indices:
@@ -112,6 +123,18 @@ class CollateralOptimization:
                         for j in indices
                     ) <= float(max_exp),
                     f"collateral_{cp}",
+                )
+
+        # Per-counterparty gross notional constraint: sum(|final_qty| × price) <= cap.
+        # Uses abs_net_pos_vars (already linearised above), so no extra binary variables needed.
+        if max_gross_exposure_by_counterparty:
+            for cp, max_gross in max_gross_exposure_by_counterparty.items():
+                indices = cp_indices.get(cp, [])
+                if not indices:
+                    continue
+                prob += (
+                    pulp.lpSum(abs_net_pos_vars[j] * float(c_prices[j]) for j in indices) <= float(max_gross),
+                    f"gross_collateral_{cp}",
                 )
 
         self._solve_problem(prob, "PULP_CBC_CMD")
@@ -134,14 +157,15 @@ class CollateralOptimization:
         _notional_traded = float(np.sum(c_prices * np.abs(net_qty)))
         _trading_cost_val = float(np.sum(c_costs * (buy_qty + sell_qty)))
         _net_pos = existing_qty + net_qty
-        _coll_cost_val = float(np.sum(effective_mu * c_prices * np.abs(_net_pos)))
+        _coll_cost_val = float(np.sum(effective_mu * c_costs * np.abs(_net_pos)))
         print(f"  LP  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
               f"  notional_traded={_notional_traded:,.0f}"
               f"  trading_cost={_trading_cost_val:,.0f} ({100*_trading_cost_val/max(_notional_traded,1):.1f}% of notional)"
               f"  collateral_cost={_coll_cost_val:,.0f}  (effective_mu={effective_mu:.3f})")
         _n_unwind = int(np.sum((net_qty * existing_qty < 0) & (np.abs(net_qty) > 0.5)))
         _n_new = int(np.sum((existing_qty == 0) & (np.abs(net_qty) > 0.5)))
-        print(f"  LP trades  unwind={_n_unwind}  new={_n_new}")
+        _n_frozen = int(np.sum(~tradeable))
+        print(f"  LP trades  unwind={_n_unwind}  new={_n_new}  frozen_illiquid={_n_frozen} (|delta|<{min_trade_delta})")
 
         return {
             "net_qty": net_qty,

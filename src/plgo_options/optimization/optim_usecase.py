@@ -22,6 +22,7 @@ class OptimizerRunParams:
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
+    roll_itm_only: bool = False
     is_replay: bool = False
     counterparties: list[str] | None = None
 
@@ -131,11 +132,12 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        lam_factor = 3.
-        mu_factor = 1.0
+        lam_factor = 0.2
+        mu_factor = 5.3
 
-        result = optimizer.run_lp(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=3,
-                                  lam_factor=lam_factor, mu_factor=mu_factor, counterparties=["Flowdesk", "KeyRock"])
+        result = optimizer.run_lp(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, roll_itm_only=True,
+                                  lam_factor=lam_factor, mu_factor=mu_factor, counterparties=["Flowdesk", "KeyRock"],
+                                  collateral_budget_pct=0.0)
         #result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, lam_factor=lam_factor)#, counterparties=["Flowdesk"])
 
         print(f"roll_unwind_trades: {len(result.get('roll_unwind_trades', []))}")
