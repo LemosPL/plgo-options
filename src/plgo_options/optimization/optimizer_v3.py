@@ -634,6 +634,8 @@ class OptimizerV3(BaseOptimizer):
     def run_lp(self,
                  lam_factor: float = 0.5,
                  mu_factor: float = 0.0,
+                 bid_ask_atm_pct: float = 0.03,
+                 bid_ask_min_delta: float = 0.05,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
@@ -746,6 +748,8 @@ class OptimizerV3(BaseOptimizer):
             spot_arr, spot_weights, residual, candidates, c_payoffs,
             lam_factor=lam_factor,
             mu_factor=mu_factor,
+            bid_ask_atm_pct=bid_ask_atm_pct,
+            bid_ask_min_delta=bid_ask_min_delta,
             max_exposure_by_counterparty=max_exposure_by_counterparty,
         )
 
@@ -831,6 +835,14 @@ class OptimizerV3(BaseOptimizer):
                 })
 
         trades = self._aggregate_trade_legs(trades)
+
+        lp_trades = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
+        total_notional = sum(abs(t.get("qty", 0)) * float(t.get("bs_price_usd", 0) or 0) for t in lp_trades)
+        total_est_cost = sum(float(t.get("estimated_cost", 0) or 0) for t in lp_trades)
+        print(f"=== Trading cost estimate ===")
+        print(f"  notional traded : {total_notional:>14,.0f}")
+        print(f"  estimated cost  : {total_est_cost:>14,.0f}  ({100*total_est_cost/max(total_notional,1):.2f}% of notional)")
+
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]

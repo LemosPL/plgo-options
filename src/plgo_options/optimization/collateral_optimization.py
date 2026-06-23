@@ -18,6 +18,8 @@ class CollateralOptimization:
         c_payoffs,
         lam_factor=1.0,
         mu_factor=0.0,
+        bid_ask_atm_pct=0.03,
+        bid_ask_min_delta=0.05,
         max_exposure_by_counterparty=None,
     ):
         n_spots = len(spot_ladder)
@@ -70,13 +72,14 @@ class CollateralOptimization:
             prob += abs_net_pos_vars[j] >= net_pos_j, f"abs_net_pos_pos_{j}"
             prob += abs_net_pos_vars[j] >= -net_pos_j, f"abs_net_pos_neg_{j}"
 
-        c_vegas = np.array([abs(float(getattr(c, "vega", 0.0) or 0.0)) for c in candidates])
-        max_vega = float(np.max(c_vegas)) if np.any(c_vegas > 0) else 1.0
         c_prices = np.array([max(float(getattr(c, "bs_price_usd", 0.0) or 0.0), 1e-8) for c in candidates])
-        vega_penalty = np.where(c_vegas > 0, (max_vega / np.maximum(c_vegas, 1e-12)) ** 2, 1.0)
-        # Unwind-only candidates are already held: skip vega_penalty (it can be huge for near-expiry
-        # or far OTM options) so the LP isn't artificially deterred from closing them.
-        c_costs = np.where(unwind_only, c_prices, vega_penalty * c_prices)
+        # Delta-based bid-ask spread: wider for lower-delta options, same formula for all candidates.
+        # bid_ask_pct(δ) = bid_ask_atm_pct / (2 × |δ|), floored at min_delta to cap the spread.
+        # Deep ITM options (|δ| → 1) naturally get tighter spreads (they behave like forwards).
+        c_deltas = np.array([abs(float(getattr(c, "delta", 0.5) or 0.5)) for c in candidates])
+        c_deltas_floored = np.maximum(c_deltas, bid_ask_min_delta)
+        bid_ask_pct = bid_ask_atm_pct / (2.0 * c_deltas_floored)
+        c_costs = bid_ask_pct * c_prices
 
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.
         # effective_mu → 1 as mu_factor → ∞, so the LP never unwinds purely for collateral
@@ -128,12 +131,14 @@ class CollateralOptimization:
 
         # Objective breakdown
         _profile_err_before = float(np.sum(np.array(spot_weights) * np.abs(residual_payoff)))
+        _notional_traded = float(np.sum(c_prices * np.abs(net_qty)))
         _trading_cost_val = float(np.sum(c_costs * (buy_qty + sell_qty)))
         _net_pos = existing_qty + net_qty
         _coll_cost_val = float(np.sum(effective_mu * c_prices * np.abs(_net_pos)))
-        print(f"  LP objective  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
-              f"  trading_cost={_trading_cost_val:,.0f}  collateral_cost={_coll_cost_val:,.0f}"
-              f"  (effective_mu={effective_mu:.3f})")
+        print(f"  LP  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
+              f"  notional_traded={_notional_traded:,.0f}"
+              f"  trading_cost={_trading_cost_val:,.0f} ({100*_trading_cost_val/max(_notional_traded,1):.1f}% of notional)"
+              f"  collateral_cost={_coll_cost_val:,.0f}  (effective_mu={effective_mu:.3f})")
         _n_unwind = int(np.sum((net_qty * existing_qty < 0) & (np.abs(net_qty) > 0.5)))
         _n_new = int(np.sum((existing_qty == 0) & (np.abs(net_qty) > 0.5)))
         print(f"  LP trades  unwind={_n_unwind}  new={_n_new}")
