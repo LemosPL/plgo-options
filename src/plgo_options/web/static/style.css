@@ -1267,3 +1267,93 @@ select { margin-bottom: .5rem; }
 .collat-table tr.collat-scenario-breakeven td {
   border-top: 2px dashed var(--orange);
 }
+
+/* ── Deals / Risk page ─────────────────────────────────────── */
+.deals-layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 1rem;
+  margin-top: 1rem;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .deals-layout { grid-template-columns: 1fr; }
+}
+
+.deals-list {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  padding-right: .25rem;
+}
+.deals-empty {
+  color: var(--muted);
+  font-size: .85rem;
+  padding: 1rem;
+  text-align: center;
+}
+
+.deal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .7rem .8rem;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.deal-card:hover { border-color: var(--accent); }
+.deal-card.selected { border-color: var(--accent); background: var(--hover-bg); }
+
+.deal-card-top {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: .5rem; margin-bottom: .35rem;
+}
+.deal-card-cpty { font-weight: 700; font-size: .9rem; color: var(--text); }
+.deal-badge {
+  font-size: .65rem; text-transform: uppercase; letter-spacing: .04em;
+  padding: .15rem .4rem; border-radius: 4px; white-space: nowrap;
+  background: rgba(88,166,255,.15); color: var(--accent); border: 1px solid rgba(88,166,255,.3);
+}
+.deal-card-meta {
+  display: flex; justify-content: space-between; gap: .5rem;
+  font-size: .72rem; color: var(--muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.deal-card-pop { font-weight: 700; }
+.deal-pop-good { color: var(--green); }
+.deal-pop-mid  { color: var(--orange); }
+.deal-pop-bad  { color: var(--red); }
+
+.deals-detail { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+.deals-legs-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.deals-legs-table th, .deals-legs-table td {
+  padding: .4rem .5rem; text-align: right; border-bottom: 1px solid var(--border);
+  font-family: 'SF Mono', 'Fira Code', monospace; white-space: nowrap;
+}
+.deals-legs-table th {
+  color: var(--muted); font-weight: 600; text-transform: uppercase;
+  font-size: .65rem; letter-spacing: .04em; font-family: inherit;
+}
+.deals-legs-table td.lt { text-align: left; }
+.deals-legs-table tr.leg-closed td { opacity: .45; text-decoration: line-through; }
+.deals-legs-table tr.leg-closed td.keep-strike { text-decoration: none; }
+.num-pos { color: var(--green); }
+.num-neg { color: var(--red); }
+
+.suggestion-item {
+  display: flex; justify-content: space-between; align-items: center; gap: .6rem;
+  padding: .55rem .7rem; border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: .5rem; background: var(--bg);
+}
+.suggestion-item .sug-text { font-size: .8rem; color: var(--text); }
+.suggestion-item .sug-sub {
+  font-size: .7rem; color: var(--muted);
+  font-family: 'SF Mono', 'Fira Code', monospace; margin-top: .15rem;
+}
+.deals-whatif-banner {
+  font-size: .78rem; padding: .5rem .7rem; border-radius: var(--radius);
+  background: rgba(88,166,255,.08); border: 1px solid rgba(88,166,255,.25);
+  color: var(--text); margin-bottom: .6rem;
+}

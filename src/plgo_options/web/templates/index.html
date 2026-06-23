@@ -31,6 +31,11 @@
       Portfolio P&amp;L
       <span class="nav-badge" id="nav-badge-portfolio"></span>
     </li>
+    <li class="nav-item" data-page="deals">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 100 14A7 7 0 008 1zM2 8a6 6 0 1112 0A6 6 0 012 8z"/><path d="M8 3.5a.5.5 0 01.5.5v4l3 1.8a.5.5 0 01-.5.86L7.7 8.6A.5.5 0 017.5 8.2V4a.5.5 0 01.5-.5z"/><path d="M1.5 8.5a.5.5 0 01.5.5 6 6 0 003.2 5.3"/></svg>
+      Deals / Risk
+      <span class="nav-badge" id="nav-badge-deals"></span>
+    </li>
     <li class="nav-item" data-page="pricing">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 16A8 8 0 108 0a8 8 0 000 16zm.25-11.25v1.5a.75.75 0 01-1.5 0v-1.5a.75.75 0 011.5 0zm0 4v3.5a.75.75 0 01-1.5 0v-3.5a.75.75 0 011.5 0z"/></svg>
       Pricing
@@ -486,6 +491,42 @@
         </table>
       </div>
     </section>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Deals / Risk                                           -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-deals" class="page">
+
+    <section class="card">
+      <div class="pf-toolbar">
+        <h2 style="margin:0">Deals &amp; Risk Analysis</h2>
+        <div class="pf-toolbar-spacer"></div>
+        <span id="deals-meta" class="risk-sub-item" style="color:var(--muted)"></span>
+        <label class="toggle-label" style="margin:0">
+          <input type="checkbox" id="deals-include-expired"> Include Expired
+        </label>
+        <button id="btn-deals-refresh" class="btn-primary" style="width:auto">Refresh</button>
+      </div>
+      <p style="margin:.5rem 0 0; font-size:.8rem; color:var(--muted)">
+        Each deal is one multi-leg structure (grouped by counterparty &amp; trade date). Select a deal to see its
+        payoff profile, where price is likely to land (probability distribution), and which legs you could
+        close at ~zero cost to improve the profile.
+      </p>
+    </section>
+
+    <div class="deals-layout">
+      <!-- Left: deal list -->
+      <div id="deals-list" class="deals-list">
+        <div class="deals-empty">Loading deals…</div>
+      </div>
+
+      <!-- Right: detail -->
+      <div id="deals-detail" class="deals-detail">
+        <div class="deals-empty">Select a deal on the left to analyse it.</div>
+      </div>
+    </div>
+
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -2053,6 +2094,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=56"></script>
+<script src="/static/app.js?v=57"></script>
 </body>
 </html>

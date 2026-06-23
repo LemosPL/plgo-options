@@ -897,6 +897,7 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
+    dealsLoaded = false;
     sbLoaded = false;
     pfData = null;
 
@@ -981,6 +982,13 @@ document.querySelectorAll(".nav-item").forEach(item => {
       }, 50);
     }
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
+    if (pg === "deals" && !dealsLoaded) dealsInit();
+    if (pg === "deals") {
+      setTimeout(() => {
+        const dc = document.getElementById("deals-payoff-chart");
+        if (dc && dc.data) Plotly.Plots.resize(dc);
+      }, 50);
+    }
     if (pg === "roll" && !rollLoaded && !isFil) rollInit();
     if (pg === "structurer" && !sbLoaded) sbInit();
     if (pg === "volcurve" && !vcLoaded) vcInit();
@@ -9946,3 +9954,408 @@ async function collatDeleteModal() {
     setup();
   }
 })();
+
+// ════════════════════════════════════════════════════════════
+// DEALS / RISK PAGE
+// ════════════════════════════════════════════════════════════
+let dealsLoaded = false;
+let dealsData = null;          // full /api/deals response
+let dealsSelectedId = null;    // currently-selected deal id
+let dealsClosed = new Set();   // leg ids marked to close (what-if)
+
+const fmtUsd = (v) => {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const n = Number(v);
+  const a = Math.abs(n);
+  let s;
+  if (a >= 1e6) s = (n / 1e6).toFixed(2) + "M";
+  else if (a >= 1e3) s = (n / 1e3).toFixed(1) + "k";
+  else s = n.toFixed(0);
+  return "$" + s;
+};
+const fmtPct1 = (v) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(0) + "%";
+const dealAsset = () => currentAsset;
+
+async function dealsInit() {
+  dealsLoaded = true;
+  const incExp = document.getElementById("deals-include-expired");
+  const $refresh = document.getElementById("btn-deals-refresh");
+  if ($refresh && !$refresh._wired) {
+    $refresh._wired = true;
+    $refresh.addEventListener("click", () => loadDeals());
+    incExp?.addEventListener("change", () => loadDeals());
+  }
+  await loadDeals();
+}
+
+async function loadDeals() {
+  const list = document.getElementById("deals-list");
+  const detail = document.getElementById("deals-detail");
+  list.innerHTML = `<div class="deals-empty">Loading deals…</div>`;
+  detail.innerHTML = `<div class="deals-empty">Select a deal on the left to analyse it.</div>`;
+  const incExp = document.getElementById("deals-include-expired")?.checked ? "true" : "false";
+  try {
+    dealsData = await get(`/api/deals?asset=${dealAsset()}&include_expired=${incExp}`);
+  } catch (e) {
+    list.innerHTML = `<div class="deals-empty">Failed to load deals: ${e.message}</div>`;
+    return;
+  }
+  const n = dealsData.deals.length;
+  const meta = document.getElementById("deals-meta");
+  if (meta) meta.textContent = `${n} deal${n === 1 ? "" : "s"} · spot ${fmtStrike(dealsData.spot)}`;
+  renderDealList();
+  // Auto-select the first deal (or keep prior selection if still present).
+  const keep = dealsData.deals.find(d => d.id === dealsSelectedId);
+  selectDeal(keep ? keep.id : (dealsData.deals[0]?.id || null));
+}
+
+function popClass(p) {
+  if (p === null || p === undefined) return "";
+  if (p >= 0.66) return "deal-pop-good";
+  if (p >= 0.33) return "deal-pop-mid";
+  return "deal-pop-bad";
+}
+
+function renderDealList() {
+  const list = document.getElementById("deals-list");
+  if (!dealsData.deals.length) {
+    list.innerHTML = `<div class="deals-empty">No deals found for ${dealAsset()}.</div>`;
+    return;
+  }
+  list.innerHTML = "";
+  dealsData.deals.forEach(d => {
+    const card = document.createElement("div");
+    card.className = "deal-card" + (d.id === dealsSelectedId ? " selected" : "");
+    card.dataset.id = d.id;
+    const pop = d.prob_profit;
+    card.innerHTML = `
+      <div class="deal-card-top">
+        <span class="deal-card-cpty">${d.counterparty || "—"}</span>
+        <span class="deal-badge">${d.strategy}</span>
+      </div>
+      <div class="deal-card-meta">
+        <span>${d.trade_date} · ${d.n_legs} legs · ${d.days_to_expiry}d</span>
+        <span class="deal-card-pop ${popClass(pop)}">P ${fmtPct1(pop)}</span>
+      </div>
+      <div class="deal-card-meta" style="margin-top:.2rem">
+        <span>max +${fmtUsd(d.max_profit)} / ${fmtUsd(d.max_loss)}</span>
+        <span>MTM ${fmtUsd(d.mtm)}</span>
+      </div>`;
+    card.addEventListener("click", () => selectDeal(d.id));
+    list.appendChild(card);
+  });
+}
+
+function selectDeal(id) {
+  dealsSelectedId = id;
+  dealsClosed = new Set();
+  document.querySelectorAll(".deal-card").forEach(c =>
+    c.classList.toggle("selected", c.dataset.id === id));
+  renderDealDetail();
+}
+
+// Recompute payoff + risk metrics for the current deal given a set of legs
+// marked to close. Closing a leg replaces its expiry payoff with the cash
+// realised today (its premium + current MTM), shifting the curve by a constant.
+function dealMetrics(deal, closedSet) {
+  const grid = dealsData.grid;
+  const mass = deal.prob_mass;
+  const after = new Array(grid.length).fill(0);
+  let shift = 0;        // P&L locked in from closed legs (premium + close cash)
+  let netCloseCash = 0; // market cash transacted now (cost-to-close metric)
+  deal.legs.forEach(leg => {
+    if (closedSet.has(leg.id)) {
+      shift += (leg.premium_usd || 0) + (leg.close_cash || 0);
+      netCloseCash += (leg.close_cash || 0);
+    } else {
+      const p = leg.payoff;
+      for (let i = 0; i < grid.length; i++) after[i] += p[i];
+    }
+  });
+  for (let i = 0; i < after.length; i++) after[i] += shift;
+  let maxP = -Infinity, maxL = Infinity;
+  for (const v of after) { if (v > maxP) maxP = v; if (v < maxL) maxL = v; }
+  let probProfit = null, expected = null;
+  if (mass) {
+    probProfit = 0; expected = 0;
+    for (let i = 0; i < after.length; i++) {
+      if (after[i] > 0) probProfit += mass[i];
+      expected += after[i] * mass[i];
+    }
+  }
+  return { after, maxP, maxL, probProfit, expected, netCloseCash, be: beCrossings(grid, after) };
+}
+
+function beCrossings(grid, payoff) {
+  const out = [];
+  for (let i = 0; i < grid.length - 1; i++) {
+    const y0 = payoff[i], y1 = payoff[i + 1];
+    if (y0 * y1 < 0) {
+      const x0 = grid[i], x1 = grid[i + 1];
+      out.push(x0 + (x1 - x0) * (-y0) / (y1 - y0));
+    }
+  }
+  return out;
+}
+
+function renderDealDetail() {
+  const detail = document.getElementById("deals-detail");
+  const deal = dealsData.deals.find(d => d.id === dealsSelectedId);
+  if (!deal) { detail.innerHTML = `<div class="deals-empty">Select a deal.</div>`; return; }
+
+  const base = dealMetrics(deal, new Set());
+  const wi = dealMetrics(deal, dealsClosed);
+  const hasWhatIf = dealsClosed.size > 0;
+
+  const greekRows = `
+    <div class="risk-metric"><span class="risk-label">P(profit)</span><span class="risk-value ${popClass(wi.probProfit)}">${fmtPct1(wi.probProfit)}</span></div>
+    <div class="risk-metric"><span class="risk-label">Expected P&L</span><span class="risk-value" style="color:${(wi.expected||0)>=0?'var(--green)':'var(--red)'}">${fmtUsd(wi.expected)}</span></div>
+    <div class="risk-metric"><span class="risk-label">Max Profit</span><span class="risk-value">${fmtUsd(wi.maxP)}</span></div>
+    <div class="risk-metric"><span class="risk-label">Max Loss</span><span class="risk-value" style="color:var(--red)">${fmtUsd(wi.maxL)}</span></div>
+    <div class="risk-metric"><span class="risk-label">Breakeven</span><span class="risk-value" style="font-size:.95rem">${wi.be.length ? wi.be.map(b => fmtStrike(b)).join(" / ") : "—"}</span></div>
+    <div class="risk-metric"><span class="risk-label">Net Credit</span><span class="risk-value" style="color:${deal.net_credit>=0?'var(--green)':'var(--red)'}">${fmtUsd(deal.net_credit)}</span></div>
+    <div class="risk-metric"><span class="risk-label">&Delta;</span><span class="risk-value" style="color:var(--text)">${deal.greeks.delta.toFixed(1)}</span></div>
+    <div class="risk-metric"><span class="risk-label">&Theta;/day</span><span class="risk-value" style="color:var(--text)">${fmtUsd(deal.greeks.theta)}</span></div>
+    <div class="risk-metric"><span class="risk-label">&nu; /1%</span><span class="risk-value" style="color:var(--text)">${fmtUsd(deal.greeks.vega)}</span></div>
+    <div class="risk-metric"><span class="risk-label">ATM IV</span><span class="risk-value" style="color:var(--text)">${deal.atm_iv_pct}%</span></div>`;
+
+  const whatifBanner = hasWhatIf ? `
+    <div class="deals-whatif-banner">
+      <b>What-if:</b> closing ${dealsClosed.size} leg(s) ·
+      net cash to do it: <b style="color:${Math.abs(wi.netCloseCash) < zeroCostTol(deal) ? 'var(--green)' : 'var(--orange)'}">${fmtUsd(wi.netCloseCash)}</b>
+      ${wi.netCloseCash >= 0 ? "(you receive)" : "(you pay)"} ·
+      max loss ${fmtUsd(base.maxL)} → <b>${fmtUsd(wi.maxL)}</b> ·
+      P(profit) ${fmtPct1(base.probProfit)} → <b>${fmtPct1(wi.probProfit)}</b>
+      <button id="btn-deals-reset-whatif" class="btn-secondary" style="width:auto;margin-left:.6rem;padding:.15rem .5rem">Reset</button>
+    </div>` : "";
+
+  detail.innerHTML = `
+    <section class="card">
+      <h2>${deal.counterparty} · ${deal.strategy} <span style="color:var(--muted);font-weight:400">— ${deal.strategy_desc} · exp ${deal.expiry}</span></h2>
+      <div class="risk-grid">${greekRows}</div>
+    </section>
+
+    <section class="card">
+      ${whatifBanner}
+      <div id="deals-payoff-chart" class="chart-container" style="min-height:420px"></div>
+    </section>
+
+    <section class="card">
+      <div class="pf-toolbar" style="margin-bottom:.6rem">
+        <h2 style="margin:0">Legs — tick to close (what-if)</h2>
+        <div class="pf-toolbar-spacer"></div>
+        <button id="btn-deals-suggest" class="btn-primary" style="width:auto">Suggest zero-cost improvements</button>
+      </div>
+      <table class="deals-legs-table">
+        <thead><tr>
+          <th></th><th class="lt">Leg</th><th>Strike</th><th>Qty</th>
+          <th>IV</th><th>Premium</th><th>MTM / Close</th>
+        </tr></thead>
+        <tbody id="deals-legs-body"></tbody>
+      </table>
+      <div id="deals-suggestions" style="margin-top:.8rem"></div>
+    </section>`;
+
+  renderLegsTable(deal);
+  drawDealChart(deal, base, wi);
+
+  document.getElementById("btn-deals-reset-whatif")?.addEventListener("click", () => {
+    dealsClosed = new Set(); renderDealDetail();
+  });
+  document.getElementById("btn-deals-suggest").addEventListener("click", () => suggestZeroCost(deal));
+}
+
+function renderLegsTable(deal) {
+  const body = document.getElementById("deals-legs-body");
+  body.innerHTML = "";
+  deal.legs.forEach(leg => {
+    const tr = document.createElement("tr");
+    if (dealsClosed.has(leg.id)) tr.className = "leg-closed";
+    const sideColor = leg.side === "Long" ? "var(--green)" : "var(--red)";
+    tr.innerHTML = `
+      <td class="keep-strike"><input type="checkbox" class="deal-leg-cb" data-id="${leg.id}" ${dealsClosed.has(leg.id) ? "checked" : ""}></td>
+      <td class="lt" style="color:${sideColor}">${leg.side} ${leg.opt} ${fmtStrike(leg.strike)} <span style="color:var(--muted)">${leg.expiry}</span></td>
+      <td class="keep-strike">${fmtStrike(leg.strike)}</td>
+      <td>${leg.qty.toLocaleString()}</td>
+      <td>${leg.iv_pct}%</td>
+      <td class="${leg.premium_usd>=0?'num-pos':'num-neg'}">${fmtUsd(leg.premium_usd)}</td>
+      <td class="${leg.close_cash>=0?'num-pos':'num-neg'}">${fmtUsd(leg.close_cash)}</td>`;
+    body.appendChild(tr);
+  });
+  body.querySelectorAll(".deal-leg-cb").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const id = Number(cb.dataset.id);
+      if (cb.checked) dealsClosed.add(id); else dealsClosed.delete(id);
+      renderDealDetail();
+    });
+  });
+}
+
+// Tolerance for "zero cost": small relative to the deal's gross close value.
+function zeroCostTol(deal) {
+  const gross = deal.legs.reduce((s, l) => s + Math.abs(l.close_cash || 0), 0);
+  return Math.max(gross * 0.05, 5000);
+}
+
+// Brute-force search over leg subsets for a near-zero-cash close that improves
+// the profile (raises max loss / lifts P(profit)). Falls back to greedy when a
+// deal has many legs.
+function suggestZeroCost(deal) {
+  const out = document.getElementById("deals-suggestions");
+  const legs = deal.legs;
+  const n = legs.length;
+  const base = dealMetrics(deal, new Set());
+  const tol = zeroCostTol(deal);
+  const cands = [];
+
+  const evalSet = (ids) => {
+    if (!ids.size) return;
+    const m = dealMetrics(deal, ids);
+    if (Math.abs(m.netCloseCash) > tol) return;
+    const lossGain = m.maxL - base.maxL;       // positive = less downside
+    const popGain = (m.probProfit ?? 0) - (base.probProfit ?? 0);
+    // Require a real improvement on at least one axis.
+    if (lossGain <= 1 && popGain <= 1e-4) return;
+    cands.push({ ids: [...ids], lossGain, popGain, netCloseCash: m.netCloseCash, maxL: m.maxL, probProfit: m.probProfit });
+  };
+
+  if (n <= 14) {
+    for (let mask = 1; mask < (1 << n); mask++) {
+      const ids = new Set();
+      for (let i = 0; i < n; i++) if (mask & (1 << i)) ids.add(legs[i].id);
+      evalSet(ids);
+    }
+  } else {
+    // Greedy: add the single best zero-cost leg repeatedly.
+    let cur = new Set();
+    for (let step = 0; step < n; step++) {
+      let best = null;
+      for (const leg of legs) {
+        if (cur.has(leg.id)) continue;
+        const trial = new Set(cur); trial.add(leg.id);
+        const m = dealMetrics(deal, trial);
+        if (Math.abs(m.netCloseCash) > tol) continue;
+        const score = (m.maxL - base.maxL) + (m.probProfit ?? 0) * 1e5;
+        if (!best || score > best.score) best = { id: leg.id, score };
+      }
+      if (!best) break;
+      cur.add(best.id);
+      evalSet(new Set(cur));
+    }
+  }
+
+  // Rank by downside reduction, then P(profit) gain, then cheapest cash.
+  cands.sort((a, b) => (b.lossGain - a.lossGain) || (b.popGain - a.popGain) || (Math.abs(a.netCloseCash) - Math.abs(b.netCloseCash)));
+  // De-dup identical id-sets, keep top 5.
+  const seen = new Set(); const top = [];
+  for (const c of cands) {
+    const key = c.ids.slice().sort((x, y) => x - y).join(",");
+    if (seen.has(key)) continue; seen.add(key);
+    top.push(c); if (top.length >= 5) break;
+  }
+
+  if (!top.length) {
+    out.innerHTML = `<div class="deals-empty">No zero-cost closing set found that improves this profile (within ±${fmtUsd(tol)} cash). The structure may already be efficient, or improving it would require paying premium.</div>`;
+    return;
+  }
+
+  out.innerHTML = `<div style="font-size:.78rem;color:var(--muted);margin-bottom:.5rem">Closing sets that cost ≈ $0 and improve the profile:</div>` +
+    top.map((c, idx) => {
+      const labels = c.ids.map(id => {
+        const l = legs.find(x => x.id === id);
+        return `${l.side} ${l.opt} ${fmtStrike(l.strike)}`;
+      }).join(" + ");
+      return `<div class="suggestion-item">
+        <div>
+          <div class="sug-text">Close: ${labels}</div>
+          <div class="sug-sub">cash ${fmtUsd(c.netCloseCash)} · max loss → ${fmtUsd(c.maxL)} (${c.lossGain>0?'+':''}${fmtUsd(c.lossGain)}) · P(profit) → ${fmtPct1(c.probProfit)}</div>
+        </div>
+        <button class="btn-secondary deals-apply-sug" data-idx="${idx}" style="width:auto">Apply</button>
+      </div>`;
+    }).join("");
+
+  out.querySelectorAll(".deals-apply-sug").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const c = top[Number(btn.dataset.idx)];
+      dealsClosed = new Set(c.ids);
+      renderDealDetail();
+    });
+  });
+}
+
+function drawDealChart(deal, base, wi) {
+  const el = document.getElementById("deals-payoff-chart");
+  if (!el) return;
+  const c = chartColors();
+  const accent = "#58a6ff";
+  const grid = dealsData.grid;
+  const spot = dealsData.spot;
+  const hasWhatIf = dealsClosed.size > 0;
+
+  const traces = [];
+
+  // Probability distribution (terminal spot), drawn as a filled area on a
+  // secondary y-axis pinned to the lower portion of the chart.
+  if (deal.prob_density) {
+    traces.push({
+      x: grid, y: deal.prob_density, name: "Spot distribution @ expiry",
+      type: "scatter", mode: "lines", yaxis: "y2",
+      line: { color: c.muted, width: 1 },
+      fill: "tozeroy", fillcolor: "rgba(139,148,158,0.18)",
+      hoverinfo: "skip",
+    });
+  }
+
+  // Original payoff.
+  traces.push({
+    x: grid, y: base.after, name: "Payoff at expiry",
+    type: "scatter", mode: "lines",
+    line: { color: c.text, width: 2, dash: hasWhatIf ? "dot" : "solid" },
+    hovertemplate: "Spot %{x}<br>P&L %{y:$,.0f}<extra></extra>",
+  });
+
+  // What-if payoff (after closing legs).
+  if (hasWhatIf) {
+    traces.push({
+      x: grid, y: wi.after, name: "After closing selected",
+      type: "scatter", mode: "lines",
+      line: { color: "#58a6ff", width: 2.5 },
+      hovertemplate: "Spot %{x}<br>P&L %{y:$,.0f}<extra></extra>",
+    });
+  }
+
+  const shapes = [
+    // zero P&L line
+    { type: "line", xref: "x", yref: "y", x0: grid[0], x1: grid[grid.length - 1], y0: 0, y1: 0,
+      line: { color: c.zeroline, width: 1 } },
+    // current spot
+    { type: "line", xref: "x", yref: "paper", x0: spot, x1: spot, y0: 0, y1: 1,
+      line: { color: accent, width: 1, dash: "dash" } },
+  ];
+  const annotations = [
+    { x: spot, yref: "paper", y: 1.02, text: `spot ${fmtStrike(spot)}`, showarrow: false,
+      font: { color: accent, size: 11 } },
+  ];
+  // Breakeven markers (use what-if curve when active).
+  (hasWhatIf ? wi.be : base.be).forEach(b => {
+    shapes.push({ type: "line", xref: "x", yref: "paper", x0: b, x1: b, y0: 0, y1: 1,
+      line: { color: c.muted, width: 1, dash: "dot" } });
+    annotations.push({ x: b, yref: "paper", y: -0.08, text: fmtStrike(b), showarrow: false,
+      font: { color: c.muted, size: 10 } });
+  });
+
+  const maxDensity = deal.prob_density ? Math.max(...deal.prob_density) : 1;
+  const layout = {
+    margin: { l: 60, r: 20, t: 20, b: 40 },
+    paper_bgcolor: c.paper, plot_bgcolor: c.plot,
+    font: { color: c.text, size: 11 },
+    xaxis: { title: `${dealAsset()} spot at expiry`, gridcolor: c.grid, zerolinecolor: c.zeroline },
+    yaxis: { title: "P&L (USD)", gridcolor: c.grid, zerolinecolor: c.zeroline, tickformat: "$.2s" },
+    yaxis2: { overlaying: "y", side: "right", showgrid: false, showticklabels: false,
+      range: [0, maxDensity * 3.2], fixedrange: true },
+    shapes, annotations,
+    legend: { orientation: "h", y: 1.12, bgcolor: c.legendBg, bordercolor: c.legendBorder, borderwidth: 1 },
+    showlegend: true,
+  };
+  Plotly.newPlot(el, traces, layout, { responsive: true, displayModeBar: false });
+}

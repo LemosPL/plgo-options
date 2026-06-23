@@ -227,6 +227,60 @@ def _iv_from_surface(
 
 
 # ---------------------------------------------------------------------------
+# Shared market context (reused by /pnl and the Deals/Risk page)
+# ---------------------------------------------------------------------------
+
+async def build_market_context(asset: str) -> dict:
+    """Fetch spot + vol smiles for an asset, returning a reusable context.
+
+    Mirrors the market-data fetch inside ``/pnl`` so other endpoints (e.g. the
+    Deals/Risk page) price legs with the SAME term-structure IV as the Pricing
+    tab. Never raises — falls back to an empty surface so callers can use
+    ``DEFAULT_IV``.
+
+    Returns a dict with: ``spot`` (float), ``smiles`` (dict[str, VolSmile]),
+    ``deribit_dates`` (dict[str, date]), ``is_fil`` (bool).
+    """
+    is_fil = asset.upper() == "FIL"
+    smiles: dict[str, VolSmile] = {}
+    spot = 0.0
+
+    if is_fil:
+        try:
+            spot = await client.get_fil_spot_price()
+        except Exception:
+            spot = 3.0
+        try:
+            eth_smiles = await _fetch_smiles()
+            vol_ratio = await client.get_historical_vol_ratio(days=30)
+            eth_spot_ref = await client.get_eth_spot_price()
+            for exp_code, smile in eth_smiles.items():
+                scaled_ivs = [iv * vol_ratio for iv in smile.ivs.tolist()]
+                if eth_spot_ref > 0:
+                    fil_strikes = [k / eth_spot_ref * spot for k in smile.strikes.tolist()]
+                else:
+                    fil_strikes = smile.strikes.tolist()
+                smiles[exp_code] = VolSmile(fil_strikes, scaled_ivs)
+        except Exception:
+            pass
+    else:
+        try:
+            spot = await client.get_eth_spot_price()
+            smiles = await _fetch_smiles()
+        except Exception:
+            smiles = {}
+
+    deribit_dates: dict[str, date] = {}
+    for exp in smiles:
+        try:
+            deribit_dates[exp] = _deribit_expiry_to_date(exp)
+        except ValueError:
+            continue
+
+    return {"spot": spot, "smiles": smiles, "deribit_dates": deribit_dates, "is_fil": is_fil}
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
