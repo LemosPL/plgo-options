@@ -1326,7 +1326,21 @@ select { margin-bottom: .5rem; }
 .deal-pop-mid  { color: var(--orange); }
 .deal-pop-bad  { color: var(--red); }
 
+.deal-swatch {
+  display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+  margin-right: .35rem; vertical-align: middle;
+}
+.deal-card-cpty .deal-select-cb { margin-right: .4rem; vertical-align: middle; }
+
 .deals-detail { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+.deals-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+}
+.deal-summary-card h2 {
+  font-size: .8rem; text-transform: none; letter-spacing: 0; color: var(--text);
+}
 .deals-legs-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
 .deals-legs-table th, .deals-legs-table td {
   padding: .4rem .5rem; text-align: right; border-bottom: 1px solid var(--border);
