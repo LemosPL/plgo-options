@@ -9046,36 +9046,61 @@ async function refreshMtmDeltas() {
   }
 }
 
+// Median of a numeric array (non-mutating).
+function _median(arr) {
+  if (!arr.length) return 0;
+  const s = arr.slice().sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+// Hampel filter: replace isolated outlier points (bad snapshots) with the
+// local median. Robust to spikes, preserves genuine level shifts.
+function _hampel(values, window = 3, nSigmas = 3) {
+  const n = values.length;
+  const out = values.slice();
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - window), hi = Math.min(n - 1, i + window);
+    const win = values.slice(lo, hi + 1);
+    const med = _median(win);
+    const mad = _median(win.map(v => Math.abs(v - med)));
+    const sigma = 1.4826 * mad;  // MAD → σ for a normal distribution
+    if (sigma > 0 && Math.abs(values[i] - med) > nSigmas * sigma) out[i] = med;
+  }
+  return out;
+}
+
 function _renderMtmChart(elId, history) {
   const dates = history.map(h => h.date);
-  const mtm = history.map(h => h.mtm_usd);
-  const spot = history.map(h => h.spot);
+  const rawMtm = history.map(h => h.mtm_usd);
+  // Strip outlier snapshots so the curve reflects the real MTM trajectory.
+  const mtm = _hampel(rawMtm);
+
+  // Focus the y-axis on the actual curve (not anchored at 0 / huge outliers).
+  const lo = Math.min(...mtm), hi = Math.max(...mtm);
+  const span = (hi - lo) || Math.max(Math.abs(hi), 1);
+  const pad = span * 0.08;
 
   const traces = [
     {
       x: dates, y: mtm, name: "Portfolio MTM (USD)",
       type: "scatter", mode: "lines+markers",
-      line: { color: "#3fb950", width: 2 },
-      marker: { size: 5 },
-      yaxis: "y",
-    },
-    {
-      x: dates, y: spot, name: "Spot",
-      type: "scatter", mode: "lines",
-      line: { color: "#58a6ff", width: 1.5, dash: "dot" },
-      yaxis: "y2",
+      line: { color: "#3fb950", width: 2, shape: "spline", smoothing: 0.6 },
+      marker: { size: 4 },
+      hovertemplate: "%{x}<br>MTM %{y:$,.0f}<extra></extra>",
     },
   ];
   const layout = {
-    margin: { t: 10, r: 50, b: 40, l: 60 },
+    margin: { t: 10, r: 20, b: 40, l: 70 },
     paper_bgcolor: "rgba(0,0,0,0)",
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: getComputedStyle(document.body).color, size: 11 },
-    showlegend: true,
-    legend: { orientation: "h", y: -0.15 },
+    showlegend: false,
     xaxis: { showgrid: false },
-    yaxis: { title: "MTM (USD)", tickprefix: "$", gridcolor: "rgba(128,128,128,.2)" },
-    yaxis2: { title: "Spot", overlaying: "y", side: "right", showgrid: false, tickprefix: "$" },
+    yaxis: {
+      title: "MTM (USD)", tickprefix: "$", gridcolor: "rgba(128,128,128,.2)",
+      range: [lo - pad, hi + pad], tickformat: ",.0f",
+    },
     hovermode: "x unified",
   };
   Plotly.newPlot(elId, traces, layout, { responsive: true, displayModeBar: false });
@@ -9980,6 +10005,54 @@ const fmtUsd = (v) => {
 const fmtPct1 = (v) => (v === null || v === undefined || !isFinite(v)) ? "—" : (v * 100).toFixed(0) + "%";
 const dealAsset = () => currentAsset;
 
+// Manual grouping overrides { counterparty: { legId: groupId } }, persisted per
+// asset in localStorage so the user's group/ungroup choices survive reloads.
+let dealsOverrides = {};
+const _ovKey = () => `plgo_deal_overrides_${dealAsset()}`;
+function loadOverrides() {
+  try { dealsOverrides = JSON.parse(localStorage.getItem(_ovKey()) || "{}") || {}; }
+  catch { dealsOverrides = {}; }
+}
+function saveOverrides() {
+  try { localStorage.setItem(_ovKey(), JSON.stringify(dealsOverrides)); } catch {}
+}
+
+// Current resolved grouping for a counterparty, read back from the rendered
+// deals: { legId(str): groupId }. Lets us pin existing groups while we modify
+// only the legs the user touched.
+function currentGroupingFor(cpty) {
+  const map = {};
+  dealsData.deals.filter(d => d.counterparty === cpty).forEach(d => {
+    d.leg_ids.forEach(id => { map[String(id)] = d.group_id; });
+  });
+  return map;
+}
+
+// Merge the selected deals (must share a counterparty) into one manual deal.
+function groupSelectedDeals() {
+  const deals = selectedDeals();
+  if (deals.length < 2) return;
+  const cpty = deals[0].counterparty;
+  if (!deals.every(d => d.counterparty === cpty)) {
+    alert("Deals can only be grouped within the same counterparty.");
+    return;
+  }
+  const map = currentGroupingFor(cpty);          // pin existing groups…
+  const newId = "manual-" + Date.now().toString(36);
+  deals.forEach(d => d.leg_ids.forEach(id => { map[String(id)] = newId; }));  // …reassign selected
+  dealsOverrides[cpty] = map;
+  saveOverrides();
+  dealsSelectedIds = new Set([`${cpty}|${newId}`]);
+  loadDeals();
+}
+
+// Ungroup: drop this counterparty's manual overrides → back to suggested split.
+function ungroupCounterparty(cpty) {
+  if (dealsOverrides[cpty]) { delete dealsOverrides[cpty]; saveOverrides(); }
+  dealsSelectedIds = new Set();
+  loadDeals();
+}
+
 async function dealsInit() {
   dealsLoaded = true;
   const incExp = document.getElementById("deals-include-expired");
@@ -9997,16 +10070,21 @@ async function loadDeals() {
   const detail = document.getElementById("deals-detail");
   list.innerHTML = `<div class="deals-empty">Loading deals…</div>`;
   detail.innerHTML = `<div class="deals-empty">Select a deal on the left to analyse it.</div>`;
-  const incExp = document.getElementById("deals-include-expired")?.checked ? "true" : "false";
+  const incExp = !!document.getElementById("deals-include-expired")?.checked;
+  loadOverrides();
   try {
-    dealsData = await get(`/api/deals?asset=${dealAsset()}&include_expired=${incExp}`);
+    dealsData = await post(`/api/deals`, {
+      asset: dealAsset(), include_expired: incExp, overrides: dealsOverrides,
+    });
   } catch (e) {
     list.innerHTML = `<div class="deals-empty">Failed to load deals: ${e.message}</div>`;
     return;
   }
   const n = dealsData.deals.length;
+  const nManual = dealsData.deals.filter(d => d.manual).length;
   const meta = document.getElementById("deals-meta");
-  if (meta) meta.textContent = `${n} deal${n === 1 ? "" : "s"} · spot ${fmtStrike(dealsData.spot)}`;
+  if (meta) meta.textContent =
+    `${n} deal${n === 1 ? "" : "s"}${nManual ? ` (${nManual} grouped)` : ""} · spot ${fmtStrike(dealsData.spot)}`;
   // Keep any prior selection that still exists; otherwise select the first deal.
   const valid = new Set(dealsData.deals.map(d => d.id));
   dealsSelectedIds = new Set([...dealsSelectedIds].filter(id => valid.has(id)));
@@ -10026,7 +10104,10 @@ function popClass(p) {
 function renderDealList() {
   const list = document.getElementById("deals-list");
   if (!dealsData.deals.length) {
-    list.innerHTML = `<div class="deals-empty">No deals found for ${dealAsset()}.</div>`;
+    const expHint = document.getElementById("deals-include-expired")?.checked
+      ? ""
+      : `<br><br>All ${dealAsset()} positions may have expired. Tick <b>Include Expired</b> above to see them.`;
+    list.innerHTML = `<div class="deals-empty">No active deals for ${dealAsset()}.${expHint}</div>`;
     return;
   }
   list.innerHTML = "";
@@ -10176,16 +10257,20 @@ function renderDealsView() {
   }).join("");
 
   // Legs / what-if / zero-cost tool — only meaningful for a single focused deal.
+  const ungroupBtn = (single && single.manual)
+    ? `<button id="btn-deals-ungroup" class="btn-secondary" style="width:auto" title="Drop manual grouping for ${single.counterparty} and return to the auto-suggested structures">Ungroup → suggested</button>`
+    : "";
   const legsSection = single ? `
     <section class="card">
       <div class="pf-toolbar" style="margin-bottom:.6rem">
         <h2 style="margin:0">Legs — tick to close (what-if)</h2>
         <div class="pf-toolbar-spacer"></div>
+        ${ungroupBtn}
         <button id="btn-deals-suggest" class="btn-primary" style="width:auto">Suggest zero-cost improvements</button>
       </div>
       <table class="deals-legs-table">
         <thead><tr>
-          <th></th><th class="lt">Leg</th><th>Strike</th><th>Qty</th>
+          <th></th><th class="lt">Leg</th><th>Trade Date</th><th>Expiry</th><th>Strike</th><th>Qty</th>
           <th>IV</th><th>Premium</th><th>MTM / Close</th>
         </tr></thead>
         <tbody id="deals-legs-body"></tbody>
@@ -10194,16 +10279,21 @@ function renderDealsView() {
     </section>` : `
     <section class="card">
       <p style="margin:0;font-size:.8rem;color:var(--muted)">
-        ${deals.length} deals selected — comparing payoff profiles. Select a single deal to use the
-        leg-level what-if and zero-cost close tool.
+        ${deals.length} deals selected — comparing payoff profiles.
+        ${canGroup(deals) ? "Use <b>Group selected</b> above to merge them into one deal." : "Select a single deal for the leg-level what-if and zero-cost close tool."}
       </p>
     </section>`;
+
+  const groupBtn = canGroup(deals)
+    ? `<button id="btn-deals-group" class="btn-primary" style="width:auto" title="Merge the selected deals into one deal">Group selected (${deals.length})</button>`
+    : "";
 
   detail.innerHTML = `
     <section class="card">
       <div class="pf-toolbar">
         <h2 style="margin:0">Payoff Profiles ${single ? "" : `· ${deals.length} deals`}</h2>
         <div class="pf-toolbar-spacer"></div>
+        ${groupBtn}
         <button id="btn-deals-clear-sel" class="btn-secondary" style="width:auto">Clear selection</button>
       </div>
       ${hasWhatIf ? whatifBannerHtml(single, base, wi) : ""}
@@ -10219,10 +10309,17 @@ function renderDealsView() {
     dealsSelectedIds = new Set(); dealsClosed = new Set();
     renderDealList(); renderDealsView();
   });
+  document.getElementById("btn-deals-group")?.addEventListener("click", groupSelectedDeals);
+  document.getElementById("btn-deals-ungroup")?.addEventListener("click", () => ungroupCounterparty(single.counterparty));
   document.getElementById("btn-deals-reset-whatif")?.addEventListener("click", () => {
     dealsClosed = new Set(); renderDealsView();
   });
   document.getElementById("btn-deals-suggest")?.addEventListener("click", () => suggestZeroCost(single));
+}
+
+// Can the current multi-selection be merged? (2+ deals, same counterparty.)
+function canGroup(deals) {
+  return deals.length >= 2 && deals.every(d => d.counterparty === deals[0].counterparty);
 }
 
 function renderLegsTable(deal) {
@@ -10234,7 +10331,9 @@ function renderLegsTable(deal) {
     const sideColor = leg.side === "Long" ? "var(--green)" : "var(--red)";
     tr.innerHTML = `
       <td class="keep-strike"><input type="checkbox" class="deal-leg-cb" data-id="${leg.id}" ${dealsClosed.has(leg.id) ? "checked" : ""}></td>
-      <td class="lt" style="color:${sideColor}">${leg.side} ${leg.opt} ${fmtStrike(leg.strike)} <span style="color:var(--muted)">${leg.expiry}</span></td>
+      <td class="lt" style="color:${sideColor}">${leg.side} ${leg.opt}</td>
+      <td class="keep-strike">${leg.trade_date || "—"}</td>
+      <td class="keep-strike">${leg.expiry}</td>
       <td class="keep-strike">${fmtStrike(leg.strike)}</td>
       <td>${leg.qty.toLocaleString()}</td>
       <td>${leg.iv_pct}%</td>
@@ -10368,9 +10467,13 @@ function drawDealsChart(deals, single, base, wi) {
     });
   }
 
-  // One payoff line per selected deal.
+  // One payoff line per selected deal. Track overall P&L extent so the spot /
+  // breakeven verticals (drawn as traces — log x-axis can't use shapes cleanly)
+  // span the full plot.
+  let yMin = Infinity, yMax = -Infinity;
   deals.forEach(d => {
     const m = dealMetrics(d, new Set());
+    for (const v of m.after) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
     traces.push({
       x: grid, y: m.after,
       name: `${d.counterparty} · ${d.strategy}`,
@@ -10382,6 +10485,7 @@ function drawDealsChart(deals, single, base, wi) {
 
   // Single-deal what-if "after closing" curve.
   if (hasWhatIf) {
+    for (const v of wi.after) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
     traces.push({
       x: grid, y: wi.after, name: "After closing selected legs",
       type: "scatter", mode: "lines",
@@ -10389,37 +10493,43 @@ function drawDealsChart(deals, single, base, wi) {
       hovertemplate: "Spot %{x}<br>P&L %{y:$,.0f}<extra></extra>",
     });
   }
+  if (!isFinite(yMin)) { yMin = -1; yMax = 1; }
 
-  const shapes = [
-    { type: "line", xref: "x", yref: "y", x0: grid[0], x1: grid[grid.length - 1], y0: 0, y1: 0,
-      line: { color: c.zeroline, width: 1 } },
-    { type: "line", xref: "x", yref: "paper", x0: spot, x1: spot, y0: 0, y1: 1,
-      line: { color: accent, width: 1, dash: "dash" } },
-  ];
-  const annotations = [
-    { x: spot, yref: "paper", y: 1.02, text: `spot ${fmtStrike(spot)}`, showarrow: false,
-      font: { color: accent, size: 11 } },
-  ];
-  // Breakeven markers only for a single focused deal (avoids clutter).
+  // Current-spot vertical (as a trace, like the platform's payoff charts —
+  // shapes mis-position on a log axis).
+  traces.push({
+    x: [spot, spot], y: [yMin, yMax],
+    type: "scatter", mode: "lines",
+    name: `Spot ${fmtStrike(spot)}`,
+    line: { color: accent, width: 1.5, dash: "dash" },
+    hoverinfo: "skip",
+  });
+
+  // Breakeven verticals only for a single focused deal (avoids clutter).
   if (single) {
-    (hasWhatIf ? wi.be : base.be).forEach(b => {
-      shapes.push({ type: "line", xref: "x", yref: "paper", x0: b, x1: b, y0: 0, y1: 1,
-        line: { color: c.muted, width: 1, dash: "dot" } });
-      annotations.push({ x: b, yref: "paper", y: -0.08, text: fmtStrike(b), showarrow: false,
-        font: { color: c.muted, size: 10 } });
+    (hasWhatIf ? wi.be : base.be).forEach((b, i) => {
+      traces.push({
+        x: [b, b], y: [yMin, yMax],
+        type: "scatter", mode: "lines",
+        name: `Breakeven ${fmtStrike(b)}`,
+        line: { color: c.muted, width: 1, dash: "dot" },
+        showlegend: i === 0, legendgroup: "be",
+        hoverinfo: "name",
+      });
     });
   }
 
   const maxDensity = (single && single.prob_density) ? Math.max(...single.prob_density) : 1;
   const layout = {
-    margin: { l: 60, r: 20, t: 20, b: 40 },
+    margin: { l: 60, r: 20, t: 20, b: 50 },
     paper_bgcolor: c.paper, plot_bgcolor: c.plot,
     font: { color: c.text, size: 11 },
-    xaxis: { title: `${dealAsset()} spot at expiry`, gridcolor: c.grid, zerolinecolor: c.zeroline },
-    yaxis: { title: "P&L (USD)", gridcolor: c.grid, zerolinecolor: c.zeroline, tickformat: "$.2s" },
+    xaxis: { title: `${dealAsset()} spot at expiry (USD) — log scale`, type: "log",
+      gridcolor: c.grid, zerolinecolor: c.zeroline },
+    yaxis: { title: "P&L (USD)", gridcolor: c.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
+      tickformat: "$.2s" },
     yaxis2: { overlaying: "y", side: "right", showgrid: false, showticklabels: false,
       range: [0, maxDensity * 3.2], fixedrange: true },
-    shapes, annotations,
     legend: { orientation: "h", y: 1.14, bgcolor: c.legendBg, bordercolor: c.legendBorder, borderwidth: 1 },
     showlegend: true,
   };

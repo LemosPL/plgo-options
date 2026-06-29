@@ -21,9 +21,11 @@ consistent across the app.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 import numpy as np
 
 from plgo_options.data.database import get_db
@@ -114,6 +116,77 @@ def _fmt_k(k: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Structure decomposition
+# ---------------------------------------------------------------------------
+# A same-counterparty, same-day booking may actually be several distinct
+# structures (e.g. two call spreads + a put spread + naked legs) rather than one
+# big "Custom (N-leg)" blob. Without a trade/ticket id we can't know for sure,
+# so we *suggest* a decomposition by greedily pairing legs into recognisable
+# structures. The user can override the grouping in the UI.
+
+def decompose_legs(legs: list[dict]) -> list[list[dict]]:
+    """Split a leg set into a list of recognisable sub-structures.
+
+    Small, already-clean structures (<=4 legs that classify to a named strategy)
+    are kept intact. Anything else is decomposed within each expiry: vertical
+    spreads first, then straddles/strangles, then risk reversals, then the
+    remaining naked legs as singles.
+    """
+    label, _ = _classify(legs)
+    clean = len(legs) <= 4 and "Custom" not in label and "Structure" not in label
+    if clean:
+        return [legs]
+
+    by_exp: dict[str, list[dict]] = defaultdict(list)
+    for l in legs:
+        by_exp[l["expiry"]].append(l)
+    out: list[list[dict]] = []
+    for _exp, elegs in by_exp.items():
+        out.extend(_decompose_one_expiry(elegs))
+    return out
+
+
+def _decompose_one_expiry(legs: list[dict]) -> list[list[dict]]:
+    used: set = set()
+
+    def avail(pred):
+        return [l for l in legs if l["id"] not in used and pred(l)]
+
+    structures: list[list[dict]] = []
+
+    # 1. Vertical spreads — same option type, opposite side, paired by size.
+    for opt in ("C", "P"):
+        longs = sorted(avail(lambda l: l["opt"] == opt and l["sign"] > 0), key=lambda l: -l["qty"])
+        shorts = sorted(avail(lambda l: l["opt"] == opt and l["sign"] < 0), key=lambda l: -l["qty"])
+        for a, b in zip(longs, shorts):
+            structures.append([a, b])
+            used.add(a["id"]); used.add(b["id"])
+
+    # 2. Straddles / strangles — same-side call + put.
+    for sgn in (1, -1):
+        cs = sorted(avail(lambda l: l["opt"] == "C" and l["sign"] == sgn), key=lambda l: -l["qty"])
+        ps = sorted(avail(lambda l: l["opt"] == "P" and l["sign"] == sgn), key=lambda l: -l["qty"])
+        for a, b in zip(cs, ps):
+            structures.append([a, b])
+            used.add(a["id"]); used.add(b["id"])
+
+    # 3. Risk reversals / collars — remaining call + put (necessarily opposite side).
+    cs = sorted(avail(lambda l: l["opt"] == "C"), key=lambda l: -l["qty"])
+    ps = sorted(avail(lambda l: l["opt"] == "P"), key=lambda l: -l["qty"])
+    for a, b in zip(cs, ps):
+        structures.append([a, b])
+        used.add(a["id"]); used.add(b["id"])
+
+    # 4. Whatever is left over — naked single legs.
+    for l in legs:
+        if l["id"] not in used:
+            structures.append([l])
+            used.add(l["id"])
+
+    return structures
+
+
+# ---------------------------------------------------------------------------
 # Probability model (risk-neutral log-normal terminal spot, r = 0)
 # ---------------------------------------------------------------------------
 
@@ -168,14 +241,37 @@ def _breakevens(grid: np.ndarray, payoff: np.ndarray) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# Endpoint
+# Endpoints
 # ---------------------------------------------------------------------------
+
+class DealsRequest(BaseModel):
+    asset: str = "ETH"
+    include_expired: bool = False
+    # Manual grouping overrides: { counterparty: { leg_id(str): group_id(str) } }.
+    # When a counterparty has an entry, its legs are grouped purely by group_id
+    # (overriding the auto-decomposition). Legs missing from the map fall back to
+    # a per-trade-date group.
+    overrides: dict[str, dict[str, str]] | None = None
+
 
 @router.get("")
 @router.get("/")
 async def list_deals(asset: str = "ETH", include_expired: bool = False):
-    """Return all deals (grouped multi-leg structures) with risk analytics."""
+    """Return all deals (auto-decomposed structures) with risk analytics."""
+    return await _assemble(asset, include_expired, None)
+
+
+@router.post("")
+@router.post("/")
+async def list_deals_post(req: DealsRequest):
+    """Like GET, but honours manual grouping overrides from the UI."""
+    return await _assemble(req.asset, req.include_expired, req.overrides)
+
+
+async def _assemble(asset: str, include_expired: bool,
+                    overrides: dict[str, dict[str, str]] | None):
     asset = asset.upper()
+    overrides = overrides or {}
 
     # 1. Load active legs from the DB.
     try:
@@ -193,8 +289,8 @@ async def list_deals(asset: str = "ETH", include_expired: bool = False):
     smiles = ctx["smiles"]
     deribit_dates = ctx["deribit_dates"]
 
-    # 3. Normalise legs and bucket them into deals by (counterparty, trade_date).
-    groups: dict[tuple[str, str], list[dict]] = {}
+    # 3. Normalise legs and bucket them by counterparty.
+    by_cpty: dict[str, list[dict]] = defaultdict(list)
     all_strikes: list[float] = []
     for r in rows:
         strike = _safe_float(r.get("strike"))
@@ -230,12 +326,11 @@ async def list_deals(asset: str = "ETH", include_expired: bool = False):
             "premium_per": premium_per,
             "premium_usd": premium_usd,
         }
-        key = (leg["counterparty"], leg["trade_date"])
-        groups.setdefault(key, []).append(leg)
+        by_cpty[leg["counterparty"]].append(leg)
         all_strikes.append(strike)
 
-    if not groups:
-        return {"asset": asset, "spot": spot, "deals": []}
+    if not all_strikes:
+        return {"asset": asset, "spot": spot, "grid": [], "deals": []}
 
     # 4. Build a shared spot grid spanning the strike range and current spot.
     lo_ref = min(all_strikes + ([spot] if spot > 0 else []))
@@ -244,13 +339,32 @@ async def list_deals(asset: str = "ETH", include_expired: bool = False):
     grid_hi = hi_ref * 1.6
     grid = np.linspace(grid_lo, grid_hi, GRID_POINTS)
 
+    # 5. Resolve each counterparty's legs into structures (deals).
     deals = []
-    for (cpty, tdate), legs in groups.items():
-        deals.append(_build_deal(cpty, tdate, legs, grid, spot, smiles,
-                                 deribit_dates, today))
+    for cpty, legs in by_cpty.items():
+        omap = overrides.get(cpty) or {}
+        if omap:
+            # Manual grouping: bucket legs by their assigned group_id.
+            grouped: dict[str, list[dict]] = defaultdict(list)
+            for leg in legs:
+                gid = omap.get(str(leg["id"])) or f"date:{leg['trade_date']}"
+                grouped[gid].append(leg)
+            for gid, glegs in grouped.items():
+                tdate = min((l["trade_date"] for l in glegs), default="")
+                deals.append(_build_deal(cpty, tdate, glegs, gid, grid, spot,
+                                         smiles, deribit_dates, today, manual=True))
+        else:
+            # Auto: group by trade date, then decompose each day into structures.
+            by_date: dict[str, list[dict]] = defaultdict(list)
+            for leg in legs:
+                by_date[leg["trade_date"]].append(leg)
+            for tdate, dlegs in by_date.items():
+                for i, struct in enumerate(decompose_legs(dlegs)):
+                    deals.append(_build_deal(cpty, tdate, struct, f"{tdate}#{i}",
+                                             grid, spot, smiles, deribit_dates, today))
 
     # Sort by soonest expiry, then counterparty.
-    deals.sort(key=lambda d: (d["expiry"] or "9999", d["counterparty"]))
+    deals.sort(key=lambda d: (d["expiry"] or "9999", d["counterparty"], d["group_id"]))
     return {
         "asset": asset,
         "spot": spot,
@@ -259,7 +373,8 @@ async def list_deals(asset: str = "ETH", include_expired: bool = False):
     }
 
 
-def _build_deal(cpty, tdate, legs, grid, spot, smiles, deribit_dates, today):
+def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
+                today, manual=False):
     """Price one deal and assemble its analytics payload."""
     # Horizon = latest expiry among the legs (classic payoff-at-expiry diagram).
     horizon_days = max((l["days_rem"] for l in legs), default=0)
@@ -317,6 +432,7 @@ def _build_deal(cpty, tdate, legs, grid, spot, smiles, deribit_dates, today):
             "opt": opt,
             "qty": qty,
             "strike": K,
+            "trade_date": leg["trade_date"],
             "expiry": leg["expiry"],
             "premium_per": round(prem_usd / qty, 4) if qty else 0.0,
             "premium_usd": round(prem_usd, 2),
@@ -341,9 +457,14 @@ def _build_deal(cpty, tdate, legs, grid, spot, smiles, deribit_dates, today):
         expected_pnl = float(np.sum(total_payoff * mass))
 
     return {
-        "id": f"{cpty}|{tdate}",
+        "id": f"{cpty}|{group_id}",
+        "parent": cpty,
+        "group_id": group_id,
+        "leg_ids": [l["id"] for l in legs],
+        "manual": manual,
         "counterparty": cpty,
         "trade_date": tdate,
+        "trade_dates": sorted({l["trade_date"] for l in legs if l["trade_date"]}),
         "strategy": label,
         "strategy_desc": desc,
         "expiry": horizon_date,
