@@ -9,6 +9,15 @@ class CollateralOptimization:
         self.counterparties = counterparties
         self.positions = []
 
+    @staticmethod
+    def _resolve(param, cp, default=0.0):
+        """Return per-CP value from a dict, or the scalar itself, or default."""
+        if isinstance(param, dict):
+            return param.get(cp, default)
+        if param is None:
+            return default
+        return param
+
     def optimize(
         self,
         spot_ladder,
@@ -23,6 +32,8 @@ class CollateralOptimization:
         min_trade_delta=0.10,
         max_exposure_by_counterparty=None,
         max_gross_exposure_by_counterparty=None,
+        collateral_tier_free_pct=0.0,
+        collateral_tier_mu=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -93,22 +104,51 @@ class CollateralOptimization:
         # covers the residual net cost (1 − effective_mu) × price × qty.
         effective_mu = mu_factor / (1.0 + mu_factor)
 
-        profile_error = pulp.lpSum(float(spot_weights[i]) * abs_error_vars[i] for i in range(n_spots))
-        trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
-        # Use c_costs (bid_ask_pct × price) so holding cost and trading cost share the same scale.
-        # Since effective_mu < 1 always, holding cost < trading cost for every candidate,
-        # so the LP never unwinds purely for collateral — only when profile improvement covers
-        # the residual net cost (1 − effective_mu) × bid_ask_pct × price × qty.
-        collateral_cost = pulp.lpSum(
-            effective_mu * float(c_costs[j]) * abs_net_pos_vars[j] for j in range(n_candidates)
-        )
-        prob += lam_factor * profile_error + trading_cost + collateral_cost
-
-        # Build cp → candidate index map (shared by both constraint types below).
+        # Build cp → candidate index map (used by tiered collateral and exposure constraints).
         cp_indices: dict[str, list[int]] = {}
         for j, c in enumerate(candidates):
             cp = getattr(c, "counterparty", "")
             cp_indices.setdefault(cp, []).append(j)
+
+        profile_error = pulp.lpSum(float(spot_weights[i]) * abs_error_vars[i] for i in range(n_spots))
+        trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
+
+        tiered_mode = collateral_tier_mu is not None
+        tier_vars: dict = {}  # cp → (t_base, t_steep, mu_base, mu_steep) — populated when tiered_mode
+        if tiered_mode:
+            # Piecewise-linear collateral cost per counterparty.
+            # Tier 0 (cheap): gross notional up to G0_cp × (1 + free_pct) — penalised at effective_mu.
+            # Tier 1 (steep): gross notional above that ceiling — penalised at effective_mu_steep.
+            # Negative free_pct pushes the LP to reduce exposure (ceiling < current gross).
+            # free_pct and mu_steep can be per-CP (dict) or a scalar applied to all CPs.
+            for cp, indices in cp_indices.items():
+                g0 = float(sum(abs(existing_qty[j]) * float(c_prices[j]) for j in indices))
+                free_pct = self._resolve(collateral_tier_free_pct, cp, default=0.0)
+                g_free = g0 * (1.0 + free_pct)
+                mu_steep_cp = self._resolve(collateral_tier_mu, cp, default=0.07)
+                effective_mu_steep = mu_steep_cp / (1.0 + mu_steep_cp)
+
+                if g0 == 0.0:
+                    t_base = pulp.LpVariable(f"tier_base_{cp}", lowBound=0, cat="Continuous")
+                else:
+                    t_base = pulp.LpVariable(f"tier_base_{cp}", lowBound=0, upBound=max(g_free, 0.0), cat="Continuous")
+                t_steep = pulp.LpVariable(f"tier_steep_{cp}", lowBound=0, cat="Continuous")
+                tier_vars[cp] = (t_base, t_steep, effective_mu, effective_mu_steep)
+
+                gross_notional_cp = pulp.lpSum(abs_net_pos_vars[j] * float(c_prices[j]) for j in indices)
+                prob += t_base + t_steep == gross_notional_cp, f"tier_link_{cp}"
+
+            collateral_cost = pulp.lpSum(
+                mu_b * t_base + mu_s * t_steep
+                for (t_base, t_steep, mu_b, mu_s) in tier_vars.values()
+            )
+        else:
+            # Flat collateral cost: uniform penalty on absolute net position across all candidates.
+            collateral_cost = pulp.lpSum(
+                effective_mu * float(c_costs[j]) * abs_net_pos_vars[j] for j in range(n_candidates)
+            )
+
+        prob += lam_factor * profile_error + trading_cost + collateral_cost
 
         # Per-counterparty signed net notional constraint (existing + net new <= max).
         if max_exposure_by_counterparty:
@@ -157,11 +197,25 @@ class CollateralOptimization:
         _notional_traded = float(np.sum(c_prices * np.abs(net_qty)))
         _trading_cost_val = float(np.sum(c_costs * (buy_qty + sell_qty)))
         _net_pos = existing_qty + net_qty
-        _coll_cost_val = float(np.sum(effective_mu * c_costs * np.abs(_net_pos)))
-        print(f"  LP  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
-              f"  notional_traded={_notional_traded:,.0f}"
-              f"  trading_cost={_trading_cost_val:,.0f} ({100*_trading_cost_val/max(_notional_traded,1):.1f}% of notional)"
-              f"  collateral_cost={_coll_cost_val:,.0f}  (effective_mu={effective_mu:.3f})")
+        if tiered_mode:
+            _tier_base_val = float(sum(pulp.value(t_base) or 0.0 for (t_base, _, _, _) in tier_vars.values()))
+            _tier_steep_val = float(sum(pulp.value(t_steep) or 0.0 for (_, t_steep, _, _) in tier_vars.values()))
+            _coll_cost_val = float(sum(
+                (pulp.value(t_base) or 0.0) * mu_b + (pulp.value(t_steep) or 0.0) * mu_s
+                for (t_base, t_steep, mu_b, mu_s) in tier_vars.values()
+            ))
+            print(f"  LP  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
+                  f"  notional_traded={_notional_traded:,.0f}"
+                  f"  trading_cost={_trading_cost_val:,.0f} ({100*_trading_cost_val/max(_notional_traded,1):.1f}% of notional)"
+                  f"  collateral_cost={_coll_cost_val:,.0f}"
+                  f"  [tiered: base={_tier_base_val:,.0f}  steep={_tier_steep_val:,.0f}]"
+                  f"  (effective_mu={effective_mu:.3f})")
+        else:
+            _coll_cost_val = float(np.sum(effective_mu * c_costs * np.abs(_net_pos)))
+            print(f"  LP  profile_err={_profile_err_before:,.0f}→{profile_error_val:,.0f}"
+                  f"  notional_traded={_notional_traded:,.0f}"
+                  f"  trading_cost={_trading_cost_val:,.0f} ({100*_trading_cost_val/max(_notional_traded,1):.1f}% of notional)"
+                  f"  collateral_cost={_coll_cost_val:,.0f}  (effective_mu={effective_mu:.3f})")
         _n_unwind = int(np.sum((net_qty * existing_qty < 0) & (np.abs(net_qty) > 0.5)))
         _n_new = int(np.sum((existing_qty == 0) & (np.abs(net_qty) > 0.5)))
         _n_frozen = int(np.sum(~tradeable))

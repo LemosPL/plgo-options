@@ -26,13 +26,16 @@ TRADE_COLUMNS = [
     "Premium USD",
 ]
 
+def _latest_eth_xlsx() -> Path:
+    """Return the most recently dated PLGO_Trades_*.xlsx in data/positions/."""
+    positions_dir = Path(__file__).resolve().parents[3] / "data/positions"
+    candidates = sorted(positions_dir.glob("PLGO_Trades_*.xlsx"))
+    return candidates[-1] if candidates else positions_dir / "PLGO_Trades.xlsx"
+
+
 # --- ETH paths ---
-# Primary: bundled data/ directory (works in Docker and local)
-_PROJECT_DATA_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "data/positions"
-    / "PLGO_Trades_2026-06-01.xlsx"
-)
+# Primary: latest PLGO_Trades_*.xlsx found in data/positions/
+_PROJECT_DATA_PATH = _latest_eth_xlsx()
 
 # Fallback: user's Downloads folder (local dev)
 _DOWNLOADS_PATH = (

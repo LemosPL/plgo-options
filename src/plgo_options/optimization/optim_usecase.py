@@ -25,6 +25,8 @@ class OptimizerRunParams:
     roll_itm_only: bool = False
     is_replay: bool = False
     counterparties: list[str] | None = None
+    collateral_tier_free_pct: float | dict[str, float] = 0.0
+    collateral_tier_mu: float | dict[str, float] | None = None
 
 
 @dataclass
@@ -132,8 +134,8 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        lam_factor = 0.2
-        mu_factor = 5.3
+        lam_factor = 0.1
+        mu_factor = 4.3
 
         result = optimizer.run_lp(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, roll_itm_only=True,
                                   lam_factor=lam_factor, mu_factor=mu_factor, counterparties=["Flowdesk", "KeyRock"],

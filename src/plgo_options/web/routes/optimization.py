@@ -54,6 +54,8 @@ class OptimizationParams(BaseModel):
     save_usecase_snapshot: bool = False
     is_replay: bool = False
     counterparties: list[str] | None = None
+    collateral_tier_free_pct: float | dict[str, float] = 0.0
+    collateral_tier_mu: float | dict[str, float] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -79,6 +81,8 @@ async def run_optimizer(params: OptimizationParams):
         roll_dte_threshold=params.roll_dte_threshold,
         is_replay=False,
         counterparties=params.counterparties,
+        collateral_tier_free_pct=params.collateral_tier_free_pct,
+        collateral_tier_mu=params.collateral_tier_mu,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

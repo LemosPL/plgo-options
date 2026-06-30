@@ -59,7 +59,7 @@ class BaseOptimizer:
         asset: str = "ETH",
     ):
         self.asset = asset.upper()
-        self.asset_precision = 0
+        self.asset_precision = 2 if self.asset == "FIL" else 0
         self.spot = spot
         #self.spot = spot  # backward-compatible alias
         self.spot_ladder = spot_ladder

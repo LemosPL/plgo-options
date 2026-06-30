@@ -653,6 +653,8 @@ class OptimizerV3(BaseOptimizer):
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
                  max_exposure_by_counterparty: dict | None = None,
+                 collateral_tier_free_pct: "dict[str, float] | float" = 0.0,
+                 collateral_tier_mu: "dict[str, float] | float | None" = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -672,6 +674,10 @@ class OptimizerV3(BaseOptimizer):
         roll_position_ids = {id(p) for p in roll_positions}
 
         option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
+        # Spreads are built from target_expiry vanilla legs only (before unwind injection),
+        # so they're always new positions (existing_qty=0, unwind_only=False via getattr defaults).
+        # SpreadCandidate is frozen so we concatenate after the existing_qty stamp loop below.
+        spread_candidates = self._build_spread_candidates(option_legs, target_expiry=target_expiry)
 
         option_smile = self._build_option_smile()
         if option_smile is None:
@@ -714,10 +720,10 @@ class OptimizerV3(BaseOptimizer):
 
         for c in option_legs:
             c.existing_qty = held_positions.get((c.expiry_code, c.strike, c.opt, c.counterparty), 0.0)
-        candidates = option_legs
+        candidates = option_legs + spread_candidates
 
-        n_with_existing = sum(1 for c in candidates if c.existing_qty != 0.0)
-        n_unwind_only = sum(1 for c in candidates if c.unwind_only)
+        n_with_existing = sum(1 for c in candidates if getattr(c, "existing_qty", 0.0) != 0.0)
+        n_unwind_only = sum(1 for c in candidates if getattr(c, "unwind_only", False))
         print(f"candidates: {len(candidates)} total, {n_with_existing} with existing_qty≠0, {n_unwind_only} unwind_only")
 
         target_strikes = np.asarray(target_profile.index, dtype=float)
@@ -778,6 +784,8 @@ class OptimizerV3(BaseOptimizer):
             min_trade_delta=min_trade_delta,
             max_exposure_by_counterparty=max_exposure_by_counterparty,
             max_gross_exposure_by_counterparty=max_gross_exposure_by_counterparty,
+            collateral_tier_free_pct=collateral_tier_free_pct,
+            collateral_tier_mu=collateral_tier_mu,
         )
 
         if lp_result is None:
@@ -850,9 +858,9 @@ class OptimizerV3(BaseOptimizer):
                     "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
                     "vega": round(float(leg.vega or 0.0), 4),
                     "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
-                    "is_unwind": bool(rounded_qty * c.existing_qty < 0),
-                    "unwind_qty": abs(int(leg_qty)) if rounded_qty * c.existing_qty < 0 else 0,
-                    "new_qty": 0 if rounded_qty * c.existing_qty < 0 else abs(int(leg_qty)),
+                    "is_unwind": bool(rounded_qty * getattr(c, "existing_qty", 0.0) < 0),
+                    "unwind_qty": abs(int(leg_qty)) if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else 0,
+                    "new_qty": 0 if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else abs(int(leg_qty)),
                     "estimated_cost": round(float(est_cost), 2),
                     "normalized_benefit": 0.0,
                     "net_benefit": 0.0,
