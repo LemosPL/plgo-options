@@ -596,11 +596,15 @@ function replicateStrategy() {
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${K} on ${l.expiry}.`); return; }
     const sigma = ivPct / 100;  // mid IV — used to mark fair value & report
 
-    // Bid/ask premium centred on the MID premium so buy/sell mirror the fair
-    // value evenly. Half-width = local vega × spread (a bid/ask quoted in vol,
+    // MID premium (fair value) — this is what the PAYOFF CURVES use, so the
+    // diagram stays clean (breakevens at fair value, "P&L now" through ~0 at
+    // the current spot). The bid/ask spread only affects the cost summary below.
+    const premMid = pricerBs(spot, K, T, 0, sigma, l.type);
+
+    // Executed (bid/ask) premium for the cost summary + per-leg table. Centred
+    // on the mid, half-width = local vega × spread (a bid/ask quoted in vol,
     // converted to a premium spread). Applying ±spread to IV and repricing was
     // convex — it inflated buy premiums and collapsed OTM sell premiums to 0.
-    const premMid = pricerBs(spot, K, T, 0, sigma, l.type);
     let prem = premMid;
     if (volSpreadPts > 0) {
       const vegaPt = Math.abs(pricerBs(spot, K, T, 0, (ivPct + 1) / 100, l.type)
@@ -617,21 +621,22 @@ function replicateStrategy() {
     for (let i = 0; i < nPts; i++) {
       const intrinsic = l.type === "C" ? Math.max(spots[i] - K, 0) : Math.max(K - spots[i], 0);
 
+      // Payoff curves use the fair MID premium (unbiased by the bid/ask spread).
       // All expired
-      pnlAllExpired[i] += dir * qty * (intrinsic - prem);
+      pnlAllExpired[i] += dir * qty * (intrinsic - premMid);
 
       // Now (full BS value)
       const valNow = pricerBs(spots[i], K, T, 0, sigma, l.type);
-      pnlNow[i] += dir * qty * (valNow - prem);
+      pnlNow[i] += dir * qty * (valNow - premMid);
 
       // At first expiry: legs expiring then → intrinsic, others → BS with remaining time
       const remainingDte = dte - firstDte;
       if (remainingDte <= 0) {
-        pnlFirstExpiry[i] += dir * qty * (intrinsic - prem);
+        pnlFirstExpiry[i] += dir * qty * (intrinsic - premMid);
       } else {
         const Tremain = remainingDte / 365.25;
         const valRemain = pricerBs(spots[i], K, Tremain, 0, sigma, l.type);
-        pnlFirstExpiry[i] += dir * qty * (valRemain - prem);
+        pnlFirstExpiry[i] += dir * qty * (valRemain - premMid);
       }
     }
 
@@ -8474,6 +8479,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const selectedCounterparties = cptySel
       ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
       : [];
+    const saveRequested = document.getElementById("optv2-save-usecase")?.checked || false;
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
@@ -8482,12 +8488,20 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
-      save_usecase_snapshot: document.getElementById("optv2-save-usecase")?.checked || false,
+      save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
+    // If the run was saved, reveal + refresh the snapshots list so the new file
+    // shows immediately with its download link.
+    if (saveRequested) {
+      const sec = document.getElementById("optv2-snapshots-section");
+      if (sec) sec.style.display = "";
+      await optv2LoadSnapshots();
+      sec?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
   } finally {
     $btn.classList.remove("loading");
     $btn.textContent = "Run Optimizer";

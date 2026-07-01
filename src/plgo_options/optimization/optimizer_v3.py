@@ -971,6 +971,7 @@ class OptimizerV3(BaseOptimizer):
                  roll_itm_only: bool = False,
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
+                 **_ignored,  # tolerate LP-only params (collateral tiering) from asdict(run_params)
             ):
         lam_factor *= self.spot/1000.0
         print(self.spot)

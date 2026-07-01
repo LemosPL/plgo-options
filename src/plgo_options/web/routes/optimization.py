@@ -86,21 +86,21 @@ async def run_optimizer(params: OptimizationParams):
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
-    print(params.save_usecase_snapshot)
     try:
+        result = usecase.run()
         if params.save_usecase_snapshot:
-            # Save under the same persistent root the list/download endpoints scan,
-            # so anything saved here is immediately visible in the snapshots browser.
+            # Save AFTER run() so the snapshot captures the result, not just the
+            # inputs. Written under the same persistent root the list/download
+            # endpoints scan, so it's immediately visible in the snapshots browser.
             save_dir = SNAPSHOT_ROOT / "usecases"
             save_path = usecase.save_auto(save_dir)
-            print(f"Saved usecase snapshot to {save_path}")
-        result = usecase.run()
+            print(f"Saved usecase snapshot (with result) to {save_path}")
     except Exception as e:
         tb = traceback.format_exc()
         print(tb)
         raise HTTPException(
             status_code=500,
-            detail=f"Optimization save failed: {e}\n\n{tb}",
+            detail=f"Optimization failed: {e}\n\n{tb}",
         )
 
     return result

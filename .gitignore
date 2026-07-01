@@ -16,3 +16,4 @@ data/plgo_options.prod.db-wal
 data/plgo_options.db.bak-*
 data/plgo_options.prod.db.bak-*
 data/optimization_snapshots/*.json
+data/optimization_snapshots/usecases/*.json
