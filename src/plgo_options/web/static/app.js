@@ -594,13 +594,20 @@ function replicateStrategy() {
     const T = Math.max(dte, 0) / 365.25;
     let ivPct = lookupSmileIv(l.expiry, K);
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${K} on ${l.expiry}.`); return; }
-    // Apply bid/ask vol spread: buys at offer (mid + spread), sells at bid (mid - spread)
-    if (volSpreadPts > 0) {
-      ivPct = l.side === "buy" ? ivPct + volSpreadPts : Math.max(ivPct - volSpreadPts, 1);
-    }
-    const sigma = ivPct / 100;
+    const sigma = ivPct / 100;  // mid IV — used to mark fair value & report
 
-    const prem = pricerBs(spot, K, T, 0, sigma, l.type);
+    // Bid/ask premium centred on the MID premium so buy/sell mirror the fair
+    // value evenly. Half-width = local vega × spread (a bid/ask quoted in vol,
+    // converted to a premium spread). Applying ±spread to IV and repricing was
+    // convex — it inflated buy premiums and collapsed OTM sell premiums to 0.
+    const premMid = pricerBs(spot, K, T, 0, sigma, l.type);
+    let prem = premMid;
+    if (volSpreadPts > 0) {
+      const vegaPt = Math.abs(pricerBs(spot, K, T, 0, (ivPct + 1) / 100, l.type)
+                            - pricerBs(spot, K, T, 0, Math.max(ivPct - 1, 1) / 100, l.type)) / 2;
+      const halfWidth = vegaPt * volSpreadPts;
+      prem = l.side === "buy" ? premMid + halfWidth : Math.max(premMid - halfWidth, 0);
+    }
     const premEth = spot > 0 ? prem / spot : 0;
 
     // Delta this position creates: per-contract delta × signed quantity (underlying units).
@@ -657,7 +664,14 @@ function replicateStrategy() {
   const expiryLabel = uniqueExpiries.length === 1
     ? uniqueExpiries[0]
     : uniqueExpiries.join(" / ");
-  const fmtUsd = v => "$" + Math.abs(Math.round(v)).toLocaleString();
+  // Show sub-dollar precision for small amounts (FIL per-contract premiums are
+  // fractions of a dollar — rounding to whole dollars was showing a real credit
+  // as "$0"); whole dollars once the amount is material.
+  const fmtUsd = v => {
+    const a = Math.abs(v);
+    const dp = a === 0 ? 0 : a < 1000 ? (currentAsset === "FIL" ? 4 : 2) : 0;
+    return "$" + a.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  };
   const payColor = totalPay > 0 ? "var(--red)" : "var(--muted)";
   const rcvColor = totalReceive > 0 ? "var(--green)" : "var(--muted)";
   const netLabel = net >= 0 ? "Rcv" : "Pay";
@@ -7050,12 +7064,17 @@ function sbPriceStructure() {
     const T = Math.max(dte, 0) / 365.25;
     let ivPct = sbLookupSmileIv(leg.expiry, leg.strike);
     if (ivPct == null) { alert(`Cannot interpolate IV for strike ${leg.strike} at ${leg.expiry}`); return; }
-    // Apply bid/ask vol spread: buys at offer (mid + spread), sells at bid (mid - spread)
+    const sigma = ivPct / 100;  // mid IV
+    // Bid/ask premium centred on the mid premium, half-width = vega × spread
+    // (see pricer note) — avoids the convexity blow-up that zeroed OTM sells.
+    const premMid = bsPrice(spot, leg.strike, T, 0, sigma, leg.type);
+    let bsPremEth = premMid;
     if (sbVolSpread > 0) {
-      ivPct = leg.side === "buy" ? ivPct + sbVolSpread : Math.max(ivPct - sbVolSpread, 1);
+      const vegaPt = Math.abs(bsPrice(spot, leg.strike, T, 0, (ivPct + 1) / 100, leg.type)
+                            - bsPrice(spot, leg.strike, T, 0, Math.max(ivPct - 1, 1) / 100, leg.type)) / 2;
+      const halfWidth = vegaPt * sbVolSpread;
+      bsPremEth = leg.side === "buy" ? premMid + halfWidth : Math.max(premMid - halfWidth, 0);
     }
-    const sigma = ivPct / 100;
-    const bsPremEth = bsPrice(spot, leg.strike, T, 0, sigma, leg.type);
     if (isNaN(bsPremEth)) console.error("NaN from bsPrice:", { spot, strike: leg.strike, T, sigma, type: leg.type });
     const bsPremUsd = isNaN(bsPremEth) ? 0 : bsPremEth;
     const legCost = dir * leg.qty * bsPremUsd;
