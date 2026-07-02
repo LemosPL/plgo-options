@@ -403,6 +403,19 @@
       </div>
     </section>
 
+    <!-- Payoff chart controls -->
+    <div class="pf-chart-controls" style="display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap;margin-bottom:.4rem">
+      <label class="toggle-label" style="margin:0">
+        <input type="checkbox" id="pf-show-collateral"> Show posted collateral
+      </label>
+      <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
+        <input type="checkbox" id="pf-collateral-haircut"> apply haircut
+      </label>
+      <span style="font-size:.75rem;color:var(--muted)">
+        Uses the <b>Counterparty</b> filter below: <b>All</b> shows one total line; a specific counterparty splits into ETH-book vs FIL-book collateral.
+      </span>
+    </div>
+
     <!-- Payoff profile chart -->
     <div id="portfolio-payoff-chart" class="chart-container" style="min-height:650px"></div>
 
@@ -2094,6 +2107,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=61"></script>
+<script src="/static/app.js?v=62"></script>
 </body>
 </html>

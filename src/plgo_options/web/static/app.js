@@ -2746,6 +2746,7 @@ function drawExposureChart(positions) {
 // ─── Portfolio P&L (interactive) ───────────────────────────
 let portfolioLoaded = false;
 let pfData = null;              // raw API response
+let pfCollateral = null;        // /api/collateral/summary response (posted collateral, both books)
 let pfSelected = new Set();     // selected position indices
 let pfRolled = new Map();       // idx → { newDte }
 let pfSortCol = "expiry";
@@ -2824,6 +2825,15 @@ async function loadPortfolio() {
     pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExpired}`);
     pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
+
+    // Posted-collateral overlay data (spans both ETH & FIL books). Best-effort:
+    // a failure here must not break the P&L page.
+    try {
+      pfCollateral = await get("/api/collateral/summary?asset=all");
+    } catch (e) {
+      console.warn("Collateral summary unavailable for overlay:", e);
+      pfCollateral = null;
+    }
 
     // Default: expired → Old only, active → both Old AND New
     pfOldSet = new Set();
@@ -3207,6 +3217,68 @@ function pfInitCompareSets() {
   }
 }
 
+// ── Posted-collateral overlay ─────────────────────────────
+// Values each counterparty's posted collateral across the spot ladder. The
+// token that matches the page's current asset (ETH on the ETH page, FIL on the
+// FIL page) is re-valued at each ladder spot; every other token is held at its
+// live spot. So an ETH-collateralised book slopes up with spot, while a
+// FIL-book on the ETH page reads flat — which is correct.
+function pfCollateralValueAt(row, spot, applyHaircut) {
+  const hc = pfCollateral.haircuts || {};
+  const sp = pfCollateral.spots || {};
+  const cut = (asset) => applyHaircut ? (1 - (hc[asset] || 0)) : 1;
+  const ethPx = currentAsset === "ETH" ? spot : (sp.ETH || 0);
+  const filPx = currentAsset === "FIL" ? spot : (sp.FIL || 0);
+  return (row.eth_qty || 0) * ethPx * cut("ETH")
+       + (row.fil_qty || 0) * filPx * cut("FIL")
+       + (row.btc_qty || 0) * (sp.BTC || 0) * cut("BTC")
+       + (row.wave_qty || 0) * (row.wave_price || 0) * cut("WAVE")
+       + (row.usdc_usd || 0) * cut("USDC");
+}
+
+function pfCollateralCurveForRows(rows, spots, applyHaircut) {
+  return spots.map(s => rows.reduce((sum, r) => sum + pfCollateralValueAt(r, s, applyHaircut), 0));
+}
+
+/** Build Plotly traces for the posted-collateral overlay, honouring the
+ *  counterparty filter. "All" → one Total line; a specific counterparty →
+ *  separate ETH-book and FIL-book lines. Returns [] when the toggle is off or
+ *  there's nothing to show. */
+function pfCollateralTraces(spots) {
+  const toggle = document.getElementById("pf-show-collateral");
+  if (!toggle || !toggle.checked || !pfCollateral || !Array.isArray(pfCollateral.rows)) return [];
+
+  const applyHaircut = document.getElementById("pf-collateral-haircut")?.checked || false;
+  const suffix = applyHaircut ? " (post-haircut)" : "";
+  const fCpty = document.getElementById("pf-filter-cpty").value;
+  const traces = [];
+
+  const mk = (rows, name, color) => {
+    if (!rows.length) return;
+    const curve = pfCollateralCurveForRows(rows, spots, applyHaircut);
+    if (curve.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
+    traces.push({
+      x: spots, y: curve, type: "scatter", mode: "lines",
+      name: name + suffix,
+      line: { color, width: 2, dash: "dash" },
+      legendgroup: "collateral",
+      hovertemplate: name + ": $%{y:,.0f}<extra></extra>",
+    });
+  };
+
+  if (fCpty) {
+    // One counterparty selected → split by book.
+    const rows = pfCollateral.rows.filter(r =>
+      (r.counterparty || "").toLowerCase() === fCpty.toLowerCase());
+    mk(rows.filter(r => r.portfolio_asset === "ETH"), `${fCpty} — ETH-book collateral`, "#d29922");
+    mk(rows.filter(r => r.portfolio_asset === "FIL"), `${fCpty} — FIL-book collateral`, "#a371f7");
+  } else {
+    // All counterparties → single total across both books.
+    mk(pfCollateral.rows, "Total collateral posted", "#d29922");
+  }
+  return traces;
+}
+
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
   const allHorizons = pfData.chart_horizons;
@@ -3259,8 +3331,11 @@ function pfRenderPayoffChart() {
     });
   }
 
-  // Spot line
-  const allY = traces.flatMap(t => t.y);
+  // Posted-collateral overlay (dashed lines, honours counterparty filter)
+  const collTraces = pfCollateralTraces(spots);
+
+  // Spot line — span the full y-range including any collateral overlay
+  const allY = [...traces, ...collTraces].flatMap(t => t.y);
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
@@ -3271,6 +3346,7 @@ function pfRenderPayoffChart() {
       legendgroup: "spot",
     });
   }
+  traces.push(...collTraces);
 
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
@@ -3428,6 +3504,12 @@ document.getElementById("btn-pf-expiring-10d").addEventListener("click", () => {
 
 ["pf-filter-cpty", "pf-filter-expiry", "pf-filter-type", "pf-filter-side"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderTable(); });
+});
+
+// Counterparty filter also re-scopes the posted-collateral overlay; the two
+// collateral toggles just redraw the chart.
+["pf-filter-cpty", "pf-show-collateral", "pf-collateral-haircut"].forEach(id => {
+  document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderPayoffChart(); });
 });
 
 document.querySelectorAll("#pf-positions-table .sortable").forEach(th => {
