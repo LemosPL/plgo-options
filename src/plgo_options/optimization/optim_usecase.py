@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,19 @@ import numpy as np
 from plgo_options.optimization.optimizer import OptimizerV2
 from plgo_options.optimization.optimizer_v3 import OptimizerV3
 from plgo_options.optimization.snapshot import load_snapshot_dict
+
+
+def _json_default(obj: Any) -> Any:
+    """Coerce numpy scalars/arrays (e.g. from scipy/bs_greeks) to native JSON types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 @dataclass
@@ -96,16 +110,24 @@ class OptimizerUseCase:
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            json.dump(
-                {
-                    "optimizer_input": self.optimizer_input,
-                    "run_params": asdict(self.run_params),
-                    "result": self.result,
-                },
-                f,
-                indent=2,
-            )
+        # Write to a temp file and atomically replace the target so a serialization
+        # error (e.g. a stray numpy type) can never leave a truncated/corrupt snapshot.
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with tmp_path.open("w") as f:
+                json.dump(
+                    {
+                        "optimizer_input": self.optimizer_input,
+                        "run_params": asdict(self.run_params),
+                        "result": self.result,
+                    },
+                    f,
+                    indent=2,
+                    default=_json_default,
+                )
+            os.replace(tmp_path, path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return path
 
     def save_auto(self, directory: str | Path) -> Path:
