@@ -3255,14 +3255,19 @@ function pfCollateralTraces(spots) {
 
   const mk = (rows, name, color) => {
     if (!rows.length) return;
-    const curve = pfCollateralCurveForRows(rows, spots, applyHaircut);
-    if (curve.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
+    const posted = pfCollateralCurveForRows(rows, spots, applyHaircut);
+    if (posted.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
+    // Plotted on the right axis (y2) and NEGATED so the collateral cushion
+    // dives alongside the (negative) liability payoff instead of blowing out
+    // the P&L scale. customdata keeps the true posted $ for the hover.
     traces.push({
-      x: spots, y: curve, type: "scatter", mode: "lines",
+      x: spots, y: posted.map(v => -v), type: "scatter", mode: "lines",
       name: name + suffix,
+      yaxis: "y2",
+      customdata: posted,
       line: { color, width: 2, dash: "dash" },
       legendgroup: "collateral",
-      hovertemplate: name + ": $%{y:,.0f}<extra></extra>",
+      hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
     });
   };
 
@@ -3331,11 +3336,11 @@ function pfRenderPayoffChart() {
     });
   }
 
-  // Posted-collateral overlay (dashed lines, honours counterparty filter)
+  // Posted-collateral overlay (dashed lines on the right axis, honours filter)
   const collTraces = pfCollateralTraces(spots);
 
-  // Spot line — span the full y-range including any collateral overlay
-  const allY = [...traces, ...collTraces].flatMap(t => t.y);
+  // Spot line — span the payoff (y1) range only; collateral lives on y2.
+  const allY = traces.flatMap(t => t.y);
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
@@ -3356,11 +3361,17 @@ function pfRenderPayoffChart() {
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
-    margin: { t: 50, r: 200, b: 50, l: 80 },
+    yaxis2: {
+      title: "Posted collateral (USD, shown negative)",
+      overlaying: "y", side: "right",
+      color: "#d29922", showgrid: false, zeroline: false,
+      tickformat: "$,.2s",
+    },
+    margin: { t: 50, r: 260, b: 50, l: 80 },
     showlegend: true,
     legend: {
       font: { color: cc.muted, size: 10 },
-      orientation: "v", x: 1.02, y: 1,
+      orientation: "v", x: 1.13, y: 1,
       xanchor: "left", yanchor: "top",
       bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1,
     },
