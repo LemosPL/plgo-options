@@ -183,6 +183,21 @@ async def collateral_summary(asset: str = "all"):
     for m in margin_rows:
         all_display.setdefault(m["counterparty"].lower(), m["counterparty"])
 
+    # Collateral can be posted in an asset that has no live option book (e.g. a
+    # FIL-only portfolio still holding ETH as collateral). Trade data won't carry
+    # that asset's spot, so fall back to a direct live fetch — otherwise that
+    # collateral would silently value at $0. Mirrors the BTC block below.
+    if not spots.get("ETH") and any(m["eth_qty"] for m in margin_rows):
+        try:
+            spots["ETH"] = float(await _client.get_eth_spot_price())
+        except Exception:
+            pass
+    if not spots.get("FIL") and any(m["fil_qty"] for m in margin_rows):
+        try:
+            spots["FIL"] = float(await _client.get_fil_spot_price())
+        except Exception:
+            pass
+
     eth_spot = spots.get("ETH", 0.0)
     fil_spot = spots.get("FIL", 0.0)
 
