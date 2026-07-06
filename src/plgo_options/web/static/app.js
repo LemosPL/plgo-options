@@ -1,8 +1,5 @@
 "use strict";
 
-// TEMP: deploy/cache canary. If the console shows this, the new app.js loaded.
-console.log("%cPLGO app.js build 65 loaded", "color:#3fb950;font-weight:bold");
-
 // ─── State ──────────────────────────────────────────────────
 let currentAsset = "ETH";  // "ETH" or "FIL"
 let ethSpot = null;
@@ -2749,7 +2746,7 @@ function drawExposureChart(positions) {
 // ─── Portfolio P&L (interactive) ───────────────────────────
 let portfolioLoaded = false;
 let pfData = null;              // raw API response
-let pfCollateral = null;        // /api/collateral/summary response (posted collateral, both books)
+let pfCollateralMap = null;     // /api/collateral/map response (posted collateral by counterparty × token)
 let pfSelected = new Set();     // selected position indices
 let pfRolled = new Map();       // idx → { newDte }
 let pfSortCol = "expiry";
@@ -2829,13 +2826,14 @@ async function loadPortfolio() {
     pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
 
-    // Posted-collateral overlay data (spans both ETH & FIL books). Best-effort:
-    // a failure here must not break the P&L page.
+    // Posted-collateral overlay data — sourced from the Collateral Map
+    // (counterparty_collateral), the same table the Collateral tab edits.
+    // Best-effort: a failure here must not break the P&L page.
     try {
-      pfCollateral = await get("/api/collateral/summary?asset=all");
+      pfCollateralMap = await get("/api/collateral/map");
     } catch (e) {
-      console.warn("Collateral summary unavailable for overlay:", e);
-      pfCollateral = null;
+      console.warn("Collateral map unavailable for overlay:", e);
+      pfCollateralMap = null;
     }
 
     // Default: expired → Old only, active → both Old AND New
@@ -3221,59 +3219,50 @@ function pfInitCompareSets() {
 }
 
 // ── Posted-collateral overlay ─────────────────────────────
-// Values each counterparty's posted collateral across the spot ladder. The
-// token that matches the page's current asset (ETH on the ETH page, FIL on the
-// FIL page) is re-valued at each ladder spot; every other token is held at its
-// live spot. So an ETH-collateralised book slopes up with spot, while a
-// FIL-book on the ETH page reads flat — which is correct.
-function pfCollateralValueAt(row, spot, applyHaircut) {
-  const hc = pfCollateral.haircuts || {};
-  const sp = pfCollateral.spots || {};
-  const cut = (asset) => applyHaircut ? (1 - (hc[asset] || 0)) : 1;
-  const ethPx = currentAsset === "ETH" ? spot : (sp.ETH || 0);
-  const filPx = currentAsset === "FIL" ? spot : (sp.FIL || 0);
-  return (row.eth_qty || 0) * ethPx * cut("ETH")
-       + (row.fil_qty || 0) * filPx * cut("FIL")
-       + (row.btc_qty || 0) * (sp.BTC || 0) * cut("BTC")
-       + (row.wave_qty || 0) * (row.wave_price || 0) * cut("WAVE")
-       + (row.usdc_usd || 0) * cut("USDC");
+// Values one counterparty's posted collateral (token qtys from the Collateral
+// Map) across the spot ladder. The token matching the page's current asset
+// (ETH on the ETH page, FIL on the FIL page) is re-valued at each ladder spot;
+// every other token is held at its effective map price (USDC = 1). So an
+// ETH-collateralised holding slopes up with spot while a USDC holding reads flat.
+function pfCollMapValueAt(qtys, spot, applyHaircut) {
+  const prices = pfCollateralMap.prices || {};
+  const hc = pfCollateralMap.haircuts || {};
+  let sum = 0;
+  for (const asset of Object.keys(qtys)) {
+    const q = qtys[asset] || 0;
+    if (!q) continue;
+    const px = asset === currentAsset ? spot
+      : asset === "USDC" ? 1
+      : (prices[asset] || 0);
+    const cut = applyHaircut ? (1 - (hc[asset] || 0)) : 1;
+    sum += q * px * cut;
+  }
+  return sum;
 }
 
-function pfCollateralCurveForRows(rows, spots, applyHaircut) {
-  return spots.map(s => rows.reduce((sum, r) => sum + pfCollateralValueAt(r, s, applyHaircut), 0));
+function pfCollMapCurve(cptys, spots, applyHaircut) {
+  return spots.map(s => cptys.reduce((sum, c) => sum + pfCollMapValueAt(c.qtys || {}, s, applyHaircut), 0));
 }
 
-/** Build Plotly traces for the posted-collateral overlay, honouring the
- *  counterparty filter. "All" → one Total line; a specific counterparty →
- *  separate ETH-book and FIL-book lines. Returns [] when the toggle is off or
- *  there's nothing to show. */
+/** Build Plotly traces for the posted-collateral overlay from the Collateral
+ *  Map (counterparty_collateral). "All" → one Total line; a specific
+ *  counterparty → that counterparty's line. Plotted on the right axis (y2) and
+ *  NEGATED so the cushion dives alongside the (negative) liability payoff.
+ *  Returns [] when the toggle is off or there's nothing posted. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
-  // TEMP diag
-  console.log("[collateral] toggle.checked=", toggle?.checked,
-    "pfCollateral=", pfCollateral,
-    "rows=", pfCollateral?.rows?.length,
-    "currentAsset=", currentAsset,
-    "spots.len=", spots?.length);
-  if (!toggle || !toggle.checked || !pfCollateral || !Array.isArray(pfCollateral.rows)) {
-    console.log("[collateral] EARLY RETURN — guard failed");
-    return [];
-  }
+  if (!toggle || !toggle.checked || !pfCollateralMap || !Array.isArray(pfCollateralMap.counterparties)) return [];
 
   const applyHaircut = document.getElementById("pf-collateral-haircut")?.checked || false;
   const suffix = applyHaircut ? " (post-haircut)" : "";
   const fCpty = document.getElementById("pf-filter-cpty").value;
   const traces = [];
 
-  const mk = (rows, name, color) => {
-    if (!rows.length) { console.log("[collateral] mk skip (no rows):", name); return; }
-    const posted = pfCollateralCurveForRows(rows, spots, applyHaircut);
-    console.log("[collateral] mk", name, "rows=", rows.length,
-      "posted[0,mid,last]=", posted[0], posted[Math.floor(posted.length/2)], posted[posted.length-1]);
-    if (posted.every(v => Math.abs(v) < 1)) { console.log("[collateral] mk skip (all <$1):", name); return; }  // nothing posted → skip
-    // Plotted on the right axis (y2) and NEGATED so the collateral cushion
-    // dives alongside the (negative) liability payoff instead of blowing out
-    // the P&L scale. customdata keeps the true posted $ for the hover.
+  const mk = (cptys, name, color) => {
+    if (!cptys.length) return;
+    const posted = pfCollMapCurve(cptys, spots, applyHaircut);
+    if (posted.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
+    // customdata keeps the true (positive) posted $ for the hover.
     traces.push({
       x: spots, y: posted.map(v => -v), type: "scatter", mode: "lines",
       name: name + suffix,
@@ -3286,16 +3275,12 @@ function pfCollateralTraces(spots) {
   };
 
   if (fCpty) {
-    // One counterparty selected → split by book.
-    const rows = pfCollateral.rows.filter(r =>
-      (r.counterparty || "").toLowerCase() === fCpty.toLowerCase());
-    mk(rows.filter(r => r.portfolio_asset === "ETH"), `${fCpty} — ETH-book collateral`, "#d29922");
-    mk(rows.filter(r => r.portfolio_asset === "FIL"), `${fCpty} — FIL-book collateral`, "#a371f7");
+    const cptys = pfCollateralMap.counterparties.filter(c =>
+      (c.counterparty || "").toLowerCase() === fCpty.toLowerCase());
+    mk(cptys, `${fCpty} — collateral posted`, "#d29922");
   } else {
-    // All counterparties → single total across both books.
-    mk(pfCollateral.rows, "Total collateral posted", "#d29922");
+    mk(pfCollateralMap.counterparties, "Total collateral posted", "#d29922");
   }
-  console.log("[collateral] produced", traces.length, "trace(s)");
   return traces;
 }
 
