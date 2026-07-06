@@ -1,7 +1,7 @@
 "use strict";
 
 // TEMP: deploy/cache canary. If the console shows this, the new app.js loaded.
-console.log("%cPLGO app.js build 64 loaded", "color:#3fb950;font-weight:bold");
+console.log("%cPLGO app.js build 65 loaded", "color:#3fb950;font-weight:bold");
 
 // ─── State ──────────────────────────────────────────────────
 let currentAsset = "ETH";  // "ETH" or "FIL"
@@ -3249,7 +3249,16 @@ function pfCollateralCurveForRows(rows, spots, applyHaircut) {
  *  there's nothing to show. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
-  if (!toggle || !toggle.checked || !pfCollateral || !Array.isArray(pfCollateral.rows)) return [];
+  // TEMP diag
+  console.log("[collateral] toggle.checked=", toggle?.checked,
+    "pfCollateral=", pfCollateral,
+    "rows=", pfCollateral?.rows?.length,
+    "currentAsset=", currentAsset,
+    "spots.len=", spots?.length);
+  if (!toggle || !toggle.checked || !pfCollateral || !Array.isArray(pfCollateral.rows)) {
+    console.log("[collateral] EARLY RETURN — guard failed");
+    return [];
+  }
 
   const applyHaircut = document.getElementById("pf-collateral-haircut")?.checked || false;
   const suffix = applyHaircut ? " (post-haircut)" : "";
@@ -3257,9 +3266,11 @@ function pfCollateralTraces(spots) {
   const traces = [];
 
   const mk = (rows, name, color) => {
-    if (!rows.length) return;
+    if (!rows.length) { console.log("[collateral] mk skip (no rows):", name); return; }
     const posted = pfCollateralCurveForRows(rows, spots, applyHaircut);
-    if (posted.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
+    console.log("[collateral] mk", name, "rows=", rows.length,
+      "posted[0,mid,last]=", posted[0], posted[Math.floor(posted.length/2)], posted[posted.length-1]);
+    if (posted.every(v => Math.abs(v) < 1)) { console.log("[collateral] mk skip (all <$1):", name); return; }  // nothing posted → skip
     // Plotted on the right axis (y2) and NEGATED so the collateral cushion
     // dives alongside the (negative) liability payoff instead of blowing out
     // the P&L scale. customdata keeps the true posted $ for the hover.
@@ -3284,6 +3295,7 @@ function pfCollateralTraces(spots) {
     // All counterparties → single total across both books.
     mk(pfCollateral.rows, "Total collateral posted", "#d29922");
   }
+  console.log("[collateral] produced", traces.length, "trace(s)");
   return traces;
 }
 
