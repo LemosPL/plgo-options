@@ -411,8 +411,20 @@
       <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
         <input type="checkbox" id="pf-collateral-haircut"> apply haircut
       </label>
-      <span style="font-size:.75rem;color:var(--muted)">
-        Posted collateral (from the Collateral Map) on the right axis, shown negative to track the payoff. Uses the <b>Counterparty</b> filter below: <b>All</b> = total; or pick one counterparty.
+      <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
+        <input type="checkbox" id="pf-collateral-invert" checked> invert (negative)
+      </label>
+      <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
+        <input type="checkbox" id="pf-collateral-residual"> residual (collateral + payoff)
+      </label>
+      <span class="pf-seg" id="pf-collateral-scope" style="font-size:.75rem">
+        <span style="color:var(--muted);margin-right:.35rem">Scope:</span>
+        <button type="button" class="pf-seg-btn active" data-scope="all">All</button>
+        <button type="button" class="pf-seg-btn" data-scope="eth">ETH (USDC+ETH+BTC)</button>
+        <button type="button" class="pf-seg-btn" data-scope="fil">FIL only</button>
+      </span>
+      <span style="font-size:.72rem;color:var(--muted)">
+        From the Collateral Map, on the right axis. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
       </span>
     </div>
 
@@ -2107,6 +2119,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=66"></script>
+<script src="/static/app.js?v=67"></script>
 </body>
 </html>

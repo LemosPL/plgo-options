@@ -218,6 +218,21 @@ a { color: var(--accent); }
 
 .sub-tab-pane { display: none; }
 .sub-tab-pane.active { display: block; }
+
+/* Small segmented control (e.g. collateral overlay scope) */
+.pf-seg { display: inline-flex; align-items: center; gap: .25rem; }
+.pf-seg-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: .18rem .5rem;
+  font-size: .72rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.pf-seg-btn:hover { color: var(--text); }
+.pf-seg-btn.active { color: var(--accent); border-color: var(--accent); background: var(--hover-bg); }
 .sub-tab-pane > * + * { margin-top: 1.25rem; }
 
 /* ── Card ──────────────────────────────────────────────────── */

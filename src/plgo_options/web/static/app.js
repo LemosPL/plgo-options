@@ -2747,6 +2747,7 @@ function drawExposureChart(positions) {
 let portfolioLoaded = false;
 let pfData = null;              // raw API response
 let pfCollateralMap = null;     // /api/collateral/map response (posted collateral by counterparty × token)
+let pfCollateralScope = "all";  // "all" | "eth" (USDC+ETH+BTC) | "fil" (FIL only)
 let pfSelected = new Set();     // selected position indices
 let pfRolled = new Map();       // idx → { newDte }
 let pfSortCol = "expiry";
@@ -3224,11 +3225,20 @@ function pfInitCompareSets() {
 // (ETH on the ETH page, FIL on the FIL page) is re-valued at each ladder spot;
 // every other token is held at its effective map price (USDC = 1). So an
 // ETH-collateralised holding slopes up with spot while a USDC holding reads flat.
-function pfCollMapValueAt(qtys, spot, applyHaircut) {
+// Which tokens count for each scope. null = all tokens.
+const PF_COLL_SCOPE_ASSETS = {
+  all: null,
+  eth: new Set(["USDC", "ETH", "BTC"]),
+  fil: new Set(["FIL"]),
+};
+
+function pfCollMapValueAt(qtys, spot, applyHaircut, scope) {
   const prices = pfCollateralMap.prices || {};
   const hc = pfCollateralMap.haircuts || {};
+  const allow = PF_COLL_SCOPE_ASSETS[scope] || null;
   let sum = 0;
   for (const asset of Object.keys(qtys)) {
+    if (allow && !allow.has(asset)) continue;
     const q = qtys[asset] || 0;
     if (!q) continue;
     const px = asset === currentAsset ? spot
@@ -3240,48 +3250,56 @@ function pfCollMapValueAt(qtys, spot, applyHaircut) {
   return sum;
 }
 
-function pfCollMapCurve(cptys, spots, applyHaircut) {
-  return spots.map(s => cptys.reduce((sum, c) => sum + pfCollMapValueAt(c.qtys || {}, s, applyHaircut), 0));
+function pfCollMapCurve(cptys, spots, applyHaircut, scope) {
+  return spots.map(s => cptys.reduce((sum, c) => sum + pfCollMapValueAt(c.qtys || {}, s, applyHaircut, scope), 0));
 }
 
-/** Build Plotly traces for the posted-collateral overlay from the Collateral
- *  Map (counterparty_collateral). "All" → one Total line; a specific
- *  counterparty → that counterparty's line. Plotted on the right axis (y2) and
- *  NEGATED so the cushion dives alongside the (negative) liability payoff.
- *  Returns [] when the toggle is off or there's nothing posted. */
+// Counterparties in scope for the overlay, honouring the Counterparty filter.
+function pfCollateralActiveCptys() {
+  if (!pfCollateralMap || !Array.isArray(pfCollateralMap.counterparties)) return [];
+  const fCpty = document.getElementById("pf-filter-cpty").value;
+  if (fCpty) return pfCollateralMap.counterparties.filter(c =>
+    (c.counterparty || "").toLowerCase() === fCpty.toLowerCase());
+  return pfCollateralMap.counterparties;
+}
+
+/** Positive posted-collateral curve for the active filter + scope + haircut,
+ *  or null when nothing is posted. Shared by the collateral line and the
+ *  residual (collateral + payoff) overlay. */
+function pfCollateralSumCurve(spots) {
+  const cptys = pfCollateralActiveCptys();
+  if (!cptys.length) return null;
+  const applyHaircut = document.getElementById("pf-collateral-haircut")?.checked || false;
+  const curve = pfCollMapCurve(cptys, spots, applyHaircut, pfCollateralScope);
+  return curve.every(v => Math.abs(v) < 1) ? null : curve;
+}
+
+/** Build the posted-collateral overlay trace from the Collateral Map. Plotted
+ *  on the right axis (y2); negated when "invert" is on so the cushion dives
+ *  alongside the (negative) liability payoff. Returns [] when off/empty. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
-  if (!toggle || !toggle.checked || !pfCollateralMap || !Array.isArray(pfCollateralMap.counterparties)) return [];
+  if (!toggle || !toggle.checked) return [];
+  const curve = pfCollateralSumCurve(spots);
+  if (!curve) return [];
 
+  const invert = document.getElementById("pf-collateral-invert")?.checked ?? true;
   const applyHaircut = document.getElementById("pf-collateral-haircut")?.checked || false;
-  const suffix = applyHaircut ? " (post-haircut)" : "";
   const fCpty = document.getElementById("pf-filter-cpty").value;
-  const traces = [];
+  const scopeLbl = { all: "", eth: " · ETH set", fil: " · FIL only" }[pfCollateralScope] || "";
+  const name = (fCpty ? `${fCpty} collateral` : "Total collateral posted")
+    + (applyHaircut ? " (post-haircut)" : "") + scopeLbl;
 
-  const mk = (cptys, name, color) => {
-    if (!cptys.length) return;
-    const posted = pfCollMapCurve(cptys, spots, applyHaircut);
-    if (posted.every(v => Math.abs(v) < 1)) return;  // nothing posted → skip
-    // customdata keeps the true (positive) posted $ for the hover.
-    traces.push({
-      x: spots, y: posted.map(v => -v), type: "scatter", mode: "lines",
-      name: name + suffix,
-      yaxis: "y2",
-      customdata: posted,
-      line: { color, width: 2, dash: "dash" },
-      legendgroup: "collateral",
-      hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
-    });
-  };
-
-  if (fCpty) {
-    const cptys = pfCollateralMap.counterparties.filter(c =>
-      (c.counterparty || "").toLowerCase() === fCpty.toLowerCase());
-    mk(cptys, `${fCpty} — collateral posted`, "#d29922");
-  } else {
-    mk(pfCollateralMap.counterparties, "Total collateral posted", "#d29922");
-  }
-  return traces;
+  // customdata keeps the true (positive) posted $ for the hover.
+  return [{
+    x: spots, y: invert ? curve.map(v => -v) : curve, type: "scatter", mode: "lines",
+    name,
+    yaxis: "y2",
+    customdata: curve,
+    line: { color: "#d29922", width: 2, dash: "dash" },
+    legendgroup: "collateral",
+    hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
+  }];
 }
 
 function pfRenderPayoffChart() {
@@ -3338,6 +3356,27 @@ function pfRenderPayoffChart() {
 
   // Posted-collateral overlay (dashed lines on the right axis, honours filter)
   const collTraces = pfCollateralTraces(spots);
+  const collInvert = document.getElementById("pf-collateral-invert")?.checked ?? true;
+
+  // Residual (collateral + payoff at expiry) overlay — optional, right axis.
+  if (document.getElementById("pf-collateral-residual")?.checked) {
+    const collCurve = pfCollateralSumCurve(spots);
+    let payoffCurve = null, plabel = "";
+    if (newPositions.length > 0) { payoffCurve = pfSumCurves(pfNewSet, 0); plabel = "New"; }
+    else if (oldPositions.length > 0) { payoffCurve = pfSumCurveForSet(pfOldSet, 0); plabel = "Old"; }
+    if (collCurve && payoffCurve) {
+      const residual = collCurve.map((c, i) => c + (payoffCurve[i] || 0));
+      collTraces.push({
+        x: spots, y: collInvert ? residual.map(v => -v) : residual, type: "scatter", mode: "lines",
+        name: `Residual (collateral + ${plabel} payoff @ expiry)`,
+        yaxis: "y2",
+        customdata: residual,
+        line: { color: "#2dd4bf", width: 2.5, dash: "dashdot" },
+        legendgroup: "collateral",
+        hovertemplate: "Residual: $%{customdata:,.0f}<extra></extra>",
+      });
+    }
+  }
 
   // Spot line — span the payoff (y1) range only; collateral lives on y2.
   const allY = traces.flatMap(t => t.y);
@@ -3362,7 +3401,7 @@ function pfRenderPayoffChart() {
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
     yaxis2: {
-      title: "Posted collateral (USD, shown negative)",
+      title: "Collateral / residual (USD" + (collInvert ? ", negative)" : ")"),
       overlaying: "y", side: "right",
       color: "#d29922", showgrid: false, zeroline: false,
       tickformat: "$,.2s",
@@ -3517,10 +3556,21 @@ document.getElementById("btn-pf-expiring-10d").addEventListener("click", () => {
   document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderTable(); });
 });
 
-// Counterparty filter also re-scopes the posted-collateral overlay; the two
+// Counterparty filter also re-scopes the posted-collateral overlay; the
 // collateral toggles just redraw the chart.
-["pf-filter-cpty", "pf-show-collateral", "pf-collateral-haircut"].forEach(id => {
+["pf-filter-cpty", "pf-show-collateral", "pf-collateral-haircut",
+ "pf-collateral-invert", "pf-collateral-residual"].forEach(id => {
   document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderPayoffChart(); });
+});
+
+// Collateral scope segmented control (All / ETH set / FIL only).
+document.querySelectorAll("#pf-collateral-scope .pf-seg-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    pfCollateralScope = btn.dataset.scope;
+    document.querySelectorAll("#pf-collateral-scope .pf-seg-btn")
+      .forEach(b => b.classList.toggle("active", b === btn));
+    if (pfData) pfRenderPayoffChart();
+  });
 });
 
 document.querySelectorAll("#pf-positions-table .sortable").forEach(th => {
@@ -10074,15 +10124,15 @@ async function collatDeleteModal() {
     const addCp = document.getElementById("btn-collat-add-cp");
     if (addCp) addCp.addEventListener("click", () => collatAddCp());
 
-    // Auto-refresh live prices while the Collateral tab is open. Skips when a
-    // map input is focused so it never clobbers a value you're typing.
+    // Auto-refresh live prices while the Collateral tab is open, every 10 min.
+    // Skips when a map input is focused so it never clobbers a value you're typing.
     setInterval(() => {
       const page = document.getElementById("page-collateral");
       if (!page || !page.classList.contains("active")) return;
       const ae = document.activeElement;
       if (ae && ae.closest && ae.closest("#collat-map-table")) return;
       collatLoad();
-    }, 30000);
+    }, 600000);
 
     document.getElementById("collat-modal-close")?.addEventListener("click", collatCloseModal);
     document.getElementById("btn-collat-modal-cancel")?.addEventListener("click", collatCloseModal);
