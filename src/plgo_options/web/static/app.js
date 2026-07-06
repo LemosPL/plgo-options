@@ -3381,12 +3381,13 @@ function pfRenderPayoffChart() {
     }
   }
 
-  // Spot line — span the payoff (y1) range only; collateral lives on y2.
+  // Spot line — span the full payoff (y1) range including zero, so it reaches
+  // the $0 line even when the whole payoff is negative (e.g. the FIL book).
   const allY = traces.flatMap(t => t.y);
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
-      y: [Math.min(...allY), Math.max(...allY)],
+      y: [Math.min(0, ...allY), Math.max(0, ...allY)],
       type: "scatter", mode: "lines",
       name: `Spot $${fmtSpot(pfData.eth_spot)}`,
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
@@ -3395,25 +3396,6 @@ function pfRenderPayoffChart() {
   }
   traces.push(...collTraces);
 
-  // Align the right (collateral/residual) axis zero with the left (P&L) axis
-  // zero, by scaling the same range. A positive collateral value then always
-  // renders above the zero line, never down in the negative-P&L region.
-  let yaxisRange, yaxis2Range;
-  const y2vals = collTraces.flatMap(t => t.y).filter(v => Number.isFinite(v));
-  if (allY.length > 0 && y2vals.length > 0) {
-    let lo = Math.min(0, ...allY), hi = Math.max(0, ...allY);
-    const pad = (hi - lo) * 0.05 || 1;
-    lo -= pad; hi += pad;
-    yaxisRange = [lo, hi];
-    let k = 0;
-    for (const v of y2vals) {
-      if (v > 0 && hi > 0) k = Math.max(k, v / hi);
-      else if (v < 0 && lo < 0) k = Math.max(k, v / lo);
-    }
-    k = (k || 1) * 1.05;
-    yaxis2Range = [lo * k, hi * k];
-  }
-
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
   const titleText = `Portfolio Payoff — Old (${oldPositions.length}) vs New (${newPositions.length})`;
@@ -3421,14 +3403,13 @@ function pfRenderPayoffChart() {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
-    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
-      ...(yaxisRange ? { range: yaxisRange, autorange: false } : {}) },
+    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2, rangemode: "tozero" },
     yaxis2: {
       title: "Collateral / residual (USD" + (collInvert ? ", collateral negative)" : ")"),
       overlaying: "y", side: "right",
       color: "#d29922", showgrid: false, zeroline: false,
       tickformat: "$,.2s",
-      ...(yaxis2Range ? { range: yaxis2Range, autorange: false } : {}),
+      rangemode: "tozero",
     },
     margin: { t: 50, r: 260, b: 50, l: 80 },
     showlegend: true,
@@ -3440,7 +3421,7 @@ function pfRenderPayoffChart() {
     },
   };
 
-  Plotly.react("portfolio-payoff-chart", traces, layout, { responsive: true });
+  Plotly.react("portfolio-payoff-chart", traces, layout, { responsive: true, scrollZoom: true });
 }
 
 // ── MTM Matrix (HTML table with dollar values) ───────────
