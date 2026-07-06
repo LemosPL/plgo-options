@@ -125,7 +125,7 @@ class CollateralOptimization:
                 g0 = float(sum(abs(existing_qty[j]) * float(c_prices[j]) for j in indices))
                 free_pct = self._resolve(collateral_tier_free_pct, cp, default=0.0)
                 g_free = g0 * (1.0 + free_pct)
-                mu_steep_cp = self._resolve(collateral_tier_mu, cp, default=0.07)
+                mu_steep_cp = mu_factor + self._resolve(collateral_tier_mu, cp, default=0.07)
                 effective_mu_steep = mu_steep_cp / (1.0 + mu_steep_cp)
 
                 if g0 == 0.0:
@@ -133,7 +133,7 @@ class CollateralOptimization:
                 else:
                     t_base = pulp.LpVariable(f"tier_base_{cp}", lowBound=0, upBound=max(g_free, 0.0), cat="Continuous")
                 t_steep = pulp.LpVariable(f"tier_steep_{cp}", lowBound=0, cat="Continuous")
-                tier_vars[cp] = (t_base, t_steep, effective_mu, effective_mu_steep)
+                tier_vars[cp] = (t_base, t_steep, 0.0, effective_mu_steep)
 
                 gross_notional_cp = pulp.lpSum(abs_net_pos_vars[j] * float(c_prices[j]) for j in indices)
                 prob += t_base + t_steep == gross_notional_cp, f"tier_link_{cp}"

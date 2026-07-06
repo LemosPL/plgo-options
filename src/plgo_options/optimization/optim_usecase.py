@@ -156,10 +156,10 @@ class OptimizerUseCase:
     def run_test(self):
         print('run_test()')
         optimizer = self.build_optimizer(self.today)
-        lam_factor = 0.1
-        mu_factor = 4.3
+        lam_factor = 0.2
+        mu_factor = 2.3
 
-        result = optimizer.run_lp(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, roll_itm_only=True,
+        result = optimizer.run_lp(target_expiry="25SEP26", is_replay=True, roll_dte_threshold=25, roll_itm_only=True,
                                   lam_factor=lam_factor, mu_factor=mu_factor, counterparties=["Flowdesk", "KeyRock"],
                                   collateral_budget_pct=0.0)
         #result = optimizer.run(target_expiry="28AUG26", is_replay=True, roll_dte_threshold=5, lam_factor=lam_factor)#, counterparties=["Flowdesk"])
