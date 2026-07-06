@@ -1,5 +1,8 @@
 "use strict";
 
+// TEMP: deploy/cache canary. If the console shows this, the new app.js loaded.
+console.log("%cPLGO app.js build 64 loaded", "color:#3fb950;font-weight:bold");
+
 // ─── State ──────────────────────────────────────────────────
 let currentAsset = "ETH";  // "ETH" or "FIL"
 let ethSpot = null;
