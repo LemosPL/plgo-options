@@ -46,7 +46,7 @@ class OptimizerV3(BaseOptimizer):
         self.cost = None
         self.risk_reduction = None
 
-    def _estimate_trade_cost(
+    def _estimate_trade_cash_outlay(
         self,
         qty: float,
         price: float,
@@ -56,7 +56,11 @@ class OptimizerV3(BaseOptimizer):
         is_held: bool = False,
     ) -> float:
         """
-        Estimate transaction cost for a single leg.
+        Estimate cash outlay for a single leg — roughly the premium paid/received,
+        scaled by unwind_discount (for closing held positions) or new_position_penalty
+        (for opening new ones). This is NOT a transaction-cost/bid-ask estimate — for
+        new positions it's close to 100% of notional by construction. The LP's own
+        `trading_cost` term (bid-ask-based) is the right figure for execution cost.
         """
         abs_qty = abs(float(qty))
         price = max(float(price), 0.0)
@@ -161,7 +165,7 @@ class OptimizerV3(BaseOptimizer):
                 "is_unwind": True,
                 "unwind_qty": abs(int(unwind_qty)),
                 "new_qty": 0,
-                "estimated_cost": 0.0,
+                "estimated_cash_outlay": 0.0,
                 "normalized_benefit": 0.0,
                 "net_benefit": 0.0,
                 "delta_contribution": round(float(unwind_qty * (getattr(p, "delta", 0.0) or 0.0)), 4),
@@ -259,7 +263,7 @@ class OptimizerV3(BaseOptimizer):
                 "iv_pct": round(float(replacement.iv_pct or 0.0), 1),
                 "bs_price_usd": round(float(replacement.bs_price_usd or 0.0), 2),
                 "vega": round(float(replacement.vega or 0.0), 4),
-                "estimated_cost": 0.0,
+                "estimated_cash_outlay": 0.0,
                 "normalized_benefit": 0.0,
                 "net_benefit": 0.0,
                 "delta_contribution": round(float(replacement_qty * replacement_delta), 4),
@@ -512,7 +516,7 @@ class OptimizerV3(BaseOptimizer):
                 "is_unwind": False,
                 "unwind_qty": 0,
                 "new_qty": abs(int(leg_qty)),
-                "estimated_cost": 0.0,
+                "estimated_cash_outlay": 0.0,
                 "normalized_benefit": 0.0,
                 "net_benefit": 0.0,
                 "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
@@ -822,19 +826,25 @@ class OptimizerV3(BaseOptimizer):
         roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
         trades = list(roll_unwind_trades)
         fitted_payoff = adjusted_base_payoff.copy()
+        # Accumulated once per candidate, before est_cost gets stamped onto every leg
+        # below — summing "estimated_cash_outlay" off the leg rows after the fact
+        # double-counts spreads/condors that share a leg with another candidate
+        # (_aggregate_trade_legs merges those shared legs additively).
+        total_cash_outlay = 0.0
 
         for j, (qty, c) in enumerate(zip(net_qty, candidates)):
             rounded_qty = int(np.round(qty))
             if rounded_qty == 0:
                 continue
 
-            est_cost = self._estimate_candidate_trade_cost(
+            est_cost = self._estimate_candidate_cash_outlay(
                 c=c,
                 qty=rounded_qty,
                 held_positions=held_positions,
                 unwind_discount=unwind_discount,
                 new_position_penalty=new_position_penalty,
             )
+            total_cash_outlay += est_cost
             instrument_name = self._candidate_instrument_name(c)
             fitted_payoff += rounded_qty * np.array(c_payoffs[j])
 
@@ -861,7 +871,7 @@ class OptimizerV3(BaseOptimizer):
                     "is_unwind": bool(rounded_qty * getattr(c, "existing_qty", 0.0) < 0),
                     "unwind_qty": abs(int(leg_qty)) if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else 0,
                     "new_qty": 0 if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else abs(int(leg_qty)),
-                    "estimated_cost": round(float(est_cost), 2),
+                    "estimated_cash_outlay": round(float(est_cost), 2),
                     "normalized_benefit": 0.0,
                     "net_benefit": 0.0,
                     "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
@@ -873,10 +883,13 @@ class OptimizerV3(BaseOptimizer):
 
         lp_trades = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
         total_notional = sum(abs(t.get("qty", 0)) * float(t.get("bs_price_usd", 0) or 0) for t in lp_trades)
-        total_est_cost = sum(float(t.get("estimated_cost", 0) or 0) for t in lp_trades)
-        print(f"=== Trading cost estimate ===")
-        print(f"  notional traded : {total_notional:>14,.0f}")
-        print(f"  estimated cost  : {total_est_cost:>14,.0f}  ({100*total_est_cost/max(total_notional,1):.2f}% of notional)")
+        # NOTE: this is cash outlay (≈ premium ± penalty), NOT a transaction-cost
+        # estimate — for new positions it's naturally close to 100% of notional.
+        # The LP's own `trading_cost` printed above (bid-ask-based) is the right
+        # figure for execution/transaction cost.
+        print(f"=== Cash outlay estimate ===")
+        print(f"  notional traded      : {total_notional:>14,.0f}")
+        print(f"  estimated cash outlay: {total_cash_outlay:>14,.0f}  ({100*total_cash_outlay/max(total_notional,1):.2f}% of notional)")
 
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
@@ -1170,7 +1183,7 @@ class OptimizerV3(BaseOptimizer):
             if rounded_qty == 0:
                 continue
 
-            est_cost = self._estimate_candidate_trade_cost(
+            est_cost = self._estimate_candidate_cash_outlay(
                 c=c,
                 qty=rounded_qty,
                 held_positions=held_positions,
@@ -1277,7 +1290,7 @@ class OptimizerV3(BaseOptimizer):
                     "unwind_qty": 0,
                     "new_qty": abs(int(leg_qty)),
                     "strike_weight": round(float(w), 4),
-                    "estimated_cost": round(float(est_cost), 2),
+                    "estimated_cash_outlay": round(float(est_cost), 2),
                     "normalized_benefit": round(float(normalized_benefit), 2),
                     "net_benefit": round(float(net_benefit), 2),
                     "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
@@ -2019,7 +2032,7 @@ class OptimizerV3(BaseOptimizer):
             if key not in aggregated:
                 aggregated[key] = trade.copy()
                 aggregated[key]["qty"] = qty
-                aggregated[key]["estimated_cost"] = float(trade.get("estimated_cost", 0.0) or 0.0)
+                aggregated[key]["estimated_cash_outlay"] = float(trade.get("estimated_cash_outlay", 0.0) or 0.0)
                 aggregated[key]["normalized_benefit"] = float(trade.get("normalized_benefit", 0.0) or 0.0)
                 aggregated[key]["net_benefit"] = float(trade.get("net_benefit", 0.0) or 0.0)
                 aggregated[key]["delta_contribution"] = float(trade.get("delta_contribution", 0.0) or 0.0)
@@ -2031,7 +2044,7 @@ class OptimizerV3(BaseOptimizer):
 
             existing = aggregated[key]
             existing["qty"] += qty
-            existing["estimated_cost"] += float(trade.get("estimated_cost", 0.0) or 0.0)
+            existing["estimated_cash_outlay"] += float(trade.get("estimated_cash_outlay", 0.0) or 0.0)
             existing["normalized_benefit"] += float(trade.get("normalized_benefit", 0.0) or 0.0)
             existing["net_benefit"] += float(trade.get("net_benefit", 0.0) or 0.0)
             existing["delta_contribution"] += float(trade.get("delta_contribution", 0.0) or 0.0)
@@ -2048,7 +2061,7 @@ class OptimizerV3(BaseOptimizer):
                 continue
 
             trade["side"] = "Buy" if trade["qty"] > 0 else "Sell"
-            trade["estimated_cost"] = round(float(trade.get("estimated_cost", 0.0)), 2)
+            trade["estimated_cash_outlay"] = round(float(trade.get("estimated_cash_outlay", 0.0)), 2)
             trade["normalized_benefit"] = round(float(trade.get("normalized_benefit", 0.0)), 2)
             trade["net_benefit"] = round(float(trade.get("net_benefit", 0.0)), 2)
             trade["delta_contribution"] = round(float(trade.get("delta_contribution", 0.0)), 4)
@@ -2085,7 +2098,7 @@ class OptimizerV3(BaseOptimizer):
             else f"{self.asset}-{c.expiry_code}-{int(c.strike)}-{c.opt}"
         )
 
-    def _estimate_candidate_trade_cost(
+    def _estimate_candidate_cash_outlay(
             self,
             c,
             qty: int,
@@ -2093,6 +2106,12 @@ class OptimizerV3(BaseOptimizer):
             unwind_discount: float,
             new_position_penalty: float,
     ) -> float:
+        """Sum _estimate_trade_cash_outlay() across all legs of a candidate.
+
+        For spreads/straddles/condors this returns the SAME combined total on
+        every leg (see call sites) — not a per-leg cost, so don't sum this
+        field across leg rows without deduping by the parent candidate first.
+        """
         est_cost = 0.0
 
         for leg, leg_qty, _strategy in self._candidate_trade_legs(c, qty):
@@ -2103,7 +2122,7 @@ class OptimizerV3(BaseOptimizer):
                 )
             )
 
-            est_cost += self._estimate_trade_cost(
+            est_cost += self._estimate_trade_cash_outlay(
                 qty=leg_qty,
                 price=float(leg.bs_price_usd or 0.0),
                 held_qty=held_qty,

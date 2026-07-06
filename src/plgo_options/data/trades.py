@@ -70,36 +70,52 @@ def _safe_float(v) -> float:
         return 0.0
 
 
-def read_eth_trades(file_path: Path | None = None) -> list[dict]:
-    """Return a list of trade dicts from the 'Trades' tab.
+# Maps the current 'Trades' sheet header names (ID, Status, Counterparty, Trade
+# Date, Side, Type, Instrument, Expiry, DTE, Strike, % OTM, Qty, Notional ($mm),
+# Premium USD, ...) onto the older canonical TRADE_COLUMNS names the rest of the
+# app (portfolio.py, aggregate_positions, etc.) keys off of. Canonical names not
+# present in this mapping (or already matching) pass through unchanged, so a
+# sheet already using the old TRADE_COLUMNS headers still works.
+_HEADER_ALIASES = {
+    "Trade Date": "Initial Trade Date",
+    "Side": "Buy / Sell / Unwind",
+    "Type": "Option Type",
+    "Instrument": "Trade_ID",
+    "Expiry": "Option Expiry Date",
+    "DTE": "Days Remaining to Expiry",
+    "Qty": "ETH Options",
+    "Notional ($mm)": "$ Notional (mm)",
+}
 
-    Each dict is keyed by the exact column headers found in the sheet.
-    Dates are normalised to ISO-8601 strings for JSON serialisation.
+
+def _normalize_trade_record(record: dict) -> dict:
+    """Rename current-schema headers to the canonical TRADE_COLUMNS keys.
+
+    Also derives 'Premium per Contract' and 'Ref. Spot Price' when the sheet
+    doesn't carry them directly (the current export only has 'Premium USD').
     """
-    fp = file_path
-    if fp is None:
-        # Try bundled data/ first, then Downloads
-        if _PROJECT_DATA_PATH.exists():
-            fp = _PROJECT_DATA_PATH
-        else:
-            fp = _DOWNLOADS_PATH
+    normalized = {_HEADER_ALIASES.get(k, k): v for k, v in record.items()}
 
-    try:
-        wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
-    except (FileNotFoundError, PermissionError, OSError):
-        # Last resort: try the other path
-        alt = _PROJECT_DATA_PATH if fp != _PROJECT_DATA_PATH else _DOWNLOADS_PATH
-        if alt.exists():
-            fp = alt
-            wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
-        else:
-            raise
+    if "Premium per Contract" not in normalized:
+        qty = _safe_float(normalized.get("ETH Options"))
+        premium_usd = _safe_float(normalized.get("Premium USD"))
+        normalized["Premium per Contract"] = premium_usd / qty if qty else 0.0
 
+    normalized.setdefault("Ref. Spot Price", 0.0)
+    normalized.setdefault("$ Notional (mm)", 0.0)
+
+    return normalized
+
+
+def _read_trades_sheet(fp: Path, missing_header_msg: str) -> list[dict]:
+    """Shared 'Trades' sheet parser for read_eth_trades / read_fil_trades."""
+    wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
     ws = wb["Trades"]
     rows = ws.iter_rows(values_only=True)
 
-    # Scan for the header row that starts with "Counterparty"
+    # Scan for the header row containing "Counterparty", even if not in column A.
     headers: list[str] | None = None
+    header_start_idx = 0
     for row in rows:
         if not row:
             continue
@@ -119,26 +135,59 @@ def read_eth_trades(file_path: Path | None = None) -> list[dict]:
 
     if headers is None:
         wb.close()
-        raise ValueError(
-            "Could not find header row starting with 'Counterparty' "
-            "in the 'Trades' sheet"
-        )
+        raise ValueError(missing_header_msg)
 
     trades: list[dict] = []
     for row in rows:
         if all(cell is None for cell in row):
             continue
-        record = dict(zip(headers, row))
+        # row is NOT pre-sliced like headers is, so slice it the same way here —
+        # otherwise fields silently bind to the wrong column when Counterparty
+        # isn't in column A.
+        record = dict(zip(headers, row[header_start_idx:]))
         # Normalise dates/datetimes → ISO strings
         for k, v in record.items():
             if isinstance(v, datetime):
                 record[k] = v.isoformat()
             elif isinstance(v, date):
                 record[k] = v.isoformat()
-        trades.append(record)
+        trades.append(_normalize_trade_record(record))
 
     wb.close()
     return trades
+
+
+def read_eth_trades(file_path: Path | None = None) -> list[dict]:
+    """Return a list of trade dicts from the 'Trades' tab.
+
+    Each dict is keyed by the canonical TRADE_COLUMNS names, regardless of
+    whether the sheet uses the old or current header layout. Dates are
+    normalised to ISO-8601 strings for JSON serialisation.
+    """
+    fp = file_path
+    if fp is None:
+        # Try bundled data/ first, then Downloads
+        if _PROJECT_DATA_PATH.exists():
+            fp = _PROJECT_DATA_PATH
+        else:
+            fp = _DOWNLOADS_PATH
+
+    try:
+        return _read_trades_sheet(
+            fp,
+            "Could not find header row starting with 'Counterparty' "
+            "in the 'Trades' sheet",
+        )
+    except (FileNotFoundError, PermissionError, OSError):
+        # Last resort: try the other path
+        alt = _PROJECT_DATA_PATH if fp != _PROJECT_DATA_PATH else _DOWNLOADS_PATH
+        if alt.exists():
+            return _read_trades_sheet(
+                alt,
+                "Could not find header row starting with 'Counterparty' "
+                "in the 'Trades' sheet",
+            )
+        raise
 
 
 def _latest_trade_file(directory: Path) -> Path | None:
@@ -163,58 +212,20 @@ def read_fil_trades(file_path: Path | None = None) -> list[dict]:
             fp = _FIL_DOWNLOADS_PATH
 
     try:
-        wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
+        return _read_trades_sheet(
+            fp,
+            "Could not find header row starting with 'Counterparty' "
+            "in the FIL 'Trades' sheet",
+        )
     except (FileNotFoundError, PermissionError, OSError):
         alt = _FIL_PROJECT_DATA_PATH if fp != _FIL_PROJECT_DATA_PATH else _FIL_DOWNLOADS_PATH
         if alt.exists():
-            fp = alt
-            wb = openpyxl.load_workbook(fp, read_only=True, data_only=True)
-        else:
-            raise
-
-    ws = wb["Trades"]
-    rows = ws.iter_rows(values_only=True)
-
-    # Scan for the header row containing "Counterparty", even if not in column A.
-    headers: list[str] | None = None
-    for row in rows:
-        if not row:
-            continue
-
-        normalized_cells = [
-            str(cell).strip().lower() if cell is not None else ""
-            for cell in row
-        ]
-
-        if "counterparty" in normalized_cells:
-            header_start_idx = normalized_cells.index("counterparty")
-            headers = [
-                str(h).strip() if h is not None else f"col_{i}"
-                for i, h in enumerate(row[header_start_idx:], start=header_start_idx)
-            ]
-            break
-
-    if headers is None:
-        wb.close()
-        raise ValueError(
-            "Could not find header row starting with 'Counterparty' "
-            "in the FIL 'Trades' sheet"
-        )
-
-    trades: list[dict] = []
-    for row in rows:
-        if all(cell is None for cell in row):
-            continue
-        record = dict(zip(headers, row))
-        for k, v in record.items():
-            if isinstance(v, datetime):
-                record[k] = v.isoformat()
-            elif isinstance(v, date):
-                record[k] = v.isoformat()
-        trades.append(record)
-
-    wb.close()
-    return trades
+            return _read_trades_sheet(
+                alt,
+                "Could not find header row starting with 'Counterparty' "
+                "in the FIL 'Trades' sheet",
+            )
+        raise
 
 
 def aggregate_positions(trades: list[dict]) -> list[dict]:

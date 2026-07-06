@@ -361,7 +361,7 @@ def load_positions_from_latest_xlsx(token) -> list[Position]:
         return []
 
     xlsx_files = sorted(
-        positions_dir.glob("*.xlsx"),
+        (p for p in positions_dir.glob("*.xlsx") if not p.name.startswith("~$")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
