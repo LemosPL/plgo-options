@@ -3365,9 +3365,12 @@ function pfRenderPayoffChart() {
     if (newPositions.length > 0) { payoffCurve = pfSumCurves(pfNewSet, 0); plabel = "New"; }
     else if (oldPositions.length > 0) { payoffCurve = pfSumCurveForSet(pfOldSet, 0); plabel = "Old"; }
     if (collCurve && payoffCurve) {
+      // Always POSITIVE collateral + payoff — the true net coverage. Never the
+      // inverted collateral (that would sum two negatives). Not affected by the
+      // invert toggle, so it always reads as the real signed residual.
       const residual = collCurve.map((c, i) => c + (payoffCurve[i] || 0));
       collTraces.push({
-        x: spots, y: collInvert ? residual.map(v => -v) : residual, type: "scatter", mode: "lines",
+        x: spots, y: residual, type: "scatter", mode: "lines",
         name: `Residual (collateral + ${plabel} payoff @ expiry)`,
         yaxis: "y2",
         customdata: residual,
@@ -3392,6 +3395,25 @@ function pfRenderPayoffChart() {
   }
   traces.push(...collTraces);
 
+  // Align the right (collateral/residual) axis zero with the left (P&L) axis
+  // zero, by scaling the same range. A positive collateral value then always
+  // renders above the zero line, never down in the negative-P&L region.
+  let yaxisRange, yaxis2Range;
+  const y2vals = collTraces.flatMap(t => t.y).filter(v => Number.isFinite(v));
+  if (allY.length > 0 && y2vals.length > 0) {
+    let lo = Math.min(0, ...allY), hi = Math.max(0, ...allY);
+    const pad = (hi - lo) * 0.05 || 1;
+    lo -= pad; hi += pad;
+    yaxisRange = [lo, hi];
+    let k = 0;
+    for (const v of y2vals) {
+      if (v > 0 && hi > 0) k = Math.max(k, v / hi);
+      else if (v < 0 && lo < 0) k = Math.max(k, v / lo);
+    }
+    k = (k || 1) * 1.05;
+    yaxis2Range = [lo * k, hi * k];
+  }
+
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
   const titleText = `Portfolio Payoff — Old (${oldPositions.length}) vs New (${newPositions.length})`;
@@ -3399,12 +3421,14 @@ function pfRenderPayoffChart() {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
-    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2 },
+    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
+      ...(yaxisRange ? { range: yaxisRange, autorange: false } : {}) },
     yaxis2: {
-      title: "Collateral / residual (USD" + (collInvert ? ", negative)" : ")"),
+      title: "Collateral / residual (USD" + (collInvert ? ", collateral negative)" : ")"),
       overlaying: "y", side: "right",
       color: "#d29922", showgrid: false, zeroline: false,
       tickformat: "$,.2s",
+      ...(yaxis2Range ? { range: yaxis2Range, autorange: false } : {}),
     },
     margin: { t: 50, r: 260, b: 50, l: 80 },
     showlegend: true,
