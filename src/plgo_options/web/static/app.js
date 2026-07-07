@@ -3275,7 +3275,8 @@ function pfCollateralSumCurve(spots) {
 }
 
 /** Build the posted-collateral overlay trace from the Collateral Map. Plotted
- *  on the right axis (y2); negated when "invert" is on so the cushion dives
+ *  on the SAME (left) axis as the payoff profile so the two are directly
+ *  comparable in USD; negated when "invert" is on so the cushion dives
  *  alongside the (negative) liability payoff. Returns [] when off/empty. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
@@ -3294,7 +3295,6 @@ function pfCollateralTraces(spots) {
   return [{
     x: spots, y: invert ? curve.map(v => -v) : curve, type: "scatter", mode: "lines",
     name,
-    yaxis: "y2",
     customdata: curve,
     line: { color: "#d29922", width: 2, dash: "dash" },
     legendgroup: "collateral",
@@ -3372,7 +3372,6 @@ function pfRenderPayoffChart() {
       collTraces.push({
         x: spots, y: residual, type: "scatter", mode: "lines",
         name: `Residual (collateral + ${plabel} payoff @ expiry)`,
-        yaxis: "y2",
         customdata: residual,
         line: { color: "#2dd4bf", width: 2.5, dash: "dashdot" },
         legendgroup: "collateral",
@@ -3381,9 +3380,10 @@ function pfRenderPayoffChart() {
     }
   }
 
-  // Spot line — span the full payoff (y1) range including zero, so it reaches
-  // the $0 line even when the whole payoff is negative (e.g. the FIL book).
-  const allY = traces.flatMap(t => t.y);
+  // Spot line — span the full left-axis range (payoff + collateral overlays)
+  // including zero, so it reaches the $0 line even when everything is negative
+  // (e.g. the FIL book). Collateral now shares this axis, so include it.
+  const allY = [...traces.flatMap(t => t.y), ...collTraces.flatMap(t => t.y)];
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
@@ -3403,15 +3403,12 @@ function pfRenderPayoffChart() {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
-    yaxis: { title: "Portfolio P&L (USD)", color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2, rangemode: "tozero" },
-    yaxis2: {
-      title: "Collateral / residual (USD" + (collInvert ? ", collateral negative)" : ")"),
-      overlaying: "y", side: "right",
-      color: "#d29922", showgrid: false, zeroline: false,
-      tickformat: "$,.2s",
-      rangemode: "tozero",
+    yaxis: {
+      title: "Portfolio P&L / Collateral (USD" + (collInvert ? ", collateral negative)" : ")"),
+      color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
+      tickformat: "$,.2s", rangemode: "tozero",
     },
-    margin: { t: 50, r: 260, b: 50, l: 80 },
+    margin: { t: 50, r: 200, b: 50, l: 80 },
     showlegend: true,
     legend: {
       font: { color: cc.muted, size: 10 },
