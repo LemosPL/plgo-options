@@ -21,7 +21,7 @@ consistent across the app.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 
 from fastapi import APIRouter, HTTPException
@@ -93,16 +93,23 @@ def _classify(legs: list[dict]) -> tuple[str, str]:
         return "2-Leg Structure", "Two-leg combination"
 
     if n == 4 and len(calls) == 2 and len(puts) == 2:
-        # Iron condor / butterfly: short the inner strikes, long the outer wings
+        # Iron condor / butterfly: short the inner strikes, long the outer wings.
+        # Reverse (long inner, short outer) is the debit "reverse" variant.
         short_strikes = sorted(l["strike"] for l in shorts)
         long_strikes = sorted(l["strike"] for l in longs)
         if len(shorts) == 2 and len(longs) == 2:
-            if abs(short_strikes[0] - short_strikes[1]) < 1e-9:
-                return "Iron Butterfly", "Short straddle + protective wings"
-            inner = (min(long_strikes) <= min(short_strikes)
-                     and max(long_strikes) >= max(short_strikes))
-            if inner:
+            short_inner = (min(long_strikes) <= min(short_strikes)
+                           and max(long_strikes) >= max(short_strikes))
+            long_inner = (min(short_strikes) <= min(long_strikes)
+                          and max(short_strikes) >= max(long_strikes))
+            if short_inner:
+                if abs(short_strikes[0] - short_strikes[1]) < 1e-9:
+                    return "Iron Butterfly", "Short straddle + protective wings"
                 return "Iron Condor", "Short strangle + protective wings"
+            if long_inner:
+                if abs(long_strikes[0] - long_strikes[1]) < 1e-9:
+                    return "Reverse Iron Butterfly", "Long straddle funded by short wings"
+                return "Reverse Iron Condor", "Long strangle funded by short wings"
         return "4-Leg Structure", "Four-leg combination"
 
     nc, npu = len(calls), len(puts)
@@ -155,12 +162,41 @@ def _decompose_one_expiry(legs: list[dict]) -> list[list[dict]]:
     structures: list[list[dict]] = []
 
     # 1. Vertical spreads — same option type, opposite side, paired by size.
+    call_verticals: list[list[dict]] = []
+    put_verticals: list[list[dict]] = []
     for opt in ("C", "P"):
         longs = sorted(avail(lambda l: l["opt"] == opt and l["sign"] > 0), key=lambda l: -l["qty"])
         shorts = sorted(avail(lambda l: l["opt"] == opt and l["sign"] < 0), key=lambda l: -l["qty"])
+        bucket = call_verticals if opt == "C" else put_verticals
         for a, b in zip(longs, shorts):
-            structures.append([a, b])
+            bucket.append([a, b])
             used.add(a["id"]); used.add(b["id"])
+
+    # 1b. Reassemble a call vertical + put vertical of matching size into a
+    # single iron condor / butterfly, so the whole 4-leg structure stays one
+    # deal (correct label + net premium) instead of two split spreads. Only
+    # merge when it actually classifies as an iron structure; otherwise keep
+    # the two spreads separate.
+    used_put_v: set = set()
+    for cv in call_verticals:
+        cv_qty = min(l["qty"] for l in cv)
+        merged = False
+        for pi, pv in enumerate(put_verticals):
+            if pi in used_put_v:
+                continue
+            if abs(min(l["qty"] for l in pv) - cv_qty) < 1e-6:
+                combo = cv + pv
+                label, _ = _classify(combo)
+                if "Iron" in label:
+                    structures.append(combo)
+                    used_put_v.add(pi)
+                    merged = True
+                    break
+        if not merged:
+            structures.append(cv)
+    for pi, pv in enumerate(put_verticals):
+        if pi not in used_put_v:
+            structures.append(pv)
 
     # 2. Straddles / strangles — same-side call + put.
     for sgn in (1, -1):
@@ -313,6 +349,7 @@ async def _assemble(asset: str, include_expired: bool,
         leg = {
             "id": r.get("id"),
             "counterparty": str(r.get("counterparty") or "").strip(),
+            "trade_id": str(r.get("trade_id") or "").strip(),
             "trade_date": str(r.get("trade_date") or "").strip().split("T")[0],
             "opt": opt,
             "side": "Long" if sign > 0 else "Short",
@@ -354,9 +391,31 @@ async def _assemble(asset: str, include_expired: bool,
                 deals.append(_build_deal(cpty, tdate, glegs, gid, grid, spot,
                                          smiles, deribit_dates, today, manual=True))
         else:
-            # Auto: group by trade date, then decompose each day into structures.
-            by_date: dict[str, list[dict]] = defaultdict(list)
+            # Auto grouping. Prefer the booking's real ticket id (``trade_id``)
+            # when it actually ties several legs together — it groups a whole
+            # structure (including legs rolled in on later dates) as one deal,
+            # which is authoritative. But ``trade_id`` semantics vary by
+            # counterparty: some book one id per structure, others one id per
+            # leg. A singleton id carries no grouping information, so treat only
+            # ids shared by >=2 legs as tickets; everything else falls back to
+            # grouping by trade date + heuristic decomposition.
+            tid_counts = Counter(leg.get("trade_id") or "" for leg in legs)
+            with_id: dict[str, list[dict]] = defaultdict(list)
+            without_id: list[dict] = []
             for leg in legs:
+                tid = leg.get("trade_id") or ""
+                if tid and tid_counts[tid] >= 2:
+                    with_id[tid].append(leg)
+                else:
+                    without_id.append(leg)
+
+            for tid, glegs in with_id.items():
+                tdate = min((l["trade_date"] for l in glegs), default="")
+                deals.append(_build_deal(cpty, tdate, glegs, f"tid:{tid}",
+                                         grid, spot, smiles, deribit_dates, today))
+
+            by_date: dict[str, list[dict]] = defaultdict(list)
+            for leg in without_id:
                 by_date[leg["trade_date"]].append(leg)
             for tdate, dlegs in by_date.items():
                 for i, struct in enumerate(decompose_legs(dlegs)):
