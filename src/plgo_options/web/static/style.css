@@ -1295,6 +1295,46 @@ select { margin-bottom: .5rem; }
   .deals-layout { grid-template-columns: 1fr; }
 }
 
+.deals-left { display: flex; flex-direction: column; gap: .6rem; min-width: 0; }
+
+/* Filter / quick-select bar above the deal list */
+.deals-filters {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .6rem .7rem;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  font-size: .72rem;
+}
+.deals-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; }
+.deals-filter-lbl {
+  color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+  font-size: .62rem; font-weight: 700; min-width: 62px;
+}
+.deal-chip {
+  cursor: pointer; user-select: none;
+  padding: .2rem .5rem; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg);
+  color: var(--muted); white-space: nowrap; font-size: .7rem;
+  transition: border-color .12s, background .12s, color .12s;
+}
+.deal-chip:hover { border-color: var(--accent); color: var(--text); }
+.deal-chip.active {
+  background: var(--hover-bg); border-color: var(--accent); color: var(--text); font-weight: 600;
+}
+.deal-chip.chip-up   { }
+.deal-chip.active.chip-gain { border-color: var(--green); color: var(--green); }
+.deal-chip.active.chip-loss { border-color: var(--red); color: var(--red); }
+.deals-filter-sel {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: .2rem .35rem; font-size: .7rem; max-width: 150px;
+}
+.deals-filter-actions { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+.deals-filter-actions .deal-chip { border-style: solid; }
+.deals-filter-count { color: var(--muted); font-size: .68rem; margin-left: auto; }
+
 .deals-list {
   display: flex;
   flex-direction: column;

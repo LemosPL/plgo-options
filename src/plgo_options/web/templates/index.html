@@ -534,16 +534,21 @@
         <button id="btn-deals-refresh" class="btn-primary" style="width:auto">Refresh</button>
       </div>
       <p style="margin:.5rem 0 0; font-size:.8rem; color:var(--muted)">
-        Each deal is one multi-leg structure (grouped by counterparty &amp; trade date). Select a deal to see its
-        payoff profile, where price is likely to land (probability distribution), and which legs you could
-        close at ~zero cost to improve the profile.
+        Each deal is one multi-leg structure (grouped by trade ticket where available, otherwise by
+        counterparty &amp; trade date). Use the filters to isolate deals by party, expiry, trade date, leg type,
+        or risk (e.g. what loses money if spot rises, or sits near max loss), then <b>Select shown</b> to
+        overlay them. Select a single deal to see its payoff profile, probability distribution, and which
+        legs you could close at ~zero cost to improve it.
       </p>
     </section>
 
     <div class="deals-layout">
-      <!-- Left: deal list -->
-      <div id="deals-list" class="deals-list">
-        <div class="deals-empty">Loading deals…</div>
+      <!-- Left: filters + deal list -->
+      <div class="deals-left">
+        <div id="deals-filters" class="deals-filters"></div>
+        <div id="deals-list" class="deals-list">
+          <div class="deals-empty">Loading deals…</div>
+        </div>
       </div>
 
       <!-- Right: detail -->
@@ -2131,6 +2136,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=70"></script>
+<script src="/static/app.js?v=71"></script>
 </body>
 </html>

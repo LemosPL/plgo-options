@@ -10178,6 +10178,21 @@ let dealsData = null;            // full /api/deals response
 let dealsSelectedIds = new Set();// ids of deals selected for compare
 let dealsClosed = new Set();     // leg ids marked to close (what-if, single deal)
 
+// Deal-list filter/quick-select state. Filters narrow the visible list; the
+// "Select shown" button then selects everything currently visible.
+//   cpty   : counterparty name ("" = all)
+//   expiry : one expiry date ("" = all) — matches deals that touch it
+//   tdate  : one trade date ("" = all)
+//   legs   : Set of leg-composition tags a deal must contain (AND):
+//            'C','P','sC','sP','lC','lP' (short/long call/put)
+//   up     : directional impact of a ~+15% spot move ("gain"|"loss"|"")
+//   state  : where the deal sits on its own payoff curve at current spot
+//            ("maxloss" = near worst case | "maxprofit" = near best | "")
+let dealsFilter = { cpty: "", expiry: "", tdate: "", legs: new Set(), up: "", state: "" };
+function resetDealsFilter() {
+  dealsFilter = { cpty: "", expiry: "", tdate: "", legs: new Set(), up: "", state: "" };
+}
+
 // Distinct colors for overlaying multiple deal profiles on one chart.
 const DEAL_COLORS = ["#58a6ff", "#3fb950", "#d29922", "#bc8cff", "#f85149",
                      "#39c5cf", "#ff7b72", "#a5d6ff", "#7ee787", "#ffa657"];
@@ -10280,6 +10295,8 @@ async function loadDeals() {
   dealsSelectedIds = new Set([...dealsSelectedIds].filter(id => valid.has(id)));
   if (!dealsSelectedIds.size && dealsData.deals[0]) dealsSelectedIds.add(dealsData.deals[0].id);
   dealsClosed = new Set();
+  resetDealsFilter();
+  renderDealFilters();
   renderDealList();
   renderDealsView();
 }
@@ -10291,6 +10308,156 @@ function popClass(p) {
   return "deal-pop-bad";
 }
 
+// Linear-interpolate a per-grid array (e.g. a payoff curve) at an arbitrary
+// spot level. Grid is ascending; clamps to the ends.
+function dealInterpAt(arr, x) {
+  const g = dealsData.grid;
+  if (!g || !g.length || !arr) return null;
+  if (x <= g[0]) return arr[0];
+  if (x >= g[g.length - 1]) return arr[arr.length - 1];
+  for (let i = 0; i < g.length - 1; i++) {
+    if (x >= g[i] && x <= g[i + 1]) {
+      const t = (g[i + 1] - g[i]) ? (x - g[i]) / (g[i + 1] - g[i]) : 0;
+      return arr[i] + (arr[i + 1] - arr[i]) * t;
+    }
+  }
+  return arr[arr.length - 1];
+}
+
+// Where the deal sits on its own payoff curve *at the current spot*, as a
+// fraction from 0 (max loss) to 1 (max profit). null when the curve is flat.
+function dealPnlPosition(d) {
+  const range = d.max_profit - d.max_loss;
+  if (!isFinite(range) || range <= 1e-9) return null;
+  const here = dealInterpAt(d.payoff, dealsData.spot);
+  if (here === null) return null;
+  return (here - d.max_loss) / range;
+}
+
+// Directional impact of a ~+15% spot move: does the deal make or lose money if
+// price goes up from here? Uses the at-expiry payoff curve so it reflects a
+// real move (not just instantaneous delta) and handles capped structures.
+function dealUpImpact(d) {
+  const spot = dealsData.spot;
+  if (!(spot > 0)) return "flat";
+  const here = dealInterpAt(d.payoff, spot);
+  const up = dealInterpAt(d.payoff, spot * 1.15);
+  if (here === null || up === null) return "flat";
+  const eps = Math.max(1, Math.abs(d.max_profit - d.max_loss) * 0.01);
+  if (up > here + eps) return "gain";
+  if (up < here - eps) return "loss";
+  return "flat";
+}
+
+// Does a deal contain a leg matching a composition tag?
+function dealHasLegTag(d, tag) {
+  const opt = tag.slice(-1);                     // 'C' or 'P'
+  const side = tag.length === 2 ? (tag[0] === "s" ? "Short" : "Long") : null;
+  return d.legs.some(l => l.opt === opt && (!side || l.side === side));
+}
+
+function dealMatchesFilter(d) {
+  const f = dealsFilter;
+  if (f.cpty && d.counterparty !== f.cpty) return false;
+  if (f.expiry && !(d.expiries || [d.expiry]).includes(f.expiry)) return false;
+  if (f.tdate && !(d.trade_dates || [d.trade_date]).includes(f.tdate)) return false;
+  for (const tag of f.legs) if (!dealHasLegTag(d, tag)) return false;
+  if (f.up && dealUpImpact(d) !== f.up) return false;
+  if (f.state) {
+    const pos = dealPnlPosition(d);
+    if (pos === null) return false;
+    if (f.state === "maxloss" && pos > 0.15) return false;
+    if (f.state === "maxprofit" && pos < 0.85) return false;
+  }
+  return true;
+}
+
+function visibleDeals() {
+  return dealsData.deals.filter(dealMatchesFilter);
+}
+
+// Re-render the filter bar + list + count without refetching.
+function applyDealsFilter() {
+  renderDealFilters();
+  renderDealList();
+}
+
+function renderDealFilters() {
+  const host = document.getElementById("deals-filters");
+  if (!host || !dealsData) return;
+  const deals = dealsData.deals;
+  const cptys = [...new Set(deals.map(d => d.counterparty).filter(Boolean))].sort();
+  const expiries = [...new Set(deals.flatMap(d => d.expiries || [d.expiry]).filter(Boolean))].sort();
+  const tdates = [...new Set(deals.flatMap(d => d.trade_dates || [d.trade_date]).filter(Boolean))].sort();
+  const f = dealsFilter;
+  const shown = visibleDeals().length;
+
+  const chip = (label, active, attrs, extra = "") =>
+    `<span class="deal-chip ${active ? "active " + extra : ""}" ${attrs}>${label}</span>`;
+
+  const cptyChips = [chip("All", !f.cpty, `data-cpty=""`)]
+    .concat(cptys.map(c => chip(c, f.cpty === c, `data-cpty="${c}"`))).join("");
+
+  const legDefs = [["C", "Calls"], ["P", "Puts"], ["sC", "Short C"], ["sP", "Short P"],
+                   ["lC", "Long C"], ["lP", "Long P"]];
+  const legChips = legDefs.map(([tag, lbl]) =>
+    chip(lbl, f.legs.has(tag), `data-leg="${tag}"`)).join("");
+
+  const opt = (v, sel) => `<option value="${v}" ${sel === v ? "selected" : ""}>${v || "All"}</option>`;
+  const expSel = `<select class="deals-filter-sel" data-sel="expiry">${["", ...expiries].map(e => opt(e, f.expiry)).join("")}</select>`;
+  const tdSel = `<select class="deals-filter-sel" data-sel="tdate">${["", ...tdates].map(t => opt(t, f.tdate)).join("")}</select>`;
+
+  host.innerHTML = `
+    <div class="deals-filter-row"><span class="deals-filter-lbl">Party</span>${cptyChips}</div>
+    <div class="deals-filter-row"><span class="deals-filter-lbl">When</span>${expSel}${tdSel}</div>
+    <div class="deals-filter-row"><span class="deals-filter-lbl">Legs</span>${legChips}</div>
+    <div class="deals-filter-row"><span class="deals-filter-lbl">If spot ↑</span>
+      ${chip("Gains", f.up === "gain", `data-up="gain"`, "chip-gain")}
+      ${chip("Loses", f.up === "loss", `data-up="loss"`, "chip-loss")}
+      <span class="deals-filter-lbl" style="min-width:auto;margin-left:.4rem">P&amp;L now</span>
+      ${chip("Near max loss", f.state === "maxloss", `data-state="maxloss"`, "chip-loss")}
+      ${chip("Near max profit", f.state === "maxprofit", `data-state="maxprofit"`, "chip-gain")}
+    </div>
+    <div class="deals-filter-row deals-filter-actions">
+      <span class="deal-chip" data-act="select">Select shown</span>
+      <span class="deal-chip" data-act="clearsel">Clear selection</span>
+      <span class="deal-chip" data-act="reset">Reset filters</span>
+      <span class="deals-filter-count">${shown} / ${deals.length} shown · ${dealsSelectedIds.size} selected</span>
+    </div>`;
+
+  // Wire counterparty chips (single-select).
+  host.querySelectorAll("[data-cpty]").forEach(el =>
+    el.addEventListener("click", () => { f.cpty = el.dataset.cpty; applyDealsFilter(); }));
+  // Leg-composition chips (multi, toggle).
+  host.querySelectorAll("[data-leg]").forEach(el =>
+    el.addEventListener("click", () => {
+      const t = el.dataset.leg;
+      f.legs.has(t) ? f.legs.delete(t) : f.legs.add(t);
+      applyDealsFilter();
+    }));
+  // Direction / state chips (single-select, click active to clear).
+  host.querySelectorAll("[data-up]").forEach(el =>
+    el.addEventListener("click", () => { f.up = f.up === el.dataset.up ? "" : el.dataset.up; applyDealsFilter(); }));
+  host.querySelectorAll("[data-state]").forEach(el =>
+    el.addEventListener("click", () => { f.state = f.state === el.dataset.state ? "" : el.dataset.state; applyDealsFilter(); }));
+  // Expiry / trade-date selects.
+  host.querySelectorAll("[data-sel]").forEach(el =>
+    el.addEventListener("change", () => { f[el.dataset.sel] = el.value; applyDealsFilter(); }));
+  // Actions.
+  host.querySelector('[data-act="select"]')?.addEventListener("click", () => {
+    visibleDeals().forEach(d => dealsSelectedIds.add(d.id));
+    dealsClosed = new Set();
+    renderDealFilters(); renderDealList(); renderDealsView();
+  });
+  host.querySelector('[data-act="clearsel"]')?.addEventListener("click", () => {
+    dealsSelectedIds = new Set(); dealsClosed = new Set();
+    renderDealFilters(); renderDealList(); renderDealsView();
+  });
+  host.querySelector('[data-act="reset"]')?.addEventListener("click", () => {
+    resetDealsFilter(); applyDealsFilter();
+  });
+}
+
 function renderDealList() {
   const list = document.getElementById("deals-list");
   if (!dealsData.deals.length) {
@@ -10300,8 +10467,13 @@ function renderDealList() {
     list.innerHTML = `<div class="deals-empty">No active deals for ${dealAsset()}.${expHint}</div>`;
     return;
   }
+  const deals = visibleDeals();
+  if (!deals.length) {
+    list.innerHTML = `<div class="deals-empty">No deals match the current filters.<br><br>Click <b>Reset filters</b> above to see all ${dealsData.deals.length} deals.</div>`;
+    return;
+  }
   list.innerHTML = "";
-  dealsData.deals.forEach((d, i) => {
+  deals.forEach((d, i) => {
     const card = document.createElement("div");
     const sel = dealsSelectedIds.has(d.id);
     card.className = "deal-card" + (sel ? " selected" : "");
@@ -10338,6 +10510,7 @@ function toggleDeal(id) {
   if (dealsSelectedIds.has(id)) dealsSelectedIds.delete(id);
   else dealsSelectedIds.add(id);
   dealsClosed = new Set();   // what-if only applies to a single focused deal
+  renderDealFilters();       // keep the "selected" count in sync
   renderDealList();
   renderDealsView();
 }
