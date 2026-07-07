@@ -46,11 +46,14 @@ SNAPSHOT_ROOT = _resolve_snapshot_root()
 
 class OptimizationParams(BaseModel):
     asset: str = "ETH"
-    lam_factor: float = 1.0
+    lam_factor: float = 0.2
+    mu_factor: float = 0.0
     target_expiry: str | None = None
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
+    roll_itm_only: bool = False
+    collateral_budget_pct: float | None = None
     save_usecase_snapshot: bool = False
     is_replay: bool = False
     counterparties: list[str] | None = None
@@ -75,10 +78,13 @@ async def run_optimizer(params: OptimizationParams):
     run_params = OptimizerRunParams(
         asset=params.asset.upper(),
         lam_factor=params.lam_factor,
+        mu_factor=params.mu_factor,
         target_expiry=params.target_expiry,
         unwind_discount=params.unwind_discount,
         new_position_penalty=params.new_position_penalty,
         roll_dte_threshold=params.roll_dte_threshold,
+        roll_itm_only=params.roll_itm_only,
+        collateral_budget_pct=params.collateral_budget_pct,
         is_replay=False,
         counterparties=params.counterparties,
         collateral_tier_free_pct=params.collateral_tier_free_pct,

@@ -8628,14 +8628,23 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL")
       : [];
     const saveRequested = document.getElementById("optv2-save-usecase")?.checked || false;
+    const rollItmOnly = document.getElementById("optv2-roll-itm-only")?.checked || false;
+    // Empty field = no cap (disabled); "0" is a real value (cap at current level) and
+    // must NOT collapse to the same thing, so check for the empty string explicitly.
+    const collateralBudgetRaw = document.getElementById("optv2-collateral-budget-pct")?.value;
+    const collateralBudgetPct = collateralBudgetRaw === "" || collateralBudgetRaw === undefined
+      ? null
+      : parseFloat(collateralBudgetRaw);
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
-      lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "1"),
+      lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
+      mu_factor: parseFloat(document.getElementById("optv2-mu-factor")?.value || "0"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
-      vega_cross_expiry_corr: parseFloat("0"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
+      roll_itm_only: rollItmOnly,
+      collateral_budget_pct: collateralBudgetPct,
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,

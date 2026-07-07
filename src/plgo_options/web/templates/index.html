@@ -1473,8 +1473,12 @@
       <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem">
         <button id="btn-load-optv2" class="btn-primary" style="width:auto">Load Risk Profile</button>
         <label class="pf-filter-label">λ Overall
-          <input type="number" id="optv2-lam-factor" value="1.0" step="0.1" min="0" style="width:5rem"
-            title="LASSO regularization strength. Higher = fewer, larger trades; lower = more, smaller trades.">
+          <input type="number" id="optv2-lam-factor" value="0.2" step="0.05" min="0" style="width:5rem"
+            title="Profile-fit weight in the LP objective. Higher = prioritize matching the target payoff curve over trading/collateral cost; lower = cheaper trades even if the fit is looser.">
+        </label>
+        <label class="pf-filter-label">μ Collateral
+          <input type="number" id="optv2-mu-factor" value="2.3" step="0.1" min="0" style="width:5rem"
+            title="Holding-cost weight for posted collateral in the LP objective. Higher = optimizer works harder to avoid growing collateral usage; 0 = collateral is free.">
         </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
@@ -1505,6 +1509,14 @@
             style="width:5rem"
             title="Roll positions with DTE less than or equal to this value. Clear to disable forced roll."
           >
+        </label>
+        <label class="toggle-label" style="margin:0">
+          <input type="checkbox" id="optv2-roll-itm-only" checked>
+          ITM-only rolls
+        </label>
+        <label class="pf-filter-label">Gross Collateral Δ
+          <input type="number" id="optv2-collateral-budget-pct" value="0" step="0.05" style="width:5rem"
+            title="Per-counterparty cap on gross collateral change (0 = no increase allowed, -0.1 = force 10% reduction). Clear to disable the cap.">
         </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
@@ -2119,6 +2131,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=69"></script>
+<script src="/static/app.js?v=70"></script>
 </body>
 </html>

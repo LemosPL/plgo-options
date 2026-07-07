@@ -31,12 +31,14 @@ def _json_default(obj: Any) -> Any:
 @dataclass
 class OptimizerRunParams:
     asset: str = "ETH"
-    lam_factor: float = 1.0
+    lam_factor: float = 0.2
+    mu_factor: float = 0.0
     target_expiry: str | None = "31JUL26"
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
     roll_itm_only: bool = False
+    collateral_budget_pct: float | None = None
     is_replay: bool = False
     counterparties: list[str] | None = None
     collateral_tier_free_pct: float | dict[str, float] = 0.0
@@ -147,10 +149,11 @@ class OptimizerUseCase:
         print('run()')
         optimizer = self.build_optimizer(self.today)
 
-        '''self.run_params.target_expiry = "31JUL26"
-        self.run_params.lam_factor = 0.3
-        self.run_params.roll_dte_threshold = 7'''
-        self.result = optimizer.run(**asdict(self.run_params))
+        # LP-based engine (tiered collateral, bid-ask-based trading cost) — every
+        # OptimizerRunParams field maps onto a run_lp() kwarg, unlike the older
+        # optimizer.run(), which silently drops collateral_tier_free_pct/mu and
+        # has no mu_factor/collateral_budget_pct/roll_itm_only equivalent at all.
+        self.result = optimizer.run_lp(**asdict(self.run_params))
         return self.result
 
     def run_test(self):
