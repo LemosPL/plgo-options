@@ -3296,6 +3296,64 @@ function pfCollateralNoteText() {
     + `ETH revalues with spot; USDC held at $1.`;
 }
 
+// Multi-line hover tooltip (native title) breaking down the fixed ETH book:
+// each counterparty's tokens, the aggregate composition, and the current $
+// value (ETH valued at the map's ETH price).
+function pfEthBookTooltip() {
+  const lines = ["ETH book collateral (fixed allocation):"];
+  let usdc = 0, eth = 0, btc = 0;
+  for (const [name, q] of Object.entries(PF_ETH_COLL_ALLOCATION)) {
+    const disp = name.charAt(0).toUpperCase() + name.slice(1);
+    const bits = [];
+    if (q.ETH)  { bits.push(`${q.ETH.toLocaleString()} ETH`);   eth  += q.ETH; }
+    if (q.BTC)  { bits.push(`${q.BTC.toLocaleString()} BTC`);   btc  += q.BTC; }
+    if (q.USDC) { bits.push(`$${q.USDC.toLocaleString()} USDC`); usdc += q.USDC; }
+    lines.push(`  • ${disp}: ${bits.join(" + ")}`);
+  }
+  const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
+  const ethPx = prices.ETH || 0, btcPx = prices.BTC || 0;
+  const totParts = [];
+  if (eth)  totParts.push(`${eth.toLocaleString()} ETH`);
+  if (btc)  totParts.push(`${btc.toLocaleString()} BTC`);
+  if (usdc) totParts.push(`$${usdc.toLocaleString()} USDC`);
+  lines.push(`Total: ${totParts.join(" + ")}`);
+  const totalUsd = usdc + eth * ethPx + btc * btcPx;
+  if (ethPx) lines.push(`≈ $${Math.round(totalUsd).toLocaleString()} (ETH @ $${Math.round(ethPx).toLocaleString()})`);
+  lines.push("ETH revalues with spot; USDC held at $1.");
+  return lines.join("\n");
+}
+
+// Hover tooltip for the FIL book: the "rest" of the Collateral Map after the
+// ETH carve-out, aggregated per counterparty, with the current $ value (FIL at
+// the map's FIL price).
+function pfFilBookTooltip() {
+  const lines = ["FIL book collateral (all remaining = full map − ETH book):"];
+  const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
+  const cps = (pfCollateralMap && pfCollateralMap.counterparties) || [];
+  const fmtTok = (a, q) => a === "USDC" ? `$${q.toLocaleString()} USDC` : `${q.toLocaleString()} ${a}`;
+  const totals = {};
+  cps.forEach(cp => {
+    const q = pfEffectiveQtys(cp, "fil");
+    const bits = [];
+    Object.keys(q).forEach(a => {
+      if (!q[a]) return;
+      bits.push(fmtTok(a, q[a]));
+      totals[a] = (totals[a] || 0) + q[a];
+    });
+    if (bits.length) lines.push(`  • ${cp.counterparty}: ${bits.join(" + ")}`);
+  });
+  if (Object.keys(totals).length) {
+    lines.push(`Total: ${Object.entries(totals).map(([a, q]) => fmtTok(a, q)).join(" + ")}`);
+    const totalUsd = Object.entries(totals).reduce((s, [a, q]) =>
+      s + q * (a === "USDC" ? 1 : (prices[a] || 0)), 0);
+    if (totalUsd) lines.push(`≈ $${Math.round(totalUsd).toLocaleString()}`);
+  } else {
+    lines.push("  (nothing allocated to the FIL book)");
+  }
+  lines.push("FIL revalues with spot; USDC held at $1.");
+  return lines.join("\n");
+}
+
 // Counterparties in scope for the overlay, honouring the Counterparty filter.
 function pfCollateralActiveCptys() {
   if (!pfCollateralMap || !Array.isArray(pfCollateralMap.counterparties)) return [];
@@ -3464,6 +3522,12 @@ function pfRenderPayoffChart() {
 
   const noteEl = document.getElementById("pf-collateral-note");
   if (noteEl) noteEl.textContent = pfCollateralNoteText();
+
+  // Hover tips on the scope buttons breaking down each book's collateral.
+  const ethBtn = document.querySelector('#pf-collateral-scope [data-scope="eth"]');
+  if (ethBtn) ethBtn.title = pfEthBookTooltip();
+  const filBtn = document.querySelector('#pf-collateral-scope [data-scope="fil"]');
+  if (filBtn) filBtn.title = pfFilBookTooltip();
 }
 
 // ── MTM Matrix (HTML table with dollar values) ───────────
