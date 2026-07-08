@@ -3225,20 +3225,44 @@ function pfInitCompareSets() {
 // (ETH on the ETH page, FIL on the FIL page) is re-valued at each ladder spot;
 // every other token is held at its effective map price (USDC = 1). So an
 // ETH-collateralised holding slopes up with spot while a USDC holding reads flat.
-// Which tokens count for each scope. null = all tokens.
-const PF_COLL_SCOPE_ASSETS = {
-  all: null,
-  eth: new Set(["USDC", "ETH", "BTC"]),
-  fil: new Set(["FIL"]),
+
+// Fixed allocation policy: how the shared collateral pool is earmarked to the
+// ETH book. These figures are AUTHORITATIVE (set by treasury, not read from the
+// Collateral Map). Everything else in the map is "the rest" and belongs to the
+// FIL book. Keys are counterparty names, matched case-insensitively.
+const PF_ETH_COLL_ALLOCATION = {
+  flowdesk: { ETH: 2000, USDC: 6717467 },
+  keyrock:  { USDC: 8926168 },
 };
 
-function pfCollMapValueAt(qtys, spot, applyHaircut, scope) {
+function pfEthAllocFor(cp) {
+  return PF_ETH_COLL_ALLOCATION[(cp.counterparty || "").toLowerCase()] || {};
+}
+
+// Effective posted-collateral quantities for a counterparty under a scope:
+//   all → full map holdings (the literal Collateral Map total)
+//   eth → the fixed ETH-book carve-out (authoritative, above)
+//   fil → the rest = full map minus the ETH carve-out (floored at 0 so an
+//         authoritative figure exceeding the map can't create a negative)
+function pfEffectiveQtys(cp, scope) {
+  const full = cp.qtys || {};
+  if (scope === "eth") return pfEthAllocFor(cp);
+  if (scope === "fil") {
+    const alloc = pfEthAllocFor(cp);
+    const rest = {};
+    for (const a of new Set([...Object.keys(full), ...Object.keys(alloc)])) {
+      rest[a] = Math.max(0, (full[a] || 0) - (alloc[a] || 0));
+    }
+    return rest;
+  }
+  return full;
+}
+
+function pfCollMapValueAt(qtys, spot, applyHaircut) {
   const prices = pfCollateralMap.prices || {};
   const hc = pfCollateralMap.haircuts || {};
-  const allow = PF_COLL_SCOPE_ASSETS[scope] || null;
   let sum = 0;
   for (const asset of Object.keys(qtys)) {
-    if (allow && !allow.has(asset)) continue;
     const q = qtys[asset] || 0;
     if (!q) continue;
     const px = asset === currentAsset ? spot
@@ -3251,7 +3275,25 @@ function pfCollMapValueAt(qtys, spot, applyHaircut, scope) {
 }
 
 function pfCollMapCurve(cptys, spots, applyHaircut, scope) {
-  return spots.map(s => cptys.reduce((sum, c) => sum + pfCollMapValueAt(c.qtys || {}, s, applyHaircut, scope), 0));
+  return spots.map(s => cptys.reduce((sum, c) =>
+    sum + pfCollMapValueAt(pfEffectiveQtys(c, scope), s, applyHaircut), 0));
+}
+
+// Human-readable description of the fixed ETH/FIL allocation, generated from
+// PF_ETH_COLL_ALLOCATION so the on-screen note can never drift from the logic.
+function pfCollateralNoteText() {
+  const fmtQ = q => {
+    const bits = [];
+    if (q.ETH) bits.push(`${q.ETH.toLocaleString()} ETH`);
+    if (q.BTC) bits.push(`${q.BTC.toLocaleString()} BTC`);
+    if (q.USDC) bits.push(`$${q.USDC.toLocaleString()} USDC`);
+    return bits.join(" + ");
+  };
+  const parts = Object.entries(PF_ETH_COLL_ALLOCATION).map(([name, q]) =>
+    `${name.charAt(0).toUpperCase()}${name.slice(1)} ${fmtQ(q)}`);
+  return `Collateral allocation (fixed policy) — ETH book: ${parts.join("; ")}. `
+    + `FIL book: all remaining collateral (FIL + any leftover USDC/ETH). `
+    + `ETH revalues with spot; USDC held at $1.`;
 }
 
 // Counterparties in scope for the overlay, honouring the Counterparty filter.
@@ -3419,6 +3461,9 @@ function pfRenderPayoffChart() {
   };
 
   Plotly.react("portfolio-payoff-chart", traces, layout, { responsive: true, scrollZoom: true });
+
+  const noteEl = document.getElementById("pf-collateral-note");
+  if (noteEl) noteEl.textContent = pfCollateralNoteText();
 }
 
 // ── MTM Matrix (HTML table with dollar values) ───────────

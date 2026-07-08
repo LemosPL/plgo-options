@@ -1295,6 +1295,14 @@ select { margin-bottom: .5rem; }
   .deals-layout { grid-template-columns: 1fr; }
 }
 
+.pf-collateral-note {
+  font-size: .72rem; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid #d29922; border-radius: 6px;
+  padding: .4rem .6rem; margin-bottom: .5rem; line-height: 1.4;
+}
+.pf-collateral-note:empty { display: none; }
+
 .deals-left { display: flex; flex-direction: column; gap: .6rem; min-width: 0; }
 
 /* Filter / quick-select bar above the deal list */
