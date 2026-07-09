@@ -15,6 +15,45 @@ from plgo_options.optimization.optimizer_v3 import OptimizerV3
 from plgo_options.optimization.snapshot import load_snapshot_dict
 
 
+def _log_moneyness_ladder(spot: float, low: float, high: float, n_points: int) -> list[float]:
+    """Spot ladder evenly spaced in log-moneyness ln(K / spot) — denser near the
+    money, sparser in the wings — instead of the shared portfolio ladder's
+    linear dollar steps. Snapped to round increments (finer near ATM) so the
+    Optimizer v2 matrix/chart show clean values; the exact current spot is
+    always included so the P&L-from-today anchor in build_payoffs lands on a
+    real ladder point.
+
+    Scoped to the optimizer's own input only — the shared SPOT_LADDER used by
+    the Portfolio P&L and legacy "opt2" tabs is untouched.
+    """
+    if spot <= 0 or low <= 0 or high <= spot:
+        return list(np.arange(low, high + (high - low) / n_points, (high - low) / n_points))
+
+    lm_low = np.log(low / spot)
+    lm_high = np.log(high / spot)
+    lms = np.linspace(lm_low, lm_high, n_points)
+
+    def _snap(price: float, abs_lm: float) -> float:
+        # Step size scales with distance from ATM — mirrors the tick-spacing
+        # heuristic already used for the payoff chart's x-axis labels.
+        if abs_lm < 0.05:
+            step = spot * 0.005
+        elif abs_lm < 0.15:
+            step = spot * 0.015
+        elif abs_lm < 0.35:
+            step = spot * 0.04
+        elif abs_lm < 0.7:
+            step = spot * 0.08
+        else:
+            step = spot * 0.15
+        step = max(step, 1e-6)
+        return round(price / step) * step
+
+    points = {_snap(spot * np.exp(lm), abs(lm)) for lm in lms}
+    points.add(round(spot, 2))
+    return sorted(float(p) for p in points if p > 0)
+
+
 def _json_default(obj: Any) -> Any:
     """Coerce numpy scalars/arrays (e.g. from scipy/bs_greeks) to native JSON types."""
     if isinstance(obj, np.ndarray):
@@ -60,13 +99,26 @@ class OptimizerUseCase:
     ) -> "OptimizerUseCase":
         # print(portfolio_payload)
         spot = portfolio_payload.get("spot", portfolio_payload.get("eth_spot"))
+        asset = portfolio_payload.get("asset", run_params.asset).upper()
+
+        # Dense ladder for actual LP profile-fit resolution and chart
+        # smoothness — matrix *display* row count is trimmed separately in
+        # the frontend (optv2MatrixDisplayRows), not by starving this ladder.
+        shared_ladder = portfolio_payload["spot_ladder"]
+        spot_ladder = (
+            _log_moneyness_ladder(spot, min(shared_ladder), max(shared_ladder), n_points=len(shared_ladder))
+            if spot
+            else shared_ladder
+        )
+        if asset == "ETH":
+            spot_ladder = sorted({round(p) for p in spot_ladder})
 
         return_val = cls(
             today=datetime.today(),
             optimizer_input={
-                "asset": portfolio_payload.get("asset", run_params.asset).upper(),
+                "asset": asset,
                 "spot": spot,
-                "spot_ladder": portfolio_payload["spot_ladder"],
+                "spot_ladder": spot_ladder,
                 "matrix_horizons": portfolio_payload["matrix_horizons"],
                 "chart_horizons": portfolio_payload["chart_horizons"],
                 "vol_surface": portfolio_payload["vol_surface"],

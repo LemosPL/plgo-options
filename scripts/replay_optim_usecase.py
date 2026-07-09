@@ -34,7 +34,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260706_115633_ALL_ETH.json")
+        path = Path("../data/optimization_snapshots/usecases/20260708_161629_ALL_ETH.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -43,11 +43,11 @@ def main() -> None:
     spot_arr = np.array(optimizer.spot_ladder, dtype=float)
     horizons = [90]  # sorted(set(self.chart_horizons + [0]))
     trades = []
-    before_payoff, after_payoff = optimizer.build_payoffs(horizons, spot_arr, trades)
+    before_payoff, after_payoff, _ = optimizer.build_payoffs(horizons, spot_arr, trades)
 
-    result = usecase.run_test()
+    #result = usecase.run_test()
 
-    #result = usecase.run()
+    result = usecase.run()
 
 
     #out_path = path.with_name(path.stem + "_replayed.json")

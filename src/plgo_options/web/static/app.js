@@ -8630,12 +8630,24 @@ function optv2RenderPayoff() {
   Plotly.newPlot("optv2-payoff-chart", traces, layout, { responsive: true });
 }
 
+/* ── Pick ~targetRows evenly index-spaced ladder points for matrix display.
+   The ladder itself stays dense (for LP fit resolution + chart smoothness);
+   this only thins out which rows the matrix tables show. ── */
+function optv2MatrixDisplayIdx(spots, targetRows = 14) {
+  const n = spots.length;
+  if (n <= targetRows) return spots.map((_, i) => i);
+  const idxs = [];
+  for (let i = 0; i < targetRows; i++) {
+    idxs.push(Math.round((i * (n - 1)) / (targetRows - 1)));
+  }
+  return [...new Set(idxs)];
+}
+
 /* ── Scenario matrix: spot (rows) × horizon (columns) ──────── */
 function optv2RenderMatrix() {
   const spots    = optv2Data.spot_ladder;
   const positions = optv2Data.positions;
   const ethSpot  = optv2Data.eth_spot;
-  const step     = spots.length > 1 ? spots[1] - spots[0] : 100;
 
   // Header
   const $thead = document.getElementById("optv2-matrix-thead");
@@ -8653,12 +8665,16 @@ function optv2RenderMatrix() {
   const $tbody = document.getElementById("optv2-matrix-tbody");
   $tbody.innerHTML = "";
 
-  spots.forEach((s, si) => {
-    // Only show rows at $500 increments
-    if (s % 500 !== 0) return;
-
+  // Ladder is log-moneyness spaced (dense near ATM, sparse in the wings) and
+  // kept dense for LP fit resolution — thin it to a handful of display rows
+  // here rather than filtering by dollar value, which wouldn't land on much
+  // of anything on a non-uniform ladder.
+  const nearestIdx = optv2NearestIdx(spots, ethSpot);
+  const displayIdx = optv2MatrixDisplayIdx(spots);
+  displayIdx.forEach((si) => {
+    const s = spots[si];
     const tr = document.createElement("tr");
-    if (Math.abs(s - ethSpot) < step / 2) tr.classList.add("row-highlight");
+    if (si === nearestIdx) tr.classList.add("row-highlight");
 
     const tdSpot = document.createElement("td");
     tdSpot.textContent = "$" + s.toLocaleString();
@@ -8895,6 +8911,31 @@ function optv2RenderResult(data) {
   document.getElementById("optv2-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
   document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry || "All";
 
+  // Both matrices below show P&L *from today*, anchored to 0 at (today,
+  // current spot) — we don't have each position's historical entry premium
+  // to compute a true absolute P&L. Surface that anchor explicitly so the
+  // book's actual current MTM isn't lost, just baked into the reference point.
+  const $mtmNote = document.getElementById("optv2-matrix-mtm-note");
+  if ($mtmNote) {
+    if (data.current_book_mtm != null) {
+      const mtm = data.current_book_mtm;
+      $mtmNote.innerHTML = `Both matrices show P&amp;L <b>from today</b>, not absolute value — ` +
+        `current book MTM is <b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">` +
+        `${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> (the implicit $0 anchor at Now/current spot below).`;
+    } else {
+      $mtmNote.textContent = "";
+    }
+  }
+
+  // Refresh the main P&L Matrix from this same optimizer result — it was
+  // originally rendered from the /pnl payload's own (linear-ladder) position
+  // curves at "Load Risk Profile" time, which used a different spot_ladder
+  // than the optimizer's. Re-rendering from data.before here keeps both
+  // matrices on the identical ladder and semantics.
+  if (data.before && data.before.payoff_by_horizon) {
+    optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody");
+  }
+
   // Show "After" matrix next to the main P&L Matrix
   const $afterPanel = document.getElementById("optv2-matrix-after-panel");
   const $matrixGrid = document.getElementById("optv2-matrix-grid");
@@ -9008,7 +9049,6 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const ethSpot = data.eth_spot;
   const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
   const payoff = data[side].payoff_by_horizon;
-  const step = spots.length > 1 ? spots[1] - spots[0] : 100;
 
   const $thead = document.getElementById(theadId);
   $thead.innerHTML = "";
@@ -9024,11 +9064,15 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const $tbody = document.getElementById(tbodyId);
   $tbody.innerHTML = "";
 
-  spots.forEach((s, si) => {
-    if (s % 500 !== 0) return;
-
+  // Ladder is log-moneyness spaced (dense near ATM, sparse in the wings) and
+  // kept dense for LP fit resolution — thin it to a handful of display rows
+  // here rather than filtering by dollar value.
+  const nearestIdx = optv2NearestIdx(spots, ethSpot);
+  const displayIdx = optv2MatrixDisplayIdx(spots);
+  displayIdx.forEach((si) => {
+    const s = spots[si];
     const tr = document.createElement("tr");
-    if (Math.abs(s - ethSpot) < step / 2) tr.classList.add("row-highlight");
+    if (si === nearestIdx) tr.classList.add("row-highlight");
 
     const tdSpot = document.createElement("td");
     tdSpot.textContent = "$" + s.toLocaleString();

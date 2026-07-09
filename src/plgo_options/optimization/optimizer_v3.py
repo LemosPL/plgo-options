@@ -896,7 +896,9 @@ class OptimizerV3(BaseOptimizer):
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
-        before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(horizons, spot_arr, trades)
+        before_payoff_by_horizon, after_payoff_by_horizon, current_book_mtm = self.build_payoffs(
+            horizons, spot_arr, trades,
+        )
 
         fitted_payoff_cash_shift = float(
             np.sum(spot_weights * (adjusted_base_payoff - fitted_payoff)) / np.sum(spot_weights)
@@ -971,6 +973,9 @@ class OptimizerV3(BaseOptimizer):
             "replacement_trades": replacement_output,
             "trades": trades,
             "candidates_evaluated": len(candidates),
+            # Reference point the before/after P&L matrices are anchored to —
+            # today's actual mark of the existing book, at the current spot.
+            "current_book_mtm": round(float(current_book_mtm), 2),
         }
 
 
@@ -1228,7 +1233,7 @@ class OptimizerV3(BaseOptimizer):
 
             trades = self._aggregate_trade_legs(trades)
             premium_summary = self._trade_premium_summary(trades)
-            before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
+            before_payoff_by_horizon, after_payoff_by_horizon, _ = self.build_payoffs(
                 horizons,
                 spot_arr,
                 trades,
@@ -1367,7 +1372,7 @@ class OptimizerV3(BaseOptimizer):
             if trade.get("strategy") != "ROLL_UNWIND"
         ]
 
-        before_payoff_by_horizon, after_payoff_by_horizon = self.build_payoffs(
+        before_payoff_by_horizon, after_payoff_by_horizon, _ = self.build_payoffs(
             horizons,
             spot_arr,
             trades,
@@ -1558,7 +1563,7 @@ class OptimizerV3(BaseOptimizer):
         # ------------------------------------------------------------------
         spot_arr = np.array(self.spot_ladder, dtype=float)
         horizons = sorted(set(self.chart_horizons + [0]))
-        before_payoff, after_payoff = self.build_payoffs(horizons, spot_arr, trades)
+        before_payoff, after_payoff, _ = self.build_payoffs(horizons, spot_arr, trades)
 
         return {
             "status": "ok",
@@ -1688,6 +1693,10 @@ class OptimizerV3(BaseOptimizer):
         return trades
 
     def build_payoffs(self, horizons, spot_arr, trades):
+        # Always compute horizon 0 internally (even if the caller didn't ask
+        # for it) — it's the reference point both curves get anchored to below.
+        all_horizons = sorted(set(horizons) | {0})
+
         # Populate per-position payoff curves first
         for p in self.positions:
             p.payoff_by_horizon = {}
@@ -1703,7 +1712,7 @@ class OptimizerV3(BaseOptimizer):
             # Use signed quantity so long/short is reflected in the curve
             signed_qty = qty if str(getattr(p, "side", "")).lower() == "long" else -qty
 
-            for h in horizons:
+            for h in all_horizons:
                 h_key = str(h)
 
                 if opt == "F":
@@ -1718,9 +1727,9 @@ class OptimizerV3(BaseOptimizer):
 
                 p.payoff_by_horizon[h_key] = np.round(curve, 2).tolist()
 
-        # Before payoff: aggregate from existing positions
+        # Before payoff: aggregate from existing positions (raw value at T+h)
         before_payoff = {}
-        for h in horizons:
+        for h in all_horizons:
             h_key = str(h)
             total = np.zeros(len(spot_arr))
             for p in self.positions:
@@ -1729,19 +1738,17 @@ class OptimizerV3(BaseOptimizer):
                     total += np.array(curve)
             before_payoff[h_key] = np.round(total, 2).tolist()
 
-        pnl = 0.
-        for trade in trades:
-            pnl += trade["bs_price_usd"] * trade["qty"]
-
-        # Trade payoff contribution: for each proposed trade, compute BS
-        # values across the spot ladder at each horizon
+        # Trade payoff contribution: for each proposed trade, compute BS value
+        # across the spot ladder at each horizon. Raw value (no premium netted
+        # out here) — netting is applied uniformly below via the "today" anchor
+        # instead, so both curves get the same treatment.
         trade_payoff_delta = {}
-        for h in horizons:
+        for h in all_horizons:
             h_key = str(h)
             total = np.zeros(len(spot_arr))
             for trade in trades:
                 if trade["opt"] == "F":
-                    # Perpetual future: P&L = qty * (spot - entry)
+                    # Perpetual future: value = qty * (spot - entry)
                     vals = spot_arr - trade["strike"]
                 else:
                     dte_at_h = max(trade["dte"] - h, 0)
@@ -1749,16 +1756,35 @@ class OptimizerV3(BaseOptimizer):
                     sigma = trade["iv_pct"] / 100.0
                     vals = bs_vec(spot_arr, trade["strike"], T_h, 0.0, sigma, trade["opt"])
                 total += trade["qty"] * vals
-            trade_payoff_delta[h_key] = np.round(total - pnl, 2).tolist()
+            trade_payoff_delta[h_key] = np.round(total, 2).tolist()
 
-        # After payoff = before + trades
-        after_payoff = {}
-        for h_key in before_payoff:
-            before = np.array(before_payoff[h_key])
-            delta_arr = np.array(trade_payoff_delta[h_key])
-            after_payoff[h_key] = np.round(before + delta_arr, 2).tolist()
+        # Anchor both curves to today's actual mark, converting "raw value at
+        # T+h" into "P&L from today to T+h" — the fair comparison we can make
+        # without each position's historical entry premium (which we don't
+        # have): "before" nets out today's mark of the existing book; "after"
+        # additionally nets out the (known) premium paid/received for the
+        # proposed trades today, so both curves read 0 at (h=0, current spot).
+        spot_idx0 = int(np.argmin(np.abs(np.asarray(spot_arr) - self.spot)))
+        today_value_before = before_payoff["0"][spot_idx0]
+        pnl_today = sum(trade["bs_price_usd"] * trade["qty"] for trade in trades)
+        today_value_after = today_value_before + pnl_today
 
-        return before_payoff, after_payoff
+        after_payoff_raw = {
+            h_key: (np.array(before_payoff[h_key]) + np.array(trade_payoff_delta[h_key])).tolist()
+            for h_key in before_payoff
+        }
+
+        before_payoff = {
+            h_key: np.round(np.array(curve) - today_value_before, 2).tolist()
+            for h_key, curve in before_payoff.items()
+            if int(h_key) in horizons
+        }
+        after_payoff = {
+            h_key: np.round(np.array(curve) - today_value_after, 2).tolist()
+            for h_key, curve in after_payoff_raw.items()
+            if int(h_key) in horizons
+        }
+        return before_payoff, after_payoff, today_value_before
 
     def add_perp_hedge(self, perp_candidate, qty):
         c = perp_candidate
