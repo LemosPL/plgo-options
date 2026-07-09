@@ -160,7 +160,13 @@ class BaseOptimizer:
         held_keys_by_expiry = dict(sorted(held_keys_by_expiry.items(), key=lambda kv: kv[0]))
 
         if counterparties is None:
-            counterparties = ["Deribit"]
+            # Default to counterparties we already have positions with, rather
+            # than a hardcoded exchange — an empty book falls back to Deribit
+            # so there's still a candidate universe to build from.
+            counterparties = sorted({
+                p.counterparty for p in self.positions
+                if getattr(p, "counterparty", None)
+            }) or ["Deribit"]
 
         tt = 0
         for smile in matching_smiles:
