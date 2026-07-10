@@ -1770,8 +1770,11 @@ class OptimizerV3(BaseOptimizer):
         # have): "before" nets out today's mark of the existing book; "after"
         # additionally nets out the (known) premium paid/received for the
         # proposed trades today, so both curves read 0 at (h=0, current spot).
-        spot_idx0 = int(np.argmin(np.abs(np.asarray(spot_arr) - self.spot)))
-        today_value_before = before_payoff["0"][spot_idx0]
+        # Interpolated rather than snapped to the nearest ladder point — ETH's
+        # ladder is rounded to whole dollars for display, so the live spot is
+        # essentially never exactly on it; interpolation error shrinks with the
+        # square of the gap, vs. linearly for nearest-point snapping.
+        today_value_before = float(np.interp(self.spot, spot_arr, before_payoff["0"]))
         pnl_today = sum(trade["bs_price_usd"] * trade["qty"] for trade in trades)
         today_value_after = today_value_before + pnl_today
 
