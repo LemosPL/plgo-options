@@ -900,9 +900,12 @@ class OptimizerV3(BaseOptimizer):
             horizons, spot_arr, trades,
         )
 
-        fitted_payoff_cash_shift = float(
-            np.sum(spot_weights * (adjusted_base_payoff - fitted_payoff)) / np.sum(spot_weights)
-        )
+        # Anchor to the value AT the current spot, not a weighted average across
+        # the whole ladder — a single global shift can't fix the wings without
+        # reintroducing a mismatch at the money, which is the most heavily
+        # weighted (and usually already best-fit) point.
+        spot_idx0 = int(np.argmin(np.abs(spot_arr - self.spot)))
+        fitted_payoff_cash_shift = float(adjusted_base_payoff[spot_idx0] - fitted_payoff[spot_idx0])
         fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
 
         sum_weights = np.sum(spot_weights)
@@ -1313,9 +1316,12 @@ class OptimizerV3(BaseOptimizer):
         for trade in box_neutralizer_trades:
             fitted_payoff += self._trade_value_curve(trade, spot_arr)
 
-        fitted_payoff_cash_shift = float(
-            np.sum(spot_weights * (adjusted_base_payoff - fitted_payoff)) / np.sum(spot_weights)
-        )
+        # Anchor to the value AT the current spot, not a weighted average across
+        # the whole ladder — a single global shift can't fix the wings without
+        # reintroducing a mismatch at the money, which is the most heavily
+        # weighted (and usually already best-fit) point.
+        spot_idx0 = int(np.argmin(np.abs(spot_arr - self.spot)))
+        fitted_payoff_cash_shift = float(adjusted_base_payoff[spot_idx0] - fitted_payoff[spot_idx0])
         fitted_payoff_comparable = fitted_payoff + fitted_payoff_cash_shift
 
         print("is_replay:" + str(is_replay))
