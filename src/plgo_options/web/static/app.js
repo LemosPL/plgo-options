@@ -8976,10 +8976,11 @@ function optv2RenderResult(data) {
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td>${Math.abs(t.qty)}</td>`,
       `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`,
       `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
-    ], 10,
+    ], 11,
     "No replacement or new trades proposed."
   );
 }
