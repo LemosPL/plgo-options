@@ -362,6 +362,7 @@ async def _assemble(asset: str, include_expired: bool,
             "days_rem": days_rem,
             "premium_per": premium_per,
             "premium_usd": premium_usd,
+            "ref_spot": _safe_float(r.get("ref_spot")),
         }
         by_cpty[leg["counterparty"]].append(leg)
         all_strikes.append(strike)
@@ -491,6 +492,7 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
             "opt": opt,
             "qty": qty,
             "strike": K,
+            "ref_spot": round(leg.get("ref_spot") or 0.0, 6),
             "trade_date": leg["trade_date"],
             "expiry": leg["expiry"],
             "premium_per": round(prem_usd / qty, 4) if qty else 0.0,

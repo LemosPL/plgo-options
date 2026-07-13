@@ -20,6 +20,7 @@ class ReconTrade(BaseModel):
     option_type: str = ""
     strike: float | None = 0
     expiry: str = ""
+    ref_price: float | None = 0   # reference spot at trade time (→ our ref_spot)
     qty: float | None = 0
     premium_usd: float | None = 0
 
@@ -27,6 +28,8 @@ class ReconTrade(BaseModel):
         # Coerce None to 0 for numeric fields (JSON null from JS NaN)
         if self.strike is None:
             object.__setattr__(self, "strike", 0.0)
+        if self.ref_price is None:
+            object.__setattr__(self, "ref_price", 0.0)
         if self.qty is None:
             object.__setattr__(self, "qty", 0.0)
         if self.premium_usd is None:
@@ -411,6 +414,66 @@ async def reconcile_trades(body: ReconRequest):
         "only_ours": only_ours,
         "only_theirs": only_theirs,
         "collateral": body.their_collateral.model_dump(),
+    }
+
+
+@router.post("/reconcile/apply-ref-prices")
+async def apply_ref_prices(body: ReconRequest):
+    """Backfill our trades' ref_spot from a counterparty file's ref_price.
+
+    Matches each of our (non-expired) trades for this counterparty to a file
+    row — by trade_id first, then by (side, type, strike, expiry) — and, when
+    the file carries a positive ref_price that differs from ours, updates
+    ref_spot (and recomputes % OTM and notional) through the audited trade
+    update path. READ of the file only; the only writes are ref-price fields.
+    """
+    db = await get_db()
+    our_all = await repo.list_trades(db, include_expired=False, include_deleted=False, asset=body.asset)
+    our_trades = [t for t in our_all
+                  if (t.get("counterparty", "") or "").lower() == body.counterparty.lower()
+                  and not _is_expired(str(t.get("expiry", "")))]
+
+    # Build ref_price lookups from the file (first positive value wins).
+    by_tid: dict[str, float] = {}
+    by_ste: dict[tuple, float] = {}
+    for th in body.their_trades:
+        rp = float(th.ref_price or 0)
+        if rp <= 0:
+            continue
+        tid = str(th.trade_id or "").strip().lower()
+        if tid and tid not in by_tid:
+            by_tid[tid] = rp
+        ste = (_norm_side(th.side), _norm_type(th.option_type),
+               float(th.strike or 0), _norm_date(str(th.expiry or "")))
+        by_ste.setdefault(ste, rp)
+
+    updated, skipped, unmatched = 0, 0, 0
+    for t in our_trades:
+        tid = str(t.get("trade_id", "") or "").strip().lower()
+        ste = (_norm_side(str(t.get("side", ""))), _norm_type(str(t.get("option_type", ""))),
+               float(t.get("strike", 0) or 0), _norm_date(str(t.get("expiry", ""))))
+        rp = by_tid.get(tid) if tid in by_tid else by_ste.get(ste)
+        if not rp or rp <= 0:
+            unmatched += 1
+            continue
+        cur = float(t.get("ref_spot", 0) or 0)
+        if abs(cur - rp) < 1e-9:
+            skipped += 1
+            continue
+        strike = float(t.get("strike", 0) or 0)
+        qty = float(t.get("qty", 0) or 0)
+        changes = {
+            "ref_spot": rp,
+            "pct_otm": round((strike / rp - 1) * 100, 4) if rp > 0 else 0,
+            "notional_mm": round(qty * rp / 1e6, 6),
+        }
+        await repo.update_trade(db, t["id"], changes, changed_by="reconciliation")
+        updated += 1
+
+    return {
+        "counterparty": body.counterparty, "asset": body.asset,
+        "updated": updated, "skipped_same": skipped, "unmatched": unmatched,
+        "our_count": len(our_trades),
     }
 
 

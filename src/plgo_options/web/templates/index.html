@@ -184,6 +184,7 @@
               <th class="sortable" data-col="expiry">Expiry</th>
               <th class="sortable" data-col="days_remaining">DTE</th>
               <th class="sortable" data-col="strike">Strike</th>
+              <th class="sortable" data-col="ref_spot">Ref Price</th>
               <th class="sortable" data-col="pct_otm_live">% OTM</th>
               <th class="sortable" data-col="qty">Qty</th>
               <th class="sortable" data-col="notional_mm">Notional</th>
@@ -269,6 +270,7 @@
                 <th>Type</th>
                 <th>Strike</th>
                 <th>Expiry</th>
+                <th>Ref Price</th>
                 <th>Qty</th>
                 <th>Premium USD</th>
                 <th style="width:30px"></th>
@@ -297,6 +299,15 @@
       <!-- Run reconciliation -->
       <section class="card">
         <button class="btn-primary" id="rc-run" style="width:100%;padding:.75rem;font-size:1rem">Run reconciliation</button>
+        <button class="btn-secondary" id="rc-apply-ref" style="width:100%;padding:.6rem;font-size:.9rem;margin-top:.6rem"
+          title="Update ref_spot on our matching trades from the file's ref_price (audited). Recomputes % OTM and notional.">
+          Apply ref prices to our book
+        </button>
+        <p style="margin:.4rem 0 0;font-size:.72rem;color:var(--muted)">
+          Backfills each matching trade's reference spot from the uploaded file's <b>ref_price</b>
+          (matched by trade&nbsp;id, else side/type/strike/expiry), so it shows across the positions
+          table, portfolio, deals and charts.
+        </p>
       </section>
 
       <!-- Reconciliation History -->
@@ -487,6 +498,7 @@
               <th class="sortable" data-col="expiry">Expiry</th>
               <th class="sortable" data-col="days_remaining">DTE</th>
               <th class="sortable" data-col="strike">Strike</th>
+              <th class="sortable" data-col="ref_spot" title="Reference spot at trade time">Ref Price</th>
               <th class="sortable" data-col="pct_otm_live" title="Live % OTM vs current spot">% OTM</th>
               <th class="sortable" data-col="qty">ETH Qty</th>
               <th class="sortable" data-col="premium_per">Entry Prem</th>
@@ -793,6 +805,7 @@
               <th class="sortable" data-col="side_raw" style="text-align:left">Side</th>
               <th class="sortable" data-col="option_type" style="text-align:left">Type</th>
               <th class="sortable" data-col="strike">Strike</th>
+              <th class="sortable" data-col="ref_spot" title="Reference spot at trade time">Ref Price</th>
               <th class="sortable" data-col="expiry">Expiry</th>
               <th class="sortable" data-col="days_remaining">DTE</th>
               <th class="sortable" data-col="net_qty">Net Qty</th>
@@ -1154,6 +1167,7 @@
                 <th class="sortable" data-col="side_raw" style="text-align:left">Side</th>
                 <th class="sortable" data-col="option_type" style="text-align:left">Type</th>
                 <th class="sortable" data-col="strike">Strike</th>
+                <th class="sortable" data-col="ref_spot" title="Reference spot at trade time">Ref Price</th>
                 <th class="sortable" data-col="expiry">Expiry</th>
                 <th class="sortable" data-col="days_remaining">DTE</th>
                 <th class="sortable" data-col="net_qty">Net Qty</th>
@@ -1413,6 +1427,7 @@
               <th class="sortable" data-col="side">Side</th>
               <th class="sortable" data-col="opt">Type</th>
               <th class="sortable" data-col="strike">Strike</th>
+              <th class="sortable" data-col="ref_spot" title="Reference spot at trade time">Ref Price</th>
               <th class="sortable" data-col="expiry">Expiry</th>
               <th class="sortable" data-col="dte">DTE</th>
               <th class="sortable" data-col="qty">Qty</th>
@@ -2138,6 +2153,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=79"></script>
+<script src="/static/app.js?v=81"></script>
 </body>
 </html>

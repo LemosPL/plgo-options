@@ -522,6 +522,7 @@ async def suggest_trades(req: OptimizeRequest):
         positions_display.append({
             "id": t["id"], "counterparty": t.get("counterparty", ""),
             "side": t["side"], "opt": opt, "strike": strike,
+            "ref_spot": _safe_float(t.get("ref_spot")),
             "expiry": t["expiry"], "net_qty": sign * qty, "qty": qty,
             "premium_usd": _safe_float(t.get("premium_usd")),
         })
@@ -1646,6 +1647,7 @@ async def chat(req: ChatRequest):
             positions_detail.append({
                 "id": t["id"], "counterparty": t.get("counterparty", ""),
                 "side": side_label, "type": "Call" if opt == "C" else "Put",
+                "opt": opt, "ref_spot": _safe_float(t.get("ref_spot")),
                 "strike": strike, "qty": qty, "net_qty": sign * qty,
                 "expiry": exp_short, "expiry_code": exp_code, "dte": dte,
                 "premium_usd": entry_premium,

@@ -1160,7 +1160,7 @@ async function tmLoad() {
     tmLoaded = true;
     tmRender();
   } catch (e) {
-    tmBody.innerHTML = `<tr><td colspan="22" style="text-align:center;padding:2rem;color:var(--red)">Error: ${e.message}</td></tr>`;
+    tmBody.innerHTML = `<tr><td colspan="23" style="text-align:center;padding:2rem;color:var(--red)">Error: ${e.message}</td></tr>`;
   }
 }
 
@@ -1282,6 +1282,7 @@ function tmRenderTable() {
       <td>${t.expiry || ""}</td>
       <td>${t.days_remaining || 0}</td>
       <td>${fmtK(t.strike)}</td>
+      <td>${t.ref_spot ? fmtK(t.ref_spot) : "—"}</td>
       <td>${fmt(t.pct_otm_live, 1)}%</td>
       <td>${fmtK(t.qty)}</td>
       <td>${fmtMm((t.qty || 0) * (ethSpot || 0) / 1e6)}</td>
@@ -1963,7 +1964,7 @@ document.getElementById("btn-tm-export").addEventListener("click", () => {
 let rcTheirTrades = [];
 
 function rcAddRow(data) {
-  const d = data || { trade_id: "", trade_date: "", side: "Buy", option_type: "Call", strike: "", expiry: "", qty: "", premium_usd: "" };
+  const d = data || { trade_id: "", trade_date: "", side: "Buy", option_type: "Call", strike: "", expiry: "", ref_price: "", qty: "", premium_usd: "" };
   rcTheirTrades.push(d);
   rcRenderRows();
 }
@@ -1984,6 +1985,7 @@ function rcRenderRows() {
     </select></td>
     <td><input type="number" class="rc-field" data-idx="${i}" data-col="strike" value="${t.strike || ""}" step="any" style="width:80px;font-size:.78rem"></td>
     <td><input type="text" class="rc-field" data-idx="${i}" data-col="expiry" value="${t.expiry || ""}" placeholder="YYYY-MM-DD" style="width:100px;font-size:.78rem"></td>
+    <td><input type="number" class="rc-field" data-idx="${i}" data-col="ref_price" value="${t.ref_price || ""}" step="any" placeholder="ref spot" style="width:80px;font-size:.78rem"></td>
     <td><input type="number" class="rc-field" data-idx="${i}" data-col="qty" value="${t.qty || ""}" step="any" style="width:80px;font-size:.78rem"></td>
     <td><input type="number" class="rc-field" data-idx="${i}" data-col="premium_usd" value="${t.premium_usd || ""}" step="any" style="width:100px;font-size:.78rem"></td>
     <td><button class="tm-action-btn btn-delete rc-remove" data-idx="${i}" title="Remove">&times;</button></td>
@@ -2097,6 +2099,7 @@ function rcParseRow(row) {
     option_type: rcNormType(row.option_type || row.Option_Type || row.Type || row["Option Type"] || row["Option_Type"] || row["Instrument Type"] || ""),
     strike: pf(row.strike ?? row.Strike ?? row["Strike Price"] ?? row["Strike_Price"] ?? 0),
     expiry: rcNormDate(row.expiry ?? row.Expiry ?? row["Expiry Date"] ?? row["Expiry_Date"] ?? row["Option Expiry Date"] ?? ""),
+    ref_price: pf(row.ref_price ?? row.Ref_Price ?? row["Ref Price"] ?? row["Ref. Spot Price"] ?? row.ref_spot ?? row["Reference Price"] ?? 0),
     qty: pf(row.qty ?? row.Qty ?? row.Quantity ?? row["ETH Options"] ?? row["Quantity"] ?? row["Size"] ?? 0),
     premium_usd: pf(row.premium_usd ?? row.Premium_USD ?? row["Premium USD"] ?? row["Premium_USD"] ?? row["Premium"] ?? 0),
   };
@@ -2242,6 +2245,29 @@ document.getElementById("rc-run").addEventListener("click", async () => {
   }
 });
 
+// Backfill ref_spot on our book from the uploaded file's ref_price.
+document.getElementById("rc-apply-ref").addEventListener("click", async () => {
+  const counterparty = document.getElementById("rc-counterparty").value;
+  if (!counterparty) { alert("Please select a counterparty"); return; }
+  const withRef = rcTheirTrades.filter(t => (parseFloat(t.ref_price) || 0) > 0).length;
+  if (!withRef) { alert("The uploaded file has no ref_price values to apply. Add a ref_price column first."); return; }
+  if (!confirm(`Apply reference prices from ${withRef} file row(s) to ${counterparty}'s matching trades in our book?\n\nThis updates ref_spot (and recomputes % OTM / notional) and is recorded in the audit log.`)) return;
+
+  const btn = document.getElementById("rc-apply-ref");
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "Applying…";
+  try {
+    const res = await post("/api/trades/reconcile/apply-ref-prices", {
+      counterparty, asset: currentAsset, their_trades: rcTheirTrades,
+    });
+    alert(`Ref prices applied.\n\nUpdated: ${res.updated}\nAlready current: ${res.skipped_same}\nNo file match: ${res.unmatched}\n(of ${res.our_count} trades for ${counterparty})`);
+    tmLoaded = false;   // force Trade Management refresh
+  } catch (err) {
+    alert(`Failed to apply ref prices: ${err.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+});
+
 // ─── Reconciliation History ─────────────────────────────────
 async function rcLoadHistory() {
   try {
@@ -2338,7 +2364,8 @@ function rcRenderResults(res) {
   container._reconRows = rows;
   container._reconCounterparty = res.counterparty;
 
-  const ourCols = 7, theirCols = 7;
+  const ourCols = 8, theirCols = 8;
+  const fmtRef = v => v ? Number(v).toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—";
   html += `<div style="max-height:700px;overflow:auto;margin-top:1rem;border:1px solid var(--border);border-radius:var(--radius)">
   <table style="font-size:.76rem;border-collapse:collapse;width:100%;table-layout:fixed" id="rc-results-table">
     <thead style="position:sticky;top:0;z-index:2;background:var(--surface)">
@@ -2349,8 +2376,8 @@ function rcRenderResults(res) {
         <th colspan="${theirCols}" style="text-align:center;border-bottom:2px solid var(--orange);padding:.5rem;font-size:.82rem;background:var(--surface)">THEIR BOOK</th>
         <th rowspan="2" style="width:120px;background:var(--surface)">Action</th>
       </tr><tr style="background:var(--surface)">
-        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
-        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Ref</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
+        <th style="background:var(--surface)">Side</th><th style="background:var(--surface)">Type</th><th style="background:var(--surface)">Strike</th><th style="background:var(--surface)">Ref</th><th style="background:var(--surface)">Expiry</th><th style="background:var(--surface)">Trade Date</th><th style="background:var(--surface)">Qty</th><th style="background:var(--surface)">Premium</th>
       </tr>
     </thead><tbody>`;
 
@@ -2370,6 +2397,7 @@ function rcRenderResults(res) {
       html += `<td${cellStyle("side", r)} style="${cs}">${o.side || ""}</td>`;
       html += `<td${cellStyle("option_type", r)} style="${cs}">${o.option_type || ""}</td>`;
       html += `<td${cellStyle("strike", r)} style="${cs}">${o.strike || ""}</td>`;
+      html += `<td${cellStyle("ref_price", r)} style="${cs}">${fmtRef(o.ref_spot)}</td>`;
       html += `<td${cellStyle("expiry", r)} style="${cs}">${o.expiry_norm || o.expiry || ""}</td>`;
       html += `<td${cellStyle("trade_date", r)} style="${cs}">${o.trade_date_norm || o.trade_date || ""}</td>`;
       html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(o.qty)}</td>`;
@@ -2385,6 +2413,7 @@ function rcRenderResults(res) {
       html += `<td${cellStyle("side", r)} style="${cs}">${t.side || ""}</td>`;
       html += `<td${cellStyle("option_type", r)} style="${cs}">${t.option_type || ""}</td>`;
       html += `<td${cellStyle("strike", r)} style="${cs}">${t.strike || ""}</td>`;
+      html += `<td${cellStyle("ref_price", r)} style="${cs}">${fmtRef(t.ref_price)}</td>`;
       html += `<td${cellStyle("expiry", r)} style="${cs}">${t.expiry_norm || t.expiry || ""}</td>`;
       html += `<td${cellStyle("trade_date", r)} style="${cs}">${t.trade_date_norm || t.trade_date || ""}</td>`;
       html += `<td${cellStyle("qty", r)} style="${cs}">${fmtQty(t.qty)}</td>`;
@@ -2482,17 +2511,22 @@ async function rcHandleAction(action, idx) {
         const prefix = currentAsset === "FIL" ? "FIL" : "ETH";
         instrument = `${prefix}-${ed.getDate()}${months[ed.getMonth()]}${String(ed.getFullYear()).slice(2)}-${Math.round(strikeVal)}-${optCode}`;
       }
+      const refSpot = parseFloat(t.ref_price) || 0;
+      const qtyVal = Math.abs(parseFloat(t.qty) || 0);
       await post("/api/trades/", {
         asset: currentAsset,
         counterparty: normCp,
-        trade_id: "",
+        trade_id: String(t.trade_id || ""),
         trade_date: normTradeDate,
         side: normSide,
         option_type: normType,
         instrument: instrument,
         expiry: normExpiry,
         strike: strikeVal,
-        qty: Math.abs(parseFloat(t.qty) || 0),
+        ref_spot: refSpot,
+        pct_otm: refSpot > 0 ? Math.round((strikeVal / refSpot - 1) * 10000) / 100 : 0,
+        notional_mm: refSpot > 0 ? Math.round((qtyVal * refSpot / 1e6) * 1e6) / 1e6 : 0,
+        qty: qtyVal,
         premium_usd: parseFloat(t.premium_usd) || 0,
       });
       rcMarkRowDone(idx, "Added");
@@ -3069,6 +3103,7 @@ function pfRenderTable() {
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
+      `<td style="font-family:monospace">${pos.ref_spot ? fmtNum(pos.ref_spot, _sd) : "—"}</td>` +
       `<td class="${otmClass}">${pos.pct_otm_live}%</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.qty)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.premium_per, 2)}</td>` +
@@ -4136,6 +4171,7 @@ function rollRenderTable() {
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
       `<td style="text-align:left;color:${typeColor}">${pos.opt === "C" ? "Call" : "Put"}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
+      `<td style="font-family:monospace">${pos.ref_spot ? fmtNum(pos.ref_spot, _sd) : "—"}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.net_qty)}</td>` +
@@ -5184,6 +5220,7 @@ function opt2RenderPortfolio() {
     else if (col === "side") { va = a.side; vb = b.side; return va < vb ? -dir : va > vb ? dir : 0; }
     else if (col === "opt") { va = a.opt; vb = b.opt; return va < vb ? -dir : va > vb ? dir : 0; }
     else if (col === "strike") { va = a.strike; vb = b.strike; }
+    else if (col === "ref_spot") { va = a.ref_spot || 0; vb = b.ref_spot || 0; }
     else if (col === "expiry") { va = a._exp; vb = b._exp; return va < vb ? -dir : va > vb ? dir : 0; }
     else if (col === "dte") { va = a._dte; vb = b._dte; }
     else if (col === "qty") { va = a.qty; vb = b.qty; }
@@ -5237,6 +5274,7 @@ function opt2RenderPortfolio() {
       <td style="${cs}" class="${sideClass}">${r.side}</td>
       <td style="${cs}">${r.opt === "C" ? "Call" : "Put"}</td>
       <td style="${cs}">${r.strike.toLocaleString()}</td>
+      <td style="${cs}">${r.ref_spot ? r.ref_spot.toLocaleString(undefined, {maximumFractionDigits: currentAsset === "FIL" ? 2 : 0}) : "—"}</td>
       <td style="${cs}">${r._exp}</td>
       <td style="${cs}">${r._dte}</td>
       <td style="${cs}">${r.qty.toLocaleString()}</td>
@@ -5278,7 +5316,7 @@ function opt2RenderPortfolio() {
 
   const $tfoot = document.getElementById("opt2-port-foot");
   $tfoot.innerHTML = `<tr style="font-weight:700">
-    <td colspan="9" style="text-align:right">TOTAL</td>
+    <td colspan="10" style="text-align:right">TOTAL</td>
     <td style="${cs}" class="${totalNetQty >= 0 ? 'qty-long' : 'qty-short'}">${totalNetQty >= 0 ? "+" : ""}${totalNetQty.toLocaleString()}</td>
     <td style="${cs}">${fmtMoney(totalPrem)}</td>
     <td style="${cs}">${fmtMoney(totalNotional)}</td>
@@ -6923,6 +6961,7 @@ function sbRenderTable() {
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
       `<td style="text-align:left;color:${typeColor}">${pos.opt === "C" ? "Call" : "Put"}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
+      `<td style="font-family:monospace">${pos.ref_spot ? fmtNum(pos.ref_spot, _sd) : "—"}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.net_qty)}</td>` +
@@ -10784,7 +10823,7 @@ function renderDealsView() {
       </div>
       <table class="deals-legs-table">
         <thead><tr>
-          <th></th><th class="lt">Leg</th><th>Trade Date</th><th>Expiry</th><th>Strike</th><th>Qty</th>
+          <th></th><th class="lt">Leg</th><th>Trade Date</th><th>Expiry</th><th>Strike</th><th>Ref Price</th><th>Qty</th>
           <th>IV</th><th>Premium</th><th>MTM / Close</th>
         </tr></thead>
         <tbody id="deals-legs-body"></tbody>
@@ -10849,6 +10888,7 @@ function renderLegsTable(deal) {
       <td class="keep-strike">${leg.trade_date || "—"}</td>
       <td class="keep-strike">${leg.expiry}</td>
       <td class="keep-strike">${fmtStrike(leg.strike)}</td>
+      <td class="keep-strike">${leg.ref_spot ? fmtStrike(leg.ref_spot) : "—"}</td>
       <td>${leg.qty.toLocaleString()}</td>
       <td>${leg.iv_pct}%</td>
       <td class="${leg.premium_usd>=0?'num-pos':'num-neg'}">${fmtUsd(leg.premium_usd)}</td>
