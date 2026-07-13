@@ -34,7 +34,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260708_161629_ALL_ETH.json")
+        path = Path("../data/optimization_snapshots/usecases/20260713_115517_ALL_ETH.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -46,9 +46,14 @@ def main() -> None:
     before_payoff, after_payoff, _ = optimizer.build_payoffs(horizons, spot_arr, trades)
 
     #result = usecase.run_test()
-
-    result = usecase.run()
-
+    run_params = {}
+    run_params['target_expiry'] = "25SEP26"
+    run_params['roll_dte_threshold'] = 23
+    run_params['is_replay'] = True
+    run_params['lam_factor'] = 0.3
+    run_params['mu_factor'] = 2.3
+    run_params['counterparties'] = ['KeyRock']#['Flowdesk']
+    result = usecase.run(run_params=run_params)
 
     #out_path = path.with_name(path.stem + "_replayed.json")
     #out_path.write_text(json.dumps(result, indent=2, default=_json_default))

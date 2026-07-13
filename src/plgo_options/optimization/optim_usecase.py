@@ -197,7 +197,7 @@ class OptimizerUseCase:
         return OptimizerV3.from_snapshot_dict(self.optimizer_input, today)
         return OptimizerV2.from_snapshot_dict(self.optimizer_input)
 
-    def run(self) -> dict[str, Any]:
+    def run(self, run_params=None) -> dict[str, Any]:
         print('run()')
         optimizer = self.build_optimizer(self.today)
 
@@ -205,6 +205,9 @@ class OptimizerUseCase:
         # OptimizerRunParams field maps onto a run_lp() kwarg, unlike the older
         # optimizer.run(), which silently drops collateral_tier_free_pct/mu and
         # has no mu_factor/collateral_budget_pct/roll_itm_only equivalent at all.
+        if run_params is not None:
+            for k, v in run_params.items():
+                setattr(self.run_params, k, v)
         self.result = optimizer.run_lp(**asdict(self.run_params))
         return self.result
 

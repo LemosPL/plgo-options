@@ -90,14 +90,27 @@ class OptimizerV3(BaseOptimizer):
             return signed_qty * (spot_arr - strike)
         return np.zeros_like(spot_arr)
 
-    def _get_roll_positions(self, roll_dte_threshold: int | None, roll_itm_only: bool = False) -> list[Position]:
+    def _get_roll_positions(
+        self,
+        roll_dte_threshold: int | None,
+        roll_itm_only: bool = False,
+        counterparties: list[str] | None = None,
+    ) -> list[Position]:
         if roll_dte_threshold is None:
             return []
+
+        selected_counterparties = {
+            c.strip()
+            for c in (counterparties or [])
+            if c and c.strip() and c.strip().upper() != "ALL"
+        }
 
         roll_positions = []
         for p in self.positions:
             opt = str(getattr(p, "opt", "") or "")
             if opt not in ("C", "P", "F"):
+                continue
+            if selected_counterparties and getattr(p, "counterparty", "") not in selected_counterparties:
                 continue
             try:
                 expiry_dt = datetime.combine(p.expiry_date, datetime.min.time())
@@ -674,7 +687,9 @@ class OptimizerV3(BaseOptimizer):
                                                          current_spot=self.spot)
 
         held_positions = self.get_held_positions()
-        roll_positions = self._get_roll_positions(roll_dte_threshold, roll_itm_only=roll_itm_only)
+        roll_positions = self._get_roll_positions(
+            roll_dte_threshold, roll_itm_only=roll_itm_only, counterparties=counterparties,
+        )
         roll_position_ids = {id(p) for p in roll_positions}
 
         option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
@@ -1030,7 +1045,9 @@ class OptimizerV3(BaseOptimizer):
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder, current_spot=self.spot)
 
         held_positions = self.get_held_positions()
-        roll_positions = self._get_roll_positions(roll_dte_threshold, roll_itm_only=roll_itm_only)
+        roll_positions = self._get_roll_positions(
+            roll_dte_threshold, roll_itm_only=roll_itm_only, counterparties=counterparties,
+        )
         roll_position_ids = {id(p) for p in roll_positions}
         is_roll_mode = len(roll_positions) > 0
         
