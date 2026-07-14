@@ -25,7 +25,7 @@ from pathlib import Path
 from datetime import datetime, date
 from collections import defaultdict
 
-from .models import Position, Candidate, load_positions_from_latest_xlsx, SpreadCandidate, StraddleCandidate, IronCondorCandidate
+from .models import Position, Candidate, SpreadCandidate, StraddleCandidate, IronCondorCandidate
 from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
@@ -73,11 +73,14 @@ class BaseOptimizer:
 
     @classmethod
     def from_snapshot_dict(cls, data: dict, today: datetime.date) -> "BaseOptimizer":
+        # Use the positions actually passed in (DB/Deribit-sourced via /pnl, or a
+        # previously-saved snapshot) — do NOT re-read the latest data/positions/*.xlsx
+        # on disk here. That file's own "ID" column is an unrelated numbering scheme
+        # from wherever it was exported, not the SQLite trades.id that Trade
+        # Management's checkboxes (and forced_roll_ids) key off of; silently
+        # swapping positions for a fresh xlsx re-read broke that correlation
+        # everywhere. Keep the DB fresh instead via scripts/sync_trades_from_xlsx.py.
         snapshot_data, positions = load_snapshot_dict(data)
-
-        latest_positions = load_positions_from_latest_xlsx(snapshot_data["asset"])
-        if latest_positions:
-            positions = latest_positions
 
         spot = snapshot_data.get("spot")
         return cls(

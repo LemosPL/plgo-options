@@ -4,7 +4,7 @@ import inspect
 import json
 import os
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 import pandas as pd
@@ -55,7 +55,11 @@ def _log_moneyness_ladder(spot: float, low: float, high: float, n_points: int) -
 
 
 def _json_default(obj: Any) -> Any:
-    """Coerce numpy scalars/arrays (e.g. from scipy/bs_greeks) to native JSON types."""
+    """Coerce numpy scalars/arrays (e.g. from scipy/bs_greeks) and bare
+    datetime.date/datetime objects (several trade-dict builders in
+    optimizer_v3.py put Candidate/Position.expiry_date — a date object,
+    not a string — directly into "expiry" fields) into native JSON types.
+    """
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, np.floating):
@@ -64,6 +68,8 @@ def _json_default(obj: Any) -> Any:
         return int(obj)
     if isinstance(obj, np.bool_):
         return bool(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
