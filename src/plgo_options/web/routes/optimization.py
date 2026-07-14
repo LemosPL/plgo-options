@@ -66,7 +66,12 @@ async def run_optimizer(params: OptimizationParams):
     """Gather optimizer inputs, persist a reproducible use case, and run it."""
     print("run_optimizer()")
     try:
-        pnl_data = await portfolio_pnl(asset=params.asset.upper(), include_expired=True)
+        # Matches "Load Risk Profile"'s own /pnl fetch (include_expired defaults to
+        # False there) — this used to be harmless since the optimizer discarded
+        # whatever positions it was given in favor of a fresh xlsx re-read; now
+        # that it uses these positions directly, True here would flood the book
+        # with every historically-expired trade as if it were still live.
+        pnl_data = await portfolio_pnl(asset=params.asset.upper(), include_expired=False)
     except HTTPException as e:
         raise HTTPException(
             status_code=e.status_code,

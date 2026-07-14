@@ -434,3 +434,129 @@ async def _import_excel_trades(
 
     await db.commit()
     return count
+
+
+async def sync_excel_trades(
+    db: aiosqlite.Connection, excel_trades: list[dict], asset: str = "ETH",
+) -> dict:
+    """Upsert trades from an Excel export into the DB.
+
+    Matched by (counterparty, expiry, strike, option_type) — never by the
+    spreadsheet's own "ID"/"Trade_ID" column, which is an unrelated numbering
+    scheme from wherever the export originated and has nothing to do with
+    the DB's own trades.id (what Trade Management's checkboxes and the
+    optimizer's forced_roll_ids key off of). Matched rows keep their existing
+    id and only have mutable fields refreshed (and only written/audit-logged
+    if something actually changed); unmatched rows are inserted as new.
+    Rows in the DB but absent from this export are left untouched — this is
+    additive/refresh only, never deletes or expires anything.
+    """
+    qty_col = "ETH Options"
+    if asset != "ETH":
+        for candidate in [f"{asset} Options", "FIL Options", "Options", "Qty", "Quantity"]:
+            if any(candidate in t for t in excel_trades[:1]):
+                qty_col = candidate
+                break
+
+    cursor = await db.execute(
+        """SELECT id, counterparty, expiry, strike, option_type, qty, ref_spot,
+                  pct_otm, notional_mm, premium_per, premium_usd, trade_date, side
+           FROM trades WHERE asset = ? AND status = 'active'""",
+        (asset,),
+    )
+    existing_rows = await cursor.fetchall()
+    by_key: dict[tuple, dict] = {}
+    for r in existing_rows:
+        key = (
+            (r["counterparty"] or "").strip().lower(),
+            (r["expiry"] or "").strip()[:10],
+            round(float(r["strike"] or 0.0), 4),
+            (r["option_type"] or "").strip().lower()[:1],
+        )
+        by_key[key] = dict(r)
+
+    from datetime import datetime as _dt
+
+    matched = 0
+    updated = 0
+    inserted = 0
+    for t in excel_trades:
+        counterparty = str(t.get("Counterparty") or "").strip()
+        trade_id = str(t.get("Trade_ID") or t.get("ID") or "").strip()
+        trade_date = str(t.get("Initial Trade Date") or "").strip()
+        if "T" in trade_date:
+            trade_date = trade_date.split("T")[0]
+        side = str(t.get("Buy / Sell / Unwind") or "").strip()
+        option_type_raw = str(t.get("Option Type") or "").strip()
+        expiry = str(t.get("Option Expiry Date") or "").strip()
+        if "T" in expiry:
+            expiry = expiry.split("T")[0]
+        strike = _safe_float(t.get("Strike"))
+        ref_spot = _safe_float(t.get("Ref. Spot Price"))
+        pct_otm = _safe_float(t.get("% OTM"))
+        qty = _safe_float(t.get(qty_col) or t.get("ETH Options"))
+        notional_mm = _safe_float(t.get("$ Notional (mm)"))
+        premium_per = _safe_float(t.get("Premium per Contract"))
+        premium_usd = _safe_float(t.get("Premium USD"))
+
+        if strike <= 0 or qty <= 0:
+            continue
+
+        option_type = "Put" if option_type_raw.lower().startswith("p") else "Call"
+        key = (counterparty.lower(), expiry[:10], round(strike, 4), option_type.lower()[:1])
+
+        existing = by_key.get(key)
+        if existing is not None:
+            matched += 1
+            new_vals = {
+                "qty": qty, "ref_spot": ref_spot, "pct_otm": pct_otm,
+                "notional_mm": notional_mm, "premium_per": premium_per,
+                "premium_usd": premium_usd, "trade_date": trade_date, "side": side,
+            }
+            changed = {k: v for k, v in new_vals.items() if existing.get(k) != v}
+            if not changed:
+                continue
+            set_clause = ", ".join(f"{k} = ?" for k in changed)
+            await db.execute(
+                f"UPDATE trades SET {set_clause}, updated_at = datetime('now') WHERE id = ?",
+                (*changed.values(), existing["id"]),
+            )
+            await db.execute(
+                """INSERT INTO trade_audit_log (trade_id, action, field_changed, changed_by)
+                   VALUES (?, 'update', ?, 'excel_sync')""",
+                (existing["id"], ", ".join(changed.keys())),
+            )
+            updated += 1
+            continue
+
+        # New trade — build instrument directly (mirrors _normalize_trade_fields'
+        # backfill logic) so it's queryable immediately, not just after next startup.
+        instrument = ""
+        try:
+            ed = _dt.strptime(expiry[:10], "%Y-%m-%d")
+            opt_code = "P" if option_type == "Put" else "C"
+            strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+            instrument = f"{asset}-{ed.day}{ed.strftime('%b').upper()}{ed.strftime('%y')}-{strike_str}-{opt_code}"
+        except ValueError:
+            pass
+
+        cursor = await db.execute(
+            """INSERT INTO trades
+               (asset, counterparty, trade_id, trade_date, side, option_type,
+                instrument, expiry, strike, ref_spot, pct_otm, qty,
+                notional_mm, premium_per, premium_usd, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+            (asset, counterparty, trade_id, trade_date, side, option_type,
+             instrument, expiry, strike, ref_spot, pct_otm, qty,
+             notional_mm, premium_per, premium_usd),
+        )
+        new_id = cursor.lastrowid
+        await db.execute(
+            """INSERT INTO trade_audit_log (trade_id, action, changed_by)
+               VALUES (?, 'create', 'excel_sync')""",
+            (new_id,),
+        )
+        inserted += 1
+
+    await db.commit()
+    return {"matched": matched, "updated": updated, "inserted": inserted}
