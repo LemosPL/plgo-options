@@ -95,7 +95,15 @@ class OptimizerV3(BaseOptimizer):
         roll_dte_threshold: int | None,
         roll_itm_only: bool = False,
         counterparties: list[str] | None = None,
+        forced_roll_ids: list[int] | None = None,
     ) -> list[Position]:
+        if roll_dte_threshold == -1:
+            # Manual mode: force-roll exactly the checked Trade Management
+            # rows, bypassing DTE/ITM/counterparty filters entirely — an
+            # explicit selection always wins over the automatic ones.
+            wanted_ids = {int(i) for i in (forced_roll_ids or [])}
+            return [p for p in self.positions if getattr(p, "id", None) in wanted_ids]
+
         if roll_dte_threshold is None:
             return []
 
@@ -672,6 +680,7 @@ class OptimizerV3(BaseOptimizer):
                  max_exposure_by_counterparty: dict | None = None,
                  collateral_tier_free_pct: "dict[str, float] | float" = 0.0,
                  collateral_tier_mu: "dict[str, float] | float | None" = None,
+                 forced_roll_ids: list[int] | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -689,6 +698,7 @@ class OptimizerV3(BaseOptimizer):
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(
             roll_dte_threshold, roll_itm_only=roll_itm_only, counterparties=counterparties,
+            forced_roll_ids=forced_roll_ids,
         )
         roll_position_ids = {id(p) for p in roll_positions}
 
@@ -1007,6 +1017,7 @@ class OptimizerV3(BaseOptimizer):
                  roll_itm_only: bool = False,
                  counterparties: list[str] | None = None,
                  asset: str | None = None,
+                 forced_roll_ids: list[int] | None = None,
                  **_ignored,  # tolerate LP-only params (collateral tiering) from asdict(run_params)
             ):
         lam_factor *= self.spot/1000.0
@@ -1047,6 +1058,7 @@ class OptimizerV3(BaseOptimizer):
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(
             roll_dte_threshold, roll_itm_only=roll_itm_only, counterparties=counterparties,
+            forced_roll_ids=forced_roll_ids,
         )
         roll_position_ids = {id(p) for p in roll_positions}
         is_roll_mode = len(roll_positions) > 0

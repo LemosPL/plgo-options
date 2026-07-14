@@ -8770,6 +8770,10 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,
+      // Only meaningful when roll_dte_threshold is -1 (manual roll-selection
+      // mode), but harmless to always send — sourced from the same tmSelected
+      // set the Trade Management tab's "Expire Selected" button uses.
+      forced_roll_ids: [...tmSelected],
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);

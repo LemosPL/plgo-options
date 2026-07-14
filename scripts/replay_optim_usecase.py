@@ -50,9 +50,9 @@ def main() -> None:
     run_params['target_expiry'] = "25SEP26"
     run_params['roll_dte_threshold'] = 23
     run_params['is_replay'] = True
-    run_params['lam_factor'] = 0.3
+    run_params['lam_factor'] = 0.5
     run_params['mu_factor'] = 2.3
-    run_params['counterparties'] = ['KeyRock']#['Flowdesk']
+    run_params['counterparties'] = ['Flowdesk']#['KeyRock']#
     result = usecase.run(run_params=run_params)
 
     #out_path = path.with_name(path.stem + "_replayed.json")

@@ -420,14 +420,13 @@
       <span class="pf-seg" id="pf-collateral-scope" style="font-size:.75rem">
         <span style="color:var(--muted);margin-right:.35rem">Scope:</span>
         <button type="button" class="pf-seg-btn active" data-scope="all">All</button>
-        <button type="button" class="pf-seg-btn" data-scope="eth">ETH book</button>
-        <button type="button" class="pf-seg-btn" data-scope="fil">FIL book</button>
+        <button type="button" class="pf-seg-btn" data-scope="eth">ETH (USDC+ETH+BTC)</button>
+        <button type="button" class="pf-seg-btn" data-scope="fil">FIL only</button>
       </span>
       <span style="font-size:.72rem;color:var(--muted)">
-        From the Collateral Map, on the P&amp;L axis. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
+        From the Collateral Map, on the right axis. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
       </span>
     </div>
-    <div id="pf-collateral-note" class="pf-collateral-note"></div>
 
     <!-- Payoff profile chart -->
     <div id="portfolio-payoff-chart" class="chart-container" style="min-height:650px"></div>
@@ -1510,10 +1509,10 @@
             type="number"
             id="optv2-roll-dte-threshold"
             value="7"
-            min="0"
+            min="-1"
             step="1"
             style="width:5rem"
-            title="Roll positions with DTE less than or equal to this value. Clear to disable forced roll."
+            title="Roll positions with DTE less than or equal to this value. Clear to disable forced roll. -1 = force-roll exactly the trades checked in Trade Management, bypassing ITM/counterparty filters."
           >
         </label>
         <label class="toggle-label" style="margin:0">
@@ -2138,6 +2137,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=80"></script>
+<script src="/static/app.js?v=81"></script>
 </body>
 </html>

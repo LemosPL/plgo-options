@@ -82,6 +82,7 @@ class OptimizerRunParams:
     counterparties: list[str] | None = None
     collateral_tier_free_pct: float | dict[str, float] = 0.0
     collateral_tier_mu: float | dict[str, float] | None = None
+    forced_roll_ids: list[int] | None = None
 
 
 @dataclass
