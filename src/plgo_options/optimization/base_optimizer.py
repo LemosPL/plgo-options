@@ -445,10 +445,11 @@ class BaseOptimizer:
 
     def _portfolio_greeks(self) -> tuple[float, float, float, float]:
         """Return (delta, gamma, theta, vega) of the current portfolio."""
-        delta = sum((p.delta or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
-        gamma = sum((p.gamma or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
-        theta = sum((p.theta or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
-        vega = sum((p.vega or 0) * p.net_qty*(1. if p.side=='Long' else -1.) for p in self.positions)
+        # net_qty is already signed (negative=Short, positive=Long) — no side multiplier needed.
+        delta = sum((p.delta or 0) * p.net_qty for p in self.positions)
+        gamma = sum((p.gamma or 0) * p.net_qty for p in self.positions)
+        theta = sum((p.theta or 0) * p.net_qty for p in self.positions)
+        vega = sum((p.vega or 0) * p.net_qty for p in self.positions)
         return delta, gamma, theta, vega
 
     def _portfolio_vega_by_expiry(self) -> dict[datetime, float]:
@@ -461,8 +462,7 @@ class BaseOptimizer:
             else:
                 exp_code = "UNKNOWN"
             expiry = datetime.strptime(exp_code, "%d%b%y")
-            vega_by_expiry[expiry] = (vega_by_expiry.get(expiry, 0.0) + (p.vega or 0.0) * p.net_qty
-                                      * (1. if p.side=='Long' else -1.))
+            vega_by_expiry[expiry] = vega_by_expiry.get(expiry, 0.0) + (p.vega or 0.0) * p.net_qty
         vega_by_expiry = dict(sorted(vega_by_expiry.items(), key=lambda item: item[0]))
 
         return vega_by_expiry
@@ -603,6 +603,6 @@ class BaseOptimizer:
             else:
                 exp_code = ""
             key = (exp_code, p.strike, p.opt, p.counterparty)
-            mult = 1.0 if p.side == "Long" else -1.0
-            held_positions[key] = held_positions.get(key, 0.0) + mult*p.net_qty
+            # net_qty is already signed (negative=Short, positive=Long) — no side multiplier needed.
+            held_positions[key] = held_positions.get(key, 0.0) + p.net_qty
         return held_positions

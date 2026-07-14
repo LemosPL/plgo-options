@@ -8804,6 +8804,8 @@ const OPTV2_STRATEGY_LABELS = {
   STRADDLE: "Straddle",
   IRON_CONDOR: "Iron condor",
   SINGLE: "Single leg",
+  CLOSE: "Close",
+  REDUCE: "Reduce",
 };
 
 function optv2StrategyLabel(code) {

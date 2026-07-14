@@ -76,9 +76,8 @@ class OptimizerV3(BaseOptimizer):
 
     # Current portfolio payoff from held positions, at expiry
     def terminal_payoff_for_position(self, spot_arr, p: Position) -> np.ndarray:
-        qty = float(getattr(p, "net_qty", 0.0) or 0.0)
-        side = str(getattr(p, "side", "")).lower()
-        signed_qty = qty if side == "long" else -qty
+        # net_qty is already signed (negative=Short, positive=Long) — no side flip needed.
+        signed_qty = float(getattr(p, "net_qty", 0.0) or 0.0)
 
         strike = float(getattr(p, "strike", 0.0) or 0.0)
         opt = str(getattr(p, "opt", "") or "")
@@ -140,10 +139,9 @@ class OptimizerV3(BaseOptimizer):
         trades = []
 
         for p in roll_positions:
+            # net_qty is already signed (negative=Short, positive=Long) — closing
+            # the position is simply the opposite sign, no extra side-based flip.
             qty = float(getattr(p, "net_qty", 0.0) or 0.0)
-            raw_side = str(getattr(p, "side_raw", getattr(p, "side", ""))).lower()
-            if raw_side in ("sell", "short"):
-                qty = -qty
             if qty == 0:
                 continue
 
@@ -622,9 +620,8 @@ class OptimizerV3(BaseOptimizer):
 
         That sigma is then held fixed while evaluating BS over different spots.
         """
-        qty = float(getattr(p, "net_qty", 0.0) or 0.0)
-        side = str(getattr(p, "side", "")).lower()
-        signed_qty = qty if side == "long" else -qty
+        # net_qty is already signed (negative=Short, positive=Long) — no side flip needed.
+        signed_qty = float(getattr(p, "net_qty", 0.0) or 0.0)
 
         strike = float(getattr(p, "strike", 0.0) or 0.0)
         opt = str(getattr(p, "opt", "") or "")
@@ -878,6 +875,12 @@ class OptimizerV3(BaseOptimizer):
                     f"{self.asset}-PERPETUAL" if leg.opt == "F"
                     else f"{self.asset}-{leg.expiry_code}-{np.round(leg.strike, self.asset_precision)}-{leg.opt}"
                 )
+                existing_qty_c = float(getattr(c, "existing_qty", 0.0) or 0.0)
+                is_unwind_leg = bool(rounded_qty * existing_qty_c < 0)
+                if is_unwind_leg:
+                    # Reducing/closing an existing held position — relabel so it
+                    # isn't mistaken for a brand-new naked/spread trade in the UI.
+                    strategy = "CLOSE" if abs(leg_qty) >= abs(existing_qty_c) - 1e-6 else "REDUCE"
                 trades.append({
                     "counterparty": leg.counterparty,
                     "instrument": leg_instrument_name,
@@ -893,9 +896,9 @@ class OptimizerV3(BaseOptimizer):
                     "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
                     "vega": round(float(leg.vega or 0.0), 4),
                     "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
-                    "is_unwind": bool(rounded_qty * getattr(c, "existing_qty", 0.0) < 0),
-                    "unwind_qty": abs(int(leg_qty)) if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else 0,
-                    "new_qty": 0 if rounded_qty * getattr(c, "existing_qty", 0.0) < 0 else abs(int(leg_qty)),
+                    "is_unwind": is_unwind_leg,
+                    "unwind_qty": abs(int(leg_qty)) if is_unwind_leg else 0,
+                    "new_qty": 0 if is_unwind_leg else abs(int(leg_qty)),
                     "estimated_cash_outlay": round(float(est_cost), 2),
                     "normalized_benefit": 0.0,
                     "net_benefit": 0.0,
@@ -1738,14 +1741,13 @@ class OptimizerV3(BaseOptimizer):
 
             # You can infer these from your position object / instrument string
             # Adjust the field names here if your Position model differs.
-            qty = float(getattr(p, "net_qty", 0.0) or 0.0)
             strike = float(getattr(p, "strike", 0.0) or 0.0)
             opt = str(getattr(p, "opt", "") or "")
             iv_pct = float(getattr(p, "iv_pct", 0.0) or 0.0)
             dte = int(getattr(p, "days_remaining", 0) or 0)
 
-            # Use signed quantity so long/short is reflected in the curve
-            signed_qty = qty if str(getattr(p, "side", "")).lower() == "long" else -qty
+            # net_qty is already signed (negative=Short, positive=Long) — no side flip needed.
+            signed_qty = float(getattr(p, "net_qty", 0.0) or 0.0)
 
             for h in all_horizons:
                 h_key = str(h)
