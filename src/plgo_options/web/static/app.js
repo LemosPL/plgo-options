@@ -8761,6 +8761,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
       mu_factor: parseFloat(document.getElementById("optv2-mu-factor")?.value || "0"),
+      cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
@@ -8916,6 +8917,28 @@ function optv2RenderResult(data) {
   document.getElementById("optv2-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv2-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
   document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry || "All";
+
+  // Cash flow by counterparty — premium paid (outlay) vs. collected across
+  // every proposed trade, including forced/DTE rolls. Net far from 0 means
+  // the desk needs to wire cash to fund the trades, not self-fund them.
+  const $cashSection = document.getElementById("optv2-cash-flow-section");
+  const $cashBody = document.getElementById("optv2-cash-flow-tbody");
+  const cashByCp = data.cash_by_counterparty || {};
+  if ($cashSection && $cashBody) {
+    const cps = Object.keys(cashByCp);
+    if (cps.length) {
+      $cashSection.style.display = "";
+      $cashBody.innerHTML = cps.sort().map(cp => {
+        const v = cashByCp[cp];
+        const net = v.net || 0;
+        return `<tr><td>${cp}</td><td>$${optv2Fmt(v.outlay || 0, 0)}</td>` +
+          `<td>$${optv2Fmt(v.collection || 0, 0)}</td>` +
+          `<td style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
+      }).join("");
+    } else {
+      $cashSection.style.display = "none";
+    }
+  }
 
   // Both matrices below show P&L *from today*, anchored to 0 at (today,
   // current spot) — we don't have each position's historical entry premium

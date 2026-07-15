@@ -678,6 +678,7 @@ class OptimizerV3(BaseOptimizer):
                  collateral_tier_free_pct: "dict[str, float] | float" = 0.0,
                  collateral_tier_mu: "dict[str, float] | float | None" = None,
                  forced_roll_ids: list[int] | None = None,
+                 cash_neutrality_factor: "dict[str, float] | float" = 0.0,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -800,6 +801,23 @@ class OptimizerV3(BaseOptimizer):
             }
             print(f"  gross collateral caps: { {cp: f'{v:,.0f}' for cp, v in max_gross_exposure_by_counterparty.items()} }")
 
+        # Forced/DTE roll unwinds are fixed before the LP runs — roll_positions is
+        # already known — so build them now and fold their cash impact into the
+        # LP's cash-neutrality objective as a per-counterparty constant. Otherwise
+        # the LP only ever sees its own candidates' cash flow and has no way to
+        # counterbalance a forced roll's outlay/collection, even though that cash
+        # hits the same counterparty ledger.
+        roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
+        forced_cash_by_counterparty: dict[str, float] = {}
+        for t in roll_unwind_trades:
+            if t.get("opt") not in ("C", "P"):
+                continue
+            cp = t.get("counterparty", "")
+            forced_cash_by_counterparty[cp] = (
+                forced_cash_by_counterparty.get(cp, 0.0)
+                + float(t.get("qty", 0.0) or 0.0) * float(t.get("bs_price_usd", 0.0) or 0.0)
+            )
+
         lp = CollateralOptimization(self.asset, counterparties)
         lp_result = lp.optimize(
             spot_arr, spot_weights, residual, candidates, c_payoffs,
@@ -812,6 +830,8 @@ class OptimizerV3(BaseOptimizer):
             max_gross_exposure_by_counterparty=max_gross_exposure_by_counterparty,
             collateral_tier_free_pct=collateral_tier_free_pct,
             collateral_tier_mu=collateral_tier_mu,
+            cash_neutrality_factor=cash_neutrality_factor,
+            forced_cash_by_counterparty=forced_cash_by_counterparty,
         )
 
         if lp_result is None:
@@ -845,7 +865,6 @@ class OptimizerV3(BaseOptimizer):
             a = after_coll.get(cp, 0.0)
             print(f"  {cp:20s}  before={b:>12,.0f}  after={a:>12,.0f}  change={a - b:>+12,.0f}")
 
-        roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
         trades = list(roll_unwind_trades)
         fitted_payoff = adjusted_base_payoff.copy()
         # Accumulated once per candidate, before est_cost gets stamped onto every leg
@@ -919,6 +938,33 @@ class OptimizerV3(BaseOptimizer):
         print(f"  notional traded      : {total_notional:>14,.0f}")
         print(f"  estimated cash outlay: {total_cash_outlay:>14,.0f}  ({100*total_cash_outlay/max(total_notional,1):.2f}% of notional)")
 
+        # Cash flow by counterparty — premium paid (buys) vs. collected (sells)
+        # across every final, rounded trade actually proposed, including
+        # forced/DTE rolls. This is the "does the desk need to wire cash, or
+        # does it self-fund" figure to monitor; it should track the LP's own
+        # (continuous, pre-rounding) cash_neutrality accounting closely.
+        cash_by_counterparty: dict[str, dict] = {}
+        for t in trades:
+            if t.get("opt") not in ("C", "P"):
+                continue
+            cp = t.get("counterparty", "")
+            qty = float(t.get("qty", 0.0) or 0.0)
+            price = float(t.get("bs_price_usd", 0.0) or 0.0)
+            entry = cash_by_counterparty.setdefault(cp, {"outlay": 0.0, "collection": 0.0})
+            if qty > 0:
+                entry["outlay"] += qty * price
+            elif qty < 0:
+                entry["collection"] += -qty * price
+        print("=== Cash flow by counterparty ===")
+        for cp, v in sorted(cash_by_counterparty.items()):
+            net = v["outlay"] - v["collection"]
+            print(f"  {cp:20s}  outlay={v['outlay']:>12,.0f}  collection={v['collection']:>12,.0f}  net={net:>+12,.0f}")
+        cash_by_counterparty = {
+            cp: {"outlay": round(v["outlay"], 2), "collection": round(v["collection"], 2),
+                 "net": round(v["outlay"] - v["collection"], 2)}
+            for cp, v in cash_by_counterparty.items()
+        }
+
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
@@ -989,6 +1035,7 @@ class OptimizerV3(BaseOptimizer):
             "fitted_payoff_cash_shift": round(float(fitted_payoff_cash_shift), 2),
             "premium_summary": premium_summary,
             "net_premium_generated": premium_summary["net_premium_generated"],
+            "cash_by_counterparty": cash_by_counterparty,
             "fit_error_before": round(weighted_fit_error_before, 2),
             "fit_error_after": round(weighted_fit_error_after, 2),
             "spot_ladder": spot_arr.tolist(),

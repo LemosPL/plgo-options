@@ -34,6 +34,8 @@ class CollateralOptimization:
         max_gross_exposure_by_counterparty=None,
         collateral_tier_free_pct=0.0,
         collateral_tier_mu=None,
+        cash_neutrality_factor=0.0,
+        forced_cash_by_counterparty=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -148,7 +150,38 @@ class CollateralOptimization:
                 effective_mu * float(c_costs[j]) * abs_net_pos_vars[j] for j in range(n_candidates)
             )
 
-        prob += lam_factor * profile_error + trading_cost + collateral_cost
+        # Per-counterparty cash-neutrality penalty: premium paid (buys) vs.
+        # premium collected (sells) — across the LP's own trades AND any
+        # forced/DTE roll unwinds already locked in for that counterparty
+        # (fixed before the LP runs, passed in as a constant offset so the LP
+        # can actually counterbalance them, not just its own candidates) —
+        # should roughly net to zero, so the desk isn't wiring cash to fund
+        # trades it could have self-funded. Soft cost, not a hard constraint —
+        # an equality would often be infeasible or force away a better risk
+        # fit just to balance cash exactly. 0 (default) disables it.
+        # Union with cp_indices: a forced roll can target a counterparty with
+        # no tradeable candidates in this run (manual-selection mode bypasses
+        # the counterparty filter) — still worth surfacing in the cost/report
+        # even though the LP has nothing of its own to counterbalance it with.
+        cash_cps = set(cp_indices) | set((forced_cash_by_counterparty or {}).keys())
+        cash_imbalance_vars: dict[str, "pulp.LpVariable"] = {}
+        for cp in cash_cps:
+            indices = cp_indices.get(cp, [])
+            forced_cash_cp = float((forced_cash_by_counterparty or {}).get(cp, 0.0))
+            net_cash_cp = forced_cash_cp + pulp.lpSum(
+                (buy_vars[j] - sell_vars[j]) * float(c_prices[j]) for j in indices
+            )
+            imbalance = pulp.LpVariable(f"cash_imbalance_{cp}", lowBound=0, cat="Continuous")
+            prob += imbalance >= net_cash_cp, f"cash_imbalance_pos_{cp}"
+            prob += imbalance >= -net_cash_cp, f"cash_imbalance_neg_{cp}"
+            cash_imbalance_vars[cp] = imbalance
+
+        cash_neutrality_cost = pulp.lpSum(
+            self._resolve(cash_neutrality_factor, cp) * imbalance
+            for cp, imbalance in cash_imbalance_vars.items()
+        )
+
+        prob += lam_factor * profile_error + trading_cost + collateral_cost + cash_neutrality_cost
 
         # Per-counterparty signed net notional constraint (existing + net new <= max).
         if max_exposure_by_counterparty:
@@ -221,10 +254,26 @@ class CollateralOptimization:
         _n_frozen = int(np.sum(~tradeable))
         print(f"  LP trades  unwind={_n_unwind}  new={_n_new}  frozen_illiquid={_n_frozen} (|delta|<{min_trade_delta})")
 
+        cash_by_counterparty = {
+            cp: (
+                float((forced_cash_by_counterparty or {}).get(cp, 0.0))
+                + float(np.sum(buy_qty[indices] * c_prices[indices]) - np.sum(sell_qty[indices] * c_prices[indices]))
+            )
+            for cp, indices in ((cp, cp_indices.get(cp, [])) for cp in cash_cps)
+        }
+        if any(self._resolve(cash_neutrality_factor, cp) for cp in cash_cps):
+            _cash_cost_val = float(sum(
+                self._resolve(cash_neutrality_factor, cp) * abs(v) for cp, v in cash_by_counterparty.items()
+            ))
+            print(f"  cash_neutrality_cost={_cash_cost_val:,.0f}  " + "  ".join(
+                f"{cp}={v:+,.0f}" for cp, v in cash_by_counterparty.items()
+            ))
+
         return {
             "net_qty": net_qty,
             "trade_payoff": trade_payoff,
             "profile_error": profile_error_val,
+            "cash_by_counterparty": cash_by_counterparty,
         }
 
     def _solve_problem(self, prob, algo):
