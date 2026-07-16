@@ -1490,7 +1490,7 @@
       <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem">
         <button id="btn-load-optv2" class="btn-primary" style="width:auto">Load Risk Profile</button>
         <label class="pf-filter-label">λ Overall
-          <input type="number" id="optv2-lam-factor" value="0.2" step="0.05" min="0" style="width:5rem"
+          <input type="number" id="optv2-lam-factor" value="0.4" step="0.05" min="0" style="width:5rem"
             title="Profile-fit weight in the LP objective. Higher = prioritize matching the target payoff curve over trading/collateral cost; lower = cheaper trades even if the fit is looser.">
         </label>
         <label class="pf-filter-label">μ Collateral
@@ -1498,8 +1498,8 @@
             title="Holding-cost weight for posted collateral in the LP objective. Higher = optimizer works harder to avoid growing collateral usage; 0 = collateral is free.">
         </label>
         <label class="pf-filter-label">ν Cash Neutrality
-          <input type="number" id="optv2-cash-neutrality-factor" value="0" step="0.1" min="0" style="width:5rem"
-            title="Penalty weight in the LP objective for imbalance between premium paid and premium collected per counterparty. Higher = optimizer works harder to self-fund trades per counterparty (avoid net cash movement); 0 = disabled (default). Soft cost, not a hard cap — doesn't cover forced/DTE rolls.">
+          <input type="number" id="optv2-cash-neutrality-factor" value="0.5" step="0.1" min="0" style="width:5rem"
+            title="Penalty weight in the LP objective for imbalance between premium paid and premium collected per counterparty. Higher = optimizer works harder to self-fund trades per counterparty (avoid net cash movement); 0 = disabled. Soft cost, not a hard cap — doesn't cover forced/DTE rolls.">
         </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
