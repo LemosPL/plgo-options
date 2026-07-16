@@ -90,6 +90,7 @@ class OptimizerRunParams:
     collateral_tier_mu: float | dict[str, float] | None = None
     forced_roll_ids: list[int] | None = None
     cash_neutrality_factor: float | dict[str, float] = 0.0
+    max_qty: float | None = None
 
 
 @dataclass

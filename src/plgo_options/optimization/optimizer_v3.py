@@ -679,6 +679,7 @@ class OptimizerV3(BaseOptimizer):
                  collateral_tier_mu: "dict[str, float] | float | None" = None,
                  forced_roll_ids: list[int] | None = None,
                  cash_neutrality_factor: "dict[str, float] | float" = 0.0,
+                 max_qty: float | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -795,6 +796,18 @@ class OptimizerV3(BaseOptimizer):
                 price = float(c.bs_price_usd or 0.0)
                 eq = float(getattr(c, "existing_qty", 0.0) or 0.0)
                 cand_gross[cp] = cand_gross.get(cp, 0.0) + abs(eq) * price
+            # Forced/DTE roll positions never get a matching candidate (the target
+            # expiry usually differs, and injection explicitly skips them — see
+            # roll_position_ids below), so their gross exposure is otherwise
+            # invisible here. Add it back in: the cap's base should be the
+            # counterparty's TRUE current gross exposure (including what's about
+            # to be rolled away), so closing those positions is credited as freed
+            # collateral room the LP can actually reuse — not silently discarded.
+            for p in roll_positions:
+                cp = getattr(p, "counterparty", "")
+                price = float(getattr(p, "mark_price_usd", 0.0) or 0.0)
+                qty = float(getattr(p, "net_qty", 0.0) or 0.0)
+                cand_gross[cp] = cand_gross.get(cp, 0.0) + abs(qty) * price
             max_gross_exposure_by_counterparty = {
                 cp: gross * (1.0 + collateral_budget_pct)
                 for cp, gross in cand_gross.items() if gross > 0
@@ -818,6 +831,30 @@ class OptimizerV3(BaseOptimizer):
                 + float(t.get("qty", 0.0) or 0.0) * float(t.get("bs_price_usd", 0.0) or 0.0)
             )
 
+        # max_qty needs to cap the *aggregated* per-leg-instrument quantity that
+        # ends up in the trades table, not each raw candidate — a naked leg and
+        # several spreads can all share the same strike as one leg, and each
+        # capped individually at max_qty still sums to a multiple of it once
+        # _aggregate_trade_legs merges them by (counterparty, instrument, ...).
+        # Group candidate indices by the leg(s) they actually expand to (mirrors
+        # _candidate_trade_legs) so the LP itself can constrain that sum.
+        leg_groups: dict[tuple, list[tuple[int, float]]] = {}
+        if max_qty is not None:
+            for j, c in enumerate(candidates):
+                if self._is_spread_candidate(c):
+                    legs = [(c.long_leg, 1.0), (c.short_leg, -1.0)]
+                elif self._is_straddle_candidate(c):
+                    legs = [(c.call_leg, 1.0), (c.put_leg, 1.0)]
+                elif self._is_iron_condor_candidate(c):
+                    legs = [(c.put_low_leg, 1.0), (c.put_high_leg, -1.0),
+                            (c.call_low_leg, -1.0), (c.call_high_leg, 1.0)]
+                else:
+                    legs = [(c, 1.0)]
+                for leg, sign in legs:
+                    key = (getattr(leg, "expiry_code", ""), getattr(leg, "strike", 0.0),
+                           getattr(leg, "opt", ""), getattr(leg, "counterparty", ""))
+                    leg_groups.setdefault(key, []).append((j, sign))
+
         lp = CollateralOptimization(self.asset, counterparties)
         lp_result = lp.optimize(
             spot_arr, spot_weights, residual, candidates, c_payoffs,
@@ -832,6 +869,8 @@ class OptimizerV3(BaseOptimizer):
             collateral_tier_mu=collateral_tier_mu,
             cash_neutrality_factor=cash_neutrality_factor,
             forced_cash_by_counterparty=forced_cash_by_counterparty,
+            max_qty=max_qty,
+            leg_groups=leg_groups,
         )
 
         if lp_result is None:

@@ -36,6 +36,8 @@ class CollateralOptimization:
         collateral_tier_mu=None,
         cash_neutrality_factor=0.0,
         forced_cash_by_counterparty=None,
+        max_qty=None,
+        leg_groups=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -76,6 +78,18 @@ class CollateralOptimization:
             )
             for j in range(n_candidates)
         ]
+        # Cap the *aggregated* per-leg-instrument quantity (matching what
+        # _aggregate_trade_legs merges into the trades table), not each raw
+        # candidate — a naked leg and several spreads can share the same strike
+        # as one leg, and capping each candidate individually still lets their
+        # sum exceed max_qty once merged. leg_groups maps a leg's own identity
+        # (expiry_code, strike, opt, counterparty) to the (candidate_index, sign)
+        # pairs that contribute to it, mirroring _candidate_trade_legs.
+        if max_qty is not None and leg_groups:
+            for gi, members in enumerate(leg_groups.values()):
+                group_net = pulp.lpSum(sign * (buy_vars[j] - sell_vars[j]) for j, sign in members)
+                prob += group_net <= float(max_qty), f"max_qty_pos_{gi}"
+                prob += group_net >= -float(max_qty), f"max_qty_neg_{gi}"
         abs_error_vars = [pulp.LpVariable(f"abs_error_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
         abs_net_pos_vars = [pulp.LpVariable(f"abs_net_pos_{j}", lowBound=0, cat="Continuous") for j in range(n_candidates)]
 
