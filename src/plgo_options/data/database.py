@@ -118,6 +118,20 @@ CREATE TABLE IF NOT EXISTS collateral_price (
 );
 """
 
+# How much of each counterparty's posted collateral (per asset in the Collateral
+# Map) is earmarked to the ETH options book. The FIL book gets the remainder
+# (full map holding − ETH carve-out). Replaces the old hard-coded allocation in
+# the frontend so the split is data-driven and editable.
+COLLATERAL_ALLOCATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collateral_book_allocation (
+    counterparty TEXT NOT NULL COLLATE NOCASE,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    eth_qty REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (counterparty, asset)
+);
+"""
+
 # One row per (counterparty, portfolio_asset). Tracks collateral posted (in
 # ETH and FIL) against that asset's options book, plus the USD figure the
 # counterparty themselves are asking for (for side-by-side comparison).
@@ -164,8 +178,24 @@ async def init_db():
     await db.execute(MTM_HISTORY_SCHEMA)
     await db.execute(COLLATERAL_SCHEMA)
     await db.execute(COLLATERAL_PRICE_SCHEMA)
+    await db.execute(COLLATERAL_ALLOCATION_SCHEMA)
     await db.execute(MARGIN_SCHEMA)
     await db.execute(RECON_HISTORY_SCHEMA)
+    await db.commit()
+
+    # One-time seed of the ETH-book collateral allocation from the values that
+    # used to be hard-coded in the frontend. INSERT OR IGNORE keeps it idempotent
+    # and never clobbers edits made through the UI.
+    for cp, asset, eth_qty in (
+        ("Flowdesk", "ETH", 2000),
+        ("Flowdesk", "USDC", 6717467),
+        ("KeyRock", "USDC", 8926168),
+    ):
+        await db.execute(
+            """INSERT OR IGNORE INTO collateral_book_allocation
+                  (counterparty, asset, eth_qty) VALUES (?, ?, ?)""",
+            (cp, asset, eth_qty),
+        )
     await db.commit()
 
     # Migration: add 'asset' column if missing (existing DBs)

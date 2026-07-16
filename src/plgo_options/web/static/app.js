@@ -3374,17 +3374,13 @@ function pfInitCompareSets() {
 // every other token is held at its effective map price (USDC = 1). So an
 // ETH-collateralised holding slopes up with spot while a USDC holding reads flat.
 
-// Fixed allocation policy: how the shared collateral pool is earmarked to the
-// ETH book. These figures are AUTHORITATIVE (set by treasury, not read from the
-// Collateral Map). Everything else in the map is "the rest" and belongs to the
-// FIL book. Keys are counterparty names, matched case-insensitively.
-const PF_ETH_COLL_ALLOCATION = {
-  flowdesk: { ETH: 2000, USDC: 6717467 },
-  keyrock:  { USDC: 8926168 },
-};
-
+// How the shared collateral pool is earmarked to the ETH book. The carve-out
+// per (counterparty, asset) comes from the database (collateral_book_allocation,
+// editable in the Collateral Map) and rides along on the /map response as each
+// counterparty's `eth_alloc`. Everything else in the map is "the rest" and
+// belongs to the FIL book.
 function pfEthAllocFor(cp) {
-  return PF_ETH_COLL_ALLOCATION[(cp.counterparty || "").toLowerCase()] || {};
+  return (cp && cp.eth_alloc) || {};
 }
 
 // Effective posted-collateral quantities for a counterparty under a scope:
@@ -3427,8 +3423,15 @@ function pfCollMapCurve(cptys, spots, applyHaircut, scope) {
     sum + pfCollMapValueAt(pfEffectiveQtys(c, scope), s, applyHaircut), 0));
 }
 
-// Human-readable description of the fixed ETH/FIL allocation, generated from
-// PF_ETH_COLL_ALLOCATION so the on-screen note can never drift from the logic.
+// Counterparties that carry an ETH-book carve-out, sourced from the map's
+// per-counterparty `eth_alloc` (DB-backed, editable in the Collateral Map).
+function pfEthAllocCptys() {
+  const cps = (pfCollateralMap && pfCollateralMap.counterparties) || [];
+  return cps.filter(c => c.eth_alloc && Object.values(c.eth_alloc).some(Boolean));
+}
+
+// Human-readable description of the ETH/FIL allocation, generated from the
+// DB-backed map data so the on-screen note can never drift from the logic.
 function pfCollateralNoteText() {
   const fmtQ = q => {
     const bits = [];
@@ -3437,27 +3440,28 @@ function pfCollateralNoteText() {
     if (q.USDC) bits.push(`$${q.USDC.toLocaleString()} USDC`);
     return bits.join(" + ");
   };
-  const parts = Object.entries(PF_ETH_COLL_ALLOCATION).map(([name, q]) =>
-    `${name.charAt(0).toUpperCase()}${name.slice(1)} ${fmtQ(q)}`);
-  return `Collateral allocation (fixed policy) — ETH book: ${parts.join("; ")}. `
+  const parts = pfEthAllocCptys().map(c => `${c.counterparty} ${fmtQ(c.eth_alloc)}`);
+  const ethBook = parts.length ? parts.join("; ") : "none";
+  return `Collateral allocation (from Collateral Map) — ETH book: ${ethBook}. `
     + `FIL book: all remaining collateral (FIL + any leftover USDC/ETH). `
     + `ETH revalues with spot; USDC held at $1.`;
 }
 
-// Multi-line hover tooltip (native title) breaking down the fixed ETH book:
+// Multi-line hover tooltip (native title) breaking down the ETH book:
 // each counterparty's tokens, the aggregate composition, and the current $
 // value (ETH valued at the map's ETH price).
 function pfEthBookTooltip() {
-  const lines = ["ETH book collateral (fixed allocation):"];
+  const lines = ["ETH book collateral (from Collateral Map allocation):"];
   let usdc = 0, eth = 0, btc = 0;
-  for (const [name, q] of Object.entries(PF_ETH_COLL_ALLOCATION)) {
-    const disp = name.charAt(0).toUpperCase() + name.slice(1);
+  for (const c of pfEthAllocCptys()) {
+    const q = c.eth_alloc || {};
     const bits = [];
     if (q.ETH)  { bits.push(`${q.ETH.toLocaleString()} ETH`);   eth  += q.ETH; }
     if (q.BTC)  { bits.push(`${q.BTC.toLocaleString()} BTC`);   btc  += q.BTC; }
     if (q.USDC) { bits.push(`$${q.USDC.toLocaleString()} USDC`); usdc += q.USDC; }
-    lines.push(`  • ${disp}: ${bits.join(" + ")}`);
+    lines.push(`  • ${c.counterparty}: ${bits.join(" + ")}`);
   }
+  if (!pfEthAllocCptys().length) lines.push("  (nothing allocated to the ETH book)");
   const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
   const ethPx = prices.ETH || 0, btcPx = prices.BTC || 0;
   const totParts = [];
@@ -9896,9 +9900,19 @@ function collatRenderMap() {
     const cells = cps.map(c => {
       const qty = c.qtys[a] || 0;
       const usd = c.usd[a] || 0;
+      const ethAlloc = (c.eth_alloc && c.eth_alloc[a]) || 0;
+      const filRest = Math.max(0, qty - ethAlloc);
+      const fmtBk = v => a === "USDC"
+        ? `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+        : Number(v).toLocaleString(undefined, { maximumFractionDigits: a === "FIL" ? 0 : 2 });
       return `<td class="num">
         <input type="number" step="any" min="0" class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" value="${qty || ""}" placeholder="0" style="width:110px">
         <div style="font-size:.72rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>
+        <div style="margin-top:.3rem;display:flex;align-items:center;gap:.25rem;justify-content:flex-end">
+          <span style="font-size:.66rem;color:var(--muted)" title="How much of this ${a} backs the ETH options book. The FIL book gets the rest.">ETH bk</span>
+          <input type="number" step="any" min="0" class="collat-alloc-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" value="${ethAlloc || ""}" placeholder="0" style="width:90px;font-size:.72rem">
+        </div>
+        <div style="font-size:.64rem;color:var(--muted)">FIL bk: ${fmtBk(filRest)}</div>
       </td>`;
     }).join("");
     const rowTotal = m.asset_totals[a] || 0;
@@ -9944,6 +9958,9 @@ function collatRenderMap() {
   document.querySelectorAll("#collat-map-tbody .collat-qty-input").forEach(inp => {
     inp.addEventListener("change", () => collatSaveCell(decodeURIComponent(inp.dataset.cp), inp.dataset.asset, parseFloat(inp.value) || 0));
   });
+  document.querySelectorAll("#collat-map-tbody .collat-alloc-input").forEach(inp => {
+    inp.addEventListener("change", () => collatSaveAllocation(decodeURIComponent(inp.dataset.cp), inp.dataset.asset, parseFloat(inp.value) || 0));
+  });
   document.querySelectorAll("#collat-map-tbody .collat-price-input").forEach(inp => {
     inp.addEventListener("change", () => {
       const v = inp.value.trim();
@@ -9964,6 +9981,10 @@ async function collatSaveCell(counterparty, asset, qty) {
 }
 async function collatSavePrice(asset, price) {
   try { await api("PUT", "/api/collateral/price", { asset, price }); await collatLoad(); }
+  catch (e) { alert("Save failed: " + (e.message || e)); }
+}
+async function collatSaveAllocation(counterparty, asset, eth_qty) {
+  try { await api("PUT", "/api/collateral/map/allocation", { counterparty, asset, eth_qty }); await collatLoad(); }
   catch (e) { alert("Save failed: " + (e.message || e)); }
 }
 async function collatAddCp() {
