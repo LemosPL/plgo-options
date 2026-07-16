@@ -271,6 +271,22 @@ function updateCptyMethodBox() {
   const html = cptyMethodBoxHtml(sel.value, currentAsset);
   box.innerHTML = html;
   box.style.display = html ? "block" : "none";
+
+  // Lock the manual Vol Spread when a calibrated counterparty is driving the
+  // vol/skew — their methodology replaces it entirely, so it must not be editable.
+  const calibrated = !!getCptyMethod(sel.value, currentAsset) && !getCptyMethod(sel.value, currentAsset).uncalibrated;
+  const vs = document.getElementById("pricing-vol-spread");
+  if (vs) {
+    vs.disabled = calibrated;
+    const wrap = vs.closest("label");
+    if (wrap) { wrap.style.opacity = calibrated ? "0.4" : ""; wrap.style.pointerEvents = calibrated ? "none" : ""; }
+    vs.title = calibrated
+      ? `Locked — ${getCptyMethod(sel.value, currentAsset).name} pricing sets the vol/skew`
+      : "Bid/ask vol spread in IV points";
+  }
+  const hint = document.getElementById("pricing-vol-spread-hint");
+  if (hint && calibrated) hint.textContent = `set by ${getCptyMethod(sel.value, currentAsset).name} pricing`;
+  else updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
 }
 
 // ─── Bootstrap ──────────────────────────────────────────────
