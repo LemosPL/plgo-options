@@ -585,6 +585,18 @@
               <option value="">Loading&hellip;</option>
             </select>
           </div>
+          <!-- Counterparty pricing methodology -->
+          <div style="margin-bottom:.75rem">
+            <label style="font-size:.75rem;color:var(--muted);display:block;margin-bottom:.3rem">Counterparty pricing</label>
+            <select id="cpty-pricing-select" style="width:100%;margin:0">
+              <option value="">Mid vol surface (theoretical fair value)</option>
+              <option value="flowdesk">Flowdesk</option>
+              <option value="keyrock">Keyrock</option>
+              <option value="wave">Wave</option>
+              <option value="g20">G20</option>
+            </select>
+            <div id="cpty-method-box" style="display:none;margin-top:.4rem;padding:.5rem .6rem;background:rgba(88,166,255,0.06);border:1px solid rgba(88,166,255,0.22);border-radius:6px;font-size:.72rem;line-height:1.4;color:var(--text)"></div>
+          </div>
           <!-- Strategy templates -->
           <div style="margin-bottom:.75rem">
             <div class="btn-grid btn-grid-3" style="gap:.35rem">
@@ -2152,6 +2164,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=82"></script>
+<script src="/static/app.js?v=83"></script>
 </body>
 </html>

@@ -185,6 +185,94 @@ function pricerDelta(S, K, T, r, sigma, type) {
   return type === "C" ? normCdf(d1) : normCdf(d1) - 1;
 }
 
+// ─── Counterparty pricing methodologies ─────────────────────
+// Each counterparty quotes off its own vol/skew, not the mid vol surface.
+// We calibrate a methodology per counterparty AS WE TRADE with them, per asset.
+// Anything left blank falls back to the mid vol surface (theoretical fair value).
+//
+// Flowdesk (FIL) was reverse-engineered from the 28 Aug 26 structure (44d):
+//   • Out-of-the-money legs → a flat, elevated wing vol (~95%), ignoring your skew.
+//   • In-the-money legs      → intrinsic value only (no time premium), with the
+//                              forward shaded a few % AGAINST the option they trade
+//                              (down for a call they buy from you, up for a put).
+const CPTY_PRICING = {
+  flowdesk: {
+    name: "Flowdesk",
+    byAsset: {
+      FIL: {
+        otmFlatVol: 95,          // flat wing vol (%) applied to every OTM leg
+        itmForwardLeanPct: 4.5,  // forward shaded against the traded option on ITM legs
+        calibratedNote: "Calibrated from your 28 Aug 26 FIL structure (44d).",
+      },
+      // ETH: not calibrated yet — fill in as you trade ETH with Flowdesk.
+    },
+  },
+  keyrock: { name: "Keyrock", byAsset: {} },  // not calibrated yet
+  wave:    { name: "Wave",    byAsset: {} },  // not calibrated yet
+  g20:     { name: "G20",     byAsset: {} },  // not calibrated yet
+};
+
+// Resolve the methodology for a counterparty + asset.
+// Returns null for "no counterparty selected"; {uncalibrated:true} when the
+// counterparty exists but we haven't calibrated it for this asset yet.
+function getCptyMethod(cptyKey, asset) {
+  if (!cptyKey) return null;
+  const cp = CPTY_PRICING[cptyKey];
+  if (!cp) return null;
+  const m = cp.byAsset[asset];
+  return m ? { name: cp.name, ...m } : { name: cp.name, uncalibrated: true };
+}
+
+// Apply a calibrated counterparty methodology to one leg.
+// Returns { prem, ivShown, mode } or null if it can't be applied.
+function applyCptyPricing(method, { spot, K, T, type, side }) {
+  if (!method || method.uncalibrated) return null;
+  const intrinsic = type === "C" ? Math.max(spot - K, 0) : Math.max(K - spot, 0);
+  if (intrinsic <= 0) {
+    // OTM leg → flat elevated wing vol (their skew, not yours)
+    const sig = method.otmFlatVol / 100;
+    return { prem: pricerBs(spot, K, T, 0, sig, type), ivShown: method.otmFlatVol, mode: "otm" };
+  }
+  // ITM leg → intrinsic only (no time value), forward leaned in their favour.
+  // Call value rises with forward, put value falls. They shade the forward so
+  // whatever they're trading is worth less to you:
+  //   buy call → fwd up   sell call → fwd down
+  //   buy put  → fwd down  sell put  → fwd up
+  const lean = (method.itmForwardLeanPct || 0) / 100;
+  const sign = type === "C" ? (side === "buy" ? +1 : -1) : (side === "buy" ? -1 : +1);
+  const fLean = spot * (1 + sign * lean);
+  const prem = type === "C" ? Math.max(fLean - K, 0) : Math.max(K - fLean, 0);
+  return { prem, ivShown: 0, mode: "itm" };
+}
+
+// Plain-English methodology description shown under the selector.
+function cptyMethodBoxHtml(cptyKey, asset) {
+  const method = getCptyMethod(cptyKey, asset);
+  if (!method) return "";
+  if (method.uncalibrated) {
+    return `<strong>${method.name}</strong> — no pricing methodology calibrated for ` +
+      `${asset} yet. Legs are priced at the <strong>mid vol surface</strong> ` +
+      `(theoretical fair value). We'll fill this in as you trade ${asset} with them.`;
+  }
+  return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
+    `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
+    `<li><strong>Out-of-the-money legs:</strong> priced at a flat <strong>~${method.otmFlatVol}% vol</strong> ` +
+    `— they quote one elevated wing vol across strikes and ignore your skew, so options cost more.</li>` +
+    `<li><strong>In-the-money legs:</strong> priced at <strong>intrinsic value only</strong> (no time premium), ` +
+    `with the forward shaded <strong>~${method.itmForwardLeanPct}% against you</strong> ` +
+    `(down for calls they buy, up for puts they buy).</li>` +
+    `</ul>`;
+}
+
+function updateCptyMethodBox() {
+  const sel = document.getElementById("cpty-pricing-select");
+  const box = document.getElementById("cpty-method-box");
+  if (!sel || !box) return;
+  const html = cptyMethodBoxHtml(sel.value, currentAsset);
+  box.innerHTML = html;
+  box.style.display = html ? "block" : "none";
+}
+
 // ─── Bootstrap ──────────────────────────────────────────────
 async function init() {
   // Fetch spot + vol surface in parallel
@@ -585,6 +673,13 @@ function replicateStrategy() {
 
   const volSpreadPts = parseFloat(document.getElementById("pricing-vol-spread").value) || 0;
 
+  // Counterparty pricing methodology (Flowdesk, etc.). When one is selected and
+  // calibrated for this asset, it overrides the quoted premium + reported IV per
+  // leg (payoff curves stay on the fair mid, like the vol-spread does).
+  const cptyKey = (document.getElementById("cpty-pricing-select") || {}).value || "";
+  const cptyMethod = getCptyMethod(cptyKey, currentAsset);
+  const cptyCalibrated = !!(cptyMethod && !cptyMethod.uncalibrated);
+
   for (const l of legs) {
     const K = parseFloat(l.strike);
     const qty = parseFloat(l.quantity);
@@ -606,7 +701,13 @@ function replicateStrategy() {
     // converted to a premium spread). Applying ±spread to IV and repricing was
     // convex — it inflated buy premiums and collapsed OTM sell premiums to 0.
     let prem = premMid;
-    if (volSpreadPts > 0) {
+    let ivDisplay = ivPct;   // IV shown in the per-leg table
+    let cpMode = null;       // "otm" | "itm" when a counterparty methodology applied
+    if (cptyCalibrated) {
+      // Counterparty marks replace both the mid vol-spread and the reported IV.
+      const cpRes = applyCptyPricing(cptyMethod, { spot, K, T, type: l.type, side: l.side });
+      if (cpRes) { prem = cpRes.prem; ivDisplay = cpRes.ivShown; cpMode = cpRes.mode; }
+    } else if (volSpreadPts > 0) {
       const vegaPt = Math.abs(pricerBs(spot, K, T, 0, (ivPct + 1) / 100, l.type)
                             - pricerBs(spot, K, T, 0, Math.max(ivPct - 1, 1) / 100, l.type)) / 2;
       const halfWidth = vegaPt * volSpreadPts;
@@ -643,9 +744,9 @@ function replicateStrategy() {
     const isSynthetic = !!(smile && smile._synthetic);
     legDetails.push({
       expiry: l.expiry, dte, strike: K, type: l.type, side: l.side, quantity: qty,
-      iv_pct: ivPct, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
+      iv_pct: ivPct, iv_display: ivDisplay, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
       delta_per: deltaPer, position_delta: posDelta,
-      _synthetic: isSynthetic,
+      _synthetic: isSynthetic, cp_mode: cpMode,
     });
   }
 
@@ -685,7 +786,16 @@ function replicateStrategy() {
   const hasSynthetic = legDetails.some(d => d._synthetic);
   const allSynthetic = legDetails.every(d => d._synthetic);
   let sourceNote = "";
-  if (allSynthetic) {
+  if (cptyCalibrated) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#58a6ff;line-height:1.35">` +
+      `Prices: <strong>${cptyMethod.name} counterparty marks</strong> — OTM legs at a flat ` +
+      `~${cptyMethod.otmFlatVol}% wing vol, ITM legs at intrinsic (forward shaded ` +
+      `~${cptyMethod.itmForwardLeanPct}%). See methodology above the legs.</div>`;
+  } else if (cptyMethod && cptyMethod.uncalibrated) {
+    sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.35">` +
+      `<strong>${cptyMethod.name}</strong> has no methodology calibrated for ${currentAsset} yet — ` +
+      `showing <strong>mid vol surface</strong> fair values. We'll fill it in as you trade ${currentAsset} with them.</div>`;
+  } else if (allSynthetic) {
     sourceNote = `<div style="margin-top:4px;font-size:.7rem;color:#f0883e;line-height:1.3">` +
       `Prices: <strong>BS model with interpolated vol surface</strong> — no exact Deribit expiry match. ` +
       `These are theoretical fair values, not live market quotes. Execution prices (bid/ask) will differ.</div>`;
@@ -708,7 +818,7 @@ function replicateStrategy() {
     `<span>Receive: <strong style="color:${rcvColor}">${fmtUsd(totalReceive)}</strong></span>` +
     `<span>Net: <strong style="color:${netColor}">${netLabel} ${fmtUsd(net)}</strong> (${netEth.toFixed(4)} ${currentAsset})</span>` +
     `<span>Net Δ: <strong style="color:${totalDelta >= 0 ? 'var(--green)' : 'var(--red)'}">${totalDelta >= 0 ? '+' : ''}${totalDelta.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${currentAsset}</strong> <span style="color:var(--muted)">(${fmtUsd(totalDeltaUsd)})</span></span>` +
-    (volSpreadPts > 0 ? `<span style="font-size:.7rem;color:var(--muted)">vol &plusmn;${volSpreadPts}pts</span>` : "") +
+    (!cptyCalibrated && volSpreadPts > 0 ? `<span style="font-size:.7rem;color:var(--muted)">vol &plusmn;${volSpreadPts}pts</span>` : "") +
     `</span></div>` + sourceNote;
 
   // Per-leg table
@@ -718,16 +828,27 @@ function replicateStrategy() {
     const tr = document.createElement("tr");
     const sideColor = d.side === "buy" ? "var(--accent)" : "var(--orange)";
     const typeColor = d.type === "C" ? "var(--green)" : "var(--red)";
-    const srcLabel = d._synthetic
-      ? `<span style="color:#f0883e;font-weight:600" title="Vol interpolated between nearest Deribit expiries — theoretical, not live">Interpolated*</span>`
-      : `<span style="color:var(--muted)" title="Vol from Deribit vol surface — theoretical BS fair value">Vol Surface</span>`;
+    let srcLabel;
+    if (d.cp_mode) {
+      const cpName = cptyMethod.name;
+      srcLabel = d.cp_mode === "otm"
+        ? `<span style="color:#58a6ff;font-weight:600" title="${cpName} marks OTM legs at a flat wing vol">${cpName} · flat vol</span>`
+        : `<span style="color:#58a6ff;font-weight:600" title="${cpName} marks ITM legs at intrinsic, forward shaded against you">${cpName} · intrinsic</span>`;
+    } else if (d._synthetic) {
+      srcLabel = `<span style="color:#f0883e;font-weight:600" title="Vol interpolated between nearest Deribit expiries — theoretical, not live">Interpolated*</span>`;
+    } else {
+      srcLabel = `<span style="color:var(--muted)" title="Vol from Deribit vol surface — theoretical BS fair value">Vol Surface</span>`;
+    }
+    const ivCell = d.cp_mode === "itm"
+      ? `<span title="Intrinsic value only — no time premium">intr</span>`
+      : `${(d.iv_display).toFixed(1)}%`;
     tr.innerHTML = `
       <td style="font-size:.75rem">${d.expiry}</td>
       <td style="color:${sideColor}">${d.side.toUpperCase()}</td>
       <td style="color:${typeColor}">${d.type === "C" ? "Call" : "Put"}</td>
       <td>${fmtStrike(d.strike)}</td>
       <td>${d.dte}d</td>
-      <td>${d.iv_pct.toFixed(1)}%</td>
+      <td>${ivCell}</td>
       <td style="font-family:monospace">${d.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
       <td style="font-family:monospace">$${fmtPrem(d.bs_premium_usd)}</td>
       <td style="font-family:monospace;color:${d.side === 'sell' ? 'var(--green)' : 'var(--red)'}">$${fmtPremTotal(d.quantity * d.bs_premium_usd)}</td>
@@ -881,6 +1002,12 @@ $btnCompute.addEventListener("click", computePayoff);
 $btnRepl.addEventListener("click", replicateStrategy);
 document.getElementById("pricing-vol-spread").addEventListener("input", () => updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint"));
 updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
+document.getElementById("cpty-pricing-select").addEventListener("change", () => {
+  updateCptyMethodBox();
+  // Re-price immediately if results are already on screen.
+  if (document.getElementById("repl-results-section").style.display === "block") replicateStrategy();
+});
+updateCptyMethodBox();
 document.getElementById("btn-apply-repl").addEventListener("click", applyReplPremiums);
 
 // Send Pricing legs → Strategy Builder
@@ -950,6 +1077,7 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
         document.getElementById("sb-vol-spread").value = defaultSpread;
         updateVolSpreadHint("pricing-vol-spread", "pricing-vol-spread-hint");
         updateVolSpreadHint("sb-vol-spread", "sb-vol-spread-hint");
+        updateCptyMethodBox();  // methodology text is asset-specific
       }
       if (volData) {
         volSurface = volData;
