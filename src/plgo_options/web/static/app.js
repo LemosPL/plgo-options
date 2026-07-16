@@ -8662,24 +8662,52 @@ function optv2RenderPayoff() {
 
   const traces = [];
 
-  // If we have optimization results, show only 90d Before vs After
+  // If we have optimization results, show Before vs After — at horizon 0
+  // (today), not T+90d: the LP's own fit (lam_factor/profile_error, and the
+  // Target curve) is computed at horizon 0, so a T+90d curve — which bakes
+  // in 90 days of theta decay — is never comparable to Target regardless of
+  // fit quality. Confirmed empirically: raising lam_factor tightens the
+  // horizon-0 fit to within a few $k of Target while the T+90d gap actually
+  // grows, since decay reshapes the curve independent of today's fit.
   if (optv2OptResult && optv2OptResult.status === "ok") {
-    // Before (90d)
-    const beforeCurve = optv2OptResult.before.payoff_by_horizon["90"];
+    // The optimizer's own spot_ladder can differ from optv2Data's (/pnl's) —
+    // use it for anything sourced from optv2OptResult so x/y stay index-aligned.
+    const optSpots = optv2OptResult.spot_ladder || spots;
+    const optLogM = optSpots.map(s => Math.log(s / S0));
+
+    // Before (now)
+    const beforeCurve = optv2OptResult.before.payoff_by_horizon["0"];
     if (beforeCurve) {
       traces.push({
-        x: logM, y: beforeCurve, mode: "lines",
-        name: "Before (T+90d)",
+        x: optLogM, y: beforeCurve, mode: "lines",
+        name: "Before (Now)",
         line: { color: "#e57373", width: 2, dash: "dash" },
       });
     }
-    // After (90d)
-    const afterCurve = optv2OptResult.after.payoff_by_horizon["90"];
+    // After (now)
+    const afterCurve = optv2OptResult.after.payoff_by_horizon["0"];
     if (afterCurve) {
       traces.push({
-        x: logM, y: afterCurve, mode: "lines",
-        name: "After (T+90d)",
+        x: optLogM, y: afterCurve, mode: "lines",
+        name: "After (Now)",
         line: { color: "#4fc3f7", width: 3 },
+      });
+    }
+    // Target profile is an absolute-dollar curve on its own internal fitting
+    // scale (raw BS book value + a cash_shift constant, evaluated at horizon
+    // 0) — not directly comparable to Before/After, which are each
+    // independently anchored to read 0 at (today, current spot). Self-anchor
+    // Target the same way (subtract its own value at current spot) so all
+    // three curves cross 0 at the same point and only relative *shape* away
+    // from spot is being compared, not an arbitrary absolute-scale offset.
+    if (optv2OptResult.target_payoff) {
+      const spotIdx = optv2NearestIdx(optSpots, S0);
+      const targetAtSpot = optv2OptResult.target_payoff[spotIdx];
+      const targetCurve = optv2OptResult.target_payoff.map(v => v - targetAtSpot);
+      traces.push({
+        x: optLogM, y: targetCurve, mode: "lines",
+        name: "Target Profile",
+        line: { color: "#ffca28", width: 2, dash: "dot" },
       });
     }
   } else {
@@ -8744,7 +8772,7 @@ function optv2RenderPayoff() {
   });
 
   const layout = {
-    title: { text: optv2OptResult ? "Payoff Profile — Before vs After (T+90d)" : "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
+    title: { text: optv2OptResult ? "Payoff Profile — Before vs After vs Target (Now)" : "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
     xaxis: {
       title: "Log-Moneyness  ln(K / Spot)",
       tickvals: tickVals,
