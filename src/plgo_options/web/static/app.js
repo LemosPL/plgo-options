@@ -735,25 +735,29 @@ function replicateStrategy() {
     const deltaPer = pricerDelta(spot, K, T, 0, sigma, l.type);
     const posDelta = dir * qty * deltaPer;
 
+    // Cost basis for the payoff curves. With a counterparty selected the
+    // breakevens must reflect what you actually transact at (their premium).
+    // On mid fair value we keep the clean MID premium (unbiased by bid/ask).
+    const costBasis = cptyCalibrated ? prem : premMid;
+
     for (let i = 0; i < nPts; i++) {
       const intrinsic = l.type === "C" ? Math.max(spots[i] - K, 0) : Math.max(K - spots[i], 0);
 
-      // Payoff curves use the fair MID premium (unbiased by the bid/ask spread).
       // All expired
-      pnlAllExpired[i] += dir * qty * (intrinsic - premMid);
+      pnlAllExpired[i] += dir * qty * (intrinsic - costBasis);
 
       // Now (full BS value)
       const valNow = pricerBs(spots[i], K, T, 0, sigma, l.type);
-      pnlNow[i] += dir * qty * (valNow - premMid);
+      pnlNow[i] += dir * qty * (valNow - costBasis);
 
       // At first expiry: legs expiring then → intrinsic, others → BS with remaining time
       const remainingDte = dte - firstDte;
       if (remainingDte <= 0) {
-        pnlFirstExpiry[i] += dir * qty * (intrinsic - premMid);
+        pnlFirstExpiry[i] += dir * qty * (intrinsic - costBasis);
       } else {
         const Tremain = remainingDte / 365.25;
         const valRemain = pricerBs(spots[i], K, Tremain, 0, sigma, l.type);
-        pnlFirstExpiry[i] += dir * qty * (valRemain - premMid);
+        pnlFirstExpiry[i] += dir * qty * (valRemain - costBasis);
       }
     }
 
