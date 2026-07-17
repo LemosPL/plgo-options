@@ -607,6 +607,12 @@ async def collateral_map():
     cur = await db.execute("SELECT counterparty, asset, qty FROM counterparty_collateral")
     rows = await cur.fetchall()
 
+    # ETH-book collateral carve-out per (counterparty, asset). FIL book = the rest.
+    cur = await db.execute("SELECT counterparty, asset, eth_qty FROM collateral_book_allocation")
+    alloc_by_cp: dict[str, dict[str, float]] = {}
+    for r in await cur.fetchall():
+        alloc_by_cp.setdefault(r["counterparty"].lower(), {})[(r["asset"] or "").upper()] = float(r["eth_qty"] or 0)
+
     assets = list(MAP_ASSETS)
     for r in rows:
         a = (r["asset"] or "").upper()
@@ -632,6 +638,10 @@ async def collateral_map():
         total = round(sum(usd.values()), 2)
         _nh, hc = _haircut_value(qtys, prices)
         l = liab.get(k, 0.0)
+        # ETH-book carve-out, floored so an allocation can't exceed what's posted.
+        raw_alloc = alloc_by_cp.get(k, {})
+        eth_alloc = {a: min(raw_alloc.get(a, 0.0), qtys.get(a, 0.0))
+                     for a in assets if raw_alloc.get(a, 0.0) > 0}
         out_cps.append({
             "counterparty": info["display"],
             "qtys": qtys,
@@ -640,6 +650,7 @@ async def collateral_map():
             "liability_usd": round(l, 2),
             "collateral_haircut_usd": round(hc, 2),
             "balance_usd": round(hc - l, 2),
+            "eth_alloc": eth_alloc,
         })
     out_cps.sort(key=lambda c: c["total_usd"], reverse=True)
 
@@ -686,6 +697,46 @@ async def upsert_map_cell(payload: MapCell):
               qty = excluded.qty, updated_at = excluded.updated_at""",
         (cp, a, float(payload.qty), now),
     )
+    await db.commit()
+    return {"ok": True}
+
+
+class AllocationCell(BaseModel):
+    counterparty: str
+    asset: str
+    eth_qty: float = 0.0  # quantity earmarked to the ETH options book
+
+
+@router.put("/map/allocation")
+async def upsert_allocation(payload: AllocationCell):
+    """Set how much of a counterparty's `asset` collateral backs the ETH book.
+
+    The FIL book is always the remainder (map holding − this carve-out), so we
+    only store the ETH-book figure. eth_qty = 0 clears the row.
+    """
+    cp = payload.counterparty.strip()
+    a = payload.asset.strip().upper()
+    if not cp:
+        raise HTTPException(status_code=400, detail="counterparty required")
+    if not a:
+        raise HTTPException(status_code=400, detail="asset required")
+    if payload.eth_qty < 0:
+        raise HTTPException(status_code=400, detail="eth_qty must be >= 0")
+    db = await get_db()
+    if payload.eth_qty == 0:
+        await db.execute(
+            "DELETE FROM collateral_book_allocation WHERE counterparty = ? COLLATE NOCASE AND asset = ? COLLATE NOCASE",
+            (cp, a),
+        )
+    else:
+        now = datetime.utcnow().isoformat()
+        await db.execute(
+            """INSERT INTO collateral_book_allocation (counterparty, asset, eth_qty, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(counterparty, asset) DO UPDATE SET
+                  eth_qty = excluded.eth_qty, updated_at = excluded.updated_at""",
+            (cp, a, float(payload.eth_qty), now),
+        )
     await db.commit()
     return {"ok": True}
 
