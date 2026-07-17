@@ -545,6 +545,145 @@ class OptimizerV3(BaseOptimizer):
 
         return box_trades
 
+    def _build_box_cash_neutralizer_trades(
+            self,
+            token,
+            counterparty: str,
+            net_cash_imbalance: float,
+            option_legs: list[Candidate],
+            target_expiry: str | None,
+            min_abs_imbalance: float = 10_000.0,
+    ) -> list[dict]:
+        """Box spread (long call + short put at one strike, short call + long
+        put at another, same expiry, single counterparty) sized to neutralize
+        one counterparty's own net cash imbalance (outlay − collection).
+
+        Put-call parity makes a box's value flat with respect to spot at any
+        horizon (r=0, as elsewhere in this module: (C_low−P_low)−(C_high−P_high)
+        = K_high−K_low regardless of spot or vol) — it moves cash without
+        touching the profile fit at all. Its wide strike width (~50% of spot)
+        also gives it a large net premium per contract, unlike a narrow
+        vertical spread's tiny net price — the reason those need such large
+        quantities to move the same amount of cash.
+        """
+        if target_expiry is None or abs(net_cash_imbalance) < min_abs_imbalance:
+            return []
+
+        expiry_legs = [
+            c for c in option_legs
+            if c.expiry_code == target_expiry
+               and c.counterparty == counterparty
+               and c.opt in ("C", "P")
+               and float(c.bs_price_usd or 0.0) > 0.0
+        ]
+
+        calls_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "C"}
+        puts_by_strike = {float(c.strike): c for c in expiry_legs if c.opt == "P"}
+        common_strikes = sorted(set(calls_by_strike) & set(puts_by_strike))
+
+        if len(common_strikes) < 2:
+            return []
+
+        best_box = None
+        for low_strike in common_strikes:
+            for high_strike in common_strikes:
+                if high_strike <= low_strike:
+                    continue
+
+                low_call = calls_by_strike[low_strike]
+                low_put = puts_by_strike[low_strike]
+                high_call = calls_by_strike[high_strike]
+                high_put = puts_by_strike[high_strike]
+
+                # Long box: +C_low -P_low -C_high +P_high.
+                box_debit = (
+                        float(low_call.bs_price_usd or 0.0)
+                        - float(low_put.bs_price_usd or 0.0)
+                        - float(high_call.bs_price_usd or 0.0)
+                        + float(high_put.bs_price_usd or 0.0)
+                )
+
+                if box_debit <= 0.0:
+                    continue
+
+                target_width = max(self.spot * 0.5, 1.0)
+                width = high_strike - low_strike
+                score = abs(width - target_width) + abs((low_strike + high_strike) / 2.0 - self.spot) * 0.25
+
+                if best_box is None or score < best_box[0]:
+                    best_box = (score, box_debit, low_call, low_put, high_call, high_put)
+
+        if best_box is None:
+            return []
+
+        _score, box_debit, low_call, low_put, high_call, high_put = best_box
+        # Deliberately not capped by max_qty: a box plays a distinct role from
+        # naked/spread candidates (pure cash neutralization, flat w.r.t. spot
+        # by construction) and should stay fully effective at closing the
+        # imbalance regardless of the size limit applied elsewhere.
+        box_qty = int(round(abs(net_cash_imbalance) / box_debit))
+        if box_qty == 0:
+            return []
+
+        # net_cash_imbalance > 0 (outlay > collection, desk needs to raise
+        # cash) => sell the box (receive box_debit per unit). < 0 (desk needs
+        # to spend cash) => buy the box.
+        direction = -1 if net_cash_imbalance > 0.0 else 1
+
+        legs = [
+            (low_call, direction * box_qty),
+            (low_put, -direction * box_qty),
+            (high_call, -direction * box_qty),
+            (high_put, direction * box_qty),
+        ]
+
+        if token == "ETH":
+            strategy_instrument = (
+                f"BOX_NEUTRALIZER: "
+                f"ETH-{target_expiry}-{int(low_call.strike)} / "
+                f"ETH-{target_expiry}-{int(high_call.strike)}"
+            )
+        elif token == "FIL":
+            strategy_instrument = (
+                f"BOX_NEUTRALIZER: "
+                f"FIL-{target_expiry}-{int(low_call.strike)} / "
+                f"FIL-{target_expiry}-{int(high_call.strike)}"
+            )
+        else:
+            raise ValueError(f"Unsupported token: {token}")
+
+        box_trades = []
+        for leg, leg_qty in legs:
+            strike = int(leg.strike) if token == "ETH" else np.round(leg.strike, 2)
+            instrument_name = f"{token}-{leg.expiry_code}-{strike}-{leg.opt}"
+            box_trades.append({
+                "counterparty": leg.counterparty,
+                "instrument": instrument_name,
+                "strategy": "BOX_NEUTRALIZER",
+                "strategy_instrument": strategy_instrument,
+                "expiry": leg.expiry_date,
+                "dte": leg.dte,
+                "strike": leg.strike,
+                "opt": leg.opt,
+                "qty": leg_qty,
+                "side": "Buy" if leg_qty > 0 else "Sell",
+                "iv_pct": round(float(leg.iv_pct or 0.0), 1),
+                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                "vega": round(float(leg.vega or 0.0), 4),
+                "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
+                "is_unwind": False,
+                "unwind_qty": 0,
+                "new_qty": abs(int(leg_qty)),
+                "estimated_cash_outlay": 0.0,
+                "normalized_benefit": 0.0,
+                "net_benefit": 0.0,
+                "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
+                "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
+                "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+            })
+
+        return box_trades
+
     def _risk_neutral_spot_weights(
             self,
             spot_arr: np.ndarray,
@@ -977,23 +1116,46 @@ class OptimizerV3(BaseOptimizer):
         print(f"  notional traded      : {total_notional:>14,.0f}")
         print(f"  estimated cash outlay: {total_cash_outlay:>14,.0f}  ({100*total_cash_outlay/max(total_notional,1):.2f}% of notional)")
 
+        def _cash_by_counterparty(trade_list):
+            by_cp: dict[str, dict] = {}
+            for t in trade_list:
+                if t.get("opt") not in ("C", "P"):
+                    continue
+                cp = t.get("counterparty", "")
+                qty = float(t.get("qty", 0.0) or 0.0)
+                price = float(t.get("bs_price_usd", 0.0) or 0.0)
+                entry = by_cp.setdefault(cp, {"outlay": 0.0, "collection": 0.0})
+                if qty > 0:
+                    entry["outlay"] += qty * price
+                elif qty < 0:
+                    entry["collection"] += -qty * price
+            return by_cp
+
         # Cash flow by counterparty — premium paid (buys) vs. collected (sells)
-        # across every final, rounded trade actually proposed, including
-        # forced/DTE rolls. This is the "does the desk need to wire cash, or
-        # does it self-fund" figure to monitor; it should track the LP's own
-        # (continuous, pre-rounding) cash_neutrality accounting closely.
-        cash_by_counterparty: dict[str, dict] = {}
-        for t in trades:
-            if t.get("opt") not in ("C", "P"):
-                continue
-            cp = t.get("counterparty", "")
-            qty = float(t.get("qty", 0.0) or 0.0)
-            price = float(t.get("bs_price_usd", 0.0) or 0.0)
-            entry = cash_by_counterparty.setdefault(cp, {"outlay": 0.0, "collection": 0.0})
-            if qty > 0:
-                entry["outlay"] += qty * price
-            elif qty < 0:
-                entry["collection"] += -qty * price
+        # across every trade proposed so far, including forced/DTE rolls. Any
+        # counterparty left with a large net imbalance gets a box spread sized
+        # to neutralize it — box spreads are flat w.r.t. spot (put-call parity),
+        # so this cleans up cash without touching the profile fit, unlike
+        # raising cash_neutrality_factor (which competes with lam_factor/max_qty).
+        # Needs its own ITM-inclusive candidate set: option_legs is OTM-only
+        # (calls above spot, puts below), so calls/puts never share a strike
+        # there and a box — which needs both at two different strikes — can
+        # never form from it.
+        box_candidate_legs = self._build_candidates(
+            target_expiry=target_expiry, include_itm=True, counterparties=counterparties,
+        )
+        for cp, v in _cash_by_counterparty(trades).items():
+            box_legs = self._build_box_cash_neutralizer_trades(
+                self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
+            )
+            trades.extend(box_legs)
+        trades = self._aggregate_trade_legs(trades)
+
+        # This is the "does the desk need to wire cash, or does it self-fund"
+        # figure to monitor; it should track the LP's own (continuous,
+        # pre-rounding) cash_neutrality accounting closely, modulo any box
+        # trades added above.
+        cash_by_counterparty = _cash_by_counterparty(trades)
         print("=== Cash flow by counterparty ===")
         for cp, v in sorted(cash_by_counterparty.items()):
             net = v["outlay"] - v["collection"]
