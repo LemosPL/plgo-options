@@ -9847,6 +9847,34 @@ function _collatPostedCell(r) {
 }
 
 let collatMap = null;
+// Pending (unsaved) collateral quantity edits, keyed "cp asset book".
+// Edits accumulate here and are committed to the DB only on "Save changes".
+let collatPending = {};
+
+function collatPendingCount() { return Object.keys(collatPending).length; }
+
+function collatUpdateSaveBtn() {
+  const btn = document.getElementById("btn-collat-save");
+  if (!btn) return;
+  const n = collatPendingCount();
+  btn.disabled = n === 0;
+  btn.textContent = n ? `Save changes (${n})` : "Save changes";
+}
+
+async function collatSaveChanges() {
+  const cells = Object.values(collatPending);
+  if (!cells.length) return;
+  const btn = document.getElementById("btn-collat-save");
+  if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+  try {
+    await api("PUT", "/api/collateral/map/cells", { cells });
+    collatPending = {};        // committed — clear dirty state
+    await collatLoad();        // one reload (live prices reused from cache)
+  } catch (e) {
+    alert("Save failed: " + (e.message || e));
+    collatUpdateSaveBtn();
+  }
+}
 
 async function collatLoad() {
   const tb = document.getElementById("collat-map-tbody");
@@ -9970,9 +9998,25 @@ function collatRenderMap() {
     <td class="num ${m.total_balance_usd >= 0 ? "collat-diff-pos" : "collat-diff-neg"}" style="font-weight:600">${m.total_balance_usd > 0 ? "+" : ""}${_collatFmtUsd(m.total_balance_usd)}</td>
   </tr>`;
 
-  // Wire inputs
+  // Fresh render from the server reflects the saved state — drop any dirty edits.
+  collatPending = {};
+  collatUpdateSaveBtn();
+
+  // Wire inputs: edits are BATCHED into collatPending and committed on "Save
+  // changes" — no per-cell PUT or full reload while you type.
   document.querySelectorAll("#collat-map-tbody .collat-qty-input").forEach(inp => {
-    inp.addEventListener("change", () => collatSaveCell(decodeURIComponent(inp.dataset.cp), inp.dataset.asset, inp.dataset.book, parseFloat(inp.value) || 0));
+    inp.addEventListener("input", () => {
+      const cp = decodeURIComponent(inp.dataset.cp);
+      const asset = inp.dataset.asset, book = inp.dataset.book;
+      const qty = parseFloat(inp.value) || 0;
+      collatPending[`${cp} ${asset} ${book}`] = { counterparty: cp, asset, book, qty };
+      inp.style.borderColor = "var(--accent)";  // mark dirty
+      // Live USD hint for immediate feedback (price = current effective price).
+      const px = asset === "USDC" ? 1 : ((collatMap && collatMap.prices && collatMap.prices[asset]) || 0);
+      const hint = inp.nextElementSibling;
+      if (hint) hint.textContent = qty ? _collatFmtUsd(qty * px) : "—";
+      collatUpdateSaveBtn();
+    });
   });
   document.querySelectorAll("#collat-map-tbody .collat-price-input").forEach(inp => {
     inp.addEventListener("change", () => {
@@ -9988,13 +10032,17 @@ function collatRenderMap() {
   });
 }
 
-async function collatSaveCell(counterparty, asset, book, qty) {
-  try { await api("PUT", "/api/collateral/map/cell", { counterparty, asset, book, qty }); await collatLoad(); }
-  catch (e) { alert("Save failed: " + (e.message || e)); }
-}
 async function collatSavePrice(asset, price) {
-  try { await api("PUT", "/api/collateral/price", { asset, price }); await collatLoad(); }
-  catch (e) { alert("Save failed: " + (e.message || e)); }
+  try {
+    // Editing a price override reloads the map, which would drop unsaved qty
+    // edits — commit those first so nothing is lost.
+    if (collatPendingCount()) {
+      await api("PUT", "/api/collateral/map/cells", { cells: Object.values(collatPending) });
+      collatPending = {};
+    }
+    await api("PUT", "/api/collateral/price", { asset, price });
+    await collatLoad();
+  } catch (e) { alert("Save failed: " + (e.message || e)); }
 }
 async function collatAddCp() {
   const name = prompt("Counterparty name:");
@@ -10519,8 +10567,14 @@ async function collatDeleteModal() {
 
 (function initCollateralUi() {
   const setup = () => {
+    const save = document.getElementById("btn-collat-save");
+    if (save) save.addEventListener("click", () => collatSaveChanges());
+
     const refresh = document.getElementById("btn-collat-refresh");
-    if (refresh) refresh.addEventListener("click", () => collatLoad());
+    if (refresh) refresh.addEventListener("click", () => {
+      if (collatPendingCount() && !confirm(`Discard ${collatPendingCount()} unsaved change(s) and reload?`)) return;
+      collatLoad();
+    });
 
     const toggle = document.getElementById("collat-haircut-toggle");
     if (toggle) toggle.addEventListener("change", () => collatRenderMap());
@@ -10528,11 +10582,13 @@ async function collatDeleteModal() {
     const addCp = document.getElementById("btn-collat-add-cp");
     if (addCp) addCp.addEventListener("click", () => collatAddCp());
 
-    // Auto-refresh live prices while the Collateral tab is open, every 10 min.
-    // Skips when a map input is focused so it never clobbers a value you're typing.
+    // Auto-refresh while the Collateral tab is open, every 10 min — this is also
+    // when live prices refresh (the backend caches them for 10 min). Skips when a
+    // map input is focused or there are unsaved edits, so it never clobbers work.
     setInterval(() => {
       const page = document.getElementById("page-collateral");
       if (!page || !page.classList.contains("active")) return;
+      if (collatPendingCount()) return;
       const ae = document.activeElement;
       if (ae && ae.closest && ae.closest("#collat-map-table")) return;
       collatLoad();

@@ -18,6 +18,7 @@ positions in `portfolio_asset` options (BS MtM, matches Portfolio P&L page).
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -31,6 +32,13 @@ from plgo_options.web.routes.portfolio import portfolio_pnl
 _client = DeribitClient()
 
 router = APIRouter()
+
+# Live collateral prices are fetched from Deribit at most once every 10 minutes.
+# Reloading the Collateral Map (e.g. after editing/saving quantities) reuses this
+# cache instead of re-hitting the exchange. Manual price overrides are unaffected
+# — they live in collateral_price and apply immediately in _effective_prices.
+_PRICE_TTL_SECONDS = 600
+_live_price_cache: dict = {"ts": 0.0, "prices": None}
 
 # Haircuts applied to posted collateral. ETH counted at 90% of spot, FIL at
 # 50%, BTC at 85%, WAVE at 50% (illiquid), USD/USDC at face (no haircut).
@@ -544,8 +552,17 @@ MAP_ASSET_LABELS = {"USDC": "USD / USDC", "ETH": "ETH", "FIL": "FIL", "BTC": "BT
 COLLATERAL_BOOKS = ["ETH", "FIL"]
 
 
-async def _live_prices() -> dict[str, float]:
-    """Live USD price per collateral asset (USDC is always 1.0)."""
+async def _live_prices(force: bool = False) -> dict[str, float]:
+    """Live USD price per collateral asset (USDC is always 1.0).
+
+    Cached for _PRICE_TTL_SECONDS (10 min) so repeated map loads don't re-hit
+    Deribit. `force=True` bypasses the cache.
+    """
+    cached = _live_price_cache.get("prices")
+    if (not force and cached is not None
+            and (time.monotonic() - _live_price_cache["ts"]) < _PRICE_TTL_SECONDS):
+        return dict(cached)
+
     out = {"USDC": 1.0, "ETH": 0.0, "FIL": 0.0, "BTC": 0.0}
     try:
         out["ETH"] = float(await _client.get_eth_spot_price())
@@ -559,7 +576,15 @@ async def _live_prices() -> dict[str, float]:
         out["BTC"] = float(await _client.get_btc_spot_price())
     except Exception:
         pass
-    return out
+    # Only cache a successful-ish fetch (keep last good prices if a leg failed to 0,
+    # fall back to prior cache value for that asset).
+    if cached:
+        for a in out:
+            if not out[a] and cached.get(a):
+                out[a] = cached[a]
+    _live_price_cache["prices"] = dict(out)
+    _live_price_cache["ts"] = time.monotonic()
+    return dict(out)
 
 
 async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
@@ -704,6 +729,43 @@ async def upsert_map_cell(payload: MapCell):
     )
     await db.commit()
     return {"ok": True}
+
+
+class MapCells(BaseModel):
+    cells: list[MapCell]
+
+
+@router.put("/map/cells")
+async def upsert_map_cells(payload: MapCells):
+    """Bulk-save edited collateral quantities in one request/transaction.
+
+    Lets the Collateral Map batch a screen's worth of edits behind a single
+    "Save changes" click instead of a round-trip + reload per cell.
+    """
+    now = datetime.utcnow().isoformat()
+    rows = []
+    for c in payload.cells:
+        cp = c.counterparty.strip()
+        a = c.asset.strip().upper()
+        book = c.book.strip().upper()
+        if not cp or not a:
+            raise HTTPException(status_code=400, detail="counterparty and asset required")
+        if book not in COLLATERAL_BOOKS:
+            raise HTTPException(status_code=400, detail="book must be ETH or FIL")
+        if c.qty < 0:
+            raise HTTPException(status_code=400, detail="qty must be >= 0")
+        rows.append((cp, a, book, float(c.qty), now))
+
+    db = await get_db()
+    await db.executemany(
+        """INSERT INTO counterparty_collateral (counterparty, asset, book, qty, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(counterparty, asset, book) DO UPDATE SET
+              qty = excluded.qty, updated_at = excluded.updated_at""",
+        rows,
+    )
+    await db.commit()
+    return {"ok": True, "saved": len(rows)}
 
 
 class PriceUpdate(BaseModel):
