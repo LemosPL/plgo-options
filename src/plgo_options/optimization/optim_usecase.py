@@ -91,6 +91,7 @@ class OptimizerRunParams:
     forced_roll_ids: list[int] | None = None
     cash_neutrality_factor: float | dict[str, float] = 0.0
     max_qty: float | None = None
+    max_trades: int | None = None
 
 
 @dataclass

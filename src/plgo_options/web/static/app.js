@@ -8939,6 +8939,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       : parseFloat(collateralBudgetRaw);
     const maxQtyRaw = document.getElementById("optv2-max-qty")?.value;
     const maxQty = maxQtyRaw === "" || maxQtyRaw === undefined ? null : parseFloat(maxQtyRaw);
+    const maxTradesRaw = document.getElementById("optv2-max-trades")?.value;
+    const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
@@ -8951,6 +8953,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       roll_itm_only: rollItmOnly,
       collateral_budget_pct: collateralBudgetPct,
       max_qty: maxQty,
+      max_trades: maxTrades,
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,

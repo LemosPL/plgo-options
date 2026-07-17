@@ -62,6 +62,7 @@ class OptimizationParams(BaseModel):
     forced_roll_ids: list[int] | None = None
     cash_neutrality_factor: float | dict[str, float] = 0.0
     max_qty: float | None = None
+    max_trades: int | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -100,6 +101,7 @@ async def run_optimizer(params: OptimizationParams):
         forced_roll_ids=params.forced_roll_ids,
         cash_neutrality_factor=params.cash_neutrality_factor,
         max_qty=params.max_qty,
+        max_trades=params.max_trades,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

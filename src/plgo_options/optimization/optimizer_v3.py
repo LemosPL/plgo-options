@@ -819,6 +819,7 @@ class OptimizerV3(BaseOptimizer):
                  forced_roll_ids: list[int] | None = None,
                  cash_neutrality_factor: "dict[str, float] | float" = 0.0,
                  max_qty: float | None = None,
+                 max_trades: int | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1105,6 +1106,22 @@ class OptimizerV3(BaseOptimizer):
                 })
 
         trades = self._aggregate_trade_legs(trades)
+
+        # Keep at most max_trades "replacement" line items — ROLL_UNWIND trades
+        # are a separate table entirely and always kept; BOX_NEUTRALIZER legs
+        # (added below) are exempt too, since they exist specifically to clean
+        # up whatever cash imbalance this truncation itself reopens. Ranked by
+        # notional value (the same "Value ($)" the table shows) — a heuristic
+        # top-N rather than a true cardinality-constrained re-solve of the LP,
+        # simpler and fast at the cost of not being provably the best N trades.
+        if max_trades is not None:
+            roll_trades = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
+            other_trades = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
+            other_trades.sort(
+                key=lambda t: abs(float(t.get("qty", 0) or 0)) * float(t.get("bs_price_usd", 0) or 0),
+                reverse=True,
+            )
+            trades = roll_trades + other_trades[:int(max_trades)]
 
         lp_trades = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
         total_notional = sum(abs(t.get("qty", 0)) * float(t.get("bs_price_usd", 0) or 0) for t in lp_trades)

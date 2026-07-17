@@ -1543,6 +1543,10 @@
           <input type="number" id="optv2-max-qty" value="10000" step="1000" min="0" style="width:6rem"
             title="Hard cap on any single candidate's trade size (contracts). Without it, a high λ/μ/ν can drive the LP toward unrealistically large single-line quantities — spreads especially, since their own price is the small net premium, not either leg's full notional, making them look 'cheap' to trade at huge size. Clear to disable.">
         </label>
+        <label class="pf-filter-label">Max Trades
+          <input type="number" id="optv2-max-trades" value="15" step="1" min="1" style="width:5rem"
+            title="Cap on the number of Replacement/New Trade line items shown (Trades to Unwind/Close and Box (collateral) legs are exempt — always kept). Heuristic top-N by notional value after the LP solves, not a re-solve with fewer trades enforced — dropping trades can reopen cash/collateral balance, which the box neutralizer then cleans back up. Clear to disable.">
+        </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
@@ -2168,6 +2172,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=88"></script>
+<script src="/static/app.js?v=89"></script>
 </body>
 </html>
