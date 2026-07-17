@@ -1603,6 +1603,13 @@
       <div id="optv2-warnings" style="display:none;margin-bottom:1rem;padding:.6rem .8rem;border-radius:6px;
            background:rgba(255,193,7,.12);border:1px solid rgba(255,193,7,.4);font-size:.82rem"></div>
 
+      <!-- Send the proposed trades to the Pricing screen to price/quote them -->
+      <div style="margin:0 0 1.25rem">
+        <button id="btn-optv2-send-to-pricing" class="btn-primary" style="width:auto;background:linear-gradient(135deg,#58a6ff,#1f6feb);border-color:#1f6feb"
+          title="Load the proposed new/replacement trades into the Pricing screen so you can price them (per-counterparty methodology, vol surface, etc.)">Send trades to Pricing</button>
+        <span style="font-size:.72rem;color:var(--muted);margin-left:.6rem">Loads the new/replacement legs into the Pricing screen and prices them.</span>
+      </div>
+
       <!-- A. Summary -->
       <h3 style="margin:0 0 .5rem;font-size:.95rem">Summary</h3>
       <div class="greek-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
@@ -2167,6 +2174,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=89"></script>
+<script src="/static/app.js?v=90"></script>
 </body>
 </html>

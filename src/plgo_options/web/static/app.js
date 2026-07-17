@@ -8943,6 +8943,58 @@ function optv2ExpiryText(t) {
   return String(exp).slice(0, 10);
 }
 
+// Send the optimizer's proposed trades to the Pricing screen so they can be
+// priced/quoted (per-counterparty methodology, vol surface, etc.). Mirrors the
+// opt2 chat "Send to Pricing" flow: load legs, switch page, auto-price.
+document.getElementById("btn-optv2-send-to-pricing")?.addEventListener("click", () => {
+  const res = optv2OptResult;
+  // Prefer the new/replacement trades; fall back to the full aggregated list.
+  const source = (res && ((res.replacement_trades && res.replacement_trades.length)
+    ? res.replacement_trades : res.trades)) || [];
+  if (!source.length) { alert("No optimizer trades to send. Run the optimizer first."); return; }
+
+  legs.length = 0;  // clear existing Pricing legs
+  let sent = 0, skipped = 0;
+  const usedCodes = new Set();
+  for (const t of source) {
+    const opt = String(t.opt || "").toUpperCase();
+    if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures — no option premium to price
+    const qty = Math.abs(Number(t.qty) || 0);
+    if (!qty) { skipped++; continue; }
+    const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
+    const premium = t.bs_price_usd ? String(Math.round(t.bs_price_usd * 100) / 100) : "0";
+    // Use the trade's Deribit expiry code; a bare date can't be a pricing expiry.
+    let expCode = optv2ExpiryText(t);
+    if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
+    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    if (expCode) usedCodes.add(expCode);
+    sent++;
+  }
+  if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+
+  // Add any non-standard expiries to the Pricing dropdown (interpolated).
+  const existing = new Set([...$expSel.options].map(o => o.value));
+  for (const ec of usedCodes) {
+    if (!existing.has(ec)) {
+      const dte = _expiryCodeToDte(ec);
+      const o = document.createElement("option");
+      o.value = ec;
+      o.textContent = `${ec} (${dte != null ? dte + 'd' : '?'}) [interpolated]`;
+      $expSel.appendChild(o);
+      existing.add(ec);
+    }
+  }
+
+  // Switch to the Pricing page via the real nav handler (keeps legs intact).
+  const pricingNav = document.querySelector('.nav-item[data-page="pricing"]');
+  if (pricingNav) pricingNav.click();
+
+  // Auto-price via the vol surface once the legs are in.
+  setTimeout(() => { document.getElementById("btn-replicate")?.click(); }, 300);
+
+  if (skipped) console.log(`Optimizer → Pricing: sent ${sent} leg(s), skipped ${skipped} (perp/zero-qty).`);
+});
+
 // ─── Saved Snapshots ────────────────────────────────────────
 async function optv2LoadSnapshots() {
   const tbody = document.getElementById("optv2-snapshots-body");
