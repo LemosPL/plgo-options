@@ -539,6 +539,10 @@ async def delete_margin(counterparty: str, portfolio_asset: str):
 MAP_ASSETS = ["USDC", "ETH", "FIL", "BTC"]
 MAP_ASSET_LABELS = {"USDC": "USD / USDC", "ETH": "ETH", "FIL": "FIL", "BTC": "BTC"}
 
+# Each collateral holding is allocated to one of the two options books. The
+# Portfolio P&L page pulls the slice matching the page's asset directly.
+COLLATERAL_BOOKS = ["ETH", "FIL"]
+
 
 async def _live_prices() -> dict[str, float]:
     """Live USD price per collateral asset (USDC is always 1.0)."""
@@ -604,14 +608,8 @@ async def collateral_map():
     balance (surplus) / debit (to post) = haircut collateral − liability.
     """
     db = await get_db()
-    cur = await db.execute("SELECT counterparty, asset, qty FROM counterparty_collateral")
+    cur = await db.execute("SELECT counterparty, asset, book, qty FROM counterparty_collateral")
     rows = await cur.fetchall()
-
-    # ETH-book collateral carve-out per (counterparty, asset). FIL book = the rest.
-    cur = await db.execute("SELECT counterparty, asset, eth_qty FROM collateral_book_allocation")
-    alloc_by_cp: dict[str, dict[str, float]] = {}
-    for r in await cur.fetchall():
-        alloc_by_cp.setdefault(r["counterparty"].lower(), {})[(r["asset"] or "").upper()] = float(r["eth_qty"] or 0)
 
     assets = list(MAP_ASSETS)
     for r in rows:
@@ -621,36 +619,39 @@ async def collateral_map():
 
     prices, overrides, live = await _effective_prices(assets)
 
+    # Per counterparty: quantities split by book (ETH / FIL). The total posted
+    # per asset is the sum across books.
     cps: dict[str, dict] = {}
     for r in rows:
         k = r["counterparty"].lower()
-        entry = cps.setdefault(k, {"display": r["counterparty"], "qtys": {}})
-        entry["qtys"][(r["asset"] or "").upper()] = float(r["qty"] or 0)
+        book = (r["book"] or "FIL").upper()
+        book = book if book in COLLATERAL_BOOKS else "FIL"
+        entry = cps.setdefault(k, {"display": r["counterparty"],
+                                   "books": {b: {} for b in COLLATERAL_BOOKS}})
+        entry["books"][book][(r["asset"] or "").upper()] = float(r["qty"] or 0)
 
     liab, liab_disp = await _liability_by_cp()
     for k, n in liab_disp.items():
-        cps.setdefault(k, {"display": n, "qtys": {}})
+        cps.setdefault(k, {"display": n, "books": {b: {} for b in COLLATERAL_BOOKS}})
 
     out_cps = []
     for k, info in cps.items():
-        qtys = {a: float(info["qtys"].get(a, 0) or 0) for a in assets}
+        books = {b: {a: float(info["books"].get(b, {}).get(a, 0) or 0) for a in assets}
+                 for b in COLLATERAL_BOOKS}
+        qtys = {a: sum(books[b][a] for b in COLLATERAL_BOOKS) for a in assets}
         usd = {a: round(qtys[a] * prices[a], 2) for a in assets}
         total = round(sum(usd.values()), 2)
         _nh, hc = _haircut_value(qtys, prices)
         l = liab.get(k, 0.0)
-        # ETH-book carve-out, floored so an allocation can't exceed what's posted.
-        raw_alloc = alloc_by_cp.get(k, {})
-        eth_alloc = {a: min(raw_alloc.get(a, 0.0), qtys.get(a, 0.0))
-                     for a in assets if raw_alloc.get(a, 0.0) > 0}
         out_cps.append({
             "counterparty": info["display"],
+            "books": books,
             "qtys": qtys,
             "usd": usd,
             "total_usd": total,
             "liability_usd": round(l, 2),
             "collateral_haircut_usd": round(hc, 2),
             "balance_usd": round(hc - l, 2),
-            "eth_alloc": eth_alloc,
         })
     out_cps.sort(key=lambda c: c["total_usd"], reverse=True)
 
@@ -675,6 +676,7 @@ async def collateral_map():
 class MapCell(BaseModel):
     counterparty: str
     asset: str
+    book: str = "FIL"  # which options book this collateral backs: ETH or FIL
     qty: float = 0.0
 
 
@@ -682,61 +684,24 @@ class MapCell(BaseModel):
 async def upsert_map_cell(payload: MapCell):
     cp = payload.counterparty.strip()
     a = payload.asset.strip().upper()
+    book = payload.book.strip().upper()
     if not cp:
         raise HTTPException(status_code=400, detail="counterparty required")
     if not a:
         raise HTTPException(status_code=400, detail="asset required")
+    if book not in COLLATERAL_BOOKS:
+        raise HTTPException(status_code=400, detail="book must be ETH or FIL")
     if payload.qty < 0:
         raise HTTPException(status_code=400, detail="qty must be >= 0")
     db = await get_db()
     now = datetime.utcnow().isoformat()
     await db.execute(
-        """INSERT INTO counterparty_collateral (counterparty, asset, qty, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(counterparty, asset) DO UPDATE SET
+        """INSERT INTO counterparty_collateral (counterparty, asset, book, qty, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(counterparty, asset, book) DO UPDATE SET
               qty = excluded.qty, updated_at = excluded.updated_at""",
-        (cp, a, float(payload.qty), now),
+        (cp, a, book, float(payload.qty), now),
     )
-    await db.commit()
-    return {"ok": True}
-
-
-class AllocationCell(BaseModel):
-    counterparty: str
-    asset: str
-    eth_qty: float = 0.0  # quantity earmarked to the ETH options book
-
-
-@router.put("/map/allocation")
-async def upsert_allocation(payload: AllocationCell):
-    """Set how much of a counterparty's `asset` collateral backs the ETH book.
-
-    The FIL book is always the remainder (map holding − this carve-out), so we
-    only store the ETH-book figure. eth_qty = 0 clears the row.
-    """
-    cp = payload.counterparty.strip()
-    a = payload.asset.strip().upper()
-    if not cp:
-        raise HTTPException(status_code=400, detail="counterparty required")
-    if not a:
-        raise HTTPException(status_code=400, detail="asset required")
-    if payload.eth_qty < 0:
-        raise HTTPException(status_code=400, detail="eth_qty must be >= 0")
-    db = await get_db()
-    if payload.eth_qty == 0:
-        await db.execute(
-            "DELETE FROM collateral_book_allocation WHERE counterparty = ? COLLATE NOCASE AND asset = ? COLLATE NOCASE",
-            (cp, a),
-        )
-    else:
-        now = datetime.utcnow().isoformat()
-        await db.execute(
-            """INSERT INTO collateral_book_allocation (counterparty, asset, eth_qty, updated_at)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(counterparty, asset) DO UPDATE SET
-                  eth_qty = excluded.eth_qty, updated_at = excluded.updated_at""",
-            (cp, a, float(payload.eth_qty), now),
-        )
     await db.commit()
     return {"ok": True}
 
@@ -780,8 +745,8 @@ async def add_map_counterparty(payload: CounterpartyAdd):
     now = datetime.utcnow().isoformat()
     # A zero USDC row makes the counterparty appear as a column in the map.
     await db.execute(
-        """INSERT OR IGNORE INTO counterparty_collateral (counterparty, asset, qty, updated_at)
-           VALUES (?, 'USDC', 0, ?)""",
+        """INSERT OR IGNORE INTO counterparty_collateral (counterparty, asset, book, qty, updated_at)
+           VALUES (?, 'USDC', 'FIL', 0, ?)""",
         (cp, now),
     )
     await db.commit()

@@ -204,8 +204,9 @@ async def run_reconciliation(req: ReconRequest):
     # 3. Collateral: our records vs theirs.
     our_collat: dict[str, float] = {}
     try:
+        # Sum across books (ETH/FIL) — reconciliation compares total posted.
         cur = await db.execute(
-            "SELECT asset, qty FROM counterparty_collateral WHERE counterparty = ? COLLATE NOCASE",
+            "SELECT asset, SUM(qty) AS qty FROM counterparty_collateral WHERE counterparty = ? COLLATE NOCASE GROUP BY asset",
             (cp,),
         )
         for row in await cur.fetchall():

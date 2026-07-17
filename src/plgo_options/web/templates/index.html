@@ -417,15 +417,10 @@
       <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
         <input type="checkbox" id="pf-collateral-residual"> residual (collateral + payoff)
       </label>
-      <span class="pf-seg" id="pf-collateral-scope" style="font-size:.75rem">
-        <span style="color:var(--muted);margin-right:.35rem">Scope:</span>
-        <button type="button" class="pf-seg-btn active" data-scope="all">All</button>
-        <button type="button" class="pf-seg-btn" data-scope="eth">ETH (USDC+ETH+BTC)</button>
-        <button type="button" class="pf-seg-btn" data-scope="fil">FIL only</button>
-      </span>
       <span style="font-size:.72rem;color:var(--muted)">
-        From the Collateral Map, on the right axis. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
+        Shows the collateral allocated to <b>this book</b> (matches the page asset) from the Collateral page. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
       </span>
+      <span id="pf-collateral-note" style="font-size:.7rem;color:var(--muted);cursor:help;flex-basis:100%"></span>
     </div>
 
     <!-- Payoff profile chart -->

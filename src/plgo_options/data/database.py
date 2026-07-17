@@ -97,13 +97,19 @@ CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
 );
 """
 
+# One row per (counterparty, asset, book) — how much of each collateral asset a
+# counterparty has posted against each options book (ETH or FIL). The total
+# posted per (counterparty, asset) is the sum across books. Existing single-book
+# DBs are migrated in init_db (see below), splitting the old total via the ETH
+# carve-out that used to live in collateral_book_allocation / a frontend const.
 COLLATERAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS counterparty_collateral (
     counterparty TEXT NOT NULL COLLATE NOCASE,
     asset TEXT NOT NULL COLLATE NOCASE,
+    book TEXT NOT NULL COLLATE NOCASE DEFAULT 'FIL',
     qty REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (counterparty, asset)
+    PRIMARY KEY (counterparty, asset, book)
 );
 """
 
@@ -197,6 +203,41 @@ async def init_db():
             (cp, asset, eth_qty),
         )
     await db.commit()
+
+    # Migration: split counterparty_collateral into per-book rows (ETH / FIL).
+    # Older DBs have PK (counterparty, asset) with a single `qty` = total posted.
+    # We add a `book` column and split each total using the ETH carve-out from
+    # collateral_book_allocation (ETH book = min(carve-out, total); FIL = rest).
+    # The old table is renamed to a *_prebook backup rather than dropped, so no
+    # data is ever lost. Runs once — guarded on the `book` column being absent.
+    cursor = await db.execute("PRAGMA table_info(counterparty_collateral)")
+    coll_cols = {row[1] for row in await cursor.fetchall()}
+    if "book" not in coll_cols:
+        logger.info("Migrating counterparty_collateral to per-book (ETH/FIL) rows...")
+        await db.execute("ALTER TABLE counterparty_collateral RENAME TO counterparty_collateral_prebook")
+        await db.execute(COLLATERAL_SCHEMA)
+        await db.execute(
+            """INSERT INTO counterparty_collateral (counterparty, asset, book, qty, updated_at)
+               SELECT c.counterparty, c.asset, 'ETH',
+                      MIN(COALESCE(a.eth_qty, 0), c.qty), c.updated_at
+               FROM counterparty_collateral_prebook c
+               LEFT JOIN collateral_book_allocation a
+                 ON a.counterparty = c.counterparty COLLATE NOCASE
+                AND a.asset = c.asset COLLATE NOCASE
+               WHERE MIN(COALESCE(a.eth_qty, 0), c.qty) <> 0"""
+        )
+        await db.execute(
+            """INSERT INTO counterparty_collateral (counterparty, asset, book, qty, updated_at)
+               SELECT c.counterparty, c.asset, 'FIL',
+                      c.qty - MIN(COALESCE(a.eth_qty, 0), c.qty), c.updated_at
+               FROM counterparty_collateral_prebook c
+               LEFT JOIN collateral_book_allocation a
+                 ON a.counterparty = c.counterparty COLLATE NOCASE
+                AND a.asset = c.asset COLLATE NOCASE
+               WHERE (c.qty - MIN(COALESCE(a.eth_qty, 0), c.qty)) <> 0"""
+        )
+        await db.commit()
+        logger.info("counterparty_collateral per-book migration complete (backup: counterparty_collateral_prebook)")
 
     # Migration: add 'asset' column if missing (existing DBs)
     cursor = await db.execute("PRAGMA table_info(trades)")
