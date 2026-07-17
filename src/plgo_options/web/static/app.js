@@ -8491,7 +8491,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
     // Populate expiry dropdown from vol surface
     const $expiry = document.getElementById("optv2-target-expiry");
-    $expiry.innerHTML = '<option value="">All Maturities</option>';
+    $expiry.innerHTML = '<option value="">Select maturity…</option>';
     if (optv2Data.vol_surface) {
       const smiles = optv2Data.vol_surface
         .filter(s => s.dte > 0)
@@ -8502,10 +8502,10 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
         opt.textContent = `${s.expiry_code} (${s.dte}d)`;
         $expiry.appendChild(opt);
       });
-      // Default: "All Maturities" (empty value) is already selected
     }
 
-    document.getElementById("btn-run-optv2").disabled = false;
+    // A maturity must be chosen before running — Run stays disabled until then.
+    optv2SyncRunEnabled();
   } catch (e) {
     console.error("Optimizer v2: failed to load portfolio:", e);
     alert("Failed to load portfolio data — check console.\n" + e.message);
@@ -8835,10 +8835,28 @@ function optv2FmtSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/* ── Run gating: require a portfolio loaded AND a maturity chosen ──── */
+function optv2SyncRunEnabled() {
+  const runBtn = document.getElementById("btn-run-optv2");
+  if (!runBtn) return;
+  const hasExpiry = !!(document.getElementById("optv2-target-expiry")?.value);
+  const loaded = !!optv2Data;
+  runBtn.disabled = !(loaded && hasExpiry);
+  runBtn.title = (loaded && !hasExpiry)
+    ? "Choose a target maturity before running"
+    : "";
+}
+document.getElementById("optv2-target-expiry")?.addEventListener("change", optv2SyncRunEnabled);
+
 /* ── Run Optimizer ──────────────────────────────────────────── */
 document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   console.log("[OPT-FE] btn-run-optv2 clicked");
   const $btn = document.getElementById("btn-run-optv2");
+  // Guard: a maturity must be selected.
+  if (!document.getElementById("optv2-target-expiry")?.value) {
+    alert("Choose a target maturity before running the optimizer.");
+    return;
+  }
   $btn.classList.add("loading");
   $btn.textContent = "Running…";
   $btn.disabled = true;
