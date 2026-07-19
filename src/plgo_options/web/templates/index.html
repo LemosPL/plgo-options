@@ -1542,6 +1542,10 @@
           <input type="number" id="optv2-max-trades" value="15" step="1" min="1" style="width:5rem"
             title="Cap on the number of Replacement/New Trade line items shown (Trades to Unwind/Close and Box (collateral) legs are exempt — always kept). Heuristic top-N by notional value after the LP solves, not a re-solve with fewer trades enforced — dropping trades can reopen cash/collateral balance, which the box neutralizer then cleans back up. Clear to disable.">
         </label>
+        <label class="toggle-label" style="margin:0" title="Add a box spread per counterparty (flat w.r.t. spot, doesn't touch profile fit) sized to neutralize whatever cash imbalance is left after other trades. Uncheck to disable and see the raw LP/max_trades result without it.">
+          <input type="checkbox" id="optv2-enable-box-neutralizer" checked>
+          Box Neutralizer
+        </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
@@ -2175,6 +2179,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=92"></script>
+<script src="/static/app.js?v=93"></script>
 </body>
 </html>

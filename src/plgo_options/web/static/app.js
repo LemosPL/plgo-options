@@ -8878,6 +8878,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       : [];
     const saveRequested = document.getElementById("optv2-save-usecase")?.checked || false;
     const rollItmOnly = document.getElementById("optv2-roll-itm-only")?.checked || false;
+    const enableBoxNeutralizer = document.getElementById("optv2-enable-box-neutralizer")?.checked || false;
     // Empty field = no cap (disabled); "0" is a real value (cap at current level) and
     // must NOT collapse to the same thing, so check for the empty string explicitly.
     const collateralBudgetRaw = document.getElementById("optv2-collateral-budget-pct")?.value;
@@ -8901,6 +8902,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       collateral_budget_pct: collateralBudgetPct,
       max_qty: maxQty,
       max_trades: maxTrades,
+      enable_box_neutralizer: enableBoxNeutralizer,
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,

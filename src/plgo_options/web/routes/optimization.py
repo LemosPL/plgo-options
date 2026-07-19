@@ -63,6 +63,7 @@ class OptimizationParams(BaseModel):
     cash_neutrality_factor: float | dict[str, float] = 0.0
     max_qty: float | None = None
     max_trades: int | None = None
+    enable_box_neutralizer: bool = True
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -102,6 +103,7 @@ async def run_optimizer(params: OptimizationParams):
         cash_neutrality_factor=params.cash_neutrality_factor,
         max_qty=params.max_qty,
         max_trades=params.max_trades,
+        enable_box_neutralizer=params.enable_box_neutralizer,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

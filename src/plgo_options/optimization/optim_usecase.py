@@ -92,6 +92,7 @@ class OptimizerRunParams:
     cash_neutrality_factor: float | dict[str, float] = 0.0
     max_qty: float | None = None
     max_trades: int | None = None
+    enable_box_neutralizer: bool = True
 
 
 @dataclass

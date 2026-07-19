@@ -820,6 +820,7 @@ class OptimizerV3(BaseOptimizer):
                  cash_neutrality_factor: "dict[str, float] | float" = 0.0,
                  max_qty: float | None = None,
                  max_trades: int | None = None,
+                 enable_box_neutralizer: bool = True,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -851,8 +852,16 @@ class OptimizerV3(BaseOptimizer):
         if option_smile is None:
             return {"status": "no_smile", "message": "No valid vol surface slices available."}
 
-        # Inject candidates for held positions whose counterparty is not in the requested list,
-        # so they can be unwound even when counterparties=["Flowdesk", "KeyRock"].
+        # Inject candidates for held positions at off-target expiries (option_legs
+        # only covers target_expiry) so they're eligible for voluntary unwind too.
+        # Scoped to the selected counterparties — a position from a counterparty
+        # NOT in that list is left alone entirely now, matching the same scoping
+        # already applied to new candidates and forced rolls (previously this was
+        # a deliberate exception/"safety valve" letting the LP touch an
+        # off-scope counterparty's book; reversed on request).
+        selected_counterparties_inject = {
+            c.strip() for c in (counterparties or []) if c and c.strip() and c.strip().upper() != "ALL"
+        }
         option_leg_keys = {(c.expiry_code, c.strike, c.opt, c.counterparty) for c in option_legs}
         held_expiries = set()
         for p in self.positions:
@@ -866,6 +875,8 @@ class OptimizerV3(BaseOptimizer):
                 continue
             held_expiries.add(exp_code)
             cp = getattr(p, "counterparty", "")
+            if selected_counterparties_inject and cp not in selected_counterparties_inject:
+                continue
             strike = float(getattr(p, "strike", 0.0) or 0.0)
             opt = str(getattr(p, "opt", "") or "")
             if opt not in ("C", "P") or (exp_code, strike, opt, cp) in option_leg_keys:
@@ -1158,15 +1169,16 @@ class OptimizerV3(BaseOptimizer):
         # (calls above spot, puts below), so calls/puts never share a strike
         # there and a box — which needs both at two different strikes — can
         # never form from it.
-        box_candidate_legs = self._build_candidates(
-            target_expiry=target_expiry, include_itm=True, counterparties=counterparties,
-        )
-        for cp, v in _cash_by_counterparty(trades).items():
-            box_legs = self._build_box_cash_neutralizer_trades(
-                self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
+        if enable_box_neutralizer:
+            box_candidate_legs = self._build_candidates(
+                target_expiry=target_expiry, include_itm=True, counterparties=counterparties,
             )
-            trades.extend(box_legs)
-        trades = self._aggregate_trade_legs(trades)
+            for cp, v in _cash_by_counterparty(trades).items():
+                box_legs = self._build_box_cash_neutralizer_trades(
+                    self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
+                )
+                trades.extend(box_legs)
+            trades = self._aggregate_trade_legs(trades)
 
         # This is the "does the desk need to wire cash, or does it self-fund"
         # figure to monitor; it should track the LP's own (continuous,
