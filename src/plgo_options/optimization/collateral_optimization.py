@@ -38,6 +38,7 @@ class CollateralOptimization:
         forced_cash_by_counterparty=None,
         max_qty=None,
         leg_groups=None,
+        downside_factor=1.0,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -90,16 +91,25 @@ class CollateralOptimization:
                 group_net = pulp.lpSum(sign * (buy_vars[j] - sell_vars[j]) for j, sign in members)
                 prob += group_net <= float(max_qty), f"max_qty_pos_{gi}"
                 prob += group_net >= -float(max_qty), f"max_qty_neg_{gi}"
-        abs_error_vars = [pulp.LpVariable(f"abs_error_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
+        # Split the symmetric |error| penalty into two one-sided terms so a
+        # shortfall (book below target) and a surplus (book above target) can
+        # be weighted differently — downside_factor > 1 makes the LP treat the
+        # target as a floor to clear rather than a bullseye to hit exactly,
+        # since overshooting it (more cushion, less risk) isn't actually as
+        # bad as falling short of it. downside_factor=1 is exactly the old
+        # symmetric behavior (shortfall and surplus equally weighted).
+        shortfall_vars = [pulp.LpVariable(f"shortfall_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
+        surplus_vars = [pulp.LpVariable(f"surplus_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
         abs_net_pos_vars = [pulp.LpVariable(f"abs_net_pos_{j}", lowBound=0, cat="Continuous") for j in range(n_candidates)]
 
         for i in range(n_spots):
             trade_payoff_i = pulp.lpSum(
                 (buy_vars[j] - sell_vars[j]) * float(c_payoffs[j][i]) for j in range(n_candidates)
             )
+            # error_i > 0 => target > fitted (shortfall); < 0 => fitted > target (surplus).
             error_i = float(residual_payoff[i]) - trade_payoff_i
-            prob += abs_error_vars[i] >= error_i, f"abs_error_pos_{i}"
-            prob += abs_error_vars[i] >= -error_i, f"abs_error_neg_{i}"
+            prob += shortfall_vars[i] >= error_i, f"shortfall_{i}"
+            prob += surplus_vars[i] >= -error_i, f"surplus_{i}"
 
         for j in range(n_candidates):
             net_pos_j = float(existing_qty[j]) + buy_vars[j] - sell_vars[j]
@@ -126,7 +136,10 @@ class CollateralOptimization:
             cp = getattr(c, "counterparty", "")
             cp_indices.setdefault(cp, []).append(j)
 
-        profile_error = pulp.lpSum(float(spot_weights[i]) * abs_error_vars[i] for i in range(n_spots))
+        profile_error = pulp.lpSum(
+            float(spot_weights[i]) * (float(downside_factor) * shortfall_vars[i] + surplus_vars[i])
+            for i in range(n_spots)
+        )
         trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
 
         tiered_mode = collateral_tier_mu is not None

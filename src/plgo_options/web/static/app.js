@@ -8892,6 +8892,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
+      downside_factor: parseFloat(document.getElementById("optv2-downside-factor")?.value || "1"),
       mu_factor: parseFloat(document.getElementById("optv2-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       target_expiry: document.getElementById("optv2-target-expiry").value || null,

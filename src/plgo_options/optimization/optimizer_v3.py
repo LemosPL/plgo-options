@@ -821,6 +821,7 @@ class OptimizerV3(BaseOptimizer):
                  max_qty: float | None = None,
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
+                 downside_factor: float = 1.0,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1022,6 +1023,7 @@ class OptimizerV3(BaseOptimizer):
             forced_cash_by_counterparty=forced_cash_by_counterparty,
             max_qty=max_qty,
             leg_groups=leg_groups,
+            downside_factor=downside_factor,
         )
 
         if lp_result is None:

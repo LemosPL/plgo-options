@@ -93,6 +93,7 @@ class OptimizerRunParams:
     max_qty: float | None = None
     max_trades: int | None = None
     enable_box_neutralizer: bool = True
+    downside_factor: float = 1.0
 
 
 @dataclass
