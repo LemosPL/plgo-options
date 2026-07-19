@@ -8481,7 +8481,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
   $btn.textContent = "Loading…";
 
   try {
-    optv2Data = await get("/api/portfolio/pnl");
+    optv2Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
     optv2PopulateCounterparties();
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
