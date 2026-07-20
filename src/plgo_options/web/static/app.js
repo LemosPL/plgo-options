@@ -9572,50 +9572,31 @@ function optv3RenderKpi() {
   document.getElementById("optv3-total-mtm").textContent = "$" + optv2Fmt(sum(p => p.current_mtm), 2);
 }
 
-// Payoff chart — faithful copy of optv2RenderPayoff, pointed at v3 state/ids.
+// Payoff chart — plots actual spot price on a LOG x-axis so it works at any
+// scale (ETH ~$1-14k, FIL ~$0.2-10). Plotly auto-generates price ticks, so no
+// asset-specific tick snapping is needed. Labels are asset-aware via currentAsset.
 function optv3RenderPayoff() {
   const spots = optv3Data.spot_ladder;
   const positions = optv3ActivePositions();
-  const S0 = optv3Data.eth_spot;
-  if (!positions.length) return;
+  const S0 = optv3Data.eth_spot;  // /pnl uses "eth_spot" for the spot of any asset
+  if (!positions.length || !spots || !spots.length) return;
 
-  const logM = spots.map(s => Math.log(s / S0));
-
-  const visibleIdx = [];
-  for (let i = 0; i < spots.length; i++) {
-    let hasData = false;
-    for (const h of OPTV2_HORIZONS) {
-      if (positions[0].payoff_by_horizon[h] && positions[0].payoff_by_horizon[h][i] != null) { hasData = true; break; }
-    }
-    if (hasData) visibleIdx.push(i);
-  }
-
-  const tickVals = [], tickTexts = [];
-  const MIN_LM_GAP = 0.018, LM_GAP_SCALE = 0.12;
-  let lastTickLM = -Infinity;
-  for (const i of visibleIdx) {
-    const lm = logM[i], absLM = Math.abs(lm);
-    const requiredGap = MIN_LM_GAP + LM_GAP_SCALE * absLM;
-    if (lm - lastTickLM >= requiredGap) {
-      const s = spots[i];
-      const roundTo = absLM < 0.08 ? 100 : absLM < 0.20 ? 200 : 500;
-      if (s % roundTo === 0) { tickVals.push(lm); tickTexts.push("$" + s.toLocaleString()); lastTickLM = lm; }
-    }
-  }
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
 
   const traces = [];
   if (optv3OptResult && optv3OptResult.status === "ok") {
+    // x = actual spot prices (Plotly log-transforms them for the log axis).
     const optSpots = optv3OptResult.spot_ladder || spots;
-    const optLogM = optSpots.map(s => Math.log(s / S0));
     const beforeCurve = optv3OptResult.before.payoff_by_horizon["0"];
-    if (beforeCurve) traces.push({ x: optLogM, y: beforeCurve, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
     const afterCurve = optv3OptResult.after.payoff_by_horizon["0"];
-    if (afterCurve) traces.push({ x: optLogM, y: afterCurve, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
     if (optv3OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
       const targetAtSpot = optv3OptResult.target_payoff[spotIdx];
       const targetCurve = optv3OptResult.target_payoff.map(v => v - targetAtSpot);
-      traces.push({ x: optLogM, y: targetCurve, mode: "lines", name: "Target Profile", line: { color: "#ffca28", width: 2, dash: "dot" } });
+      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target Profile", line: { color: "#ffca28", width: 2, dash: "dot" } });
     }
   } else {
     const horizonColors = { 0: "#4fc3f7", 16: "#ba68c8", 30: "#ffb74d", 60: "#81c784", 90: "#e57373" };
@@ -9628,26 +9609,32 @@ function optv3RenderPayoff() {
         if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; }
       });
       if (!hasData) continue;
-      traces.push({ x: logM, y: totalPayoff, mode: "lines", name: h === 0 ? "Now (0d)" : `T+${h}d`, line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 } });
+      traces.push({ x: spots, y: totalPayoff, mode: "lines", name: h === 0 ? "Now (0d)" : `T+${h}d`, line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 } });
     }
   }
 
-  traces.push({ x: [logM[0], logM[logM.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
+  // Break-even line (y=0) across the spot range.
+  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
 
+  // Current-spot marker (actual price on the log axis).
   const spotPayoff0 = (() => {
     const totalPayoff = new Array(spots.length).fill(0);
     positions.forEach(p => { const curve = p.payoff_by_horizon["0"]; if (curve) for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; });
     return totalPayoff[optv2NearestIdx(spots, S0)];
   })();
-  traces.push({ x: [0], y: [spotPayoff0], mode: "markers", name: `Current Spot ($${S0.toLocaleString()})`, marker: { color: "#ffca28", size: 10, symbol: "diamond" } });
+  traces.push({ x: [S0], y: [spotPayoff0], mode: "markers", name: `${assetLabel} Spot ($${fmtPrice(S0)})`, marker: { color: "#ffca28", size: 10, symbol: "diamond" } });
 
   const layout = {
     title: { text: optv3OptResult ? "Payoff — Before vs After vs Target (Now)" : "Portfolio Payoff — All Positions", font: { color: "#e6edf3", size: 16 } },
-    xaxis: { title: "Log-Moneyness  ln(K / Spot)", tickvals: tickVals, ticktext: tickTexts, tickangle: -45, color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#ffca28", zerolinewidth: 1.5 },
+    xaxis: {
+      title: `${assetLabel} Spot (USD, log scale)`,
+      type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true,
+      color: "#8b949e", gridcolor: "#21262d",
+    },
     yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
     paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
     legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22 },
-    margin: { t: 50, b: 80, l: 80, r: 30 },
+    margin: { t: 50, b: 70, l: 80, r: 30 },
   };
   Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true });
 }
