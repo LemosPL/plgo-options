@@ -95,6 +95,7 @@ class OptimizerRunParams:
     enable_box_neutralizer: bool = True
     downside_factor: float = 1.0
     t90_weight: float = 0.0
+    manual_target: list[dict] | None = None
 
 
 @dataclass

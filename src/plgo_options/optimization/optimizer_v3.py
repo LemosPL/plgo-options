@@ -826,6 +826,7 @@ class OptimizerV3(BaseOptimizer):
                  enable_box_neutralizer: bool = True,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.0,
+                 manual_target: list[dict] | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -910,8 +911,19 @@ class OptimizerV3(BaseOptimizer):
         n_unwind_only = sum(1 for c in candidates if getattr(c, "unwind_only", False))
         print(f"candidates: {len(candidates)} total, {n_with_existing} with existing_qty≠0, {n_unwind_only} unwind_only")
 
-        target_strikes = np.asarray(target_profile.index, dtype=float)
-        target_payoff_arr = np.asarray(target_profile["Payoff($)"], dtype=float)
+        # Manual target (user-drawn on the Optimizer v3 screen) overrides the
+        # parametric one when supplied — the LP fits the book to these control
+        # points instead. Needs >=2 points; np.interp fills between them, and the
+        # LP's cash_shift free variable absorbs any constant vertical offset, so
+        # only the *shape* of the supplied curve matters.
+        if manual_target and len(manual_target) >= 2:
+            _pts = sorted(manual_target, key=lambda p: float(p.get("x", 0)))
+            target_strikes = np.array([float(p["x"]) for p in _pts], dtype=float)
+            target_payoff_arr = np.array([float(p["y"]) for p in _pts], dtype=float)
+            print(f"manual_target: fitting to {len(_pts)} user control points")
+        else:
+            target_strikes = np.asarray(target_profile.index, dtype=float)
+            target_payoff_arr = np.asarray(target_profile["Payoff($)"], dtype=float)
 
         spot_arr = np.array(self.spot_ladder, dtype=float)
         target_interp = np.interp(spot_arr, target_strikes, target_payoff_arr)

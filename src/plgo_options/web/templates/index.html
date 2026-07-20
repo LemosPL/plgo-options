@@ -1972,13 +1972,22 @@
 
           <!-- Target Profile (payoff-at-Now table: Before / After / Target) -->
           <div id="subtab-optv3-profile" class="sub-tab-pane">
-            <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now</span></h3>
-            <p class="optv3-hint" style="margin:0 0 .6rem">The desired payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0 and anchored to $0 at the current spot, the same basis as the payoff chart.</p>
+            <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now (editable)</span></h3>
+            <p class="optv3-hint" style="margin:0 0 .6rem">The payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0, anchored to $0 at the current spot. <b>Edit the Target column</b> to draw your own target, <b>Smooth</b> to round it off, then <b>Apply &amp; Re-run</b> to optimize the book toward it.</p>
+            <div id="optv3-target-toolbar" style="display:none;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.8rem">
+              <button id="btn-optv3-target-smooth" class="btn-secondary" style="width:auto" title="Moving-average smooth the Target column">Smooth</button>
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">strength
+                <input id="optv3-target-smooth-strength" type="range" min="1" max="8" value="3" style="width:90px">
+              </label>
+              <button id="btn-optv3-target-reset" class="btn-secondary" style="width:auto" title="Discard manual edits and use the built-in parametric target">Reset to auto</button>
+              <button id="btn-optv3-target-apply" class="btn-primary" style="width:auto" title="Re-run the optimizer fitting to your edited target">Apply &amp; Re-run</button>
+              <span id="optv3-target-status" class="optv3-hint" style="margin:0"></span>
+            </div>
             <div id="optv3-profile-chart" style="width:100%;height:360px;display:none;margin-bottom:1rem"></div>
-            <div id="optv3-profile-empty" class="optv3-empty">Run the optimizer to see the target profile.</div>
+            <div id="optv3-profile-empty" class="optv3-empty">Load the risk profile to define a target.</div>
             <div id="optv3-profile-wrap" class="chain-wrapper" style="max-height:520px;display:none">
               <table class="pf-table">
-                <thead><tr><th>Spot</th><th class="num">Before (Now)</th><th class="num">After (Now)</th><th class="num">Target</th><th class="num">After − Target</th></tr></thead>
+                <thead><tr><th>Spot</th><th class="num">Before (Now)</th><th class="num">After (Now)</th><th class="num">Target ✎</th><th class="num">After − Target</th></tr></thead>
                 <tbody id="optv3-profile-tbody"></tbody>
               </table>
             </div>

@@ -9474,15 +9474,11 @@ async function optv3Load() {
     // Reset the "after" matrix panel until a run produces one.
     document.getElementById("optv3-matrix-after-panel").style.display = "none";
     document.getElementById("optv3-matrix-grid").style.gridTemplateColumns = "1fr";
-    // Reset run-only panes (trades under chart, target profile) until a new run.
+    // Reset the run-only trades block until a new run. The Target Profile pane is
+    // managed by optv3RenderProfileTable() (called from optv3RenderPreview) so it
+    // stays editable off the loaded book even before the first run.
     const $tu = document.getElementById("optv3-trades-under-chart");
     if ($tu) $tu.style.display = "none";
-    const $pw = document.getElementById("optv3-profile-wrap");
-    const $pe = document.getElementById("optv3-profile-empty");
-    const $pc = document.getElementById("optv3-profile-chart");
-    if ($pw) $pw.style.display = "none";
-    if ($pc) $pc.style.display = "none";
-    if ($pe) { $pe.style.display = ""; $pe.textContent = "Run the optimizer to see the target profile."; }
 
     optv3RenderBasePill();
     optv3RenderPreview();
@@ -9502,6 +9498,7 @@ function optv3RenderPreview() {
   optv3RenderPositions();
   optv3RenderPayoff();
   optv3RenderMatrix();
+  optv3RenderProfileTable();
 }
 
 // Current-book positions table — the loaded risk profile's per-position numbers.
@@ -9767,7 +9764,7 @@ function optv3RenderResult(data) {
   }
 
   // Target profile table (payoff-at-Now: Before / After / Target)
-  optv3RenderProfileTable(data);
+  optv3RenderProfileTable();
 
   // Structures
   const $structEmpty = document.getElementById("optv3-structures-empty");
@@ -9796,78 +9793,193 @@ function optv3RenderResult(data) {
     ], 11, "No replacement or new trades proposed.");
 }
 
-// Target-profile table: spot × (Before / After / Target / After−Target) at
-// horizon 0, anchored to $0 at current spot — identical basis to the payoff
-// chart, so the table and the dotted Target line agree.
-function optv3RenderProfileTable(data) {
+// ── Target Profile: editable table + smoothing + live chart preview ─────────
+// The user can type target payoff values per spot (or smooth them), and the LP
+// fits to those on the next Run (sent as manual_target). All values are at
+// horizon 0 and anchored to $0 at the current spot — same basis as the chart.
+let optv3ManualTarget = null;     // [{x: spot, y: payoff}, ...] control points, or null = auto
+let optv3ProfileState = null;     // {spots, after, displayIdx} cached for live residual updates
+
+// Where the profile table/chart get their curves: a run result if present, else
+// the loaded book (so you can define a target before ever running).
+function optv3ProfileSource() {
+  if (optv3OptResult && optv3OptResult.status === "ok") {
+    const r = optv3OptResult;
+    return {
+      spots: r.spot_ladder || [],
+      S0: (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0,
+      before: r.before && r.before.payoff_by_horizon && r.before.payoff_by_horizon["0"],
+      after: r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon["0"],
+      autoTarget: r.target_payoff || null,
+    };
+  }
+  if (optv3Data && optv3Data.spot_ladder) {
+    const spots = optv3Data.spot_ladder;
+    const ps = optv3ActivePositions();
+    const before = spots.map((_, i) => ps.reduce((a, p) =>
+      a + ((p.payoff_by_horizon && p.payoff_by_horizon["0"] && p.payoff_by_horizon["0"][i]) || 0), 0));
+    return { spots, S0: optv3Data.eth_spot || 0, before, after: null, autoTarget: null };
+  }
+  return null;
+}
+
+// Auto target, anchored to $0 at current spot (matches the display convention).
+function optv3AutoTargetAnchored(src) {
+  if (!src.autoTarget) return null;
+  const at = src.autoTarget[optv2NearestIdx(src.spots, src.S0)] || 0;
+  return src.autoTarget.map(v => v - at);
+}
+
+// Linear-interpolate the manual control points onto a spot array (or null).
+function optv3ManualTargetInterp(spots) {
+  if (!optv3ManualTarget || optv3ManualTarget.length < 2) return null;
+  const pts = optv3ManualTarget;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return spots.map(s => {
+    if (s <= xs[0]) return ys[0];
+    if (s >= xs[xs.length - 1]) return ys[ys.length - 1];
+    let i = 1; while (i < xs.length && xs[i] < s) i++;
+    const x0 = xs[i - 1], x1 = xs[i], y0 = ys[i - 1], y1 = ys[i];
+    return x1 === x0 ? y0 : y0 + (y1 - y0) * (s - x0) / (x1 - x0);
+  });
+}
+
+function optv3RenderProfileTable() {
   const tbody = document.getElementById("optv3-profile-tbody");
   const empty = document.getElementById("optv3-profile-empty");
   const wrap = document.getElementById("optv3-profile-wrap");
+  const toolbar = document.getElementById("optv3-target-toolbar");
   if (!tbody) return;
-  const spots = (data && data.spot_ladder) || [];
-  const before = data && data.before && data.before.payoff_by_horizon && data.before.payoff_by_horizon["0"];
-  const after = data && data.after && data.after.payoff_by_horizon && data.after.payoff_by_horizon["0"];
-  const target = data && data.target_payoff;
-  if (!spots.length || !target) {
-    tbody.innerHTML = "";
-    if (empty) { empty.style.display = ""; empty.textContent = target ? "No spot ladder in the result." : "This run produced no target profile."; }
+  const src = optv3ProfileSource();
+  if (!src || !src.spots.length) {
+    tbody.innerHTML = ""; optv3ProfileState = null;
     if (wrap) wrap.style.display = "none";
-    optv3RenderProfileChart(null);
+    if (toolbar) toolbar.style.display = "none";
+    if (empty) { empty.style.display = ""; empty.textContent = "Load the risk profile to define a target."; }
+    optv3RenderProfileChart();
     return;
   }
   if (empty) empty.style.display = "none";
   if (wrap) wrap.style.display = "";
-  optv3RenderProfileChart(data);
+  if (toolbar) toolbar.style.display = "";
 
-  const S0 = data.eth_spot;
+  const spots = src.spots, S0 = src.S0;
   const spotIdx = optv2NearestIdx(spots, S0);
-  const targetAtSpot = target[spotIdx] || 0;
   const displayIdx = optv2MatrixDisplayIdx(spots);
+  const auto = optv3AutoTargetAnchored(src);
+  const manualMap = optv3ManualTarget ? new Map(optv3ManualTarget.map(p => [p.x, p.y])) : null;
+  optv3ProfileState = { spots, after: src.after, displayIdx };
+
   const cell = v => {
-    if (v == null || isNaN(v)) return `<td style="text-align:right">—</td>`;
+    if (v == null || isNaN(v)) return `<td class="num">—</td>`;
     const c = v > 0 ? "#66bb6a" : v < 0 ? "#ef5350" : "";
-    return `<td style="text-align:right;color:${c}">${Math.round(v).toLocaleString()}</td>`;
+    return `<td class="num" style="color:${c}">${Math.round(v).toLocaleString()}</td>`;
   };
+
   tbody.innerHTML = displayIdx.map(si => {
     const s = spots[si];
-    const b = before ? before[si] : null;
-    const a = after ? after[si] : null;
-    const t = target[si] != null ? target[si] - targetAtSpot : null;
-    const resid = (a != null && t != null) ? a - t : null;
+    const b = src.before ? src.before[si] : null;
+    const a = src.after ? src.after[si] : null;
+    const tv = (manualMap && manualMap.has(s)) ? manualMap.get(s) : (auto ? auto[si] : 0);
+    const resid = (a != null) ? a - tv : null;
     const hl = si === spotIdx ? ' class="row-highlight"' : '';
-    return `<tr${hl}><td style="font-weight:600">$${s.toLocaleString()}</td>`
-      + `${cell(b)}${cell(a)}${cell(t)}${cell(resid)}</tr>`;
+    return `<tr${hl}>`
+      + `<td style="font-weight:600">$${s.toLocaleString()}</td>`
+      + `${cell(b)}${cell(a)}`
+      + `<td class="num"><input class="optv3-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
+      + `${cell(resid)}</tr>`;
   }).join("");
+
+  tbody.querySelectorAll(".optv3-target-input").forEach(inp => inp.addEventListener("input", optv3OnTargetEdit));
+  optv3RenderProfileChart();
+  optv3UpdateTargetStatus();
 }
 
-// Target-profile chart (Before / After / Target curves) on the Target Profile
-// tab — same log price axis as the main payoff chart.
-function optv3RenderProfileChart(data) {
+// Rebuild the manual target from the current inputs; refresh chart + residuals live.
+function optv3OnTargetEdit() {
+  const inputs = document.querySelectorAll("#optv3-profile-tbody .optv3-target-input");
+  optv3ManualTarget = Array.from(inputs)
+    .map(i => ({ x: Number(i.dataset.x), y: Number(i.value) || 0 }))
+    .filter(p => Number.isFinite(p.x))
+    .sort((a, b) => a.x - b.x);
+  optv3RenderProfileChart();
+  optv3UpdateResiduals();
+  optv3UpdateTargetStatus();
+}
+
+// Update just the After−Target column in place (no input rebuild → no focus loss).
+function optv3UpdateResiduals() {
+  const st = optv3ProfileState; if (!st) return;
+  const rows = document.querySelectorAll("#optv3-profile-tbody tr");
+  rows.forEach((tr, k) => {
+    const si = st.displayIdx[k]; if (si == null) return;
+    const a = st.after ? st.after[si] : null;
+    const inp = tr.querySelector(".optv3-target-input");
+    const tds = tr.querySelectorAll("td");
+    const residTd = tds[tds.length - 1];
+    if (!residTd) return;
+    if (a == null || !inp) { residTd.textContent = "—"; residTd.style.color = ""; return; }
+    const r = a - (Number(inp.value) || 0);
+    residTd.textContent = Math.round(r).toLocaleString();
+    residTd.style.color = r > 0 ? "#66bb6a" : r < 0 ? "#ef5350" : "";
+  });
+}
+
+// Moving-average smooth over the current target control points.
+function optv3SmoothTarget() {
+  const st = optv3ProfileState; if (!st) return;
+  const inputs = document.querySelectorAll("#optv3-profile-tbody .optv3-target-input");
+  if (!inputs.length) return;
+  const vals = Array.from(inputs).map(i => Number(i.value) || 0);
+  const win = Math.max(1, Math.round(Number(document.getElementById("optv3-target-smooth-strength")?.value || 3)));
+  const sm = vals.map((_, i) => {
+    let s = 0, n = 0;
+    for (let j = i - win; j <= i + win; j++) if (j >= 0 && j < vals.length) { s += vals[j]; n++; }
+    return n ? s / n : vals[i];
+  });
+  optv3ManualTarget = Array.from(inputs)
+    .map((inp, k) => ({ x: Number(inp.dataset.x), y: sm[k] }))
+    .filter(p => Number.isFinite(p.x)).sort((a, b) => a.x - b.x);
+  optv3RenderProfileTable();
+}
+
+function optv3ResetTarget() {
+  optv3ManualTarget = null;
+  optv3RenderProfileTable();
+}
+
+function optv3UpdateTargetStatus() {
+  const el = document.getElementById("optv3-target-status"); if (!el) return;
+  const n = optv3ManualTarget ? optv3ManualTarget.length : 0;
+  el.textContent = n >= 2
+    ? `Manual target active (${n} points) — click Apply & Re-run to optimize to it.`
+    : "Using the auto (parametric) target. Edit any Target cell — or Smooth — to override.";
+}
+
+// Target-profile chart (Before / After / Target). Target = manual override if set.
+function optv3RenderProfileChart() {
   const el = document.getElementById("optv3-profile-chart");
   if (!el) return;
-  const spots = (data && data.spot_ladder) || [];
-  const target = data && data.target_payoff;
-  if (!spots.length || !target) { el.style.display = "none"; return; }
+  const src = optv3ProfileSource();
+  if (!src || !src.spots.length) { el.style.display = "none"; return; }
   el.style.display = "";
-
-  const S0 = data.eth_spot;
+  const spots = src.spots, S0 = src.S0;
   const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
-  const spotIdx = optv2NearestIdx(spots, S0);
-  const targetAtSpot = target[spotIdx] || 0;
-  const before = data.before && data.before.payoff_by_horizon && data.before.payoff_by_horizon["0"];
-  const after = data.after && data.after.payoff_by_horizon && data.after.payoff_by_horizon["0"];
+  const manual = optv3ManualTargetInterp(spots);
+  const auto = optv3AutoTargetAnchored(src);
+  const targetCurve = manual || auto;
 
   const traces = [];
-  if (before) traces.push({ x: spots, y: before, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
-  if (after) traces.push({ x: spots, y: after, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
-  traces.push({ x: spots, y: target.map(v => v - targetAtSpot), mode: "lines", name: "Target", line: { color: "#ffca28", width: 2, dash: "dot" } });
+  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", line: { color: "#ffca28", width: 2, dash: "dot" } });
 
   let yLo = 0, yHi = 0;
   traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
-  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
 
   const layout = {
-    title: { text: "Target Profile — Before vs After vs Target (Now)", font: { color: "#e6edf3", size: 14 } },
+    title: { text: manual ? "Target Profile — Manual Target (Now)" : "Target Profile — Before vs After vs Target (Now)", font: { color: "#e6edf3", size: 14 } },
     xaxis: { title: `${assetLabel} Spot (USD, log scale)`, type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true, color: "#8b949e", gridcolor: "#21262d" },
     yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
     paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
@@ -9967,6 +10079,12 @@ document.getElementById("btn-optv3-send-to-pricing")?.addEventListener("click", 
 document.getElementById("btn-load-optv3")?.addEventListener("click", optv3Load);
 document.getElementById("optv3-target-expiry")?.addEventListener("change", optv3SyncRunEnabled);
 document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
+document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
+document.getElementById("btn-optv3-target-reset")?.addEventListener("click", optv3ResetTarget);
+document.getElementById("btn-optv3-target-apply")?.addEventListener("click", () => {
+  if (!document.getElementById("optv3-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
+  document.getElementById("btn-run-optv3")?.click();
+});
 
 document.getElementById("btn-run-optv3")?.addEventListener("click", async () => {
   const $btn = document.getElementById("btn-run-optv3");
@@ -10010,6 +10128,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,
       forced_roll_ids: [...tmSelected],
       base_trade_ids: optv2BaseIds(),
+      // User-edited target profile (Target Profile tab). null = auto parametric.
+      manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
     });
     console.log("Optimizer v3 result:", data);
     optv3RenderResult(data);

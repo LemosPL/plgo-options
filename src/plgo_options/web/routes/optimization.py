@@ -71,6 +71,10 @@ class OptimizationParams(BaseModel):
     # against becomes only this subset), instead of the whole asset book. Sourced
     # from a selection of deals on the Deals / Risk screen. None/empty = full book.
     base_trade_ids: list[int] | None = None
+    # Optional user-drawn target payoff the LP fits to, replacing the parametric
+    # target. List of {"x": spot, "y": payoff} control points (>=2), interpolated
+    # onto the optimizer's spot ladder. None = use the built-in parametric target.
+    manual_target: list[dict] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -131,6 +135,7 @@ async def run_optimizer(params: OptimizationParams):
         enable_box_neutralizer=params.enable_box_neutralizer,
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
+        manual_target=params.manual_target,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
