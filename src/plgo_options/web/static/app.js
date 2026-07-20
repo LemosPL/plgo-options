@@ -9474,6 +9474,13 @@ async function optv3Load() {
     // Reset the "after" matrix panel until a run produces one.
     document.getElementById("optv3-matrix-after-panel").style.display = "none";
     document.getElementById("optv3-matrix-grid").style.gridTemplateColumns = "1fr";
+    // Reset run-only panes (trades under chart, target profile) until a new run.
+    const $tu = document.getElementById("optv3-trades-under-chart");
+    if ($tu) $tu.style.display = "none";
+    const $pw = document.getElementById("optv3-profile-wrap");
+    const $pe = document.getElementById("optv3-profile-empty");
+    if ($pw) $pw.style.display = "none";
+    if ($pe) { $pe.style.display = ""; $pe.textContent = "Run the optimizer to see the target profile."; }
 
     optv3RenderBasePill();
     optv3RenderPreview();
@@ -9763,6 +9770,9 @@ function optv3RenderResult(data) {
     optv2RenderCompareMatrix(data, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody");
   }
 
+  // Target profile table (payoff-at-Now: Before / After / Target)
+  optv3RenderProfileTable(data);
+
   // Structures
   const $structEmpty = document.getElementById("optv3-structures-empty");
   if ($structEmpty) $structEmpty.style.display = allTrades.length ? "none" : "";
@@ -9788,6 +9798,48 @@ function optv3RenderResult(data) {
       `<td>${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 11, "No replacement or new trades proposed.");
+}
+
+// Target-profile table: spot × (Before / After / Target / After−Target) at
+// horizon 0, anchored to $0 at current spot — identical basis to the payoff
+// chart, so the table and the dotted Target line agree.
+function optv3RenderProfileTable(data) {
+  const tbody = document.getElementById("optv3-profile-tbody");
+  const empty = document.getElementById("optv3-profile-empty");
+  const wrap = document.getElementById("optv3-profile-wrap");
+  if (!tbody) return;
+  const spots = (data && data.spot_ladder) || [];
+  const before = data && data.before && data.before.payoff_by_horizon && data.before.payoff_by_horizon["0"];
+  const after = data && data.after && data.after.payoff_by_horizon && data.after.payoff_by_horizon["0"];
+  const target = data && data.target_payoff;
+  if (!spots.length || !target) {
+    tbody.innerHTML = "";
+    if (empty) { empty.style.display = ""; empty.textContent = target ? "No spot ladder in the result." : "This run produced no target profile."; }
+    if (wrap) wrap.style.display = "none";
+    return;
+  }
+  if (empty) empty.style.display = "none";
+  if (wrap) wrap.style.display = "";
+
+  const S0 = data.eth_spot;
+  const spotIdx = optv2NearestIdx(spots, S0);
+  const targetAtSpot = target[spotIdx] || 0;
+  const displayIdx = optv2MatrixDisplayIdx(spots);
+  const cell = v => {
+    if (v == null || isNaN(v)) return `<td style="text-align:right">—</td>`;
+    const c = v > 0 ? "#66bb6a" : v < 0 ? "#ef5350" : "";
+    return `<td style="text-align:right;color:${c}">${Math.round(v).toLocaleString()}</td>`;
+  };
+  tbody.innerHTML = displayIdx.map(si => {
+    const s = spots[si];
+    const b = before ? before[si] : null;
+    const a = after ? after[si] : null;
+    const t = target[si] != null ? target[si] - targetAtSpot : null;
+    const resid = (a != null && t != null) ? a - t : null;
+    const hl = si === spotIdx ? ' class="row-highlight"' : '';
+    return `<tr${hl}><td style="font-weight:600">$${s.toLocaleString()}</td>`
+      + `${cell(b)}${cell(a)}${cell(t)}${cell(resid)}</tr>`;
+  }).join("");
 }
 
 async function optv3LoadSnapshots() {

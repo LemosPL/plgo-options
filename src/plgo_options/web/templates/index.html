@@ -1896,6 +1896,7 @@
             <button class="sub-tab-btn active" data-subtab="optv3-payoff">Payoff &amp; Trades</button>
             <button class="sub-tab-btn" data-subtab="optv3-positions">Positions</button>
             <button class="sub-tab-btn" data-subtab="optv3-matrix">P&amp;L Matrix</button>
+            <button class="sub-tab-btn" data-subtab="optv3-profile">Target Profile</button>
             <button class="sub-tab-btn" data-subtab="optv3-structures">Structures</button>
             <button class="sub-tab-btn" data-subtab="optv3-cash">Cash Flow</button>
           </div>
@@ -1966,6 +1967,19 @@
                   <table class="pf-table"><thead id="optv3-matrix-after-main-thead"></thead><tbody id="optv3-matrix-after-main-tbody"></tbody></table>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <!-- Target Profile (payoff-at-Now table: Before / After / Target) -->
+          <div id="subtab-optv3-profile" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now</span></h3>
+            <p class="optv3-hint" style="margin:0 0 .6rem">The desired payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0 and anchored to $0 at the current spot, the same basis as the payoff chart.</p>
+            <div id="optv3-profile-empty" class="optv3-empty">Run the optimizer to see the target profile.</div>
+            <div id="optv3-profile-wrap" class="chain-wrapper" style="max-height:520px;display:none">
+              <table class="pf-table">
+                <thead><tr><th>ETH Spot</th><th>Before (Now)</th><th>After (Now)</th><th>Target</th><th>After − Target</th></tr></thead>
+                <tbody id="optv3-profile-tbody"></tbody>
+              </table>
             </div>
           </div>
 
