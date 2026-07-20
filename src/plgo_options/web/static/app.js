@@ -9480,6 +9480,18 @@ async function optv3Load() {
     const $tu = document.getElementById("optv3-trades-under-chart");
     if ($tu) $tu.style.display = "none";
 
+    // Fetch the built-in parametric target so the Target Profile tab shows/seeds
+    // the default target curve before any run (aligned to this /pnl ladder).
+    optv3AutoTargetProfile = null;
+    try {
+      const tp = await post("/api/optimization/target-profile", {
+        asset: currentAsset, spot_ladder: optv3Data.spot_ladder, current_spot: optv3Data.eth_spot,
+      });
+      if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (optv3Data.spot_ladder || []).length) {
+        optv3AutoTargetProfile = tp.payoff;
+      }
+    } catch (e) { console.warn("target-profile fetch failed", e); }
+
     optv3RenderBasePill();
     optv3RenderPreview();
     optv3SyncRunEnabled();
@@ -9799,6 +9811,7 @@ function optv3RenderResult(data) {
 // horizon 0 and anchored to $0 at the current spot — same basis as the chart.
 let optv3ManualTarget = null;     // [{x: spot, y: payoff}, ...] control points, or null = auto
 let optv3ProfileState = null;     // {spots, after, displayIdx} cached for live residual updates
+let optv3AutoTargetProfile = null; // parametric target payoff aligned to optv3Data.spot_ladder (from /target-profile)
 
 // Where the profile table/chart get their curves: a run result if present, else
 // the loaded book (so you can define a target before ever running).
@@ -9818,7 +9831,11 @@ function optv3ProfileSource() {
     const ps = optv3ActivePositions();
     const before = spots.map((_, i) => ps.reduce((a, p) =>
       a + ((p.payoff_by_horizon && p.payoff_by_horizon["0"] && p.payoff_by_horizon["0"][i]) || 0), 0));
-    return { spots, S0: optv3Data.eth_spot || 0, before, after: null, autoTarget: null };
+    // Default target = built-in parametric profile (fetched on Load), so it's
+    // visible/editable before the first run.
+    const autoTarget = (optv3AutoTargetProfile && optv3AutoTargetProfile.length === spots.length)
+      ? optv3AutoTargetProfile : null;
+    return { spots, S0: optv3Data.eth_spot || 0, before, after: null, autoTarget };
   }
   return null;
 }

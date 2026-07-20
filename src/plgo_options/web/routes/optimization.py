@@ -159,6 +159,43 @@ async def run_optimizer(params: OptimizationParams):
     return result
 
 
+class TargetProfileRequest(BaseModel):
+    asset: str = "ETH"
+    spot_ladder: list[float]
+    current_spot: float
+
+
+@router.post("/target-profile")
+async def target_profile(req: TargetProfileRequest):
+    """Return the built-in parametric target payoff aligned to the given spot
+    ladder, so the UI can show/seed the default target before any optimizer run.
+    Mirrors exactly what run_lp fits to when no manual target is supplied."""
+    import numpy as np
+    from plgo_options.optimization.misc_utils import build_parametric_target_profile
+
+    asset = (req.asset or "ETH").upper()
+    if not req.spot_ladder or req.current_spot <= 0:
+        raise HTTPException(400, "spot_ladder and a positive current_spot are required.")
+    try:
+        df = build_parametric_target_profile(
+            asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to build target profile: {e}")
+
+    strikes = np.asarray(df.index, dtype=float)
+    payoff = np.asarray(df["Payoff($)"], dtype=float)
+    ladder = np.asarray(req.spot_ladder, dtype=float)
+    # FIL's parametric profile uses its own strike grid; interpolate onto the
+    # caller's ladder so the returned payoff is index-aligned to spot_ladder.
+    aligned = np.interp(ladder, strikes, payoff)
+    return {
+        "asset": asset,
+        "spot_ladder": [float(x) for x in ladder],
+        "payoff": [float(v) for v in aligned],
+    }
+
+
 # Listing/download read from the same Cloud-Run-aware root the optimizer saves to
 # (SNAPSHOT_ROOT/usecases), so snapshots persist on the GCS FUSE mount in prod.
 SNAPSHOT_DIR = SNAPSHOT_ROOT / "usecases"
