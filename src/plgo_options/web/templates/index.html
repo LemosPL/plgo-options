@@ -1894,11 +1894,29 @@
         <section class="card">
           <div class="sub-tab-bar">
             <button class="sub-tab-btn active" data-subtab="optv3-payoff">Payoff</button>
+            <button class="sub-tab-btn" data-subtab="optv3-positions">Positions</button>
             <button class="sub-tab-btn" data-subtab="optv3-matrix">P&amp;L Matrix</button>
             <button class="sub-tab-btn" data-subtab="optv3-structures">Structures</button>
             <button class="sub-tab-btn" data-subtab="optv3-unwind">Unwind</button>
             <button class="sub-tab-btn" data-subtab="optv3-new">New Trades</button>
             <button class="sub-tab-btn" data-subtab="optv3-cash">Cash Flow</button>
+          </div>
+
+          <!-- Positions (current book — the loaded risk profile) -->
+          <div id="subtab-optv3-positions" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Current Book <span class="optv3-muted" id="optv3-positions-count"></span></h3>
+            <p class="optv3-hint" style="margin:0 0 .6rem">Every position in the loaded risk profile with its live greeks and MTM. Greeks are position-signed (× net qty); the last row totals the book. Scoped to any Deals selection.</p>
+            <div class="chain-wrapper" style="max-height:520px">
+              <table class="pf-table">
+                <thead><tr>
+                  <th>Counterparty</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Strike</th><th>Type</th>
+                  <th>Expiry</th><th>DTE</th><th>IV %</th><th>Δ</th><th>Γ</th><th>Θ</th><th>V</th><th>MTM ($)</th>
+                </tr></thead>
+                <tbody id="optv3-positions-tbody">
+                  <tr><td colspan="14" style="text-align:center;color:var(--muted);padding:2rem">Load the risk profile to see the current book.</td></tr>
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <!-- Payoff -->

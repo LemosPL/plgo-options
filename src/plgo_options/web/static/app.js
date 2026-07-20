@@ -9486,12 +9486,62 @@ async function optv3Load() {
   }
 }
 
-// Preview (greeks KPI + payoff + before matrix) from the loaded /pnl book.
+// Preview (greeks KPI + positions + payoff + before matrix) from the loaded book.
 function optv3RenderPreview() {
   if (!optv3Data) return;
   optv3RenderKpi();
+  optv3RenderPositions();
   optv3RenderPayoff();
   optv3RenderMatrix();
+}
+
+// Current-book positions table — the loaded risk profile's per-position numbers.
+function optv3RenderPositions() {
+  const tbody = document.getElementById("optv3-positions-tbody");
+  const count = document.getElementById("optv3-positions-count");
+  if (!tbody) return;
+  const ps = optv3ActivePositions();
+  if (count) count.textContent = ps.length ? `(${ps.length})` : "";
+  if (!ps.length) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:2rem">No positions in the current book.</td></tr>';
+    return;
+  }
+  const rows = [...ps].sort((a, b) =>
+    String(a.expiry).localeCompare(String(b.expiry)) || (a.strike - b.strike));
+  const sum = fn => rows.reduce((t, p) => t + (fn(p) || 0), 0);
+  const money = v => (v >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(v), 0);
+
+  const body = rows.map(p => {
+    const long = p.net_qty >= 0;
+    const mtm = p.current_mtm || 0;
+    return `<tr>
+      <td>${p.counterparty || "—"}</td>
+      <td>${p.instrument || ""}</td>
+      <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
+      <td style="text-align:right">${optv2Fmt(Math.abs(p.net_qty), 0)}</td>
+      <td style="text-align:right">${optv2Fmt(p.strike, 0)}</td>
+      <td>${optv2OptType(p.opt)}</td>
+      <td>${String(p.expiry || "").slice(0, 10)}</td>
+      <td style="text-align:right">${p.days_remaining ?? "—"}</td>
+      <td style="text-align:right">${optv2Fmt(p.iv_pct, 1)}</td>
+      <td style="text-align:right">${optv2Fmt((p.delta || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right">${optv2Fmt((p.gamma || 0) * p.net_qty, 4)}</td>
+      <td style="text-align:right">${optv2Fmt((p.theta || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right">${optv2Fmt((p.vega || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right;color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${money(mtm)}</td>
+    </tr>`;
+  }).join("");
+
+  const totalMtm = sum(p => p.current_mtm);
+  const footer = `<tr class="row-highlight" style="font-weight:600">
+    <td colspan="9">Total (${rows.length})</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.delta || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.gamma || 0) * p.net_qty), 4)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.theta || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.vega || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right;color:${totalMtm >= 0 ? "var(--green)" : "var(--red)"}">${money(totalMtm)}</td>
+  </tr>`;
+  tbody.innerHTML = body + footer;
 }
 
 function optv3RenderKpi() {
