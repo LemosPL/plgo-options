@@ -39,6 +39,9 @@ class CollateralOptimization:
         max_qty=None,
         leg_groups=None,
         downside_factor=1.0,
+        residual_payoff_90=None,
+        c_payoffs_90=None,
+        t90_weight=0.0,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -111,6 +114,22 @@ class CollateralOptimization:
             prob += shortfall_vars[i] >= error_i, f"shortfall_{i}"
             prob += surplus_vars[i] >= -error_i, f"surplus_{i}"
 
+        # T+90 mirror of the block above: same shortfall/surplus split and same
+        # downside_factor, but against the book repriced 90 days forward, so
+        # the fit can care about "still roughly on-target in 90 days" and not
+        # just "on-target today" — blended in via t90_weight below.
+        use_t90 = t90_weight and residual_payoff_90 is not None and c_payoffs_90 is not None
+        if use_t90:
+            shortfall_vars_90 = [pulp.LpVariable(f"shortfall90_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
+            surplus_vars_90 = [pulp.LpVariable(f"surplus90_{i}", lowBound=0, cat="Continuous") for i in range(n_spots)]
+            for i in range(n_spots):
+                trade_payoff_90_i = pulp.lpSum(
+                    (buy_vars[j] - sell_vars[j]) * float(c_payoffs_90[j][i]) for j in range(n_candidates)
+                )
+                error_90_i = float(residual_payoff_90[i]) - trade_payoff_90_i
+                prob += shortfall_vars_90[i] >= error_90_i, f"shortfall90_{i}"
+                prob += surplus_vars_90[i] >= -error_90_i, f"surplus90_{i}"
+
         for j in range(n_candidates):
             net_pos_j = float(existing_qty[j]) + buy_vars[j] - sell_vars[j]
             prob += abs_net_pos_vars[j] >= net_pos_j, f"abs_net_pos_pos_{j}"
@@ -136,10 +155,18 @@ class CollateralOptimization:
             cp = getattr(c, "counterparty", "")
             cp_indices.setdefault(cp, []).append(j)
 
-        profile_error = pulp.lpSum(
+        profile_error_t0 = pulp.lpSum(
             float(spot_weights[i]) * (float(downside_factor) * shortfall_vars[i] + surplus_vars[i])
             for i in range(n_spots)
         )
+        if use_t90:
+            profile_error_t90 = pulp.lpSum(
+                float(spot_weights[i]) * (float(downside_factor) * shortfall_vars_90[i] + surplus_vars_90[i])
+                for i in range(n_spots)
+            )
+            profile_error = (1.0 - float(t90_weight)) * profile_error_t0 + float(t90_weight) * profile_error_t90
+        else:
+            profile_error = profile_error_t0
         trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
 
         tiered_mode = collateral_tier_mu is not None

@@ -65,6 +65,7 @@ class OptimizationParams(BaseModel):
     max_trades: int | None = None
     enable_box_neutralizer: bool = True
     downside_factor: float = 1.0
+    t90_weight: float = 0.0
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -106,6 +107,7 @@ async def run_optimizer(params: OptimizationParams):
         max_trades=params.max_trades,
         enable_box_neutralizer=params.enable_box_neutralizer,
         downside_factor=params.downside_factor,
+        t90_weight=params.t90_weight,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

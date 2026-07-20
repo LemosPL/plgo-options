@@ -771,7 +771,10 @@ class OptimizerV3(BaseOptimizer):
 
         if option_smile is not None:
             maturity = datetime.combine(p.expiry_date, datetime.min.time())
-            T = option_smile._year_fraction(maturity)  # T = dte_at_horizon / 365.25
+            # _year_fraction is time-to-maturity from today, with no horizon
+            # concept — subtract it here so horizon_days actually does
+            # something (previously accepted but silently ignored).
+            T = max(option_smile._year_fraction(maturity) - horizon_days / 365.25, 0.0)
             sigma = option_smile.compute_vol(maturity, strike=strike)
         else:
             T = float('nan')
@@ -822,6 +825,7 @@ class OptimizerV3(BaseOptimizer):
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
                  downside_factor: float = 1.0,
+                 t90_weight: float = 0.0,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -938,6 +942,32 @@ class OptimizerV3(BaseOptimizer):
 
         c_payoffs = [self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile) for c in candidates]
 
+        # T+90 equivalent of the block above — same target, same spot_weights,
+        # but every position/candidate repriced 90 days forward (own cash_shift
+        # since the existing book's value moves to a different absolute scale
+        # once time value bleeds off). Mixed with the T0 term via t90_weight
+        # in the LP so the fit can care about "still roughly on-target in 90
+        # days," not just "on-target today" — a book can nail the latter and
+        # still drift badly by the former purely from theta decay.
+        base_payoff_90 = np.zeros_like(spot_arr)
+        for p in self.positions:
+            if id(p) in roll_position_ids:
+                continue
+            bs_value_90 = self.bs_value_for_position(spot_arr, p, option_smile=option_smile, horizon_days=90)
+            if np.isnan(bs_value_90.sum()):
+                continue
+            base_payoff_90 += bs_value_90
+
+        raw_residual_90 = target_interp - base_payoff_90
+        cash_shift_90 = float(np.sum(spot_weights * raw_residual_90) / np.sum(spot_weights))
+        adjusted_base_payoff_90 = base_payoff_90 + cash_shift_90
+        residual_90 = target_interp - adjusted_base_payoff_90
+
+        c_payoffs_90 = [
+            self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=90)
+            for c in candidates
+        ]
+
         # Gross collateral cap: sum(|final_qty| × price) per counterparty ≤ current × (1 + budget).
         # budget=0.0 → no increase allowed; budget=-0.1 → must shrink by 10%.
         max_gross_exposure_by_counterparty: dict | None = None
@@ -1024,6 +1054,9 @@ class OptimizerV3(BaseOptimizer):
             max_qty=max_qty,
             leg_groups=leg_groups,
             downside_factor=downside_factor,
+            residual_payoff_90=residual_90,
+            c_payoffs_90=c_payoffs_90,
+            t90_weight=t90_weight,
         )
 
         if lp_result is None:
@@ -2181,9 +2214,13 @@ class OptimizerV3(BaseOptimizer):
             c,
             spot_arr: np.ndarray,
             option_smile: OptionSmile,
+            horizon_days: int = 0,
     ) -> np.ndarray:
         """
-        Return one optimizer-unit curve.
+        Return one optimizer-unit curve: current value (at horizon_days from
+        now, default 0 = today) across the spot ladder, minus the entry price
+        (always today's price — the cost basis doesn't move, only how much
+        time has passed since paying it).
 
         Naked option:
             option value across spot ladder minus entry price.
@@ -2205,7 +2242,7 @@ class OptimizerV3(BaseOptimizer):
             long_leg = c.long_leg
             short_leg = c.short_leg
 
-            T = c.dte / 365.25
+            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
             r = 0.0
 
             long_strike = float(long_leg.strike or 0.0)
@@ -2250,7 +2287,7 @@ class OptimizerV3(BaseOptimizer):
             call_leg = c.call_leg
             put_leg = c.put_leg
 
-            T = c.dte / 365.25
+            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
             r = 0.0
             strike = float(c.strike or 0.0)
             entry_price = float(c.bs_price_usd or 0.0)
@@ -2287,7 +2324,7 @@ class OptimizerV3(BaseOptimizer):
 
             return np.array(curve_list, dtype=float)
         elif self._is_iron_condor_candidate(c):
-            T = c.dte / 365.25
+            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
             r = 0.0
             entry_price = float(c.bs_price_usd or 0.0)
 
@@ -2324,7 +2361,7 @@ class OptimizerV3(BaseOptimizer):
 
         strike = float(c.strike or 0.0)
         bs_price = float(c.bs_price_usd or 0.0)
-        T = c.dte / 365.25
+        T = max(float(c.dte) - horizon_days, 0.0) / 365.25
         r = 0.0
 
         curve_list = []
