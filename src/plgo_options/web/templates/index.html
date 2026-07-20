@@ -1908,8 +1908,8 @@
             <div class="chain-wrapper" style="max-height:520px">
               <table class="pf-table">
                 <thead><tr>
-                  <th>Counterparty</th><th>Instrument</th><th>Side</th><th>Qty</th><th>Strike</th><th>Type</th>
-                  <th>Expiry</th><th>DTE</th><th>IV %</th><th>Δ</th><th>Γ</th><th>Θ</th><th>V</th><th>MTM ($)</th>
+                  <th>Counterparty</th><th>Instrument</th><th>Side</th><th class="num">Qty</th><th class="num">Strike</th><th>Type</th>
+                  <th>Expiry</th><th class="num">DTE</th><th class="num">IV %</th><th class="num">Δ</th><th class="num">Γ</th><th class="num">Θ</th><th class="num">V</th><th class="num">MTM ($)</th>
                 </tr></thead>
                 <tbody id="optv3-positions-tbody">
                   <tr><td colspan="14" style="text-align:center;color:var(--muted);padding:2rem">Load the risk profile to see the current book.</td></tr>
@@ -1929,8 +1929,8 @@
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
-                      <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-                      <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind ($)</th><th>Counterparty</th>
+                      <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
+                      <th>Side</th><th class="num">Qty</th><th class="num">Mark ($)</th><th class="num">Unwind ($)</th><th>Counterparty</th>
                     </tr></thead>
                     <tbody id="optv3-unwind-tbody"></tbody>
                   </table>
@@ -1941,8 +1941,8 @@
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
-                      <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-                      <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+                      <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
+                      <th>Side</th><th class="num">Qty</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
                     </tr></thead>
                     <tbody id="optv3-replacement-tbody"></tbody>
                   </table>
@@ -1974,10 +1974,11 @@
           <div id="subtab-optv3-profile" class="sub-tab-pane">
             <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now</span></h3>
             <p class="optv3-hint" style="margin:0 0 .6rem">The desired payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0 and anchored to $0 at the current spot, the same basis as the payoff chart.</p>
+            <div id="optv3-profile-chart" style="width:100%;height:360px;display:none;margin-bottom:1rem"></div>
             <div id="optv3-profile-empty" class="optv3-empty">Run the optimizer to see the target profile.</div>
             <div id="optv3-profile-wrap" class="chain-wrapper" style="max-height:520px;display:none">
               <table class="pf-table">
-                <thead><tr><th>ETH Spot</th><th>Before (Now)</th><th>After (Now)</th><th>Target</th><th>After − Target</th></tr></thead>
+                <thead><tr><th>Spot</th><th class="num">Before (Now)</th><th class="num">After (Now)</th><th class="num">Target</th><th class="num">After − Target</th></tr></thead>
                 <tbody id="optv3-profile-tbody"></tbody>
               </table>
             </div>
@@ -1995,7 +1996,7 @@
             <p class="optv3-hint" style="margin:0 0 .6rem">Premium paid (outlay) vs. collected across every proposed trade. Net far from 0 means the desk must wire cash rather than self-fund.</p>
             <div class="chain-wrapper" style="max-height:420px">
               <table class="pf-table" style="max-width:620px">
-                <thead><tr><th>Counterparty</th><th>Outlay ($)</th><th>Collection ($)</th><th>Net ($)</th></tr></thead>
+                <thead><tr><th>Counterparty</th><th class="num">Outlay ($)</th><th class="num">Collection ($)</th><th class="num">Net ($)</th></tr></thead>
                 <tbody id="optv3-cash-flow-tbody"></tbody>
               </table>
             </div>

@@ -1473,6 +1473,28 @@ select { margin-bottom: .5rem; }
 .optv3-empty { text-align: center; color: var(--muted); font-size: .85rem; padding: 2.5rem 1rem; }
 .optv3-trades-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.25rem; }
 @media (max-width: 1200px) { .optv3-trades-grid { grid-template-columns: 1fr; } }
+
+/* v3 tables — match the app's standard table look (cf. #chain-table / #mtm-matrix-table).
+   pf-table has no global styles, so scope the standard to the v3 page. */
+#page-optv3 .pf-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+#page-optv3 .pf-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface); color: var(--muted); font-weight: 600;
+  text-align: left; padding: .5rem .65rem; white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+#page-optv3 .pf-table tbody td {
+  padding: .45rem .65rem; white-space: nowrap;
+  border-bottom: 1px solid var(--row-border, var(--border));
+  font-variant-numeric: tabular-nums;
+}
+#page-optv3 .pf-table tbody tr:nth-child(even) { background: rgba(127, 127, 127, .05); }
+#page-optv3 .pf-table tbody tr:hover { background: var(--hover-bg); }
+#page-optv3 .pf-table tbody tr.row-highlight { background: var(--hover-bg); font-weight: 600; }
+#page-optv3 .pf-table tbody tr.row-highlight td { border-top: 1px solid var(--border); }
+#page-optv3 .pf-table th.num, #page-optv3 .pf-table td.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+}
 .optv3-warn {
   margin-bottom: 1rem; padding: .6rem .8rem; border-radius: 6px; font-size: .82rem;
   background: rgba(255,193,7,.12); border: 1px solid rgba(255,193,7,.4);

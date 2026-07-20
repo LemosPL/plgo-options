@@ -9479,7 +9479,9 @@ async function optv3Load() {
     if ($tu) $tu.style.display = "none";
     const $pw = document.getElementById("optv3-profile-wrap");
     const $pe = document.getElementById("optv3-profile-empty");
+    const $pc = document.getElementById("optv3-profile-chart");
     if ($pw) $pw.style.display = "none";
+    if ($pc) $pc.style.display = "none";
     if ($pe) { $pe.style.display = ""; $pe.textContent = "Run the optimizer to see the target profile."; }
 
     optv3RenderBasePill();
@@ -9616,6 +9618,13 @@ function optv3RenderPayoff() {
   // Break-even line (y=0) across the spot range.
   traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
 
+  // Yellow vertical line at the current spot (restores the old spot marker bar
+  // that the x-axis zeroline used to draw at log-moneyness = 0). Spans the full
+  // y-range of the plotted curves; x uses the actual price (log-transformed).
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => { if (Array.isArray(t.y)) t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }); });
+  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+
   // Current-spot marker (actual price on the log axis).
   const spotPayoff0 = (() => {
     const totalPayoff = new Array(spots.length).fill(0);
@@ -9727,9 +9736,9 @@ function optv3RenderResult(data) {
     if ($cashEmpty) $cashEmpty.style.display = "none";
     $cashBody.innerHTML = cps.sort().map(cp => {
       const v = cashByCp[cp]; const net = v.net || 0;
-      return `<tr><td>${cp}</td><td>$${optv2Fmt(v.outlay || 0, 0)}</td>`
-        + `<td>$${optv2Fmt(v.collection || 0, 0)}</td>`
-        + `<td style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
+      return `<tr><td>${cp}</td><td class="num">$${optv2Fmt(v.outlay || 0, 0)}</td>`
+        + `<td class="num">$${optv2Fmt(v.collection || 0, 0)}</td>`
+        + `<td class="num" style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
     }).join("");
   } else {
     $cashBody.innerHTML = "";
@@ -9768,21 +9777,21 @@ function optv3RenderResult(data) {
   // Unwind table
   optv2RenderTradeTable("optv3-unwind-tbody", unwinds, "optv3-unwind-count",
     (t) => [
-      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, 0)}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td>${Math.abs(t.qty)}</td>`, `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 0)}</td>`, `<td>${t.counterparty || "—"}</td>`,
+      `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td>${t.counterparty || "—"}</td>`,
     ], 9, "No positions flagged for unwind/roll at this DTE threshold.");
 
   // Replacement / new table
   optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
     (t) => [
-      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, 0)}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td>${Math.abs(t.qty)}</td>`, `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 11, "No replacement or new trades proposed.");
 }
@@ -9803,10 +9812,12 @@ function optv3RenderProfileTable(data) {
     tbody.innerHTML = "";
     if (empty) { empty.style.display = ""; empty.textContent = target ? "No spot ladder in the result." : "This run produced no target profile."; }
     if (wrap) wrap.style.display = "none";
+    optv3RenderProfileChart(null);
     return;
   }
   if (empty) empty.style.display = "none";
   if (wrap) wrap.style.display = "";
+  optv3RenderProfileChart(data);
 
   const S0 = data.eth_spot;
   const spotIdx = optv2NearestIdx(spots, S0);
@@ -9827,6 +9838,43 @@ function optv3RenderProfileTable(data) {
     return `<tr${hl}><td style="font-weight:600">$${s.toLocaleString()}</td>`
       + `${cell(b)}${cell(a)}${cell(t)}${cell(resid)}</tr>`;
   }).join("");
+}
+
+// Target-profile chart (Before / After / Target curves) on the Target Profile
+// tab — same log price axis as the main payoff chart.
+function optv3RenderProfileChart(data) {
+  const el = document.getElementById("optv3-profile-chart");
+  if (!el) return;
+  const spots = (data && data.spot_ladder) || [];
+  const target = data && data.target_payoff;
+  if (!spots.length || !target) { el.style.display = "none"; return; }
+  el.style.display = "";
+
+  const S0 = data.eth_spot;
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const spotIdx = optv2NearestIdx(spots, S0);
+  const targetAtSpot = target[spotIdx] || 0;
+  const before = data.before && data.before.payoff_by_horizon && data.before.payoff_by_horizon["0"];
+  const after = data.after && data.after.payoff_by_horizon && data.after.payoff_by_horizon["0"];
+
+  const traces = [];
+  if (before) traces.push({ x: spots, y: before, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+  if (after) traces.push({ x: spots, y: after, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+  traces.push({ x: spots, y: target.map(v => v - targetAtSpot), mode: "lines", name: "Target", line: { color: "#ffca28", width: 2, dash: "dot" } });
+
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
+  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+
+  const layout = {
+    title: { text: "Target Profile — Before vs After vs Target (Now)", font: { color: "#e6edf3", size: 14 } },
+    xaxis: { title: `${assetLabel} Spot (USD, log scale)`, type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true, color: "#8b949e", gridcolor: "#21262d" },
+    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
+    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
+    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.25 },
+    margin: { t: 40, b: 60, l: 75, r: 20 },
+  };
+  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true });
 }
 
 async function optv3LoadSnapshots() {
@@ -9864,9 +9912,9 @@ function optv3Init() {
   // Resize the Plotly chart when its (previously-hidden) tab becomes visible.
   document.querySelectorAll('#page-optv3 .sub-tab-btn').forEach(btn => {
     btn.addEventListener("click", () => {
-      if (btn.dataset.subtab === "optv3-payoff") {
-        setTimeout(() => { const c = document.getElementById("optv3-payoff-chart"); if (c && c.data) Plotly.Plots.resize(c); }, 40);
-      }
+      const id = btn.dataset.subtab === "optv3-payoff" ? "optv3-payoff-chart"
+        : btn.dataset.subtab === "optv3-profile" ? "optv3-profile-chart" : null;
+      if (id) setTimeout(() => { const c = document.getElementById(id); if (c && c.data) Plotly.Plots.resize(c); }, 40);
     });
   });
 }
