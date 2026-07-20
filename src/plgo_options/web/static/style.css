@@ -1471,6 +1471,8 @@ select { margin-bottom: .5rem; }
 @media (max-width: 720px) { .optv3-kpi-grid { grid-template-columns: repeat(3, 1fr); } }
 .optv3-subline { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: .78rem; color: var(--muted); margin-top: 1rem; }
 .optv3-empty { text-align: center; color: var(--muted); font-size: .85rem; padding: 2.5rem 1rem; }
+.optv3-trades-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.25rem; }
+@media (max-width: 1200px) { .optv3-trades-grid { grid-template-columns: 1fr; } }
 .optv3-warn {
   margin-bottom: 1rem; padding: .6rem .8rem; border-radius: 6px; font-size: .82rem;
   background: rgba(255,193,7,.12); border: 1px solid rgba(255,193,7,.4);

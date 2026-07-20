@@ -9689,6 +9689,8 @@ function optv3RenderResult(data) {
   if (data.status !== "ok") { alert(data.message || "Optimization returned no results."); return; }
 
   document.getElementById("optv3-result-kpi").style.display = "";
+  const $tradesUnder = document.getElementById("optv3-trades-under-chart");
+  if ($tradesUnder) $tradesUnder.style.display = "";  // reveal unwind/new under the chart
   optv3OptResult = data;
   optv3RenderPayoff();  // now overlays before/after/target
 

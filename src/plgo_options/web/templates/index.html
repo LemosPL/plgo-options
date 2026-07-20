@@ -1893,12 +1893,10 @@
         <!-- Tabbed detail -->
         <section class="card">
           <div class="sub-tab-bar">
-            <button class="sub-tab-btn active" data-subtab="optv3-payoff">Payoff</button>
+            <button class="sub-tab-btn active" data-subtab="optv3-payoff">Payoff &amp; Trades</button>
             <button class="sub-tab-btn" data-subtab="optv3-positions">Positions</button>
             <button class="sub-tab-btn" data-subtab="optv3-matrix">P&amp;L Matrix</button>
             <button class="sub-tab-btn" data-subtab="optv3-structures">Structures</button>
-            <button class="sub-tab-btn" data-subtab="optv3-unwind">Unwind</button>
-            <button class="sub-tab-btn" data-subtab="optv3-new">New Trades</button>
             <button class="sub-tab-btn" data-subtab="optv3-cash">Cash Flow</button>
           </div>
 
@@ -1919,10 +1917,37 @@
             </div>
           </div>
 
-          <!-- Payoff -->
+          <!-- Payoff + the run's trades (unwind vs new) side by side -->
           <div id="subtab-optv3-payoff" class="sub-tab-pane active">
             <div id="optv3-payoff-empty" class="optv3-empty">Load the risk profile to see the payoff curve.</div>
             <div id="optv3-payoff-chart" style="width:100%;height:460px"></div>
+
+            <div id="optv3-trades-under-chart" class="optv3-trades-grid" style="display:none">
+              <div>
+                <h3 style="margin:.2rem 0 .5rem">Trades to Unwind / Close <span class="optv3-muted" id="optv3-unwind-count"></span></h3>
+                <div class="chain-wrapper" style="max-height:360px">
+                  <table class="pf-table">
+                    <thead><tr>
+                      <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+                      <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind ($)</th><th>Counterparty</th>
+                    </tr></thead>
+                    <tbody id="optv3-unwind-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+              <div>
+                <h3 style="margin:.2rem 0 .5rem">Replacement / New Trades <span class="optv3-muted" id="optv3-replacement-count"></span></h3>
+                <div class="chain-wrapper" style="max-height:360px">
+                  <table class="pf-table">
+                    <thead><tr>
+                      <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+                      <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+                    </tr></thead>
+                    <tbody id="optv3-replacement-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Matrix -->
@@ -1948,34 +1973,6 @@
           <div id="subtab-optv3-structures" class="sub-tab-pane">
             <div id="optv3-strategy-groups" style="display:flex;flex-direction:column;gap:.75rem"></div>
             <div id="optv3-structures-empty" class="optv3-empty">Run the optimizer to see proposed structures.</div>
-          </div>
-
-          <!-- Unwind -->
-          <div id="subtab-optv3-unwind" class="sub-tab-pane">
-            <h3 style="margin:.2rem 0 .5rem">Trades to Unwind / Close <span class="optv3-muted" id="optv3-unwind-count"></span></h3>
-            <div class="chain-wrapper" style="max-height:480px">
-              <table class="pf-table">
-                <thead><tr>
-                  <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-                  <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind Value ($)</th><th>Counterparty</th>
-                </tr></thead>
-                <tbody id="optv3-unwind-tbody"></tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- New Trades -->
-          <div id="subtab-optv3-new" class="sub-tab-pane">
-            <h3 style="margin:.2rem 0 .5rem">Replacement / New Trades <span class="optv3-muted" id="optv3-replacement-count"></span></h3>
-            <div class="chain-wrapper" style="max-height:480px">
-              <table class="pf-table">
-                <thead><tr>
-                  <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-                  <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
-                </tr></thead>
-                <tbody id="optv3-replacement-tbody"></tbody>
-              </table>
-            </div>
           </div>
 
           <!-- Cash Flow -->
