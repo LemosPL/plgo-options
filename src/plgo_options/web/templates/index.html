@@ -52,6 +52,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a.5.5 0 01.5.5V6h4.5a.5.5 0 010 1H8.5v4.5a.5.5 0 01-1 0V7H3a.5.5 0 010-1h4.5V1.5A.5.5 0 018 1z"/><path d="M2 14.5a.5.5 0 01.5-.5h11a.5.5 0 010 1h-11a.5.5 0 01-.5-.5z"/></svg>
       Optimizer v2
     </li>
+    <li class="nav-item" data-page="optv3">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1a.5.5 0 00-.5.5v13a.5.5 0 00.5.5h13a.5.5 0 000-1H2V1.5a.5.5 0 00-.5-.5z"/><path d="M4.5 10.5a.5.5 0 01.5-.5h1a.5.5 0 01.5.5v2a.5.5 0 01-.5.5H5a.5.5 0 01-.5-.5v-2zm3-3a.5.5 0 01.5-.5h1a.5.5 0 01.5.5v5a.5.5 0 01-.5.5H8a.5.5 0 01-.5-.5v-5zm3-3a.5.5 0 01.5-.5h1a.5.5 0 01.5.5v8a.5.5 0 01-.5.5h-1a.5.5 0 01-.5-.5v-8z"/></svg>
+      Optimizer v3
+    </li>
     <li class="nav-item" data-page="volcurve">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 1.5a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13a.5.5 0 01-.5-.5zM1 14.5a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13a.5.5 0 01-.5-.5z"/><path d="M2 10c1.5-4 3-6 5-6s4 3 6 2" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
       Vol Surface Curve
@@ -1738,6 +1742,253 @@
           </table>
         </div>
       </section>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Optimizer v3  (same engine as v2 — reorganized UI)     -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-optv3" class="page">
+    <div class="optv3-layout">
+
+      <!-- ── LEFT: control rail ─────────────────────────────── -->
+      <aside class="card optv3-rail">
+        <div class="optv3-rail-actions">
+          <button id="btn-load-optv3" class="btn-primary" style="width:auto">Load Risk Profile</button>
+          <button id="btn-run-optv3" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
+        </div>
+        <p class="optv3-hint" style="margin-top:-.4rem">Load the current book, choose a target maturity, then run. Same engine as Optimizer v2.</p>
+        <div id="optv3-base-pill" class="optv2-base-pill" style="display:none"></div>
+
+        <!-- Scope -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Scope</div>
+          <div class="optv3-field optv3-field-full">
+            <label for="optv3-target-expiry">Target Maturity</label>
+            <select id="optv3-target-expiry"><option value="">Select maturity…</option></select>
+            <p class="optv3-hint">The expiry the optimizer rolls/rebuilds the book into. Required.</p>
+          </div>
+          <div class="optv3-field optv3-field-full">
+            <label for="optv3-counterparties">Counterparties</label>
+            <select id="optv3-counterparties" multiple size="3"><option value="ALL" selected>ALL</option></select>
+            <p class="optv3-hint">Ctrl/Cmd-click for multiple. None selected = all counterparties.</p>
+          </div>
+        </div>
+
+        <!-- Objective weights -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Objective weights</div>
+          <div class="optv3-field">
+            <label for="optv3-lam-factor">λ Profile fit <input type="number" id="optv3-lam-factor" value="0.4" step="0.05" min="0"></label>
+            <p class="optv3-hint">Weight on matching the target payoff curve vs. trading/collateral cost. Higher = prioritize the fit even if trades cost more.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-downside-factor">κ Downside <input type="number" id="optv3-downside-factor" value="1" step="0.1" min="0"></label>
+            <p class="optv3-hint">Penalty on falling short of target vs. exceeding it. 1 = symmetric; &gt;1 treats the target as a floor (undershoot hurts more).</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-t90-weight">T+90 blend <input type="number" id="optv3-t90-weight" value="0" step="0.1" min="0" max="1"></label>
+            <p class="optv3-hint">Blend fitting the target today (0) vs. 90 days forward (1). e.g. 0.3 = 70% today / 30% T+90, so theta drift is considered.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-mu-factor">μ Collateral <input type="number" id="optv3-mu-factor" value="2.3" step="0.1" min="0"></label>
+            <p class="optv3-hint">Holding-cost weight on posted collateral. Higher = work harder to avoid growing collateral usage; 0 = collateral is free.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-cash-neutrality-factor">ν Cash neutrality <input type="number" id="optv3-cash-neutrality-factor" value="0.5" step="0.1" min="0"></label>
+            <p class="optv3-hint">Penalty on premium-paid vs. collected imbalance per counterparty. Higher = trades self-fund more. Soft cost, not a hard cap.</p>
+          </div>
+        </div>
+
+        <!-- Constraints -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Constraints</div>
+          <div class="optv3-field">
+            <label for="optv3-unwind-discount">Unwind discount <input type="number" id="optv3-unwind-discount" value="0.2" step="0.05" min="0" max="1"></label>
+            <p class="optv3-hint">Fraction of mark value assumed lost when closing a position (0.2 = 20% slippage on unwind).</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-new-position-penalty">New-pos penalty <input type="number" id="optv3-new-position-penalty" value="0.04" step="0.01" min="0" max="1"></label>
+            <p class="optv3-hint">Per-unit cost for opening brand-new positions, biasing the LP toward reusing / rolling existing ones.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-collateral-budget-pct">Gross collateral Δ <input type="number" id="optv3-collateral-budget-pct" value="0.05" step="0.05"></label>
+            <p class="optv3-hint">Hard per-counterparty cap on gross collateral change (0 = no increase, 0.05 = +5%, -0.1 = force −10%). Clear to disable.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-max-qty">Max qty <input type="number" id="optv3-max-qty" value="10000" step="1000" min="0"></label>
+            <p class="optv3-hint">Hard cap on any single candidate's size (contracts) — stops the LP proposing unrealistically large single lines. Clear to disable.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv3-max-trades">Max trades <input type="number" id="optv3-max-trades" value="15" step="1" min="1"></label>
+            <p class="optv3-hint">Cap on Replacement/New line items shown (unwinds &amp; box legs always kept). Top-N by notional after solving. Clear to disable.</p>
+          </div>
+        </div>
+
+        <!-- Rolls -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Rolls</div>
+          <div class="optv3-field">
+            <label for="optv3-roll-dte-threshold">Roll DTE threshold <input type="number" id="optv3-roll-dte-threshold" value="7" min="-1" step="1"></label>
+            <p class="optv3-hint">Roll positions with DTE ≤ this. Clear to disable forced rolls. −1 = force-roll exactly the trades checked in Trade Management.</p>
+          </div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-roll-itm-only" checked> ITM-only rolls</label>
+          <p class="optv3-hint">When rolling, only touch in-the-money positions.</p>
+        </div>
+
+        <!-- Output -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Output</div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-box-neutralizer" checked> Box neutralizer</label>
+          <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
+          <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
+        </div>
+      </aside>
+
+      <!-- ── RIGHT: results ─────────────────────────────────── -->
+      <div class="optv3-main">
+
+        <!-- Portfolio KPI row (after Load) -->
+        <section class="card" id="optv3-kpi-section" style="display:none">
+          <div class="optv3-section-head">
+            <h2 style="margin:0">Current Book</h2>
+            <span class="optv3-muted">Spot <b id="optv3-eth-spot">--</b></span>
+          </div>
+          <div class="optv3-kpi-grid" style="grid-template-columns:repeat(5,1fr)">
+            <div><div class="greek-label">Delta</div><div class="greek-value" id="optv3-total-delta">--</div></div>
+            <div><div class="greek-label">Gamma</div><div class="greek-value" id="optv3-total-gamma">--</div></div>
+            <div><div class="greek-label">Theta</div><div class="greek-value" id="optv3-total-theta">--</div></div>
+            <div><div class="greek-label">Vega</div><div class="greek-value" id="optv3-total-vega">--</div></div>
+            <div><div class="greek-label">MTM</div><div class="greek-value" id="optv3-total-mtm">--</div></div>
+          </div>
+        </section>
+
+        <!-- Result KPI row (after Run) -->
+        <section class="card" id="optv3-result-kpi" style="display:none">
+          <div class="optv3-section-head">
+            <h2 style="margin:0">Optimization Result</h2>
+            <span class="optv3-muted" id="optv3-result-status"></span>
+          </div>
+          <div id="optv3-warnings" class="optv3-warn" style="display:none"></div>
+          <div class="optv3-kpi-grid">
+            <div><div class="greek-label">Unwind / Roll</div><div class="greek-value" id="optv3-sum-unwind">--</div></div>
+            <div><div class="greek-label">Replacement / New</div><div class="greek-value" id="optv3-sum-replacement">--</div></div>
+            <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv3-sum-net-premium">--</div></div>
+            <div><div class="greek-label">Cash Shift</div><div class="greek-value" id="optv3-sum-cash-shift">--</div></div>
+            <div><div class="greek-label">Fit Error ↓</div><div class="greek-value" id="optv3-sum-fit">--</div></div>
+            <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv3-candidates">--</div></div>
+          </div>
+          <div class="optv3-subline">
+            <span>Premium sold: <b id="optv3-sum-prem-sold">--</b></span>
+            <span>Premium bought: <b id="optv3-sum-prem-bought">--</b></span>
+            <span>Target expiry: <b id="optv3-sum-target-expiry">--</b></span>
+          </div>
+        </section>
+
+        <!-- Tabbed detail -->
+        <section class="card">
+          <div class="sub-tab-bar">
+            <button class="sub-tab-btn active" data-subtab="optv3-payoff">Payoff</button>
+            <button class="sub-tab-btn" data-subtab="optv3-matrix">P&amp;L Matrix</button>
+            <button class="sub-tab-btn" data-subtab="optv3-structures">Structures</button>
+            <button class="sub-tab-btn" data-subtab="optv3-unwind">Unwind</button>
+            <button class="sub-tab-btn" data-subtab="optv3-new">New Trades</button>
+            <button class="sub-tab-btn" data-subtab="optv3-cash">Cash Flow</button>
+          </div>
+
+          <!-- Payoff -->
+          <div id="subtab-optv3-payoff" class="sub-tab-pane active">
+            <div id="optv3-payoff-empty" class="optv3-empty">Load the risk profile to see the payoff curve.</div>
+            <div id="optv3-payoff-chart" style="width:100%;height:460px"></div>
+          </div>
+
+          <!-- Matrix -->
+          <div id="subtab-optv3-matrix" class="sub-tab-pane">
+            <div id="optv3-matrix-mtm-note" class="optv3-muted" style="margin-bottom:.75rem"></div>
+            <div id="optv3-matrix-grid" style="display:grid;grid-template-columns:1fr;gap:1.5rem">
+              <div>
+                <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— before</span></h3>
+                <div class="chain-wrapper" style="max-height:500px">
+                  <table class="pf-table"><thead id="optv3-matrix-thead"></thead><tbody id="optv3-matrix-tbody"></tbody></table>
+                </div>
+              </div>
+              <div id="optv3-matrix-after-panel" style="display:none">
+                <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— after</span></h3>
+                <div class="chain-wrapper" style="max-height:500px">
+                  <table class="pf-table"><thead id="optv3-matrix-after-main-thead"></thead><tbody id="optv3-matrix-after-main-tbody"></tbody></table>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Structures -->
+          <div id="subtab-optv3-structures" class="sub-tab-pane">
+            <div id="optv3-strategy-groups" style="display:flex;flex-direction:column;gap:.75rem"></div>
+            <div id="optv3-structures-empty" class="optv3-empty">Run the optimizer to see proposed structures.</div>
+          </div>
+
+          <!-- Unwind -->
+          <div id="subtab-optv3-unwind" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Trades to Unwind / Close <span class="optv3-muted" id="optv3-unwind-count"></span></h3>
+            <div class="chain-wrapper" style="max-height:480px">
+              <table class="pf-table">
+                <thead><tr>
+                  <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+                  <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind Value ($)</th><th>Counterparty</th>
+                </tr></thead>
+                <tbody id="optv3-unwind-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- New Trades -->
+          <div id="subtab-optv3-new" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Replacement / New Trades <span class="optv3-muted" id="optv3-replacement-count"></span></h3>
+            <div class="chain-wrapper" style="max-height:480px">
+              <table class="pf-table">
+                <thead><tr>
+                  <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
+                  <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+                </tr></thead>
+                <tbody id="optv3-replacement-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Cash Flow -->
+          <div id="subtab-optv3-cash" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Cash Flow by Counterparty</h3>
+            <p class="optv3-hint" style="margin:0 0 .6rem">Premium paid (outlay) vs. collected across every proposed trade. Net far from 0 means the desk must wire cash rather than self-fund.</p>
+            <div class="chain-wrapper" style="max-height:420px">
+              <table class="pf-table" style="max-width:620px">
+                <thead><tr><th>Counterparty</th><th>Outlay ($)</th><th>Collection ($)</th><th>Net ($)</th></tr></thead>
+                <tbody id="optv3-cash-flow-tbody"></tbody>
+              </table>
+            </div>
+            <div id="optv3-cash-empty" class="optv3-empty">Run the optimizer to see cash flow.</div>
+          </div>
+        </section>
+
+        <!-- Saved runs -->
+        <section class="card">
+          <div class="optv3-section-head">
+            <h3 style="margin:0">Saved Runs</h3>
+            <button class="btn-secondary" style="width:auto;font-size:.75rem" id="btn-optv3-refresh-snapshots">Refresh</button>
+          </div>
+          <div class="chain-wrapper" style="max-height:250px;margin-top:.5rem">
+            <table class="pf-table" style="width:100%">
+              <thead><tr>
+                <th>Date</th><th>Asset</th><th>Expiry</th><th>Lambda</th><th>Trades</th><th>Status</th><th>Size</th><th></th>
+              </tr></thead>
+              <tbody id="optv3-snapshots-body">
+                <tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">No runs yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+      </div>
+    </div>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->

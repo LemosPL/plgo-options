@@ -1157,6 +1157,10 @@ document.querySelectorAll(".nav-item").forEach(item => {
       }, 50);
     }
     if (pg === "roll" && !rollLoaded && !isFil) rollInit();
+    if (pg === "optv3" && !optv3Loaded) optv3Init();
+    if (pg === "optv3") {
+      setTimeout(() => { const c = document.getElementById("optv3-payoff-chart"); if (c && c.data) Plotly.Plots.resize(c); }, 50);
+    }
     if (pg === "structurer" && !sbLoaded) sbInit();
     if (pg === "volcurve" && !vcLoaded) vcInit();
     if (pg === "volcurve") {
@@ -9299,8 +9303,8 @@ function optv2RenderTradeTable(tbodyId, rows, countId, rowFn, colspan, emptyMsg)
 
 // Group trade legs by their strategy_instrument so multi-leg structures
 // (spreads / straddles / boxes) render as one card instead of loose rows.
-function optv2RenderStrategyGroups(trades) {
-  const $wrap = document.getElementById("optv2-strategy-groups");
+function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
+  const $wrap = document.getElementById(wrapId);
   $wrap.innerHTML = "";
   if (!trades || !trades.length) {
     $wrap.innerHTML = '<div style="opacity:.6;font-size:.82rem">No structures proposed.</div>';
@@ -9390,6 +9394,450 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
 }
 
 // (Full Optimizer tab removed)
+
+// ═══════════════════════════════════════════════════════════════
+// OPTIMIZER V3 — reorganized UI over the exact same v2 engine.
+// Reuses the pure helpers + param-friendly renderers above
+// (optv2Fmt / optv2NearestIdx / optv2MatrixDisplayIdx / optv2OptType /
+//  optv2StrategyLabel / optv2ExpiryText / optv2RenderTradeTable /
+//  optv2RenderCompareMatrix / optv2RenderStrategyGroups) and the same
+// endpoints (/api/portfolio/pnl, /api/optimization/run, /snapshots).
+// ═══════════════════════════════════════════════════════════════
+let optv3Data = null;
+let optv3OptResult = null;
+let optv3Loaded = false;
+
+// Base-book scoping shares the same global the Deals "Send to Optimizer" sets,
+// so a selection works whether you open v2 or v3.
+function optv3ActivePositions() {
+  const all = (optv3Data && optv3Data.positions) || [];
+  const ids = optv2BaseIds();
+  if (!ids) return all;
+  const set = new Set(ids.map(Number));
+  return all.filter(p => set.has(Number(p.id)));
+}
+
+function optv3SyncRunEnabled() {
+  const runBtn = document.getElementById("btn-run-optv3");
+  if (!runBtn) return;
+  const hasExpiry = !!(document.getElementById("optv3-target-expiry")?.value);
+  runBtn.disabled = !(!!optv3Data && hasExpiry);
+  runBtn.title = (optv3Data && !hasExpiry) ? "Choose a target maturity before running" : "";
+}
+
+function optv3RenderBasePill() {
+  const el = document.getElementById("optv3-base-pill");
+  if (!el) return;
+  const ids = optv2BaseIds();
+  if (!ids) { el.style.display = "none"; el.innerHTML = ""; return; }
+  const matched = optv3Data ? optv3ActivePositions().length : ids.length;
+  const missing = optv3Data ? ids.length - matched : 0;
+  el.style.display = "";
+  el.innerHTML = `<span class="optv2-base-pill-text">🎯 Base book scoped to <b>${matched}</b> trade${matched === 1 ? "" : "s"} from Deals`
+    + (missing > 0 ? ` <span style="color:var(--red)">(${missing} not in book)</span>` : "")
+    + `</span><button id="optv3-base-clear" class="btn-secondary" style="width:auto;padding:.15rem .55rem;margin-left:.6rem">Clear ✕</button>`;
+  document.getElementById("optv3-base-clear")?.addEventListener("click", () => {
+    window._optv2BaseTradeIds = null; window._optv2BaseMeta = null;
+    optv3RenderBasePill();
+    if (optv3Data) optv3RenderPreview();
+  });
+}
+
+function optv3PopulateCounterparties() {
+  const select = document.getElementById("optv3-counterparties");
+  if (!select || !optv3Data) return;
+  const cps = [...new Set((optv3Data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  select.innerHTML = '<option value="ALL" selected>ALL</option>'
+    + cps.map(c => `<option value="${c}">${c}</option>`).join("");
+}
+
+async function optv3Load() {
+  const $btn = document.getElementById("btn-load-optv3");
+  $btn.classList.add("loading"); $btn.textContent = "Loading…";
+  try {
+    optv3Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
+    optv3OptResult = null;
+    optv3PopulateCounterparties();
+
+    const $expiry = document.getElementById("optv3-target-expiry");
+    $expiry.innerHTML = '<option value="">Select maturity…</option>';
+    if (optv3Data.vol_surface) {
+      optv3Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte).forEach(s => {
+        const o = document.createElement("option");
+        o.value = s.expiry_code; o.textContent = `${s.expiry_code} (${s.dte}d)`;
+        $expiry.appendChild(o);
+      });
+    }
+
+    document.getElementById("optv3-kpi-section").style.display = "";
+    document.getElementById("optv3-payoff-empty").style.display = "none";
+    // Reset the "after" matrix panel until a run produces one.
+    document.getElementById("optv3-matrix-after-panel").style.display = "none";
+    document.getElementById("optv3-matrix-grid").style.gridTemplateColumns = "1fr";
+
+    optv3RenderBasePill();
+    optv3RenderPreview();
+    optv3SyncRunEnabled();
+  } catch (e) {
+    console.error("Optimizer v3: failed to load portfolio:", e);
+    alert("Failed to load portfolio data — check console.\n" + e.message);
+  } finally {
+    $btn.classList.remove("loading"); $btn.textContent = "Load Risk Profile";
+  }
+}
+
+// Preview (greeks KPI + payoff + before matrix) from the loaded /pnl book.
+function optv3RenderPreview() {
+  if (!optv3Data) return;
+  optv3RenderKpi();
+  optv3RenderPayoff();
+  optv3RenderMatrix();
+}
+
+function optv3RenderKpi() {
+  document.getElementById("optv3-eth-spot").textContent = "$" + optv2Fmt(optv3Data.eth_spot, 2);
+  const ids = optv2BaseIds();
+  if (!ids) {
+    const t = optv3Data.totals || {};
+    document.getElementById("optv3-total-delta").textContent = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv3-total-gamma").textContent = optv2Fmt(t.portfolio_gamma, 4);
+    document.getElementById("optv3-total-theta").textContent = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv3-total-vega").textContent = optv2Fmt(t.portfolio_vega, 2);
+    document.getElementById("optv3-total-mtm").textContent = "$" + optv2Fmt(t.current_total_mtm, 2);
+    return;
+  }
+  const ps = optv3ActivePositions();
+  const sum = fn => ps.reduce((a, p) => a + (fn(p) || 0), 0);
+  document.getElementById("optv3-total-delta").textContent = optv2Fmt(sum(p => (p.delta || 0) * p.net_qty), 2);
+  document.getElementById("optv3-total-gamma").textContent = optv2Fmt(sum(p => (p.gamma || 0) * p.net_qty), 4);
+  document.getElementById("optv3-total-theta").textContent = optv2Fmt(sum(p => (p.theta || 0) * p.net_qty), 2);
+  document.getElementById("optv3-total-vega").textContent = optv2Fmt(sum(p => (p.vega || 0) * p.net_qty), 2);
+  document.getElementById("optv3-total-mtm").textContent = "$" + optv2Fmt(sum(p => p.current_mtm), 2);
+}
+
+// Payoff chart — faithful copy of optv2RenderPayoff, pointed at v3 state/ids.
+function optv3RenderPayoff() {
+  const spots = optv3Data.spot_ladder;
+  const positions = optv3ActivePositions();
+  const S0 = optv3Data.eth_spot;
+  if (!positions.length) return;
+
+  const logM = spots.map(s => Math.log(s / S0));
+
+  const visibleIdx = [];
+  for (let i = 0; i < spots.length; i++) {
+    let hasData = false;
+    for (const h of OPTV2_HORIZONS) {
+      if (positions[0].payoff_by_horizon[h] && positions[0].payoff_by_horizon[h][i] != null) { hasData = true; break; }
+    }
+    if (hasData) visibleIdx.push(i);
+  }
+
+  const tickVals = [], tickTexts = [];
+  const MIN_LM_GAP = 0.018, LM_GAP_SCALE = 0.12;
+  let lastTickLM = -Infinity;
+  for (const i of visibleIdx) {
+    const lm = logM[i], absLM = Math.abs(lm);
+    const requiredGap = MIN_LM_GAP + LM_GAP_SCALE * absLM;
+    if (lm - lastTickLM >= requiredGap) {
+      const s = spots[i];
+      const roundTo = absLM < 0.08 ? 100 : absLM < 0.20 ? 200 : 500;
+      if (s % roundTo === 0) { tickVals.push(lm); tickTexts.push("$" + s.toLocaleString()); lastTickLM = lm; }
+    }
+  }
+
+  const traces = [];
+  if (optv3OptResult && optv3OptResult.status === "ok") {
+    const optSpots = optv3OptResult.spot_ladder || spots;
+    const optLogM = optSpots.map(s => Math.log(s / S0));
+    const beforeCurve = optv3OptResult.before.payoff_by_horizon["0"];
+    if (beforeCurve) traces.push({ x: optLogM, y: beforeCurve, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+    const afterCurve = optv3OptResult.after.payoff_by_horizon["0"];
+    if (afterCurve) traces.push({ x: optLogM, y: afterCurve, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+    if (optv3OptResult.target_payoff) {
+      const spotIdx = optv2NearestIdx(optSpots, S0);
+      const targetAtSpot = optv3OptResult.target_payoff[spotIdx];
+      const targetCurve = optv3OptResult.target_payoff.map(v => v - targetAtSpot);
+      traces.push({ x: optLogM, y: targetCurve, mode: "lines", name: "Target Profile", line: { color: "#ffca28", width: 2, dash: "dot" } });
+    }
+  } else {
+    const horizonColors = { 0: "#4fc3f7", 16: "#ba68c8", 30: "#ffb74d", 60: "#81c784", 90: "#e57373" };
+    for (const h of OPTV2_HORIZONS) {
+      const hKey = String(h);
+      const totalPayoff = new Array(spots.length).fill(0);
+      let hasData = false;
+      positions.forEach(p => {
+        const curve = p.payoff_by_horizon[hKey];
+        if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; }
+      });
+      if (!hasData) continue;
+      traces.push({ x: logM, y: totalPayoff, mode: "lines", name: h === 0 ? "Now (0d)" : `T+${h}d`, line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 } });
+    }
+  }
+
+  traces.push({ x: [logM[0], logM[logM.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
+
+  const spotPayoff0 = (() => {
+    const totalPayoff = new Array(spots.length).fill(0);
+    positions.forEach(p => { const curve = p.payoff_by_horizon["0"]; if (curve) for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; });
+    return totalPayoff[optv2NearestIdx(spots, S0)];
+  })();
+  traces.push({ x: [0], y: [spotPayoff0], mode: "markers", name: `Current Spot ($${S0.toLocaleString()})`, marker: { color: "#ffca28", size: 10, symbol: "diamond" } });
+
+  const layout = {
+    title: { text: optv3OptResult ? "Payoff — Before vs After vs Target (Now)" : "Portfolio Payoff — All Positions", font: { color: "#e6edf3", size: 16 } },
+    xaxis: { title: "Log-Moneyness  ln(K / Spot)", tickvals: tickVals, ticktext: tickTexts, tickangle: -45, color: "#8b949e", gridcolor: "#21262d", zerolinecolor: "#ffca28", zerolinewidth: 1.5 },
+    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
+    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
+    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22 },
+    margin: { t: 50, b: 80, l: 80, r: 30 },
+  };
+  Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true });
+}
+
+// Preview P&L matrix (before) — faithful copy of optv2RenderMatrix on v3 ids.
+function optv3RenderMatrix() {
+  const spots = optv3Data.spot_ladder;
+  const positions = optv3ActivePositions();
+  const ethSpot = optv3Data.eth_spot;
+  if (!positions.length) return;
+
+  const $thead = document.getElementById("optv3-matrix-thead");
+  $thead.innerHTML = "";
+  const headRow = document.createElement("tr");
+  headRow.innerHTML = "<th>ETH Spot</th>";
+  OPTV2_HORIZONS.forEach(h => { const th = document.createElement("th"); th.textContent = h === 0 ? "Now" : `${h}d`; headRow.appendChild(th); });
+  $thead.appendChild(headRow);
+
+  const $tbody = document.getElementById("optv3-matrix-tbody");
+  $tbody.innerHTML = "";
+  const nearestIdx = optv2NearestIdx(spots, ethSpot);
+  const displayIdx = optv2MatrixDisplayIdx(spots);
+  displayIdx.forEach((si) => {
+    const s = spots[si];
+    const tr = document.createElement("tr");
+    if (si === nearestIdx) tr.classList.add("row-highlight");
+    const tdSpot = document.createElement("td");
+    tdSpot.textContent = "$" + s.toLocaleString(); tdSpot.style.fontWeight = "600";
+    tr.appendChild(tdSpot);
+    OPTV2_HORIZONS.forEach(h => {
+      const hKey = String(h);
+      let cellVal = 0;
+      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve && curve[si] !== undefined) cellVal += curve[si]; });
+      const td = document.createElement("td");
+      td.textContent = Math.round(cellVal).toLocaleString(); td.style.textAlign = "right";
+      if (cellVal > 0) td.style.color = "#66bb6a";
+      if (cellVal < 0) td.style.color = "#ef5350";
+      tr.appendChild(td);
+    });
+    $tbody.appendChild(tr);
+  });
+}
+
+// Render optimization result into the v3 KPI row + tabbed detail.
+function optv3RenderResult(data) {
+  if (data.status !== "ok") { alert(data.message || "Optimization returned no results."); return; }
+
+  document.getElementById("optv3-result-kpi").style.display = "";
+  optv3OptResult = data;
+  optv3RenderPayoff();  // now overlays before/after/target
+
+  document.getElementById("optv3-result-status").textContent = data.optimizer_converged ? "Converged" : "Did not converge";
+
+  const $warn = document.getElementById("optv3-warnings");
+  if (data.message) { $warn.style.display = ""; $warn.textContent = data.message; } else { $warn.style.display = "none"; }
+
+  const unwinds = data.roll_unwind_trades || [];
+  const replacements = data.replacement_trades || [];
+  const allTrades = data.trades || [];
+  const ps = data.premium_summary || {};
+
+  document.getElementById("optv3-sum-unwind").textContent = unwinds.length;
+  document.getElementById("optv3-sum-replacement").textContent = replacements.length;
+  const netPrem = data.net_premium_generated ?? ps.net_premium_generated ?? 0;
+  const $netPrem = document.getElementById("optv3-sum-net-premium");
+  $netPrem.textContent = (netPrem >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(netPrem), 0);
+  $netPrem.style.color = netPrem >= 0 ? "var(--green)" : "var(--red)";
+  const cash = data.cash_shift || 0;
+  document.getElementById("optv3-sum-cash-shift").textContent = (cash >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(cash), 0);
+  const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;
+  const $fit = document.getElementById("optv3-sum-fit");
+  if (fitBefore != null && fitAfter != null) {
+    const pct = fitBefore > 0 ? (100 * (fitBefore - fitAfter) / fitBefore) : 0;
+    $fit.textContent = optv2Fmt(pct, 1) + "%";
+    $fit.style.color = pct >= 0 ? "var(--green)" : "var(--red)";
+  } else { $fit.textContent = "—"; }
+  document.getElementById("optv3-candidates").textContent = data.candidates_evaluated ?? "—";
+  document.getElementById("optv3-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
+  document.getElementById("optv3-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
+  document.getElementById("optv3-sum-target-expiry").textContent = data.target_expiry || "All";
+
+  // Cash flow by counterparty
+  const $cashBody = document.getElementById("optv3-cash-flow-tbody");
+  const $cashEmpty = document.getElementById("optv3-cash-empty");
+  const cashByCp = data.cash_by_counterparty || {};
+  const cps = Object.keys(cashByCp);
+  if (cps.length) {
+    if ($cashEmpty) $cashEmpty.style.display = "none";
+    $cashBody.innerHTML = cps.sort().map(cp => {
+      const v = cashByCp[cp]; const net = v.net || 0;
+      return `<tr><td>${cp}</td><td>$${optv2Fmt(v.outlay || 0, 0)}</td>`
+        + `<td>$${optv2Fmt(v.collection || 0, 0)}</td>`
+        + `<td style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
+    }).join("");
+  } else {
+    $cashBody.innerHTML = "";
+    if ($cashEmpty) $cashEmpty.style.display = "";
+  }
+
+  // Matrix note + before/after matrices (reuse the shared renderer)
+  const $mtmNote = document.getElementById("optv3-matrix-mtm-note");
+  if ($mtmNote) {
+    if (data.current_book_mtm != null) {
+      const mtm = data.current_book_mtm;
+      $mtmNote.innerHTML = `Both matrices show P&amp;L <b>from today</b>, not absolute value — current book MTM is `
+        + `<b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> `
+        + `(the implicit $0 anchor at Now / current spot).`;
+    } else { $mtmNote.textContent = ""; }
+  }
+  if (data.before && data.before.payoff_by_horizon) {
+    optv2RenderCompareMatrix(data, "before", "optv3-matrix-thead", "optv3-matrix-tbody");
+  }
+  const $afterPanel = document.getElementById("optv3-matrix-after-panel");
+  const $matrixGrid = document.getElementById("optv3-matrix-grid");
+  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
+    $afterPanel.style.display = "";
+    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+    optv2RenderCompareMatrix(data, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody");
+  }
+
+  // Structures
+  const $structEmpty = document.getElementById("optv3-structures-empty");
+  if ($structEmpty) $structEmpty.style.display = allTrades.length ? "none" : "";
+  optv2RenderStrategyGroups(allTrades, "optv3-strategy-groups");
+
+  // Unwind table
+  optv2RenderTradeTable("optv3-unwind-tbody", unwinds, "optv3-unwind-count",
+    (t) => [
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`, `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 0)}</td>`, `<td>${t.counterparty || "—"}</td>`,
+    ], 9, "No positions flagged for unwind/roll at this DTE threshold.");
+
+  // Replacement / new table
+  optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
+    (t) => [
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td>${Math.abs(t.qty)}</td>`, `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
+    ], 11, "No replacement or new trades proposed.");
+}
+
+async function optv3LoadSnapshots() {
+  const tbody = document.getElementById("optv3-snapshots-body");
+  if (!tbody) return;
+  try {
+    const res = await get("/api/optimization/snapshots");
+    const snaps = res.snapshots || [];
+    if (!snaps.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">No saved runs yet. Tick "Save run snapshot" before running.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = snaps.map(s => {
+      const d = s.modified ? new Date(s.modified * 1000) : null;
+      const dateStr = d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      const timeStr = d ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+      const statusColor = s.status === "ok" ? "var(--green)" : s.status ? "var(--red)" : "var(--muted)";
+      return `<tr>
+        <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+        <td>${s.asset || "ETH"}</td><td>${s.target_expiry || "--"}</td><td>${s.lam_factor || "--"}</td>
+        <td>${s.trades_count != null ? s.trades_count : "--"}</td>
+        <td style="color:${statusColor}">${s.status || "--"}</td><td>${s.size_kb || 0} KB</td>
+        <td><a href="/api/optimization/snapshots/${encodeURIComponent(s.filename)}" download style="font-size:.75rem">&darr;</a></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">${e.message}</td></tr>`;
+  }
+}
+
+// One-time init when the page is first opened.
+function optv3Init() {
+  optv3Loaded = true;
+  optv3LoadSnapshots();
+  // Resize the Plotly chart when its (previously-hidden) tab becomes visible.
+  document.querySelectorAll('#page-optv3 .sub-tab-btn').forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.subtab === "optv3-payoff") {
+        setTimeout(() => { const c = document.getElementById("optv3-payoff-chart"); if (c && c.data) Plotly.Plots.resize(c); }, 40);
+      }
+    });
+  });
+}
+
+// ── Event wiring (elements exist in the initial HTML) ──
+document.getElementById("btn-load-optv3")?.addEventListener("click", optv3Load);
+document.getElementById("optv3-target-expiry")?.addEventListener("change", optv3SyncRunEnabled);
+document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
+
+document.getElementById("btn-run-optv3")?.addEventListener("click", async () => {
+  const $btn = document.getElementById("btn-run-optv3");
+  if (!document.getElementById("optv3-target-expiry")?.value) {
+    alert("Choose a target maturity before running the optimizer."); return;
+  }
+  $btn.classList.add("loading"); $btn.textContent = "Running…"; $btn.disabled = true;
+  try {
+    const rollDteThreshold = document.getElementById("optv3-roll-dte-threshold").value || null;
+    const cptySel = document.getElementById("optv3-counterparties");
+    const selectedCounterparties = cptySel
+      ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : [];
+    const saveRequested = document.getElementById("optv3-save-usecase")?.checked || false;
+    const rollItmOnly = document.getElementById("optv3-roll-itm-only")?.checked || false;
+    const enableBoxNeutralizer = document.getElementById("optv3-enable-box-neutralizer")?.checked || false;
+    const collateralBudgetRaw = document.getElementById("optv3-collateral-budget-pct")?.value;
+    const collateralBudgetPct = collateralBudgetRaw === "" || collateralBudgetRaw === undefined ? null : parseFloat(collateralBudgetRaw);
+    const maxQtyRaw = document.getElementById("optv3-max-qty")?.value;
+    const maxQty = maxQtyRaw === "" || maxQtyRaw === undefined ? null : parseFloat(maxQtyRaw);
+    const maxTradesRaw = document.getElementById("optv3-max-trades")?.value;
+    const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
+
+    const data = await post("/api/optimization/run", {
+      asset: currentAsset,
+      lam_factor: parseFloat(document.getElementById("optv3-lam-factor").value || "0.2"),
+      downside_factor: parseFloat(document.getElementById("optv3-downside-factor")?.value || "1"),
+      t90_weight: parseFloat(document.getElementById("optv3-t90-weight")?.value || "0"),
+      mu_factor: parseFloat(document.getElementById("optv3-mu-factor")?.value || "0"),
+      cash_neutrality_factor: parseFloat(document.getElementById("optv3-cash-neutrality-factor")?.value || "0"),
+      target_expiry: document.getElementById("optv3-target-expiry").value || null,
+      unwind_discount: parseFloat(document.getElementById("optv3-unwind-discount")?.value || "0.2"),
+      new_position_penalty: parseFloat(document.getElementById("optv3-new-position-penalty")?.value || "0.04"),
+      roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
+      roll_itm_only: rollItmOnly,
+      collateral_budget_pct: collateralBudgetPct,
+      max_qty: maxQty,
+      max_trades: maxTrades,
+      enable_box_neutralizer: enableBoxNeutralizer,
+      save_usecase_snapshot: saveRequested,
+      is_replay: false,
+      counterparties: selectedCounterparties.length ? selectedCounterparties : null,
+      forced_roll_ids: [...tmSelected],
+      base_trade_ids: optv2BaseIds(),
+    });
+    console.log("Optimizer v3 result:", data);
+    optv3RenderResult(data);
+    if (saveRequested) { await optv3LoadSnapshots(); }
+  } catch (e) {
+    console.error("Optimizer v3 run failed:", e);
+    alert("Optimization failed — check console.\n" + (e.message || e));
+  } finally {
+    $btn.classList.remove("loading"); $btn.textContent = "Run Optimizer"; $btn.disabled = false;
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════
 // VOL SURFACE CURVE PAGE
