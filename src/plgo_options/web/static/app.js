@@ -8474,6 +8474,63 @@ init();
 
 let optv2Data = null;
 
+/* ── Base-book scoping (trades sent from the Deals / Risk screen) ──────────
+ * When the user picks deals on Deals / Risk and hits "Send to Optimizer v2",
+ * their trade ids land on window._optv2BaseTradeIds. While that's set, the
+ * Optimizer treats *only* those trades as the current portfolio: the Run call
+ * passes base_trade_ids, and the preview (greeks/payoff/matrix) is filtered to
+ * match so what you see is what the optimizer runs against. Clearing the pill
+ * returns to the full book. */
+function optv2BaseIds() {
+  return Array.isArray(window._optv2BaseTradeIds) && window._optv2BaseTradeIds.length
+    ? window._optv2BaseTradeIds : null;
+}
+
+// Positions the previews should render — the base-book subset when scoped.
+function optv2ActivePositions() {
+  const all = (optv2Data && optv2Data.positions) || [];
+  const ids = optv2BaseIds();
+  if (!ids) return all;
+  const set = new Set(ids.map(Number));
+  return all.filter(p => set.has(Number(p.id)));
+}
+
+function optv2RenderBasePill() {
+  const el = document.getElementById("optv2-base-pill");
+  if (!el) return;
+  const ids = optv2BaseIds();
+  if (!ids) { el.style.display = "none"; el.innerHTML = ""; return; }
+  // How many of the sent trades actually matched the loaded book (if loaded)?
+  const matched = optv2Data ? optv2ActivePositions().length : ids.length;
+  const missing = optv2Data ? ids.length - matched : 0;
+  el.style.display = "";
+  el.innerHTML = `
+    <span class="optv2-base-pill-text">
+      🎯 Base book scoped to <b>${matched}</b> trade${matched === 1 ? "" : "s"} from Deals
+      ${missing > 0 ? `<span style="color:var(--red)"> (${missing} not in current book)</span>` : ""}
+      — the optimizer runs against just these.
+    </span>
+    <button id="optv2-base-clear" class="btn-secondary" style="width:auto;padding:.15rem .55rem;margin-left:.6rem"
+      title="Use the full book again">Clear ✕</button>`;
+  document.getElementById("optv2-base-clear")?.addEventListener("click", () => {
+    window._optv2BaseTradeIds = null;
+    window._optv2BaseMeta = null;
+    optv2RenderBasePill();
+    if (optv2Data) optv2RenderAll();
+  });
+}
+
+// Entry point called from the Deals screen after switching to this page.
+function optv2ApplyBaseSelection() {
+  optv2RenderBasePill();
+  if (optv2Data) {
+    optv2RenderAll();
+  } else {
+    // Nothing loaded yet — pull the book so the scoped preview shows immediately.
+    document.getElementById("btn-load-optv2")?.click();
+  }
+}
+
 document.getElementById("btn-load-optv2").addEventListener("click", async () => {
   console.log("[OPT-FE] btn-load-optv2 clicked");
   const $btn = document.getElementById("btn-load-optv2");
@@ -8524,6 +8581,7 @@ function optv2RenderAll() {
   document.getElementById("optv2-payoff-section").style.display = "";
   document.getElementById("optv2-matrix-section").style.display = "";
 
+  optv2RenderBasePill();
   optv2RenderGreeks();
   optv2RenderPayoff();
   optv2RenderMatrix();
@@ -8531,13 +8589,26 @@ function optv2RenderAll() {
 
 /* ── Greeks summary ─────────────────────────────────────────── */
 function optv2RenderGreeks() {
-  const t = optv2Data.totals;
-  document.getElementById("optv2-total-delta").textContent  = optv2Fmt(t.portfolio_delta, 2);
-  document.getElementById("optv2-total-gamma").textContent  = optv2Fmt(t.portfolio_gamma, 4);
-  document.getElementById("optv2-total-theta").textContent  = optv2Fmt(t.portfolio_theta, 2);
-  document.getElementById("optv2-total-vega").textContent   = optv2Fmt(t.portfolio_vega, 2);
-  document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt(t.current_total_mtm, 2);
-  document.getElementById("optv2-eth-spot").textContent     = "$" + optv2Fmt(optv2Data.eth_spot, 2);
+  document.getElementById("optv2-eth-spot").textContent = "$" + optv2Fmt(optv2Data.eth_spot, 2);
+  if (!optv2BaseIds()) {
+    // Full book — use the server-computed totals as before.
+    const t = optv2Data.totals;
+    document.getElementById("optv2-total-delta").textContent  = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv2-total-gamma").textContent  = optv2Fmt(t.portfolio_gamma, 4);
+    document.getElementById("optv2-total-theta").textContent  = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv2-total-vega").textContent   = optv2Fmt(t.portfolio_vega, 2);
+    document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt(t.current_total_mtm, 2);
+    return;
+  }
+  // Scoped — recompute totals from the selected positions (same formulas the
+  // /pnl endpoint uses: greek × net_qty summed, MTM summed).
+  const ps = optv2ActivePositions();
+  const sum = fn => ps.reduce((a, p) => a + (fn(p) || 0), 0);
+  document.getElementById("optv2-total-delta").textContent = optv2Fmt(sum(p => (p.delta || 0) * p.net_qty), 2);
+  document.getElementById("optv2-total-gamma").textContent = optv2Fmt(sum(p => (p.gamma || 0) * p.net_qty), 4);
+  document.getElementById("optv2-total-theta").textContent = optv2Fmt(sum(p => (p.theta || 0) * p.net_qty), 2);
+  document.getElementById("optv2-total-vega").textContent  = optv2Fmt(sum(p => (p.vega || 0) * p.net_qty), 2);
+  document.getElementById("optv2-total-mtm").textContent   = "$" + optv2Fmt(sum(p => p.current_mtm), 2);
 }
 
 let optv2OptResult = null;  // stores latest optimization result
@@ -8545,8 +8616,9 @@ let optv2OptResult = null;  // stores latest optimization result
 /* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
 function optv2RenderPayoff() {
   const spots = optv2Data.spot_ladder;
-  const positions = optv2Data.positions;
+  const positions = optv2ActivePositions();
   const S0 = optv2Data.eth_spot;
+  if (!positions.length) return;
 
   // Compute log-moneyness: ln(K / S0)
   const logM = spots.map(s => Math.log(s / S0));
@@ -8755,8 +8827,9 @@ function optv2MatrixDisplayIdx(spots, targetRows = 14) {
 /* ── Scenario matrix: spot (rows) × horizon (columns) ──────── */
 function optv2RenderMatrix() {
   const spots    = optv2Data.spot_ladder;
-  const positions = optv2Data.positions;
+  const positions = optv2ActivePositions();
   const ethSpot  = optv2Data.eth_spot;
+  if (!positions.length) return;
 
   // Header
   const $thead = document.getElementById("optv2-matrix-thead");
@@ -8912,6 +8985,9 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       // mode), but harmless to always send — sourced from the same tmSelected
       // set the Trade Management tab's "Expire Selected" button uses.
       forced_roll_ids: [...tmSelected],
+      // When trades were sent over from the Deals / Risk screen, scope the
+      // optimizer's input book to exactly those trades. null = full book.
+      base_trade_ids: optv2BaseIds(),
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -11107,6 +11183,7 @@ function renderDealsView() {
         <h2 style="margin:0">Payoff Profiles ${single ? "" : `· ${deals.length} deals`}</h2>
         <div class="pf-toolbar-spacer"></div>
         ${groupBtn}
+        <button id="btn-deals-to-optv2" class="btn-primary" style="width:auto" title="Load the selected deals' trades into Optimizer v2 as the base book to optimize against">Send to Optimizer v2 (${deals.length})</button>
         <button id="btn-deals-clear-sel" class="btn-secondary" style="width:auto">Clear selection</button>
       </div>
       ${hasWhatIf ? whatifBannerHtml(single, base, wi) : ""}
@@ -11122,12 +11199,28 @@ function renderDealsView() {
     dealsSelectedIds = new Set(); dealsClosed = new Set();
     renderDealList(); renderDealsView();
   });
+  document.getElementById("btn-deals-to-optv2")?.addEventListener("click", () => sendDealsToOptv2(deals));
   document.getElementById("btn-deals-group")?.addEventListener("click", groupSelectedDeals);
   document.getElementById("btn-deals-ungroup")?.addEventListener("click", () => ungroupCounterparty(single.counterparty));
   document.getElementById("btn-deals-reset-whatif")?.addEventListener("click", () => {
     dealsClosed = new Set(); renderDealsView();
   });
   document.getElementById("btn-deals-suggest")?.addEventListener("click", () => suggestZeroCost(single));
+}
+
+// Hand the selected deals' underlying trades to the Optimizer v2 screen as its
+// base book (the "current portfolio" the LP optimizes against). The DB trade ids
+// live on each deal as `leg_ids`; we flatten + de-dupe them, stash them on a
+// shared global, switch to the Optimizer v2 page, and let it scope itself.
+function sendDealsToOptv2(deals) {
+  const ids = [...new Set((deals || []).flatMap(d => d.leg_ids || []))]
+    .map(Number).filter(Number.isFinite);
+  if (!ids.length) { alert("No trades found in the selected deals."); return; }
+  window._optv2BaseTradeIds = ids;
+  window._optv2BaseMeta = { trades: ids.length, deals: deals.length };
+  const nav = document.querySelector('.nav-item[data-page="optv2"]');
+  if (nav) nav.click();
+  if (typeof optv2ApplyBaseSelection === "function") optv2ApplyBaseSelection();
 }
 
 // Can the current multi-selection be merged? (2+ deals, same counterparty.)

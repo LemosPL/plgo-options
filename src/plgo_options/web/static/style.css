@@ -1434,3 +1434,12 @@ select { margin-bottom: .5rem; }
   background: rgba(88,166,255,.08); border: 1px solid rgba(88,166,255,.25);
   color: var(--text); margin-bottom: .6rem;
 }
+
+/* Optimizer v2 "base book scoped to N trades from Deals" pill */
+.optv2-base-pill {
+  display: flex; align-items: center; flex-wrap: wrap; gap: .3rem;
+  font-size: .8rem; padding: .5rem .7rem; border-radius: var(--radius);
+  background: rgba(88,166,255,.10); border: 1px solid rgba(88,166,255,.35);
+  color: var(--text);
+}
+.optv2-base-pill-text b { color: var(--accent, #58a6ff); }

@@ -66,6 +66,11 @@ class OptimizationParams(BaseModel):
     enable_box_neutralizer: bool = True
     downside_factor: float = 1.0
     t90_weight: float = 0.0
+    # Optional allow-list of DB trade ids: when set, the optimizer's *input book*
+    # is scoped to exactly these trades (the "current portfolio" it optimizes
+    # against becomes only this subset), instead of the whole asset book. Sourced
+    # from a selection of deals on the Deals / Risk screen. None/empty = full book.
+    base_trade_ids: list[int] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -85,6 +90,24 @@ async def run_optimizer(params: OptimizationParams):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to gather portfolio data: {e}")
+
+    # Scope the input book to a caller-selected subset of trades, if requested.
+    # Positions in the /pnl payload carry the DB trade id under "id" (same id the
+    # forced_roll_ids / Deals-screen leg_ids use), so we filter by it here — the
+    # LP engine then treats this subset as the entire current portfolio.
+    if params.base_trade_ids:
+        wanted = {int(i) for i in params.base_trade_ids}
+        all_positions = pnl_data.get("positions", []) or []
+        filtered = [p for p in all_positions if int(p.get("id", -1)) in wanted]
+        if not filtered:
+            raise HTTPException(
+                status_code=400,
+                detail=("None of the selected trades were found in the current "
+                        f"{params.asset.upper()} book (they may be expired or from "
+                        "a different asset)."),
+            )
+        pnl_data["positions"] = filtered
+        print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
 
     print(params)
     run_params = OptimizerRunParams(
