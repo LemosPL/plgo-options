@@ -1,7 +1,83 @@
+import csv as _csv
 import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from scipy.interpolate import UnivariateSpline
+
+
+def _target_profile_data_dir() -> Path:
+    """Locate the data/ directory holding the saved target-profile CSVs, whether
+    run from the repo root, a subdir, or the /app image."""
+    for cand in (Path("data"), Path("../data"), Path("../../data"),
+                 Path(__file__).resolve().parents[2] / "data"):
+        if cand.exists():
+            return cand
+    return Path("data")
+
+
+def _clean_currency(value) -> "float | None":
+    """Parse a number that may be in accounting format — '$0.25', '(1,000,000)',
+    '$1,234.5' — returning a float (parentheses = negative) or None if unparseable."""
+    s = str(value).strip().replace("$", "").replace(",", "").replace(" ", "").strip()
+    if not s or s == "-":
+        return None
+    neg = s.startswith("(") and s.endswith(")")
+    s = s.strip("()").strip()
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return -v if neg else v
+
+
+def list_target_profiles(asset: str) -> list[dict]:
+    """List the saved target-profile CSVs for an asset, e.g. 'ETH - target.csv'.
+    Returns [{name, file}] sorted by filename."""
+    d = _target_profile_data_dir()
+    out: list[dict] = []
+    try:
+        for p in sorted(d.glob(f"{asset} - *.csv")):
+            out.append({"name": p.stem, "file": p.name})
+    except Exception:
+        pass
+    return out
+
+
+def load_target_profile_file(filename: str, asset: str = "ETH") -> pd.DataFrame:
+    """Load a saved target-profile CSV (Strike, Payoff columns) into the same
+    smoothed DataFrame shape build_parametric_target_profile returns. Handles both
+    the clean ETH format and the FIL accounting format ('$0.25', '(1,000,000)')."""
+    d = _target_profile_data_dir()
+    p = (d / filename)
+    if p.suffix.lower() != ".csv" or not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"Target profile not found: {filename}")
+    if not p.resolve().is_relative_to(d.resolve()):
+        raise ValueError("Invalid target profile path")
+
+    with p.open(newline="") as f:
+        rows = list(_csv.reader(f))
+    strikes: list[float] = []
+    payoffs: list[float] = []
+    for row in rows[1:]:  # skip header
+        if len(row) < 2:
+            continue
+        k = _clean_currency(row[0])
+        v = _clean_currency(row[1])
+        if k is None or v is None:
+            continue
+        strikes.append(k)
+        payoffs.append(v)
+    if len(strikes) < 2:
+        raise ValueError(f"Target profile {filename} has fewer than 2 usable rows")
+
+    df = pd.DataFrame({"Payoff($)": payoffs}, index=pd.Index(strikes, name="Strike($)")).sort_index()
+    df = df[~df.index.duplicated(keep="first")]
+    try:
+        return smooth_target_profile(df)
+    except Exception:
+        return df  # spline can fail on sparse/stepped profiles — use the raw curve
 
 
 def shift_target_profile(

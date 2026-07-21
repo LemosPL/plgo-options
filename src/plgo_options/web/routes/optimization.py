@@ -85,6 +85,10 @@ class OptimizationParams(BaseModel):
     # set, cost = |vega| × VOLpts per executed leg, replacing the %-of-price model.
     # {counterparty: vol_pts} dict (or a flat scalar). None = per-asset default.
     bid_ask_vol_pts: float | dict[str, float] | None = None
+    # Filename of a saved target-profile CSV (in data/) to fit to, e.g.
+    # "ETH - target shifted v2.csv". Overridden by manual_target if that is set;
+    # None = built-in parametric target.
+    target_profile_file: str | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -148,6 +152,7 @@ async def run_optimizer(params: OptimizationParams):
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,
+        target_profile_file=params.target_profile_file,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
@@ -171,27 +176,45 @@ async def run_optimizer(params: OptimizationParams):
     return result
 
 
+@router.get("/target-profiles")
+async def list_target_profiles_endpoint(asset: str = "ETH"):
+    """List the saved target-profile CSVs (in data/) available for an asset, so
+    the UI can offer them for selection alongside the built-in parametric target."""
+    from plgo_options.optimization.misc_utils import list_target_profiles
+    return {"asset": asset.upper(), "profiles": list_target_profiles(asset.upper())}
+
+
 class TargetProfileRequest(BaseModel):
     asset: str = "ETH"
     spot_ladder: list[float]
     current_spot: float
+    # Optional saved-profile filename (from /target-profiles). None = parametric.
+    profile: str | None = None
 
 
 @router.post("/target-profile")
 async def target_profile(req: TargetProfileRequest):
-    """Return the built-in parametric target payoff aligned to the given spot
-    ladder, so the UI can show/seed the default target before any optimizer run.
-    Mirrors exactly what run_lp fits to when no manual target is supplied."""
+    """Return a target payoff aligned to the given spot ladder, so the UI can
+    show/seed it before a run. With no ``profile`` this is the built-in parametric
+    target (what run_lp fits to by default); with a ``profile`` filename it's that
+    saved CSV — matching exactly what run_lp fits to when target_profile_file is set."""
     import numpy as np
-    from plgo_options.optimization.misc_utils import build_parametric_target_profile
+    from plgo_options.optimization.misc_utils import (
+        build_parametric_target_profile, load_target_profile_file,
+    )
 
     asset = (req.asset or "ETH").upper()
     if not req.spot_ladder or req.current_spot <= 0:
         raise HTTPException(400, "spot_ladder and a positive current_spot are required.")
     try:
-        df = build_parametric_target_profile(
-            asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot,
-        )
+        if req.profile:
+            df = load_target_profile_file(req.profile, asset)
+        else:
+            df = build_parametric_target_profile(
+                asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot,
+            )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(500, f"Failed to build target profile: {e}")
 

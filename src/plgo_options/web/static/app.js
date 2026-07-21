@@ -9501,17 +9501,10 @@ async function optv3Load() {
     const $tu = document.getElementById("optv3-trades-under-chart");
     if ($tu) $tu.style.display = "none";
 
-    // Fetch the built-in parametric target so the Target Profile tab shows/seeds
-    // the default target curve before any run (aligned to this /pnl ladder).
-    optv3AutoTargetProfile = null;
-    try {
-      const tp = await post("/api/optimization/target-profile", {
-        asset: currentAsset, spot_ladder: optv3Data.spot_ladder, current_spot: optv3Data.eth_spot,
-      });
-      if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (optv3Data.spot_ladder || []).length) {
-        optv3AutoTargetProfile = tp.payoff;
-      }
-    } catch (e) { console.warn("target-profile fetch failed", e); }
+    // Populate the saved-profile dropdown and fetch the active target profile
+    // (parametric by default) so the Target Profile tab shows/seeds it pre-run.
+    await optv3PopulateTargetProfiles();
+    await optv3FetchTargetProfile();
 
     optv3RenderBasePill();
     optv3RenderPreview();
@@ -9522,6 +9515,41 @@ async function optv3Load() {
   } finally {
     $btn.classList.remove("loading"); $btn.textContent = "Load Risk Profile";
   }
+}
+
+// Populate the "Profile" dropdown with the saved target-profile CSVs for the asset.
+async function optv3PopulateTargetProfiles() {
+  const sel = document.getElementById("optv3-target-select");
+  if (!sel) return;
+  const keep = optv3TargetProfileFile;
+  let profiles = [];
+  try {
+    const res = await get(`/api/optimization/target-profiles?asset=${currentAsset}`);
+    profiles = (res && res.profiles) || [];
+  } catch (e) { console.warn("target-profiles list failed", e); }
+  sel.innerHTML = '<option value="">Parametric (auto)</option>'
+    + profiles.map(p => `<option value="${p.file}">${p.name}</option>`).join("");
+  // Keep the current selection if it still exists; else fall back to parametric.
+  if (keep && profiles.some(p => p.file === keep)) sel.value = keep;
+  else { sel.value = ""; optv3TargetProfileFile = ""; }
+}
+
+// Fetch the active target profile (selected saved CSV, or parametric) aligned to
+// the loaded ladder, and use it as the shown/editable target. Clears any manual
+// edits so the selection is what drives the next Run.
+async function optv3FetchTargetProfile() {
+  if (!optv3Data) return;
+  optv3ManualTarget = null;
+  optv3AutoTargetProfile = null;
+  try {
+    const body = { asset: currentAsset, spot_ladder: optv3Data.spot_ladder, current_spot: optv3Data.eth_spot };
+    if (optv3TargetProfileFile) body.profile = optv3TargetProfileFile;
+    const tp = await post("/api/optimization/target-profile", body);
+    if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (optv3Data.spot_ladder || []).length) {
+      optv3AutoTargetProfile = tp.payoff;
+    }
+  } catch (e) { console.warn("target-profile fetch failed", e); }
+  optv3RenderProfileTable();
 }
 
 // Preview (greeks KPI + positions + payoff + before matrix) from the loaded book.
@@ -10025,7 +10053,8 @@ function optv3AppendTradeTotals(tbodyId, rows, spec) {
 // horizon 0 and anchored to $0 at the current spot — same basis as the chart.
 let optv3ManualTarget = null;     // [{x: spot, y: payoff}, ...] control points, or null = auto
 let optv3ProfileState = null;     // {spots, after, displayIdx} cached for live residual updates
-let optv3AutoTargetProfile = null; // parametric target payoff aligned to optv3Data.spot_ladder (from /target-profile)
+let optv3AutoTargetProfile = null; // active target payoff aligned to optv3Data.spot_ladder (from /target-profile)
+let optv3TargetProfileFile = "";   // selected saved-profile filename, or "" for parametric
 
 // Where the profile table/chart get their curves: a run result if present, else
 // the loaded book (so you can define a target before ever running).
@@ -10175,16 +10204,23 @@ function optv3SmoothTarget() {
 }
 
 function optv3ResetTarget() {
+  // Back to the selected profile (or parametric): drop manual edits and reload it.
   optv3ManualTarget = null;
-  optv3RenderProfileTable();
+  optv3FetchTargetProfile();
 }
 
 function optv3UpdateTargetStatus() {
   const el = document.getElementById("optv3-target-status"); if (!el) return;
   const n = optv3ManualTarget ? optv3ManualTarget.length : 0;
-  el.textContent = n >= 2
-    ? `Manual target active (${n} points) — click Apply & Re-run to optimize to it.`
-    : "Using the auto (parametric) target. Edit any Target cell — or Smooth — to override.";
+  if (n >= 2) {
+    el.textContent = `Manual target active (${n} points) — click Apply & Re-run to optimize to it.`;
+    return;
+  }
+  const sel = document.getElementById("optv3-target-select");
+  const label = sel && sel.value ? (sel.options[sel.selectedIndex]?.text || "saved profile") : null;
+  el.textContent = label
+    ? `Fitting to saved profile "${label}". Edit any Target cell — or Smooth — to override.`
+    : "Using the parametric (auto) target. Pick a saved profile, or edit / Smooth the Target column.";
 }
 
 // Target-profile chart (Before / After / Target). Target = manual override if set.
@@ -10313,6 +10349,10 @@ document.getElementById("optv3-target-expiry")?.addEventListener("change", optv3
 document.getElementById("optv3-roll-dte-threshold")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
 document.getElementById("optv3-counterparties")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
 document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
+document.getElementById("optv3-target-select")?.addEventListener("change", (e) => {
+  optv3TargetProfileFile = e.target.value || "";
+  optv3FetchTargetProfile();
+});
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
 document.getElementById("btn-optv3-target-reset")?.addEventListener("click", optv3ResetTarget);
 document.getElementById("btn-optv3-target-apply")?.addEventListener("click", () => {
@@ -10373,6 +10413,9 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
+      // Saved target profile selected in the dropdown (engine loads the CSV).
+      // Overridden by manual_target when the Target column has been edited.
+      target_profile_file: optv3TargetProfileFile || null,
     });
     console.log("Optimizer v3 result:", data);
     optv3RenderResult(data);

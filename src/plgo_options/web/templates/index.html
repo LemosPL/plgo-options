@@ -1999,6 +1999,11 @@
             <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now (editable)</span></h3>
             <p class="optv3-hint" style="margin:0 0 .6rem">The payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0, anchored to $0 at the current spot. <b>Edit the Target column</b> to draw your own target, <b>Smooth</b> to round it off, then <b>Apply &amp; Re-run</b> to optimize the book toward it.</p>
             <div id="optv3-target-toolbar" style="display:none;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.8rem">
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Profile
+                <select id="optv3-target-select" title="Pick a saved target profile (from data/) or the built-in parametric target; the optimizer will fit to it on the next Run.">
+                  <option value="">Parametric (auto)</option>
+                </select>
+              </label>
               <button id="btn-optv3-target-smooth" class="btn-secondary" style="width:auto" title="Moving-average smooth the Target column">Smooth</button>
               <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">strength
                 <input id="optv3-target-smooth-strength" type="range" min="1" max="8" value="3" style="width:90px">
@@ -2507,6 +2512,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=101"></script>
+<script src="/static/app.js?v=102"></script>
 </body>
 </html>

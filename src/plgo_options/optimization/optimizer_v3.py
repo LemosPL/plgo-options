@@ -18,7 +18,7 @@ from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
-from .misc_utils import build_parametric_target_profile
+from .misc_utils import build_parametric_target_profile, load_target_profile_file
 
 import matplotlib.pyplot as plt
 
@@ -871,6 +871,7 @@ class OptimizerV3(BaseOptimizer):
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.0,
                  manual_target: list[dict] | None = None,
+                 target_profile_file: str | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -974,6 +975,12 @@ class OptimizerV3(BaseOptimizer):
             target_strikes = np.array([float(p["x"]) for p in _pts], dtype=float)
             target_payoff_arr = np.array([float(p["y"]) for p in _pts], dtype=float)
             print(f"manual_target: fitting to {len(_pts)} user control points")
+        elif target_profile_file:
+            # A saved target-profile CSV selected in the GUI — load and fit to it.
+            _tp = load_target_profile_file(target_profile_file, self.asset)
+            target_strikes = np.asarray(_tp.index, dtype=float)
+            target_payoff_arr = np.asarray(_tp["Payoff($)"], dtype=float)
+            print(f"target_profile_file: fitting to '{target_profile_file}'")
         else:
             target_strikes = np.asarray(target_profile.index, dtype=float)
             target_payoff_arr = np.asarray(target_profile["Payoff($)"], dtype=float)
