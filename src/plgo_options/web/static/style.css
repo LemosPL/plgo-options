@@ -1503,6 +1503,19 @@ select { margin-bottom: .5rem; }
   background: rgba(255,193,7,.12); border: 1px solid rgba(255,193,7,.4);
 }
 
+/* "How to read this chart" collapsible note */
+.optv3-chart-note {
+  font-size: .76rem; color: var(--muted); margin-bottom: .75rem;
+  background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.2);
+  border-radius: var(--radius); padding: .5rem .75rem;
+}
+.optv3-chart-note > summary {
+  cursor: pointer; font-weight: 600; color: var(--text); list-style: revert;
+}
+.optv3-chart-note ul { margin: .5rem 0 .1rem; padding-left: 1.1rem; line-height: 1.5; }
+.optv3-chart-note li { margin-bottom: .3rem; }
+.optv3-chart-note b { color: var(--text); }
+
 /* Optimizer v2 "base book scoped to N trades from Deals" pill */
 .optv2-base-pill {
   display: flex; align-items: center; flex-wrap: wrap; gap: .3rem;

@@ -9561,44 +9561,41 @@ function optv3RenderPayoff() {
   const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
   const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
 
+  const C = optv3ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
   const traces = [];
   if (optv3OptResult && optv3OptResult.status === "ok") {
     // x = actual spot prices (Plotly log-transforms them for the log axis).
     const optSpots = optv3OptResult.spot_ladder || spots;
     const beforeCurve = optv3OptResult.before.payoff_by_horizon["0"];
-    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
     const afterCurve = optv3OptResult.after.payoff_by_horizon["0"];
-    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (with proposed trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
     if (optv3OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
       const targetAtSpot = optv3OptResult.target_payoff[spotIdx];
       const targetCurve = optv3OptResult.target_payoff.map(v => v - targetAtSpot);
-      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target Profile", line: { color: "#ffca28", width: 2, dash: "dot" } });
+      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target", hovertemplate: HT, line: { color: C.target, width: 2, dash: "dot" } });
     }
   } else {
-    const horizonColors = { 0: "#4fc3f7", 16: "#ba68c8", 30: "#ffb74d", 60: "#81c784", 90: "#e57373" };
-    for (const h of OPTV2_HORIZONS) {
+    // Sequential ramp (bright = Now, fading into the future) — a proper time
+    // encoding instead of a rainbow.
+    OPTV2_HORIZONS.forEach((h, k) => {
       const hKey = String(h);
       const totalPayoff = new Array(spots.length).fill(0);
       let hasData = false;
-      positions.forEach(p => {
-        const curve = p.payoff_by_horizon[hKey];
-        if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; }
+      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; } });
+      if (!hasData) return;
+      const isNow = h === 0;
+      traces.push({
+        x: spots, y: totalPayoff, mode: "lines",
+        name: isNow ? "Now (current book)" : `T+${h}d`,
+        hovertemplate: HT,
+        line: { color: C.ramp[k] || "#8b949e", width: isNow ? 3 : 1.5 },
+        ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
       });
-      if (!hasData) continue;
-      traces.push({ x: spots, y: totalPayoff, mode: "lines", name: h === 0 ? "Now (0d)" : `T+${h}d`, line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 } });
-    }
+    });
   }
-
-  // Break-even line (y=0) across the spot range.
-  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
-
-  // Yellow vertical line at the current spot (restores the old spot marker bar
-  // that the x-axis zeroline used to draw at log-moneyness = 0). Spans the full
-  // y-range of the plotted curves; x uses the actual price (log-transformed).
-  let yLo = 0, yHi = 0;
-  traces.forEach(t => { if (Array.isArray(t.y)) t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }); });
-  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
 
   // What-if: book payoff (Now) excluding the ticked roll candidates — the unwind
   // preview. Lets you compare the book with vs. without the ITM/selected trades.
@@ -9611,30 +9608,57 @@ function optv3RenderPayoff() {
       if (!optv3RollSel.has(p.id)) { for (let i = 0; i < curve.length; i++) excl[i] += curve[i]; }
       else any = true;
     });
-    if (any) traces.push({ x: spots, y: excl, mode: "lines", name: "Book excl. ticked unwinds (Now)", line: { color: "#26c6da", width: 2, dash: "dashdot" } });
+    if (any) traces.push({ x: spots, y: excl, mode: "lines", name: "Book excl. ticked unwinds (Now)", hovertemplate: HT, line: { color: C.excl, width: 2, dash: "dashdot" } });
   }
 
-  // Current-spot marker (actual price on the log axis).
-  const spotPayoff0 = (() => {
-    const totalPayoff = new Array(spots.length).fill(0);
-    positions.forEach(p => { const curve = p.payoff_by_horizon["0"]; if (curve) for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; });
-    return totalPayoff[optv2NearestIdx(spots, S0)];
-  })();
-  traces.push({ x: [S0], y: [spotPayoff0], mode: "markers", name: `${assetLabel} Spot ($${fmtPrice(S0)})`, marker: { color: "#ffca28", size: 10, symbol: "diamond" } });
+  // Break-even line (y=0) — recessive, no hover.
+  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: C.zero, dash: "dot", width: 1 }, showlegend: false, hoverinfo: "skip" });
 
-  const layout = {
-    title: { text: optv3OptResult ? "Payoff — Before vs After vs Target (Now)" : "Portfolio Payoff — All Positions", font: { color: "#e6edf3", size: 16 } },
+  // Vertical line at the current spot — thin, semi-transparent, no hover.
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => { if (Array.isArray(t.y)) t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }); });
+  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  traces.push({ x: [S0], y: [0], mode: "markers", name: `${assetLabel} Spot`, hovertemplate: `${assetLabel} spot: $${fmtPrice(S0)}<extra></extra>`, marker: { color: C.spotDot, size: 9, symbol: "diamond" } });
+
+  const layout = optv3ChartLayout({
+    title: optv3OptResult ? "Payoff at Now — Before vs After vs Target" : `Portfolio payoff — current book across horizons`,
+    assetLabel, C,
+  });
+  Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true, displaylogo: false });
+}
+
+// Shared chart palette (coherent, semi-transparent) + layout for the v3 charts.
+function optv3ChartColors() {
+  return {
+    before: "#e5737e",                       // current book — soft red, dashed
+    after:  "#4fc3f7",                       // resulting book — cyan
+    afterFill: "rgba(79,195,247,0.08)",      // faint area under the primary curve
+    target: "#ffca28",                       // target — amber, dotted
+    excl:   "#b388ff",                       // what-if excl. unwinds — violet
+    spot:   "rgba(255,202,40,0.45)",         // spot rule — faint amber
+    spotDot: "#ffca28",
+    zero:   "rgba(230,237,243,0.18)",        // break-even — faint
+    grid:   "rgba(139,148,158,0.12)",        // recessive grid
+    // sequential cyan ramp: Now (bright) → T+90 (dim)
+    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83"],
+  };
+}
+
+function optv3ChartLayout({ title, assetLabel, C, height }) {
+  return {
+    title: { text: title, font: { color: "#e6edf3", size: 15 } },
+    hovermode: "x unified",
+    hoverlabel: { bgcolor: "#161b22", bordercolor: "#30363d", font: { color: "#e6edf3", size: 11 } },
     xaxis: {
       title: `${assetLabel} Spot (USD, log scale)`,
       type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true,
-      color: "#8b949e", gridcolor: "#21262d",
+      xhoverformat: "$,.0f", color: "#8b949e", gridcolor: C.grid, zeroline: false,
     },
-    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
+    yaxis: { title: "P&L from today (USD)", tickformat: "$,.0f", zeroline: true, zerolinecolor: "rgba(248,81,73,0.55)", zerolinewidth: 1, color: "#8b949e", gridcolor: C.grid },
     paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
-    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22 },
-    margin: { t: 50, b: 70, l: 80, r: 30 },
+    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22, bgcolor: "rgba(0,0,0,0)" },
+    margin: { t: 46, b: 72, l: 84, r: 24 },
   };
-  Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true });
 }
 
 // Preview P&L matrix (before) — faithful copy of optv2RenderMatrix on v3 ids.
@@ -10094,25 +10118,24 @@ function optv3RenderProfileChart() {
   const manual = optv3ManualTargetInterp(spots);
   const auto = optv3AutoTargetAnchored(src);
   const targetCurve = manual || auto;
+  const C = optv3ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
 
   const traces = [];
-  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
-  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
-  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", line: { color: "#ffca28", width: 2, dash: "dot" } });
+  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
+  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (with trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", hovertemplate: HT, line: { color: C.target, width: 2.5, dash: "dot" } });
 
   let yLo = 0, yHi = 0;
   traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
-  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
 
-  const layout = {
-    title: { text: manual ? "Target Profile — Manual Target (Now)" : "Target Profile — Before vs After vs Target (Now)", font: { color: "#e6edf3", size: 14 } },
-    xaxis: { title: `${assetLabel} Spot (USD, log scale)`, type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true, color: "#8b949e", gridcolor: "#21262d" },
-    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
-    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.25 },
-    margin: { t: 40, b: 60, l: 75, r: 20 },
-  };
-  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true });
+  const layout = optv3ChartLayout({
+    title: manual ? "Target Profile — your manual target" : "Target Profile — Before vs After vs Target",
+    assetLabel, C,
+  });
+  layout.margin = { t: 40, b: 66, l: 78, r: 20 };
+  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true, displaylogo: false });
 }
 
 async function optv3LoadSnapshots() {
