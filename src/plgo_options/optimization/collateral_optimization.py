@@ -139,8 +139,16 @@ class CollateralOptimization:
         # Delta-based bid-ask spread: wider for lower-delta options, same formula for all candidates.
         # bid_ask_pct(δ) = bid_ask_atm_pct / (2 × |δ|), floored at bid_ask_min_delta to cap the spread.
         # Deep ITM options (|δ| → 1) naturally get tighter spreads (they behave like forwards).
+        # bid_ask_atm_pct can be a per-counterparty dict — different counterparties
+        # can be quoted with genuinely different pricing/cost (client request:
+        # e.g. Flowdesk trades wider/costlier than KeyRock on ETH) — resolved the
+        # same way as collateral_tier_free_pct/collateral_tier_mu elsewhere.
+        c_bid_ask_atm = np.array([
+            self._resolve(bid_ask_atm_pct, getattr(c, "counterparty", ""), default=0.03)
+            for c in candidates
+        ])
         c_deltas_floored = np.maximum(c_deltas, bid_ask_min_delta)
-        bid_ask_pct = bid_ask_atm_pct / (2.0 * c_deltas_floored)
+        bid_ask_pct = c_bid_ask_atm / (2.0 * c_deltas_floored)
         c_costs = bid_ask_pct * c_prices
 
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.

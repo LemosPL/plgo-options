@@ -1667,7 +1667,7 @@
           <thead>
             <tr>
               <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-              <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind Value ($)</th><th>Counterparty</th>
+              <th>Side</th><th>Qty</th><th>Mark ($)</th><th>Unwind Value ($)</th><th title="Assumed round-trip bid-ask cost of executing this trade — already netted into the After payoff curves/MTM, shown here per-trade for transparency.">Cost ($)</th><th>Counterparty</th>
             </tr>
           </thead>
           <tbody id="optv2-unwind-tbody"></tbody>
@@ -1683,7 +1683,7 @@
           <thead>
             <tr>
               <th>Instrument</th><th>Expiry</th><th>Strike</th><th>Type</th>
-              <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+              <th>Side</th><th>Qty</th><th>Price ($)</th><th>Value ($)</th><th title="Assumed round-trip bid-ask cost of executing this trade — already netted into the After payoff curves/MTM, shown here per-trade for transparency.">Cost ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
             </tr>
           </thead>
           <tbody id="optv2-replacement-tbody"></tbody>
@@ -2483,6 +2483,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=97"></script>
+<script src="/static/app.js?v=99"></script>
 </body>
 </html>

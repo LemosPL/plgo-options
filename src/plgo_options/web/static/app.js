@@ -9182,9 +9182,22 @@ function optv2RenderResult(data) {
   if ($mtmNote) {
     if (data.current_book_mtm != null) {
       const mtm = data.current_book_mtm;
-      $mtmNote.innerHTML = `Both matrices show P&amp;L <b>from today</b>, not absolute value — ` +
+      let html = `Both matrices show P&amp;L <b>from today</b>, not absolute value — ` +
         `current book MTM is <b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">` +
         `${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> (the implicit $0 anchor at Now/current spot below).`;
+      // after_book_mtm is the absolute (not relative-to-now) counterpart, net
+      // of the assumed transaction cost of actually executing these trades —
+      // a real, one-time hit that (correctly) does NOT show up in the P&L
+      // curves above, since those compare against "right after trading" as
+      // their own zero point and a one-time cost cancels out of that
+      // comparison by construction.
+      if (data.after_book_mtm != null && data.total_cost_usd != null) {
+        const afterMtm = data.after_book_mtm;
+        html += ` After executing the proposed trades (net of ~$${optv2Fmt(data.total_cost_usd, 0)} ` +
+          `assumed transaction cost), book MTM would be <b style="color:${afterMtm >= 0 ? "var(--green)" : "var(--red)"}">` +
+          `${afterMtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(afterMtm), 0)}</b>.`;
+      }
+      $mtmNote.innerHTML = html;
     } else {
       $mtmNote.textContent = "";
     }
@@ -9223,8 +9236,9 @@ function optv2RenderResult(data) {
       `<td>${Math.abs(t.qty)}</td>`,
       `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
       `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${t.counterparty || "—"}</td>`,
-    ], 9,
+    ], 10,
     "No positions flagged for unwind/roll at this DTE threshold."
   );
 
@@ -9240,10 +9254,11 @@ function optv2RenderResult(data) {
       `<td>${Math.abs(t.qty)}</td>`,
       `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
       `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`,
       `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
-    ], 11,
+    ], 12,
     "No replacement or new trades proposed."
   );
 }

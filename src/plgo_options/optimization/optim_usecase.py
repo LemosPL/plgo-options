@@ -96,6 +96,7 @@ class OptimizerRunParams:
     downside_factor: float = 1.0
     t90_weight: float = 0.0
     manual_target: list[dict] | None = None
+    bid_ask_atm_pct: float | dict[str, float] | None = None
 
 
 @dataclass

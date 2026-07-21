@@ -24,6 +24,32 @@ import matplotlib.pyplot as plt
 
 from ..pricing import options
 
+# Default per-counterparty trading cost (bid_ask_atm_pct — round-trip cost as
+# a fraction of ATM price) the LP uses when the caller doesn't pass an
+# explicit override. Client request: counterparties are quoted with genuinely
+# different pricing — e.g. on ETH, KeyRock trades wider/costlier (8%) than
+# Flowdesk (5%). FIL uses a flat 10% for every counterparty instead of a
+# per-counterparty dict — a plain scalar applies uniformly via _resolve()
+# regardless of which counterparty, including any not yet in the book (FIL
+# currently trades with Flowdesk, KeyRock, Wave, G20, GSR), so there's no
+# risk of a new counterparty silently falling back to the 3% flat default.
+# Not yet editable from the GUI; that's the intended next step.
+DEFAULT_BID_ASK_ATM_PCT_BY_ASSET: dict[str, "dict[str, float] | float"] = {
+    "ETH": {"KeyRock": 0.08, "Flowdesk": 0.05},
+    "FIL": 0.10,
+}
+
+
+def _bid_ask_cost_usd(price, qty, delta, counterparty, bid_ask_atm_pct, bid_ask_min_delta):
+    """Round-trip transaction cost (USD) for one trade leg — the same
+    delta-scaled, per-counterparty bid-ask formula CollateralOptimization uses
+    internally for its own trading_cost term, so the cost shown on a trade
+    always matches what actually drove the LP's decision to propose it.
+    """
+    d = max(abs(float(delta or 0.0)), float(bid_ask_min_delta))
+    pct = CollateralOptimization._resolve(bid_ask_atm_pct, counterparty, default=0.03)
+    return abs(float(qty)) * float(price) * pct / (2.0 * d)
+
 
 class OptimizerV3(BaseOptimizer):
     """Holds all data needed for portfolio optimization."""
@@ -135,7 +161,11 @@ class OptimizerV3(BaseOptimizer):
 
         return roll_positions
 
-    def _build_roll_unwind_trades(self, token, roll_positions: list[Position]) -> list[dict]:
+    def _build_roll_unwind_trades(
+            self, token, roll_positions: list[Position],
+            bid_ask_atm_pct: "dict[str, float] | float | None" = None,
+            bid_ask_min_delta: float = 0.05,
+    ) -> list[dict]:
         trades = []
 
         for p in roll_positions:
@@ -190,6 +220,10 @@ class OptimizerV3(BaseOptimizer):
                 "delta_contribution": round(float(unwind_qty * (getattr(p, "delta", 0.0) or 0.0)), 4),
                 "gamma_contribution": round(float(unwind_qty * (getattr(p, "gamma", 0.0) or 0.0)), 6),
                 "vega_contribution": round(float(unwind_qty * (getattr(p, "vega", 0.0) or 0.0)), 4),
+                "cost_usd": round(_bid_ask_cost_usd(
+                    getattr(p, "mark_price_usd", 0.0), unwind_qty, getattr(p, "delta", 0.0),
+                    getattr(p, "counterparty", ""), bid_ask_atm_pct, bid_ask_min_delta,
+                ), 2),
             })
 
         return trades
@@ -553,6 +587,8 @@ class OptimizerV3(BaseOptimizer):
             option_legs: list[Candidate],
             target_expiry: str | None,
             min_abs_imbalance: float = 10_000.0,
+            bid_ask_atm_pct: "dict[str, float] | float | None" = None,
+            bid_ask_min_delta: float = 0.05,
     ) -> list[dict]:
         """Box spread (long call + short put at one strike, short call + long
         put at another, same expiry, single counterparty) sized to neutralize
@@ -680,6 +716,10 @@ class OptimizerV3(BaseOptimizer):
                 "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
                 "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                 "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+                "cost_usd": round(_bid_ask_cost_usd(
+                    leg.bs_price_usd, leg_qty, leg.delta, leg.counterparty,
+                    bid_ask_atm_pct, bid_ask_min_delta,
+                ), 2),
             })
 
         return box_trades
@@ -804,7 +844,7 @@ class OptimizerV3(BaseOptimizer):
     def run_lp(self,
                  lam_factor: float = 0.5,
                  mu_factor: float = 0.0,
-                 bid_ask_atm_pct: float = 0.03,
+                 bid_ask_atm_pct: "dict[str, float] | float | None" = None,
                  bid_ask_min_delta: float = 0.05,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
@@ -837,6 +877,11 @@ class OptimizerV3(BaseOptimizer):
             else:
                 raise ValueError(f"Unsupported asset: {self.asset}")
         print(f"asset: {self.asset}")
+
+        # No explicit override => fall back to this asset's per-counterparty
+        # default pricing (see DEFAULT_BID_ASK_ATM_PCT_BY_ASSET above).
+        if bid_ask_atm_pct is None:
+            bid_ask_atm_pct = DEFAULT_BID_ASK_ATM_PCT_BY_ASSET.get(self.asset, {})
 
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder,
                                                          current_spot=self.spot)
@@ -1014,7 +1059,10 @@ class OptimizerV3(BaseOptimizer):
         # the LP only ever sees its own candidates' cash flow and has no way to
         # counterbalance a forced roll's outlay/collection, even though that cash
         # hits the same counterparty ledger.
-        roll_unwind_trades = self._build_roll_unwind_trades(self.asset, roll_positions)
+        roll_unwind_trades = self._build_roll_unwind_trades(
+            self.asset, roll_positions,
+            bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
+        )
         forced_cash_by_counterparty: dict[str, float] = {}
         for t in roll_unwind_trades:
             if t.get("opt") not in ("C", "P"):
@@ -1161,6 +1209,10 @@ class OptimizerV3(BaseOptimizer):
                     "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
                     "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
+                    "cost_usd": round(_bid_ask_cost_usd(
+                        leg.bs_price_usd, leg_qty, leg.delta, leg.counterparty,
+                        bid_ask_atm_pct, bid_ask_min_delta,
+                    ), 2),
                 })
 
         trades = self._aggregate_trade_legs(trades)
@@ -1223,6 +1275,7 @@ class OptimizerV3(BaseOptimizer):
             for cp, v in _cash_by_counterparty(trades).items():
                 box_legs = self._build_box_cash_neutralizer_trades(
                     self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
+                    bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
                 )
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)
@@ -1245,6 +1298,12 @@ class OptimizerV3(BaseOptimizer):
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
+
+        # Absolute (not relative-to-now) cost accounting for the final trade
+        # list — see the "after_book_mtm" result field below for why this is
+        # kept separate from the Before/After payoff curves.
+        total_cost_usd = sum(float(t.get("cost_usd", 0.0) or 0.0) for t in trades)
+        pnl_today_final = sum(float(t.get("bs_price_usd", 0.0) or 0.0) * float(t.get("qty", 0.0) or 0.0) for t in trades)
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
         before_payoff_by_horizon, after_payoff_by_horizon, current_book_mtm = self.build_payoffs(
@@ -1331,6 +1390,19 @@ class OptimizerV3(BaseOptimizer):
             # Reference point the before/after P&L matrices are anchored to —
             # today's actual mark of the existing book, at the current spot.
             "current_book_mtm": round(float(current_book_mtm), 2),
+            # Total assumed bid-ask transaction cost across every trade in
+            # `trades` (also broken out per-row as "cost_usd"). Deliberately
+            # NOT netted into the Before/After payoff curves — those are a
+            # "P&L relative to right now" comparison, and a one-time cost
+            # applied identically at every horizon cancels out of any such
+            # relative curve by construction (verified). It belongs instead
+            # in the absolute figure below.
+            "total_cost_usd": round(total_cost_usd, 2),
+            # Book's absolute MTM immediately after executing `trades`, net of
+            # the assumed transaction cost — the real, cost-inclusive
+            # counterpart to "current_book_mtm" (which is BEFORE any trades,
+            # so cost doesn't apply there). = before + raw trade P&L − cost.
+            "after_book_mtm": round(float(current_book_mtm) + pnl_today_final - total_cost_usd, 2),
         }
 
 
@@ -2131,6 +2203,17 @@ class OptimizerV3(BaseOptimizer):
         # square of the gap, vs. linearly for nearest-point snapping.
         today_value_before = float(np.interp(self.spot, spot_arr, before_payoff["0"]))
         pnl_today = sum(trade["bs_price_usd"] * trade["qty"] for trade in trades)
+        # NOTE: deliberately NOT netting transaction cost into this anchor.
+        # cost_usd is a one-time, permanent hit applied identically at every
+        # horizon (paid once at execution, never repeated) — so it cancels
+        # out of a "P&L relative to right now" curve by construction: shifting
+        # both the h=0 reference point and every future point by the same
+        # constant leaves their difference unchanged. Verified: after[0](spot)
+        # must stay exactly 0 (the curve's own defining invariant); folding
+        # cost in here previously broke that into a spurious +cost bump
+        # instead. Cost belongs in an ABSOLUTE figure instead — see
+        # "after_book_mtm" in run_lp's result, computed from this same
+        # pnl_today alongside total_cost_usd.
         today_value_after = today_value_before + pnl_today
 
         after_payoff_raw = {
@@ -2432,6 +2515,7 @@ class OptimizerV3(BaseOptimizer):
                 aggregated[key]["delta_contribution"] = float(trade.get("delta_contribution", 0.0) or 0.0)
                 aggregated[key]["gamma_contribution"] = float(trade.get("gamma_contribution", 0.0) or 0.0)
                 aggregated[key]["vega_contribution"] = float(trade.get("vega_contribution", 0.0) or 0.0)
+                aggregated[key]["cost_usd"] = float(trade.get("cost_usd", 0.0) or 0.0)
                 aggregated[key]["strategy"] = trade.get("strategy", "MIXED")
                 aggregated[key]["strategy_instrument"] = trade.get("strategy_instrument", "")
                 continue
@@ -2444,6 +2528,7 @@ class OptimizerV3(BaseOptimizer):
             existing["delta_contribution"] += float(trade.get("delta_contribution", 0.0) or 0.0)
             existing["gamma_contribution"] += float(trade.get("gamma_contribution", 0.0) or 0.0)
             existing["vega_contribution"] += float(trade.get("vega_contribution", 0.0) or 0.0)
+            existing["cost_usd"] = existing.get("cost_usd", 0.0) + float(trade.get("cost_usd", 0.0) or 0.0)
 
             if existing.get("strategy_instrument") != trade.get("strategy_instrument"):
                 existing["strategy"] = "MIXED"
@@ -2461,6 +2546,7 @@ class OptimizerV3(BaseOptimizer):
             trade["delta_contribution"] = round(float(trade.get("delta_contribution", 0.0)), 4)
             trade["gamma_contribution"] = round(float(trade.get("gamma_contribution", 0.0)), 6)
             trade["vega_contribution"] = round(float(trade.get("vega_contribution", 0.0)), 4)
+            trade["cost_usd"] = round(float(trade.get("cost_usd", 0.0)), 2)
             result.append(trade)
 
         result.sort(key=lambda t: (str(t.get("expiry")), float(t.get("strike") or 0.0), str(t.get("opt"))))

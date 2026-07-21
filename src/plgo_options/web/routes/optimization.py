@@ -75,6 +75,12 @@ class OptimizationParams(BaseModel):
     # target. List of {"x": spot, "y": payoff} control points (>=2), interpolated
     # onto the optimizer's spot ladder. None = use the built-in parametric target.
     manual_target: list[dict] | None = None
+    # Per-counterparty trading cost (round-trip, as a fraction of ATM price).
+    # None = use this asset's default pricing (see
+    # optimizer_v3.DEFAULT_BID_ASK_ATM_PCT_BY_ASSET); a counterparty absent
+    # from that default (or a bare float here) falls back further to
+    # CollateralOptimization's own flat default.
+    bid_ask_atm_pct: float | dict[str, float] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -136,6 +142,7 @@ async def run_optimizer(params: OptimizationParams):
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
         manual_target=params.manual_target,
+        bid_ask_atm_pct=params.bid_ask_atm_pct,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
