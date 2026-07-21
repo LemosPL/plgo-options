@@ -970,11 +970,29 @@ class OptimizerV3(BaseOptimizer):
         # points instead. Needs >=2 points; np.interp fills between them, and the
         # LP's cash_shift free variable absorbs any constant vertical offset, so
         # only the *shape* of the supplied curve matters.
+        _manual_xs, _manual_ys = [], []
         if manual_target and len(manual_target) >= 2:
-            _pts = sorted(manual_target, key=lambda p: float(p.get("x", 0)))
-            target_strikes = np.array([float(p["x"]) for p in _pts], dtype=float)
-            target_payoff_arr = np.array([float(p["y"]) for p in _pts], dtype=float)
-            print(f"manual_target: fitting to {len(_pts)} user control points")
+            # Sanitize: drop non-numeric/non-finite points and enforce strictly
+            # increasing strikes (np.interp requires monotonic xp) — a bad point
+            # from the editable grid must never crash the whole run.
+            _valid = []
+            for p in manual_target:
+                try:
+                    x = float(p.get("x")); y = float(p.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(x) and np.isfinite(y):
+                    _valid.append((x, y))
+            _valid.sort(key=lambda t: t[0])
+            for x, y in _valid:
+                if _manual_xs and x <= _manual_xs[-1]:
+                    continue
+                _manual_xs.append(x); _manual_ys.append(y)
+
+        if len(_manual_xs) >= 2:
+            target_strikes = np.array(_manual_xs, dtype=float)
+            target_payoff_arr = np.array(_manual_ys, dtype=float)
+            print(f"manual_target: fitting to {len(_manual_xs)} user control points")
         elif target_profile_file:
             # A saved target-profile CSV selected in the GUI — load and fit to it.
             _tp = load_target_profile_file(target_profile_file, self.asset)

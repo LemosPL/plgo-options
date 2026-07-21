@@ -10083,6 +10083,22 @@ function optv3ProfileSource() {
   return null;
 }
 
+// Finer control-point grid for the editable target table: ladder points nearest
+// each fixed price step (ETH $250 / FIL $0.25) so the curve can be shaped at
+// ≤250-USD granularity, instead of the coarse ~14-row matrix thinning. Where the
+// ladder itself is sparser than the step (deep wings), it follows the ladder.
+function optv3TargetDisplayIdx(spots) {
+  if (!spots || !spots.length) return [];
+  const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const step = asset === "FIL" ? 0.25 : 250;
+  const lo = spots[0], hi = spots[spots.length - 1];
+  const idxs = new Set([0, spots.length - 1]);  // always include both ends
+  for (let g = Math.ceil(lo / step) * step; g <= hi + 1e-9; g += step) {
+    idxs.add(optv2NearestIdx(spots, g));
+  }
+  return [...idxs].sort((a, b) => a - b);
+}
+
 // Auto target, anchored to $0 at current spot (matches the display convention).
 function optv3AutoTargetAnchored(src) {
   if (!src.autoTarget) return null;
@@ -10125,7 +10141,7 @@ function optv3RenderProfileTable() {
 
   const spots = src.spots, S0 = src.S0;
   const spotIdx = optv2NearestIdx(spots, S0);
-  const displayIdx = optv2MatrixDisplayIdx(spots);
+  const displayIdx = optv3TargetDisplayIdx(spots);
   const auto = optv3AutoTargetAnchored(src);
   const manualMap = optv3ManualTarget ? new Map(optv3ManualTarget.map(p => [p.x, p.y])) : null;
   optv3ProfileState = { spots, after: src.after, displayIdx };
