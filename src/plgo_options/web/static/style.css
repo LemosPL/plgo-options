@@ -1473,6 +1473,9 @@ select { margin-bottom: .5rem; }
 .optv3-empty { text-align: center; color: var(--muted); font-size: .85rem; padding: 2.5rem 1rem; }
 .optv3-trades-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.25rem; }
 @media (max-width: 1200px) { .optv3-trades-grid { grid-template-columns: 1fr; } }
+/* Let each column shrink so a wide table scrolls inside its .chain-wrapper
+   instead of forcing the grid (and the page) wider than the viewport. */
+.optv3-trades-grid > div { min-width: 0; }
 
 /* v3 tables — match the app's standard table look (cf. #chain-table / #mtm-matrix-table).
    pf-table has no global styles, so scope the standard to the v3 page. */

@@ -9768,6 +9768,44 @@ function optv3RenderResult(data) {
       `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 11, "No replacement or new trades proposed.");
+
+  // Totals rows — for unwinds the key number is the total cost to unwind
+  // (sum of Unwind Value). Also sum qty on both tables and value on new trades.
+  optv3AppendTradeTotals("optv3-unwind-tbody", unwinds, [
+    { colspan: 5, label: "Total to unwind" },
+    { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
+    {},                                               // Mark (blank)
+    { key: t => Number(t.notional) || 0 },            // Unwind Value ($)
+    {},                                               // Counterparty (blank)
+  ]);
+  optv3AppendTradeTotals("optv3-replacement-tbody", replacements, [
+    { colspan: 5, label: "Total new / replacement" },
+    { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
+    {},                                               // Price (blank)
+    { key: t => Number(t.notional) || 0 },            // Value ($)
+    { colspan: 3 },                                   // Strategy / Counterparty / Comment
+  ]);
+}
+
+// Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
+// spec entries map to cells: {colspan?, label?} for a label cell, {key: fn} to sum
+// a numeric column, {} for a blank cell, {colspan, } for a blank span.
+function optv3AppendTradeTotals(tbodyId, rows, spec) {
+  const tb = document.getElementById(tbodyId);
+  if (!tb || !rows || !rows.length) return;
+  const tr = document.createElement("tr");
+  tr.className = "row-highlight";
+  tr.style.fontWeight = "600";
+  tr.innerHTML = spec.map(c => {
+    const cs = c.colspan ? ` colspan="${c.colspan}"` : "";
+    if (c.label != null) return `<td${cs}>${c.label} (${rows.length})</td>`;
+    if (typeof c.key === "function") {
+      const sum = rows.reduce((s, t) => s + (c.key(t) || 0), 0);
+      return `<td class="num"${cs}>${optv2Fmt(sum, 0)}</td>`;
+    }
+    return `<td${cs}></td>`;
+  }).join("");
+  tb.appendChild(tr);
 }
 
 // ── Target Profile: editable table + smoothing + live chart preview ─────────
