@@ -1881,6 +1881,8 @@
           <div class="optv3-subline">
             <span>Premium sold: <b id="optv3-sum-prem-sold">--</b></span>
             <span>Premium bought: <b id="optv3-sum-prem-bought">--</b></span>
+            <span title="Assumed round-trip bid-ask cost across the proposed trades, using per-counterparty pricing.">Est. transaction cost: <b id="optv3-sum-cost">--</b></span>
+            <span title="Book MTM right after executing the proposed trades, net of transaction cost.">After-exec MTM: <b id="optv3-sum-after-mtm">--</b></span>
             <span>Target expiry: <b id="optv3-sum-target-expiry">--</b></span>
           </div>
           <div style="margin-top:1rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
@@ -1952,7 +1954,7 @@
                   <table class="pf-table">
                     <thead><tr>
                       <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
-                      <th>Side</th><th class="num">Qty</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+                      <th>Side</th><th class="num">Qty</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th class="num" title="Assumed round-trip bid-ask cost of executing this trade (per-counterparty pricing). Already netted into the after-execution MTM; NOT netted into the payoff curves.">Cost ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
                     </tr></thead>
                     <tbody id="optv3-replacement-tbody"></tbody>
                   </table>

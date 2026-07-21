@@ -9859,6 +9859,19 @@ function optv3RenderResult(data) {
   document.getElementById("optv3-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv3-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
   document.getElementById("optv3-sum-target-expiry").textContent = data.target_expiry || "All";
+  // Per-counterparty transaction cost + after-execution MTM (net of cost) —
+  // same figures the v2 screen shows; the pricing itself is applied by the
+  // shared engine on every v3 run.
+  const $cost = document.getElementById("optv3-sum-cost");
+  if ($cost) $cost.textContent = data.total_cost_usd != null ? "$" + optv2Fmt(data.total_cost_usd, 0) : "—";
+  const $am = document.getElementById("optv3-sum-after-mtm");
+  if ($am) {
+    if (data.after_book_mtm != null) {
+      const am = data.after_book_mtm;
+      $am.textContent = (am >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(am), 0);
+      $am.style.color = am >= 0 ? "var(--green)" : "var(--red)";
+    } else { $am.textContent = "—"; $am.style.color = ""; }
+  }
 
   // Cash flow by counterparty
   const $cashBody = document.getElementById("optv3-cash-flow-tbody");
@@ -9883,9 +9896,19 @@ function optv3RenderResult(data) {
   if ($mtmNote) {
     if (data.current_book_mtm != null) {
       const mtm = data.current_book_mtm;
-      $mtmNote.innerHTML = `Both matrices show P&amp;L <b>from today</b>, not absolute value — current book MTM is `
+      let noteHtml = `Both matrices show P&amp;L <b>from today</b>, not absolute value — current book MTM is `
         + `<b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> `
         + `(the implicit $0 anchor at Now / current spot).`;
+      // After-execution book MTM, net of the assumed per-counterparty trading
+      // cost (deliberately NOT netted into the curves — a one-time cost cancels
+      // out of a P&L-relative-to-now comparison).
+      if (data.after_book_mtm != null && data.total_cost_usd != null) {
+        const am = data.after_book_mtm;
+        noteHtml += ` After executing the proposed trades (net of ~$${optv2Fmt(data.total_cost_usd, 0)} `
+          + `assumed transaction cost), book MTM would be <b style="color:${am >= 0 ? "var(--green)" : "var(--red)"}">`
+          + `${am >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(am), 0)}</b>.`;
+      }
+      $mtmNote.innerHTML = noteHtml;
     } else { $mtmNote.textContent = ""; }
   }
   if (data.before && data.before.payoff_by_horizon) {
@@ -9918,16 +9941,18 @@ function optv3RenderResult(data) {
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
+      `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
-    ], 11, "No replacement or new trades proposed.");
+    ], 12, "No replacement or new trades proposed.");
 
-  // Totals row on the new-trades table (total qty + total value).
+  // Totals row on the new-trades table (total qty + total value + total cost).
   optv3AppendTradeTotals("optv3-replacement-tbody", replacements, [
     { colspan: 5, label: "Total new / replacement" },
     { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
     {},                                               // Price (blank)
     { key: t => Number(t.notional) || 0 },            // Value ($)
+    { key: t => Number(t.cost_usd) || 0 },            // Cost ($)
     { colspan: 3 },                                   // Strategy / Counterparty / Comment
   ]);
 }
