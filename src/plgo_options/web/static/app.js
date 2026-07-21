@@ -8618,56 +8618,21 @@ function optv2RenderGreeks() {
 let optv2OptResult = null;  // stores latest optimization result
 
 /* ── Payoff profile chart (Plotly) — multi-horizon, log-moneyness x-axis ── */
+// Payoff chart — plots actual spot price on a LOG x-axis so it works at any
+// scale (ETH ~$1-14k, FIL ~$0.2-10). Plotly auto-generates price ticks, so no
+// asset-specific tick snapping is needed (mirrors optv3RenderPayoff, which
+// fixed the same "zero ticks on FIL" bug there — the old log-moneyness axis's
+// custom dollar labels only ever rendered at ETH-scale strikes since the
+// tick-snap check required strike % 100 === 0, never true for FIL's ~$0.2-10
+// range).
 function optv2RenderPayoff() {
   const spots = optv2Data.spot_ladder;
   const positions = optv2ActivePositions();
-  const S0 = optv2Data.eth_spot;
-  if (!positions.length) return;
+  const S0 = optv2Data.eth_spot;  // /pnl uses "eth_spot" for the spot of any asset
+  if (!positions.length || !spots || !spots.length) return;
 
-  // Compute log-moneyness: ln(K / S0)
-  const logM = spots.map(s => Math.log(s / S0));
-
-  // Only show ticks at valid data points: drop any generated in extrapolation regions
-  const visibleIdx = [];
-  for (let i = 0; i < spots.length; i++) {
-    let hasData = false;
-    for (const h of OPTV2_HORIZONS) {
-      if (positions[0].payoff_by_horizon[h] && positions[0].payoff_by_horizon[h][i] != null) {
-        hasData = true; break;
-      }
-    }
-    if (hasData) visibleIdx.push(i);
-  }
-
-  // Build strike tick labels — spacing proportional to abs(log-moneyness)
-  // Near ATM (small |lm|) → dense ticks;  in wings (large |lm|) → sparse ticks
-  const tickVals = [];
-  const tickTexts = [];
-  const MIN_LM_GAP = 0.018;   // minimum log-moneyness gap between consecutive ticks
-  const LM_GAP_SCALE = 0.12;  // how fast gaps grow with distance from ATM
-
-  let lastTickLM = -Infinity;
-  for (const i of visibleIdx) {
-    const lm = logM[i];
-    const absLM = Math.abs(lm);
-
-    // Required gap grows linearly with distance from ATM:
-    //   gap(lm) = MIN_LM_GAP + LM_GAP_SCALE * |lm|
-    // This means at ATM (|lm|≈0) we get a tick every ~0.018 in lm-space (~1.8%)
-    // and at |lm|=0.5 we need a gap of ~0.078 (~8%) between ticks
-    const requiredGap = MIN_LM_GAP + LM_GAP_SCALE * absLM;
-
-    if (lm - lastTickLM >= requiredGap) {
-      // Snap to a "round" strike for clean labels
-      const s = spots[i];
-      const roundTo = absLM < 0.08 ? 100 : absLM < 0.20 ? 200 : 500;
-      if (s % roundTo === 0) {
-        tickVals.push(lm);
-        tickTexts.push("$" + s.toLocaleString());
-        lastTickLM = lm;
-      }
-    }
-  }
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
 
   const traces = [];
 
@@ -8682,13 +8647,12 @@ function optv2RenderPayoff() {
     // The optimizer's own spot_ladder can differ from optv2Data's (/pnl's) —
     // use it for anything sourced from optv2OptResult so x/y stay index-aligned.
     const optSpots = optv2OptResult.spot_ladder || spots;
-    const optLogM = optSpots.map(s => Math.log(s / S0));
 
     // Before (now)
     const beforeCurve = optv2OptResult.before.payoff_by_horizon["0"];
     if (beforeCurve) {
       traces.push({
-        x: optLogM, y: beforeCurve, mode: "lines",
+        x: optSpots, y: beforeCurve, mode: "lines",
         name: "Before (Now)",
         line: { color: "#e57373", width: 2, dash: "dash" },
       });
@@ -8697,7 +8661,7 @@ function optv2RenderPayoff() {
     const afterCurve = optv2OptResult.after.payoff_by_horizon["0"];
     if (afterCurve) {
       traces.push({
-        x: optLogM, y: afterCurve, mode: "lines",
+        x: optSpots, y: afterCurve, mode: "lines",
         name: "After (Now)",
         line: { color: "#4fc3f7", width: 3 },
       });
@@ -8714,7 +8678,7 @@ function optv2RenderPayoff() {
       const targetAtSpot = optv2OptResult.target_payoff[spotIdx];
       const targetCurve = optv2OptResult.target_payoff.map(v => v - targetAtSpot);
       traces.push({
-        x: optLogM, y: targetCurve, mode: "lines",
+        x: optSpots, y: targetCurve, mode: "lines",
         name: "Target Profile",
         line: { color: "#ffca28", width: 2, dash: "dot" },
       });
@@ -8745,7 +8709,7 @@ function optv2RenderPayoff() {
       if (!hasData) continue;
 
       traces.push({
-        x: logM, y: totalPayoff, mode: "lines",
+        x: spots, y: totalPayoff, mode: "lines",
         name: h === 0 ? "Now (0d)" : `T+${h}d`,
         line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 },
       });
@@ -8754,7 +8718,7 @@ function optv2RenderPayoff() {
 
   // Zero line
   traces.push({
-    x: [logM[0], logM[logM.length - 1]],
+    x: [spots[0], spots[spots.length - 1]],
     y: [0, 0],
     mode: "lines",
     name: "Break-even",
@@ -8762,7 +8726,7 @@ function optv2RenderPayoff() {
     showlegend: false,
   });
 
-  // Current spot marker (log-moneyness = 0 by definition)
+  // Current spot marker (actual price on the log axis)
   const spotPayoff0 = (() => {
     const totalPayoff = new Array(spots.length).fill(0);
     positions.forEach(p => {
@@ -8773,20 +8737,21 @@ function optv2RenderPayoff() {
   })();
 
   traces.push({
-    x: [0],
+    x: [S0],
     y: [spotPayoff0],
     mode: "markers",
-    name: `Current Spot ($${S0.toLocaleString()})`,
+    name: `${assetLabel} Spot ($${fmtPrice(S0)})`,
     marker: { color: "#ffca28", size: 10, symbol: "diamond" },
   });
 
   const layout = {
     title: { text: optv2OptResult ? "Payoff Profile — Before vs After vs Target (Now)" : "Portfolio Payoff Profile — All Positions", font: { color: "#e6edf3", size: 16 } },
     xaxis: {
-      title: "Log-Moneyness  ln(K / Spot)",
-      tickvals: tickVals,
-      ticktext: tickTexts,
-      tickangle: -45,
+      title: `${assetLabel} Spot (USD, log scale)`,
+      type: "log",
+      tickprefix: "$",
+      exponentformat: "none",
+      separatethousands: true,
       color: "#8b949e",
       gridcolor: "#21262d",
       zerolinecolor: "#ffca28",
@@ -8809,7 +8774,7 @@ function optv2RenderPayoff() {
       orientation: "h",
       y: -0.22,
     },
-    margin: { t: 50, b: 80, l: 80, r: 30 },
+    margin: { t: 50, b: 70, l: 80, r: 30 },
   };
 
   Plotly.newPlot("optv2-payoff-chart", traces, layout, { responsive: true });
