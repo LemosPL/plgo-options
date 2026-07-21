@@ -24,31 +24,33 @@ import matplotlib.pyplot as plt
 
 from ..pricing import options
 
-# Default per-counterparty trading cost (bid_ask_atm_pct — round-trip cost as
-# a fraction of ATM price) the LP uses when the caller doesn't pass an
-# explicit override. Client request: counterparties are quoted with genuinely
-# different pricing — e.g. on ETH, KeyRock trades wider/costlier (8%) than
-# Flowdesk (5%). FIL uses a flat 10% for every counterparty instead of a
-# per-counterparty dict — a plain scalar applies uniformly via _resolve()
-# regardless of which counterparty, including any not yet in the book (FIL
-# currently trades with Flowdesk, KeyRock, Wave, G20, GSR), so there's no
-# risk of a new counterparty silently falling back to the 3% flat default.
-# Not yet editable from the GUI; that's the intended next step.
-DEFAULT_BID_ASK_ATM_PCT_BY_ASSET: dict[str, "dict[str, float] | float"] = {
-    "ETH": {"KeyRock": 0.08, "Flowdesk": 0.05},
-    "FIL": 0.10,
+# Transaction cost is modelled in VOL POINTS. Per execution (one leg),
+#   cost = |qty| × |vega| × VOLpts
+# where vega is USD per 1 vol-point per contract (math_utils.bs_greeks:
+# S·φ(d1)·√T / 100) and VOLpts is the per-counterparty ONE-WAY (half-spread-
+# from-mid) bid-ask width in implied-vol points. A round trip (open + close)
+# is two executions, so it costs 2× naturally. VOLpts is entered manually per
+# counterparty from the GUI; these per-asset values are the fallback default
+# for a counterparty with no explicit entry. PLACEHOLDERS — tune to the desk's
+# real spreads. (Replaces the earlier delta-scaled %-of-price model.)
+DEFAULT_BID_ASK_VOL_PTS_BY_ASSET: dict[str, "dict[str, float] | float"] = {
+    "ETH": {"KeyRock": 1.0, "Flowdesk": 0.75},
+    "FIL": 1.5,
 }
 
+# Fallback VOLpts for a counterparty absent from the resolved dict.
+_VOL_PTS_FALLBACK = 0.75
 
-def _bid_ask_cost_usd(price, qty, delta, counterparty, bid_ask_atm_pct, bid_ask_min_delta):
-    """Round-trip transaction cost (USD) for one trade leg — the same
-    delta-scaled, per-counterparty bid-ask formula CollateralOptimization uses
-    internally for its own trading_cost term, so the cost shown on a trade
-    always matches what actually drove the LP's decision to propose it.
+
+def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
+    """One execution's transaction cost (USD) for a trade leg, modelled in vol
+    points: |qty| × |vega| × VOLpts. Mirrors CollateralOptimization's own
+    trading_cost term so the cost shown on a trade matches what drove the LP.
+    ``vega`` is USD per 1 vol-point per contract; ``bid_ask_vol_pts`` is a
+    per-counterparty dict (or a flat scalar) of one-way vol-point half-spreads.
     """
-    d = max(abs(float(delta or 0.0)), float(bid_ask_min_delta))
-    pct = CollateralOptimization._resolve(bid_ask_atm_pct, counterparty, default=0.03)
-    return abs(float(qty)) * float(price) * pct / (2.0 * d)
+    vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
+    return abs(float(qty)) * abs(float(vega or 0.0)) * float(vp)
 
 
 class OptimizerV3(BaseOptimizer):
@@ -165,6 +167,7 @@ class OptimizerV3(BaseOptimizer):
             self, token, roll_positions: list[Position],
             bid_ask_atm_pct: "dict[str, float] | float | None" = None,
             bid_ask_min_delta: float = 0.05,
+            bid_ask_vol_pts: "dict[str, float] | float | None" = None,
     ) -> list[dict]:
         trades = []
 
@@ -221,8 +224,8 @@ class OptimizerV3(BaseOptimizer):
                 "gamma_contribution": round(float(unwind_qty * (getattr(p, "gamma", 0.0) or 0.0)), 6),
                 "vega_contribution": round(float(unwind_qty * (getattr(p, "vega", 0.0) or 0.0)), 4),
                 "cost_usd": round(_bid_ask_cost_usd(
-                    getattr(p, "mark_price_usd", 0.0), unwind_qty, getattr(p, "delta", 0.0),
-                    getattr(p, "counterparty", ""), bid_ask_atm_pct, bid_ask_min_delta,
+                    unwind_qty, getattr(p, "vega", 0.0),
+                    getattr(p, "counterparty", ""), bid_ask_vol_pts,
                 ), 2),
             })
 
@@ -589,6 +592,7 @@ class OptimizerV3(BaseOptimizer):
             min_abs_imbalance: float = 10_000.0,
             bid_ask_atm_pct: "dict[str, float] | float | None" = None,
             bid_ask_min_delta: float = 0.05,
+            bid_ask_vol_pts: "dict[str, float] | float | None" = None,
     ) -> list[dict]:
         """Box spread (long call + short put at one strike, short call + long
         put at another, same expiry, single counterparty) sized to neutralize
@@ -717,8 +721,7 @@ class OptimizerV3(BaseOptimizer):
                 "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                 "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
                 "cost_usd": round(_bid_ask_cost_usd(
-                    leg.bs_price_usd, leg_qty, leg.delta, leg.counterparty,
-                    bid_ask_atm_pct, bid_ask_min_delta,
+                    leg_qty, leg.vega, leg.counterparty, bid_ask_vol_pts,
                 ), 2),
             })
 
@@ -846,6 +849,7 @@ class OptimizerV3(BaseOptimizer):
                  mu_factor: float = 0.0,
                  bid_ask_atm_pct: "dict[str, float] | float | None" = None,
                  bid_ask_min_delta: float = 0.05,
+                 bid_ask_vol_pts: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
@@ -882,6 +886,10 @@ class OptimizerV3(BaseOptimizer):
         # default pricing (see DEFAULT_BID_ASK_ATM_PCT_BY_ASSET above).
         if bid_ask_atm_pct is None:
             bid_ask_atm_pct = DEFAULT_BID_ASK_ATM_PCT_BY_ASSET.get(self.asset, {})
+        # Transaction cost is now driven by VOLpts (|vega| × VOLpts); fall back to
+        # this asset's default vol-point spreads when no explicit override is given.
+        if bid_ask_vol_pts is None:
+            bid_ask_vol_pts = DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {})
 
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder,
                                                          current_spot=self.spot)
@@ -1062,6 +1070,7 @@ class OptimizerV3(BaseOptimizer):
         roll_unwind_trades = self._build_roll_unwind_trades(
             self.asset, roll_positions,
             bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
+            bid_ask_vol_pts=bid_ask_vol_pts,
         )
         forced_cash_by_counterparty: dict[str, float] = {}
         for t in roll_unwind_trades:
@@ -1104,6 +1113,7 @@ class OptimizerV3(BaseOptimizer):
             mu_factor=mu_factor,
             bid_ask_atm_pct=bid_ask_atm_pct,
             bid_ask_min_delta=bid_ask_min_delta,
+            bid_ask_vol_pts=bid_ask_vol_pts,
             min_trade_delta=min_trade_delta,
             max_exposure_by_counterparty=max_exposure_by_counterparty,
             max_gross_exposure_by_counterparty=max_gross_exposure_by_counterparty,
@@ -1210,8 +1220,7 @@ class OptimizerV3(BaseOptimizer):
                     "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
                     "cost_usd": round(_bid_ask_cost_usd(
-                        leg.bs_price_usd, leg_qty, leg.delta, leg.counterparty,
-                        bid_ask_atm_pct, bid_ask_min_delta,
+                        leg_qty, leg.vega, leg.counterparty, bid_ask_vol_pts,
                     ), 2),
                 })
 
@@ -1276,6 +1285,7 @@ class OptimizerV3(BaseOptimizer):
                 box_legs = self._build_box_cash_neutralizer_trades(
                     self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
                     bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
+                    bid_ask_vol_pts=bid_ask_vol_pts,
                 )
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)

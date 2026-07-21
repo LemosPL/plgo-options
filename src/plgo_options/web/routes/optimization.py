@@ -81,6 +81,10 @@ class OptimizationParams(BaseModel):
     # from that default (or a bare float here) falls back further to
     # CollateralOptimization's own flat default.
     bid_ask_atm_pct: float | dict[str, float] | None = None
+    # Per-counterparty transaction cost in VOL POINTS (one-way half-spread). When
+    # set, cost = |vega| × VOLpts per executed leg, replacing the %-of-price model.
+    # {counterparty: vol_pts} dict (or a flat scalar). None = per-asset default.
+    bid_ask_vol_pts: float | dict[str, float] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -143,6 +147,7 @@ async def run_optimizer(params: OptimizationParams):
         t90_weight=params.t90_weight,
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
+        bid_ask_vol_pts=params.bid_ask_vol_pts,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

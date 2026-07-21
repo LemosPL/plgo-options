@@ -8544,6 +8544,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
   try {
     optv2Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
     optv2PopulateCounterparties();
+    optRenderVolPts("optv2-volpts-list", optv2Data);
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
@@ -8957,6 +8958,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       // When trades were sent over from the Deals / Risk screen, scope the
       // optimizer's input book to exactly those trades. null = full book.
       base_trade_ids: optv2BaseIds(),
+      // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
+      bid_ask_vol_pts: optVolPtsDict("optv2-volpts-list"),
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -9431,6 +9434,43 @@ function optv3PopulateCounterparties() {
     + cps.map(c => `<option value="${c}">${c}</option>`).join("");
 }
 
+// Default per-counterparty VOLpts (one-way half-spread) — mirrors the engine's
+// DEFAULT_BID_ASK_VOL_PTS_BY_ASSET so the inputs seed with the same fallback.
+const OPT_DEFAULT_VOL_PTS = { ETH: { KeyRock: 1.0, Flowdesk: 0.75 }, FIL: 1.5 };
+function optDefaultVolPts(asset, cpty) {
+  const a = OPT_DEFAULT_VOL_PTS[asset];
+  if (a == null) return 0.75;
+  if (typeof a === "number") return a;
+  return a[cpty] != null ? a[cpty] : 0.75;
+}
+
+// Render one editable VOLpts input per counterparty in the loaded book,
+// preserving any value the user already typed. (Shared v2/v3 by listId.)
+function optRenderVolPts(listId, data) {
+  const box = document.getElementById(listId);
+  if (!box || !data) return;
+  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const prev = {};
+  box.querySelectorAll(".opt-volpts-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  box.innerHTML = cps.length ? cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : optDefaultVolPts(asset, cp);
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-volpts-input" data-cpty="${cp}" value="${v}" step="0.25" min="0" style="width:5rem"></label></div>`;
+  }).join("") : '<p class="optv3-hint" style="margin:0">No counterparties in the loaded book.</p>';
+}
+
+// Collect {counterparty: VOLpts} from the inputs, or null if none set.
+function optVolPtsDict(listId) {
+  const box = document.getElementById(listId);
+  if (!box) return null;
+  const d = {};
+  box.querySelectorAll(".opt-volpts-input").forEach(i => {
+    const v = parseFloat(i.value);
+    if (i.dataset.cpty && Number.isFinite(v)) d[i.dataset.cpty] = v;
+  });
+  return Object.keys(d).length ? d : null;
+}
+
 async function optv3Load() {
   const $btn = document.getElementById("btn-load-optv3");
   $btn.classList.add("loading"); $btn.textContent = "Loading…";
@@ -9438,6 +9478,7 @@ async function optv3Load() {
     optv3Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
     optv3OptResult = null;
     optv3PopulateCounterparties();
+    optRenderVolPts("optv3-volpts-list", optv3Data);
 
     const $expiry = document.getElementById("optv3-target-expiry");
     $expiry.innerHTML = '<option value="">Select maturity…</option>';
@@ -10330,6 +10371,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       base_trade_ids: optv2BaseIds(),
       // User-edited target profile (Target Profile tab). null = auto parametric.
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
+      // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
+      bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
     });
     console.log("Optimizer v3 result:", data);
     optv3RenderResult(data);

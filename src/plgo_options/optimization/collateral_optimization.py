@@ -29,6 +29,7 @@ class CollateralOptimization:
         mu_factor=0.0,
         bid_ask_atm_pct=0.03,
         bid_ask_min_delta=0.05,
+        bid_ask_vol_pts=None,
         min_trade_delta=0.10,
         max_exposure_by_counterparty=None,
         max_gross_exposure_by_counterparty=None,
@@ -136,20 +137,20 @@ class CollateralOptimization:
             prob += abs_net_pos_vars[j] >= -net_pos_j, f"abs_net_pos_neg_{j}"
 
         c_prices = np.array([max(float(getattr(c, "bs_price_usd", 0.0) or 0.0), 1e-8) for c in candidates])
-        # Delta-based bid-ask spread: wider for lower-delta options, same formula for all candidates.
-        # bid_ask_pct(δ) = bid_ask_atm_pct / (2 × |δ|), floored at bid_ask_min_delta to cap the spread.
-        # Deep ITM options (|δ| → 1) naturally get tighter spreads (they behave like forwards).
-        # bid_ask_atm_pct can be a per-counterparty dict — different counterparties
-        # can be quoted with genuinely different pricing/cost (client request:
-        # e.g. Flowdesk trades wider/costlier than KeyRock on ETH) — resolved the
-        # same way as collateral_tier_free_pct/collateral_tier_mu elsewhere.
-        c_bid_ask_atm = np.array([
-            self._resolve(bid_ask_atm_pct, getattr(c, "counterparty", ""), default=0.03)
+        # Transaction cost per contract, modelled in VOL POINTS:
+        #   cost = |vega| × VOLpts
+        # vega is USD per 1 vol-point per contract; VOLpts is a per-counterparty
+        # one-way (half-spread-from-mid) bid-ask width in implied-vol points,
+        # entered manually per counterparty (resolved the same way as
+        # collateral_tier_free_pct/cash_neutrality_factor). Replaces the earlier
+        # delta-scaled %-of-price model. Each executed leg (buy OR sell) is
+        # charged once, so a round trip costs 2× naturally.
+        c_vegas = np.array([abs(float(getattr(c, "vega", 0.0) or 0.0)) for c in candidates])
+        c_vol_pts = np.array([
+            self._resolve(bid_ask_vol_pts, getattr(c, "counterparty", ""), default=0.75)
             for c in candidates
         ])
-        c_deltas_floored = np.maximum(c_deltas, bid_ask_min_delta)
-        bid_ask_pct = c_bid_ask_atm / (2.0 * c_deltas_floored)
-        c_costs = bid_ask_pct * c_prices
+        c_costs = c_vegas * c_vol_pts
 
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.
         # effective_mu → 1 as mu_factor → ∞, so the LP never unwinds purely for collateral

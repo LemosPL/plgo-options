@@ -1565,6 +1565,11 @@
         <button id="btn-run-optv2" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
       </div>
       <div id="optv2-base-pill" class="optv2-base-pill" style="display:none;margin-top:.65rem"></div>
+      <div style="margin-top:.9rem;border-top:1px solid var(--border);padding-top:.75rem">
+        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:.4rem">Transaction cost — VOL pts (per counterparty)</div>
+        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">One-way bid-ask half-spread in implied-vol points. The engine charges <b>cost = |vega| × VOLpts</b> on each executed leg. Loaded from the book; edit any value.</p>
+        <div id="optv2-volpts-list" style="display:flex;flex-wrap:wrap;gap:.75rem"><span style="font-size:.72rem;color:var(--muted)">Load the risk profile to list counterparties.</span></div>
+      </div>
     </section>
 
     <!-- Greeks summary -->
@@ -1833,6 +1838,13 @@
           </div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-roll-itm-only" checked> ITM-only rolls</label>
           <p class="optv3-hint">When rolling, only touch in-the-money positions.</p>
+        </div>
+
+        <!-- Transaction cost (VOL pts, per counterparty) -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Transaction cost — VOL pts</div>
+          <p class="optv3-hint" style="margin:0 0 .55rem">One-way bid-ask half-spread in implied-vol points, per counterparty. The engine charges <b>cost = |vega| × VOLpts</b> on each executed leg. Loaded from the book; edit any value.</p>
+          <div id="optv3-volpts-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
         </div>
 
         <!-- Output -->
@@ -2495,6 +2507,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=100"></script>
+<script src="/static/app.js?v=101"></script>
 </body>
 </html>
