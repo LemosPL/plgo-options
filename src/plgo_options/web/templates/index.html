@@ -1925,14 +1925,16 @@
 
             <div id="optv3-trades-under-chart" class="optv3-trades-grid" style="display:none">
               <div>
-                <h3 style="margin:.2rem 0 .5rem">Trades to Unwind / Close <span class="optv3-muted" id="optv3-unwind-count"></span></h3>
+                <h3 style="margin:.2rem 0 .5rem">Roll candidates — tick to unwind <span class="optv3-muted" id="optv3-rollcand-count"></span></h3>
+                <p class="optv3-hint" style="margin:0 0 .5rem">Positions eligible to roll (DTE ≤ threshold), ITM &amp; non-ITM. ITM are pre-ticked. Ticking updates the dashed <b>Book excl. ticked</b> line on the chart and sets exactly what the optimizer rolls on the next Run.</p>
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
+                      <th><input type="checkbox" id="optv3-rollcand-all" title="Tick / untick all"></th>
                       <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
-                      <th>Side</th><th class="num">Qty</th><th class="num">Mark ($)</th><th class="num">Unwind ($)</th><th>Counterparty</th>
+                      <th>Side</th><th class="num">Qty</th><th class="num">DTE</th><th>ITM</th><th class="num">Unwind ($)</th>
                     </tr></thead>
-                    <tbody id="optv3-unwind-tbody"></tbody>
+                    <tbody id="optv3-rollcand-tbody"></tbody>
                   </table>
                 </div>
               </div>
