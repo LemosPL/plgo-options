@@ -1920,19 +1920,29 @@
 
           <!-- Payoff + the run's trades (unwind vs new) side by side -->
           <div id="subtab-optv3-payoff" class="sub-tab-pane active">
+            <details class="optv3-chart-note" open>
+              <summary>How to read this chart</summary>
+              <ul>
+                <li><b>Before (current book)</b> is your whole book today; <b>After</b> is the book once the proposed trades are applied. The <b>gap between them</b> is the net effect of the trades (unwinds + new) — the "After" line is <i>not</i> the new trades on their own.</li>
+                <li>Both curves are <b>P&amp;L from today</b>, anchored to <b>$0 at the current spot</b>, so they both cross zero at spot. The premium you pay/receive is <b>not</b> visible on the curve — read it from the <b>Net Premium</b> / <b>Cash Shift</b> tiles above.</li>
+                <li><b>Roll candidates — tick to unwind</b> (below left) lists positions eligible to roll (DTE ≤ threshold), ITM &amp; non-ITM, with ITM pre-ticked. Ticking sets exactly what the optimizer rolls on the next Run and updates the dashed <b>Book excl. ticked unwinds</b> line.</li>
+                <li>X-axis is <b>log spot price</b> (works for ETH and FIL). Hover anywhere for all values at that spot. <b>Click</b> a legend entry to hide a line; <b>double-click</b> to isolate it.</li>
+              </ul>
+            </details>
             <div id="optv3-payoff-empty" class="optv3-empty">Load the risk profile to see the payoff curve.</div>
             <div id="optv3-payoff-chart" style="width:100%;height:460px"></div>
 
             <div id="optv3-trades-under-chart" class="optv3-trades-grid" style="display:none">
               <div>
-                <h3 style="margin:.2rem 0 .5rem">Trades to Unwind / Close <span class="optv3-muted" id="optv3-unwind-count"></span></h3>
+                <h3 style="margin:.2rem 0 .5rem" title="Positions eligible to roll (DTE ≤ threshold), ITM & non-ITM. ITM are pre-ticked. Ticking updates the dashed 'Book excl. ticked' line and sets exactly what the optimizer rolls on the next Run.">Roll candidates — tick to unwind <span class="optv3-muted" id="optv3-rollcand-count"></span></h3>
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
+                      <th><input type="checkbox" id="optv3-rollcand-all" title="Tick / untick all"></th>
                       <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
-                      <th>Side</th><th class="num">Qty</th><th class="num">Mark ($)</th><th class="num">Unwind ($)</th><th>Counterparty</th>
+                      <th>Side</th><th class="num">Qty</th><th class="num">DTE</th><th>ITM</th><th class="num">Unwind ($)</th>
                     </tr></thead>
-                    <tbody id="optv3-unwind-tbody"></tbody>
+                    <tbody id="optv3-rollcand-tbody"></tbody>
                   </table>
                 </div>
               </div>

@@ -9488,6 +9488,7 @@ function optv3RenderPreview() {
   if (!optv3Data) return;
   optv3RenderKpi();
   optv3RenderPositions();
+  optv3RenderRollCandidates();  // populates the tick-to-unwind panel; also refreshes the chart
   optv3RenderPayoff();
   optv3RenderMatrix();
   optv3RenderProfileTable();
@@ -9575,66 +9576,104 @@ function optv3RenderPayoff() {
   const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
   const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
 
+  const C = optv3ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
   const traces = [];
   if (optv3OptResult && optv3OptResult.status === "ok") {
     // x = actual spot prices (Plotly log-transforms them for the log axis).
     const optSpots = optv3OptResult.spot_ladder || spots;
     const beforeCurve = optv3OptResult.before.payoff_by_horizon["0"];
-    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
+    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
     const afterCurve = optv3OptResult.after.payoff_by_horizon["0"];
-    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
+    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (with proposed trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
     if (optv3OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
       const targetAtSpot = optv3OptResult.target_payoff[spotIdx];
       const targetCurve = optv3OptResult.target_payoff.map(v => v - targetAtSpot);
-      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target Profile", line: { color: "#ffca28", width: 2, dash: "dot" } });
+      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target", hovertemplate: HT, line: { color: C.target, width: 2, dash: "dot" } });
     }
   } else {
-    const horizonColors = { 0: "#4fc3f7", 16: "#ba68c8", 30: "#ffb74d", 60: "#81c784", 90: "#e57373" };
-    for (const h of OPTV2_HORIZONS) {
+    // Sequential ramp (bright = Now, fading into the future) — a proper time
+    // encoding instead of a rainbow.
+    OPTV2_HORIZONS.forEach((h, k) => {
       const hKey = String(h);
       const totalPayoff = new Array(spots.length).fill(0);
       let hasData = false;
-      positions.forEach(p => {
-        const curve = p.payoff_by_horizon[hKey];
-        if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; }
+      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; } });
+      if (!hasData) return;
+      const isNow = h === 0;
+      traces.push({
+        x: spots, y: totalPayoff, mode: "lines",
+        name: isNow ? "Now (current book)" : `T+${h}d`,
+        hovertemplate: HT,
+        line: { color: C.ramp[k] || "#8b949e", width: isNow ? 3 : 1.5 },
+        ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
       });
-      if (!hasData) continue;
-      traces.push({ x: spots, y: totalPayoff, mode: "lines", name: h === 0 ? "Now (0d)" : `T+${h}d`, line: { color: horizonColors[h] || "#8b949e", width: h === 0 ? 3 : 2 } });
-    }
+    });
   }
 
-  // Break-even line (y=0) across the spot range.
-  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: "rgba(255,255,255,0.25)", dash: "dot", width: 1 }, showlegend: false });
+  // What-if: book payoff (Now) excluding the ticked roll candidates — the unwind
+  // preview. Lets you compare the book with vs. without the ITM/selected trades.
+  if (typeof optv3RollSel !== "undefined" && optv3RollSel && optv3RollSel.size) {
+    const excl = new Array(spots.length).fill(0);
+    let any = false;
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon && p.payoff_by_horizon["0"];
+      if (!curve) return;
+      if (!optv3RollSel.has(p.id)) { for (let i = 0; i < curve.length; i++) excl[i] += curve[i]; }
+      else any = true;
+    });
+    if (any) traces.push({ x: spots, y: excl, mode: "lines", name: "Book excl. ticked unwinds (Now)", hovertemplate: HT, line: { color: C.excl, width: 2, dash: "dashdot" } });
+  }
 
-  // Yellow vertical line at the current spot (restores the old spot marker bar
-  // that the x-axis zeroline used to draw at log-moneyness = 0). Spans the full
-  // y-range of the plotted curves; x uses the actual price (log-transformed).
+  // Break-even line (y=0) — recessive, no hover.
+  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: C.zero, dash: "dot", width: 1 }, showlegend: false, hoverinfo: "skip" });
+
+  // Vertical line at the current spot — thin, semi-transparent, no hover.
   let yLo = 0, yHi = 0;
   traces.forEach(t => { if (Array.isArray(t.y)) t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }); });
-  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  traces.push({ x: [S0], y: [0], mode: "markers", name: `${assetLabel} Spot`, hovertemplate: `${assetLabel} spot: $${fmtPrice(S0)}<extra></extra>`, marker: { color: C.spotDot, size: 9, symbol: "diamond" } });
 
-  // Current-spot marker (actual price on the log axis).
-  const spotPayoff0 = (() => {
-    const totalPayoff = new Array(spots.length).fill(0);
-    positions.forEach(p => { const curve = p.payoff_by_horizon["0"]; if (curve) for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; });
-    return totalPayoff[optv2NearestIdx(spots, S0)];
-  })();
-  traces.push({ x: [S0], y: [spotPayoff0], mode: "markers", name: `${assetLabel} Spot ($${fmtPrice(S0)})`, marker: { color: "#ffca28", size: 10, symbol: "diamond" } });
+  const layout = optv3ChartLayout({
+    title: optv3OptResult ? "Payoff at Now — Before vs After vs Target" : `Portfolio payoff — current book across horizons`,
+    assetLabel, C,
+  });
+  Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true, displaylogo: false });
+}
 
-  const layout = {
-    title: { text: optv3OptResult ? "Payoff — Before vs After vs Target (Now)" : "Portfolio Payoff — All Positions", font: { color: "#e6edf3", size: 16 } },
+// Shared chart palette (coherent, semi-transparent) + layout for the v3 charts.
+function optv3ChartColors() {
+  return {
+    before: "#e5737e",                       // current book — soft red, dashed
+    after:  "#4fc3f7",                       // resulting book — cyan
+    afterFill: "rgba(79,195,247,0.08)",      // faint area under the primary curve
+    target: "#ffca28",                       // target — amber, dotted
+    excl:   "#b388ff",                       // what-if excl. unwinds — violet
+    spot:   "rgba(255,202,40,0.45)",         // spot rule — faint amber
+    spotDot: "#ffca28",
+    zero:   "rgba(230,237,243,0.18)",        // break-even — faint
+    grid:   "rgba(139,148,158,0.12)",        // recessive grid
+    // sequential cyan ramp: Now (bright) → T+90 (dim)
+    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83"],
+  };
+}
+
+function optv3ChartLayout({ title, assetLabel, C, height }) {
+  return {
+    title: { text: title, font: { color: "#e6edf3", size: 15 } },
+    hovermode: "x unified",
+    hoverlabel: { bgcolor: "#161b22", bordercolor: "#30363d", font: { color: "#e6edf3", size: 11 } },
     xaxis: {
       title: `${assetLabel} Spot (USD, log scale)`,
       type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true,
-      color: "#8b949e", gridcolor: "#21262d",
+      xhoverformat: "$,.0f", color: "#8b949e", gridcolor: C.grid, zeroline: false,
     },
-    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
+    yaxis: { title: "P&L from today (USD)", tickformat: "$,.0f", zeroline: true, zerolinecolor: "rgba(248,81,73,0.55)", zerolinewidth: 1, color: "#8b949e", gridcolor: C.grid },
     paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
-    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22 },
-    margin: { t: 50, b: 70, l: 80, r: 30 },
+    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22, bgcolor: "rgba(0,0,0,0)" },
+    margin: { t: 46, b: 72, l: 84, r: 24 },
   };
-  Plotly.newPlot("optv3-payoff-chart", traces, layout, { responsive: true });
 }
 
 // Preview P&L matrix (before) — faithful copy of optv2RenderMatrix on v3 ids.
@@ -9674,6 +9713,111 @@ function optv3RenderMatrix() {
     });
     $tbody.appendChild(tr);
   });
+}
+
+// ── Roll candidates: tick-to-unwind selection. Previews on the payoff chart
+// (a "Book excl. ticked unwinds" line) and drives exactly what the optimizer
+// rolls on the next Run (roll_dte_threshold = -1 + forced_roll_ids). ─────────
+let optv3RollSel = new Set();   // ticked position ids
+let optv3RollCandSig = "";      // signature of the current candidate set (to re-default ITM)
+
+// Positions eligible to roll: DTE <= threshold (or all if threshold = -1), in
+// the selected counterparty scope. Each tagged with _itm (call: K<spot, put: K>spot).
+function optv3RollCandidates() {
+  if (!optv3Data) return [];
+  const raw = document.getElementById("optv3-roll-dte-threshold")?.value;
+  if (raw === "" || raw == null) return [];   // rolls disabled → no candidates
+  const thr = parseInt(raw, 10);
+  if (Number.isNaN(thr)) return [];
+  const spot = optv3Data.eth_spot || 0;
+  const cptySel = document.getElementById("optv3-counterparties");
+  const scope = new Set(cptySel ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : []);
+  return optv3ActivePositions().filter(p => {
+    const opt = String(p.opt || "");
+    if (!["C", "P", "F"].includes(opt)) return false;
+    if (scope.size && !scope.has(p.counterparty)) return false;
+    if (thr === -1) return true;
+    const dte = Number(p.days_remaining);
+    return Number.isFinite(dte) && dte <= thr;
+  }).map(p => {
+    const opt = String(p.opt || "");
+    const itm = (opt === "C" && p.strike < spot) || (opt === "P" && p.strike > spot);
+    return Object.assign({ _itm: itm }, p);
+  });
+}
+
+function optv3RenderRollCandidates() {
+  const tbody = document.getElementById("optv3-rollcand-tbody");
+  const grid = document.getElementById("optv3-trades-under-chart");
+  const count = document.getElementById("optv3-rollcand-count");
+  if (!tbody) return;
+  const cands = optv3RollCandidates();
+  if (grid) grid.style.display = (cands.length || optv3OptResult) ? "" : "none";
+
+  // Re-default the ticked set to the ITM candidates whenever the candidate set changes.
+  const sig = cands.map(c => c.id).sort((a, b) => a - b).join(",");
+  if (sig !== optv3RollCandSig) {
+    optv3RollCandSig = sig;
+    optv3RollSel = new Set(cands.filter(c => c._itm).map(c => c.id));
+  }
+  if (count) count.textContent = cands.length ? `(${optv3RollSel.size}/${cands.length} ticked)` : "";
+
+  // Right column placeholder until a run produces new trades.
+  const repl = document.getElementById("optv3-replacement-tbody");
+  if (repl && !optv3OptResult) repl.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:1.5rem">Run the optimizer to see replacement / new trades.</td></tr>';
+
+  if (!cands.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:1.5rem">No roll candidates at this DTE threshold.</td></tr>';
+    optv3RenderPayoff();
+    return;
+  }
+
+  const rows = [...cands].sort((a, b) => (Number(a.days_remaining) - Number(b.days_remaining)) || (a.strike - b.strike));
+  const money = v => (v >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(v), 0);
+  tbody.innerHTML = rows.map(c => {
+    const long = c.net_qty >= 0;
+    const mtm = c.current_mtm || 0;
+    const itmBadge = c._itm ? '<span style="color:var(--green);font-weight:600">ITM</span>' : '<span style="color:var(--muted)">—</span>';
+    return `<tr>
+      <td><input type="checkbox" class="optv3-rollcand-cb" data-id="${c.id}" ${optv3RollSel.has(c.id) ? "checked" : ""}></td>
+      <td>${c.instrument || ""}</td>
+      <td>${String(c.expiry || "").slice(0, 10)}</td>
+      <td class="num">${optv2Fmt(c.strike, 0)}</td>
+      <td>${optv2OptType(c.opt)}</td>
+      <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
+      <td class="num">${optv2Fmt(Math.abs(c.net_qty), 0)}</td>
+      <td class="num">${c.days_remaining ?? "—"}</td>
+      <td>${itmBadge}</td>
+      <td class="num" style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${money(mtm)}</td>
+    </tr>`;
+  }).join("");
+
+  // Totals row for the ticked set — total qty + total cost to unwind (Σ MTM).
+  const ticked = rows.filter(c => optv3RollSel.has(c.id));
+  const totQty = ticked.reduce((s, c) => s + Math.abs(Number(c.net_qty) || 0), 0);
+  const totMtm = ticked.reduce((s, c) => s + (Number(c.current_mtm) || 0), 0);
+  const tr = document.createElement("tr");
+  tr.className = "row-highlight"; tr.style.fontWeight = "600";
+  tr.innerHTML = `<td></td><td colspan="5">Ticked to unwind (${ticked.length})</td>`
+    + `<td class="num">${optv2Fmt(totQty, 0)}</td><td></td><td></td>`
+    + `<td class="num" style="color:${totMtm >= 0 ? "var(--green)" : "var(--red)"}">${money(totMtm)}</td>`;
+  tbody.appendChild(tr);
+
+  tbody.querySelectorAll(".optv3-rollcand-cb").forEach(cb => cb.addEventListener("change", () => {
+    const id = Number(cb.dataset.id);
+    if (cb.checked) optv3RollSel.add(id); else optv3RollSel.delete(id);
+    optv3RenderRollCandidates();
+  }));
+  const allCb = document.getElementById("optv3-rollcand-all");
+  if (allCb) {
+    allCb.checked = ticked.length === rows.length && rows.length > 0;
+    allCb.onchange = () => {
+      if (allCb.checked) rows.forEach(c => optv3RollSel.add(c.id)); else rows.forEach(c => optv3RollSel.delete(c.id));
+      optv3RenderRollCandidates();
+    };
+  }
+
+  optv3RenderPayoff();  // refresh the "Book excl. ticked unwinds" what-if line
 }
 
 // Render optimization result into the v3 KPI row + tabbed detail.
@@ -9763,15 +9907,9 @@ function optv3RenderResult(data) {
   if ($structEmpty) $structEmpty.style.display = allTrades.length ? "none" : "";
   optv2RenderStrategyGroups(allTrades, "optv3-strategy-groups");
 
-  // Unwind table
-  optv2RenderTradeTable("optv3-unwind-tbody", unwinds, "optv3-unwind-count",
-    (t) => [
-      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, 0)}</td>`,
-      `<td>${optv2OptType(t.opt)}</td>`,
-      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td>${t.counterparty || "—"}</td>`,
-    ], 9, "No positions flagged for unwind/roll at this DTE threshold.");
+  // Trades to unwind are shown by the interactive Roll-candidates panel (left of
+  // the chart), which persists the ticked selection that drove this run.
+  optv3RenderRollCandidates();
 
   // Replacement / new table
   optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
@@ -9784,15 +9922,7 @@ function optv3RenderResult(data) {
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 11, "No replacement or new trades proposed.");
 
-  // Totals rows — for unwinds the key number is the total cost to unwind
-  // (sum of Unwind Value). Also sum qty on both tables and value on new trades.
-  optv3AppendTradeTotals("optv3-unwind-tbody", unwinds, [
-    { colspan: 5, label: "Total to unwind" },
-    { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
-    {},                                               // Mark (blank)
-    { key: t => Number(t.notional) || 0 },            // Unwind Value ($)
-    {},                                               // Counterparty (blank)
-  ]);
+  // Totals row on the new-trades table (total qty + total value).
   optv3AppendTradeTotals("optv3-replacement-tbody", replacements, [
     { colspan: 5, label: "Total new / replacement" },
     { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
@@ -10003,25 +10133,24 @@ function optv3RenderProfileChart() {
   const manual = optv3ManualTargetInterp(spots);
   const auto = optv3AutoTargetAnchored(src);
   const targetCurve = manual || auto;
+  const C = optv3ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
 
   const traces = [];
-  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (Now)", line: { color: "#e57373", width: 2, dash: "dash" } });
-  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (Now)", line: { color: "#4fc3f7", width: 3 } });
-  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", line: { color: "#ffca28", width: 2, dash: "dot" } });
+  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
+  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (with trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", hovertemplate: HT, line: { color: C.target, width: 2.5, dash: "dot" } });
 
   let yLo = 0, yHi = 0;
   traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
-  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: "#ffca28", width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
 
-  const layout = {
-    title: { text: manual ? "Target Profile — Manual Target (Now)" : "Target Profile — Before vs After vs Target (Now)", font: { color: "#e6edf3", size: 14 } },
-    xaxis: { title: `${assetLabel} Spot (USD, log scale)`, type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true, color: "#8b949e", gridcolor: "#21262d" },
-    yaxis: { title: "MTM (USD)", tickformat: ",.0f", zeroline: true, zerolinecolor: "#f85149", zerolinewidth: 1, color: "#8b949e", gridcolor: "#21262d" },
-    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
-    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.25 },
-    margin: { t: 40, b: 60, l: 75, r: 20 },
-  };
-  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true });
+  const layout = optv3ChartLayout({
+    title: manual ? "Target Profile — your manual target" : "Target Profile — Before vs After vs Target",
+    assetLabel, C,
+  });
+  layout.margin = { t: 40, b: 66, l: 78, r: 20 };
+  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true, displaylogo: false });
 }
 
 async function optv3LoadSnapshots() {
@@ -10113,6 +10242,10 @@ document.getElementById("btn-optv3-send-to-pricing")?.addEventListener("click", 
 // ── Event wiring (elements exist in the initial HTML) ──
 document.getElementById("btn-load-optv3")?.addEventListener("click", optv3Load);
 document.getElementById("optv3-target-expiry")?.addEventListener("change", optv3SyncRunEnabled);
+// Recompute roll candidates (and re-default the ITM ticks) when the DTE
+// threshold or counterparty scope changes.
+document.getElementById("optv3-roll-dte-threshold")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
+document.getElementById("optv3-counterparties")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
 document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
 document.getElementById("btn-optv3-target-reset")?.addEventListener("click", optv3ResetTarget);
@@ -10142,6 +10275,13 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
     const maxTradesRaw = document.getElementById("optv3-max-trades")?.value;
     const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
 
+    // When there are roll candidates, the tick-to-unwind panel is authoritative:
+    // force exactly the ticked set (roll_dte_threshold = -1 → manual mode). With
+    // no candidates, fall back to the threshold / ITM-only inputs.
+    const rollCandsActive = optv3RollCandidates().length > 0;
+    const rollThresholdParam = rollCandsActive ? -1 : (Number.isNaN(rollDteThreshold) ? null : rollDteThreshold);
+    const forcedRollIds = rollCandsActive ? [...optv3RollSel] : [...tmSelected];
+
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv3-lam-factor").value || "0.2"),
@@ -10152,7 +10292,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       target_expiry: document.getElementById("optv3-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv3-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv3-new-position-penalty")?.value || "0.04"),
-      roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
+      roll_dte_threshold: rollThresholdParam,
       roll_itm_only: rollItmOnly,
       collateral_budget_pct: collateralBudgetPct,
       max_qty: maxQty,
@@ -10161,7 +10301,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,
-      forced_roll_ids: [...tmSelected],
+      forced_roll_ids: forcedRollIds,
       base_trade_ids: optv2BaseIds(),
       // User-edited target profile (Target Profile tab). null = auto parametric.
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
