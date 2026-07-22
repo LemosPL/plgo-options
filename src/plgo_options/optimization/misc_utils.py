@@ -157,6 +157,22 @@ def save_target_profile(asset: str, name: str, points: list[dict]) -> str:
     return filename
 
 
+def delete_target_profile(asset: str, filename: str) -> None:
+    """Delete a USER-created target profile. Refuses to delete the shipped
+    built-in profiles (those live in the read-only data/ dir)."""
+    ud = _user_target_profile_dir()
+    dd = _target_profile_data_dir()
+    up = ud / filename
+    if up.suffix.lower() == ".csv" and up.exists() and up.is_file() \
+            and up.resolve().is_relative_to(ud.resolve()):
+        up.unlink()
+        return
+    # Not in the (writable) user dir — is it a shipped built-in?
+    if (dd / filename).exists():
+        raise ValueError("Built-in target profiles can't be deleted.")
+    raise FileNotFoundError(f"Target profile not found: {filename}")
+
+
 def shift_target_profile(
     target_profile: pd.DataFrame,
     current_spot: float,

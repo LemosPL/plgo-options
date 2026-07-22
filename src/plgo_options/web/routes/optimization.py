@@ -190,7 +190,8 @@ class SaveTargetProfileRequest(BaseModel):
 
 @router.post("/target-profile/save")
 async def save_target_profile_endpoint(req: SaveTargetProfileRequest):
-    """Persist the user's current target curve as a new named, selectable profile."""
+    """Persist the user's current target curve as a named, selectable profile.
+    Saving with the name of an existing user profile updates (overwrites) it."""
     from pathlib import Path
     from plgo_options.optimization.misc_utils import save_target_profile
     try:
@@ -200,6 +201,26 @@ async def save_target_profile_endpoint(req: SaveTargetProfileRequest):
     except Exception as e:
         raise HTTPException(500, f"Failed to save target profile: {e}")
     return {"file": filename, "name": Path(filename).stem}
+
+
+class DeleteTargetProfileRequest(BaseModel):
+    asset: str = "ETH"
+    file: str
+
+
+@router.post("/target-profile/delete")
+async def delete_target_profile_endpoint(req: DeleteTargetProfileRequest):
+    """Delete a user-created target profile (built-in ones can't be deleted)."""
+    from plgo_options.optimization.misc_utils import delete_target_profile
+    try:
+        delete_target_profile(req.asset.upper(), req.file)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to delete target profile: {e}")
+    return {"deleted": req.file}
 
 
 class TargetProfileRequest(BaseModel):
