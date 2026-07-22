@@ -34,8 +34,8 @@ from ..pricing import options
 # for a counterparty with no explicit entry. PLACEHOLDERS — tune to the desk's
 # real spreads. (Replaces the earlier delta-scaled %-of-price model.)
 DEFAULT_BID_ASK_VOL_PTS_BY_ASSET: dict[str, "dict[str, float] | float"] = {
-    "ETH": {"KeyRock": 1.0, "Flowdesk": 0.75},
-    "FIL": 1.5,
+    "ETH": 5.0,   # flat 5 vol pts for every ETH counterparty unless overridden
+    "FIL": 40.0,  # flat 40 vol pts for every FIL counterparty unless overridden
 }
 
 # Fallback VOLpts for a counterparty absent from the resolved dict.

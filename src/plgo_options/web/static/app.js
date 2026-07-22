@@ -9450,7 +9450,7 @@ function optv3PopulateCounterparties() {
 
 // Default per-counterparty VOLpts (one-way half-spread) — mirrors the engine's
 // DEFAULT_BID_ASK_VOL_PTS_BY_ASSET so the inputs seed with the same fallback.
-const OPT_DEFAULT_VOL_PTS = { ETH: { KeyRock: 1.0, Flowdesk: 0.75 }, FIL: 1.5 };
+const OPT_DEFAULT_VOL_PTS = { ETH: 5, FIL: 40 };
 function optDefaultVolPts(asset, cpty) {
   const a = OPT_DEFAULT_VOL_PTS[asset];
   if (a == null) return 0.75;
