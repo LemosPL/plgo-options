@@ -77,6 +77,17 @@ async function api(method, path, body) {
 const get  = (path) => api("GET", path);
 const post = (path, body) => api("POST", path, body);
 
+// Show the deployed build number (derived from the app.js cache-buster ?v=N) in
+// the sidebar, so it's obvious whether a user is on the latest deployed version.
+(function showAppVersion() {
+  try {
+    const s = document.querySelector('script[src*="app.js"]');
+    const m = s && s.src.match(/[?&]v=(\d+)/);
+    const el = document.getElementById("app-version");
+    if (el) el.textContent = m ? `build ${m[1]}` : "build ?";
+  } catch (e) { /* ignore */ }
+})();
+
 // ─── Vol surface helpers (for pricer) ────────────────────────
 // Parse expiry code to Date
 function _parseExpiryCode(code) {
@@ -9532,6 +9543,8 @@ async function optv3Load() {
 }
 
 // Populate the "Profile" dropdown with the saved target-profile CSVs for the asset.
+let optv3ProfilesList = [];  // [{name, file, user}] from /target-profiles
+
 async function optv3PopulateTargetProfiles() {
   const sel = document.getElementById("optv3-target-select");
   if (!sel) return;
@@ -9541,11 +9554,33 @@ async function optv3PopulateTargetProfiles() {
     const res = await get(`/api/optimization/target-profiles?asset=${currentAsset}`);
     profiles = (res && res.profiles) || [];
   } catch (e) { console.warn("target-profiles list failed", e); }
+  optv3ProfilesList = profiles;
   sel.innerHTML = '<option value="">Parametric (auto)</option>'
-    + profiles.map(p => `<option value="${p.file}">${p.name}</option>`).join("");
+    + profiles.map(p => `<option value="${p.file}">${p.user ? "★ " : ""}${p.name}</option>`).join("");
   // Keep the current selection if it still exists; else fall back to parametric.
   if (keep && profiles.some(p => p.file === keep)) sel.value = keep;
   else { sel.value = ""; optv3TargetProfileFile = ""; }
+  optv3SyncTargetControls();
+}
+
+// Enable Delete only for user-created profiles, and prefill the name field with
+// the selected profile's name so "Save / Update" overwrites it.
+function optv3SyncTargetControls() {
+  const sel = document.getElementById("optv3-target-select");
+  const del = document.getElementById("btn-optv3-target-delete");
+  const nameEl = document.getElementById("optv3-target-name");
+  if (!sel) return;
+  const file = sel.value;
+  const prof = optv3ProfilesList.find(p => p.file === file);
+  const isUser = !!(prof && prof.user);
+  if (del) del.disabled = !isUser;
+  // Prefill the name with the selected profile's display name (strip "ASSET - ")
+  if (nameEl && prof) {
+    const display = prof.name.replace(new RegExp(`^${currentAsset}\\s*-\\s*`), "");
+    nameEl.value = display;
+  } else if (nameEl && !file) {
+    nameEl.value = "";
+  }
 }
 
 // Fetch the active target profile (selected saved CSV, or parametric) aligned to
@@ -9599,6 +9634,25 @@ async function optv3SaveTargetProfile() {
     optv3UpdateTargetStatus();
   } catch (e) {
     alert("Failed to save target profile.\n" + (e.message || e));
+  }
+}
+
+// Delete the currently-selected (user-created) target profile.
+async function optv3DeleteTargetProfile() {
+  const sel = document.getElementById("optv3-target-select");
+  const file = sel && sel.value;
+  if (!file) return;
+  const prof = optv3ProfilesList.find(p => p.file === file);
+  if (!prof || !prof.user) { alert("Only profiles you created can be deleted."); return; }
+  if (!confirm(`Delete the saved target profile "${prof.name}"? This can't be undone.`)) return;
+  try {
+    await post("/api/optimization/target-profile/delete", { asset: currentAsset, file });
+    optv3TargetProfileFile = "";
+    await optv3PopulateTargetProfiles();   // repopulate (selection resets to parametric)
+    await optv3FetchTargetProfile();       // reload the parametric target
+    optv3UpdateTargetStatus();
+  } catch (e) {
+    alert("Failed to delete target profile.\n" + (e.detail || e.message || e));
   }
 }
 
@@ -10427,10 +10481,12 @@ document.getElementById("optv3-counterparties")?.addEventListener("change", () =
 document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
 document.getElementById("optv3-target-select")?.addEventListener("change", (e) => {
   optv3TargetProfileFile = e.target.value || "";
+  optv3SyncTargetControls();
   optv3FetchTargetProfile();
 });
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
 document.getElementById("btn-optv3-target-save")?.addEventListener("click", optv3SaveTargetProfile);
+document.getElementById("btn-optv3-target-delete")?.addEventListener("click", optv3DeleteTargetProfile);
 
 // Persistent, copyable optimizer-error panel.
 function optv3ShowError(e) {

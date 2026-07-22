@@ -228,7 +228,7 @@ def build_parametric_target_profile(asset: str, spot_ladder: list[float] | np.nd
     if asset == "ETH":
         return build_parametric_target_profile_eth(spot_ladder, current_spot)
     elif asset == "FIL":
-        return build_parametric_target_profile_fil()
+        return build_parametric_target_profile_fil(spot_ladder, current_spot)
     else:
         raise ValueError(
             f"Unsupported asset: {asset}. Supported assets are 'ETH' and 'FIL'."
@@ -263,21 +263,33 @@ def build_parametric_target_profile_eth(
     return smoothed_profile
 
 def build_parametric_target_profile_fil(
+    spot_ladder: list[float] | np.ndarray,
+    current_spot: float,
     payoff_col: str = "Payoff($)",
-    min_strike: float = 0.0,
-    max_strike: float = 5.0,
-    strike_step: float = 0.25,
-    payoff_per_strike: float = -5_000_000.0,
+    low_floor_ratio: float = 0.5,
+    trough_ratio: float = 1.0,
+    high_plateau_ratio: float = 1.7,
+    low_floor_payoff: float = -5_000_000.0,
+    trough_payoff: float = -19_000_000.0,
+    high_plateau_payoff: float = -10_000_000.0,
 ) -> pd.DataFrame:
-    strikes = np.arange(
-        min_strike,
-        max_strike + strike_step / 2,
-        strike_step,
-        dtype=float,
-    )
-    payoffs = payoff_per_strike * strikes
+    """FIL parametric target — same spot-relative floor/trough/plateau engine as
+    ETH (ratios of current_spot, interpolated across the spot ladder, smoothed),
+    instead of the old fixed 0–5 linear grid. Payoff levels default to the ETH
+    magnitudes; tune the *_payoff args for FIL's book size if needed."""
+    strikes = np.asarray(spot_ladder, dtype=float)
+    ratios = strikes / float(current_spot)
 
-    return pd.DataFrame(
+    payoffs = np.interp(
+        ratios,
+        [low_floor_ratio, trough_ratio, high_plateau_ratio],
+        [low_floor_payoff, trough_payoff, high_plateau_payoff],
+    )
+
+    target_profile = pd.DataFrame(
         {payoff_col: payoffs},
         index=pd.Index(strikes, name="Strike($)"),
     )
+
+    smoothed_profile = smooth_target_profile(target_profile)
+    return smoothed_profile

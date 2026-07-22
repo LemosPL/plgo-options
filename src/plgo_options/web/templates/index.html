@@ -14,7 +14,7 @@
 <!-- SIDEBAR                                                       -->
 <!-- ============================================================ -->
 <nav id="sidebar">
-  <div class="sidebar-brand">PLGO Options</div>
+  <div class="sidebar-brand">PLGO Options <span id="app-version" title="Deployed build — check this matches after a deploy" style="font-size:.62rem;font-weight:600;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:.05rem .4rem;margin-left:.3rem;vertical-align:middle">build …</span></div>
   <div class="sidebar-asset-switcher">
     <button class="asset-btn active" data-asset="ETH">ETH</button>
     <button class="asset-btn" data-asset="FIL">FIL</button>
@@ -2015,10 +2015,11 @@
             <p class="optv3-hint" style="margin:0 0 .6rem">The payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0, anchored to $0 at the current spot. <b>Edit the Target column</b> to draw your own target, <b>Smooth</b> to round it off, then <b>Apply &amp; Re-run</b> to optimize the book toward it.</p>
             <div id="optv3-target-toolbar" style="display:none;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.8rem">
               <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Profile
-                <select id="optv3-target-select" title="Pick a saved target profile (from data/) or the built-in parametric target; the optimizer will fit to it on the next Run.">
+                <select id="optv3-target-select" title="Pick a saved target profile or the built-in parametric target; the optimizer fits to it on the next Run.">
                   <option value="">Parametric (auto)</option>
                 </select>
               </label>
+              <button id="btn-optv3-target-delete" class="btn-secondary" style="width:auto;padding:.15rem .5rem" title="Delete the selected saved profile (built-in profiles can't be deleted)" disabled>✕</button>
               <button id="btn-optv3-target-smooth" class="btn-secondary" style="width:auto" title="Moving-average smooth the Target column">Smooth</button>
               <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">strength
                 <input id="optv3-target-smooth-strength" type="range" min="1" max="8" value="3" style="width:90px">
@@ -2026,8 +2027,8 @@
               <button id="btn-optv3-target-reset" class="btn-secondary" style="width:auto" title="Discard manual edits and use the built-in parametric target">Reset to auto</button>
               <button id="btn-optv3-target-apply" class="btn-primary" style="width:auto" title="Re-run the optimizer fitting to your edited target">Apply &amp; Re-run</button>
               <span style="width:1px;height:20px;background:var(--border);margin:0 .1rem"></span>
-              <input id="optv3-target-name" type="text" placeholder="New profile name" style="width:9rem;font-size:.8rem">
-              <button id="btn-optv3-target-save" class="btn-secondary" style="width:auto" title="Save the current target curve as a new, selectable profile">Save as new curve</button>
+              <input id="optv3-target-name" type="text" placeholder="Profile name (new or existing)" style="width:11rem;font-size:.8rem">
+              <button id="btn-optv3-target-save" class="btn-secondary" style="width:auto" title="Save the current curve under this name — creates a new profile, or updates (overwrites) the one you have selected/named">Save / Update</button>
               <span id="optv3-target-status" class="optv3-hint" style="margin:0"></span>
             </div>
             <div id="optv3-profile-chart" style="width:100%;height:360px;display:none;margin-bottom:1rem"></div>
@@ -2530,6 +2531,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=111"></script>
+<script src="/static/app.js?v=112"></script>
 </body>
 </html>
