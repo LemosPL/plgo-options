@@ -9757,8 +9757,12 @@ function optv3RenderPayoff() {
     const optSpots = optv3OptResult.spot_ladder || spots;
     const beforeCurve = optv3OptResult.before.payoff_by_horizon["0"];
     if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
-    const afterCurve = optv3OptResult.after.payoff_by_horizon["0"];
-    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: "After (with proposed trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+    // After reflects only the *selected* replacement trades (checkboxes below).
+    const afterCurve = optv3AfterSelectedCurve() || optv3OptResult.after.payoff_by_horizon["0"];
+    const nTot = (optv3Replacements || []).length;
+    const nSel = nTot - (optv3ReplDeselected ? optv3ReplDeselected.size : 0);
+    const afterName = (nTot && nSel !== nTot) ? `After (selected ${nSel}/${nTot} trades)` : "After (with proposed trades)";
+    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: afterName, hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
     if (optv3OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
       const targetAtSpot = optv3OptResult.target_payoff[spotIdx];
@@ -10107,9 +10111,13 @@ function optv3RenderResult(data) {
   // the chart), which persists the ticked selection that drove this run.
   optv3RenderRollCandidates();
 
-  // Replacement / new table
+  // Replacement / new table — each row has a checkbox to include/exclude it from
+  // the "After (selected)" payoff line above. Default: all selected.
+  optv3Replacements = replacements.map((t, i) => { t._idx = i; return t; });
+  optv3ReplDeselected = new Set();
   optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
     (t) => [
+      `<td><input type="checkbox" class="optv3-repl-cb" data-idx="${t._idx}" checked></td>`,
       `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, 0)}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
@@ -10117,10 +10125,11 @@ function optv3RenderResult(data) {
       `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
-    ], 12, "No replacement or new trades proposed.");
+    ], 13, "No replacement or new trades proposed.");
 
-  // Totals row on the new-trades table (total qty + total value + total cost).
+  // Totals row (leading blank for the checkbox column).
   optv3AppendTradeTotals("optv3-replacement-tbody", replacements, [
+    {},                                               // checkbox column
     { colspan: 5, label: "Total new / replacement" },
     { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
     {},                                               // Price (blank)
@@ -10128,6 +10137,71 @@ function optv3RenderResult(data) {
     { key: t => Number(t.cost_usd) || 0 },            // Cost ($)
     { colspan: 3 },                                   // Strategy / Counterparty / Comment
   ]);
+  optv3WireReplCheckboxes();
+}
+
+// ── Replacement-trade selection: tick to include a suggested trade in the
+// "After (selected)" payoff line. Recomputed client-side (BS) so it's live. ──
+let optv3Replacements = [];
+let optv3ReplDeselected = new Set();
+
+function optv3WireReplCheckboxes() {
+  const tb = document.getElementById("optv3-replacement-tbody");
+  if (!tb) return;
+  tb.querySelectorAll(".optv3-repl-cb").forEach(cb => cb.addEventListener("change", () => {
+    const idx = Number(cb.dataset.idx);
+    if (cb.checked) optv3ReplDeselected.delete(idx); else optv3ReplDeselected.add(idx);
+    const all = document.getElementById("optv3-repl-all");
+    if (all) all.checked = optv3ReplDeselected.size === 0;
+    optv3RenderPayoff();
+  }));
+  const all = document.getElementById("optv3-repl-all");
+  if (all) {
+    all.checked = optv3ReplDeselected.size === 0;
+    all.onchange = () => {
+      optv3ReplDeselected = new Set();
+      if (!all.checked) (optv3Replacements || []).forEach(t => optv3ReplDeselected.add(t._idx));
+      tb.querySelectorAll(".optv3-repl-cb").forEach(cb => { cb.checked = !optv3ReplDeselected.has(Number(cb.dataset.idx)); });
+      optv3RenderPayoff();
+    };
+  }
+}
+
+// One trade's P&L-from-today curve across `spots` (0 at S0) — matches the engine's
+// After-curve basis (raw BS value minus the trade's own premium).
+function optv3TradePnlNow(t, spots, S0) {
+  const qty = Number(t.qty) || 0;           // signed
+  const K = Number(t.strike) || 0;
+  const opt = String(t.opt || "").toUpperCase();
+  const price = Number(t.bs_price_usd) || 0;
+  if (opt === "F" || opt === "PERP") return spots.map(s => qty * (s - S0));
+  const sigma = (Number(t.iv_pct) || Number(t.mark_iv) || 0) / 100;
+  const T = Math.max(Number(t.dte) || 0, 0) / 365.25;
+  return spots.map(s => {
+    let val;
+    if (T <= 0 || sigma <= 0) val = opt === "C" ? Math.max(s - K, 0) : Math.max(K - s, 0);
+    else val = bsPrice(s, K, T, 0, sigma, opt);
+    return qty * (val - price);
+  });
+}
+
+// After payoff at Now including only the *selected* replacement trades: subtract
+// each deselected trade's P&L contribution from the full After curve.
+function optv3AfterSelectedCurve() {
+  const r = optv3OptResult;
+  if (!r || r.status !== "ok" || !r.after || !r.after.payoff_by_horizon) return null;
+  const base = r.after.payoff_by_horizon["0"];
+  if (!base) return null;
+  if (!optv3ReplDeselected.size) return base;   // all selected → full After
+  const spots = r.spot_ladder || [];
+  const S0 = (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0;
+  const out = base.slice();
+  (optv3Replacements || []).forEach(t => {
+    if (!optv3ReplDeselected.has(t._idx)) return;
+    const c = optv3TradePnlNow(t, spots, S0);
+    for (let i = 0; i < out.length && i < c.length; i++) out[i] -= c[i];
+  });
+  return out;
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.

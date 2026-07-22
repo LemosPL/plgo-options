@@ -1976,10 +1976,11 @@
                 </div>
               </div>
               <div>
-                <h3 style="margin:.2rem 0 .5rem">Replacement / New Trades <span class="optv3-muted" id="optv3-replacement-count"></span></h3>
+                <h3 style="margin:.2rem 0 .5rem" title="Tick / untick a trade to include or exclude it from the 'After (selected)' payoff line on the chart above.">Replacement / New Trades <span class="optv3-muted" id="optv3-replacement-count"></span></h3>
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
+                      <th><input type="checkbox" id="optv3-repl-all" title="Select / deselect all" checked></th>
                       <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
                       <th>Side</th><th class="num">Qty</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th class="num" title="Assumed round-trip bid-ask cost of executing this trade (per-counterparty pricing). Already netted into the after-execution MTM; NOT netted into the payoff curves.">Cost ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
                     </tr></thead>
@@ -2531,6 +2532,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=112"></script>
+<script src="/static/app.js?v=113"></script>
 </body>
 </html>
