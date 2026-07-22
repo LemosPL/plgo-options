@@ -720,9 +720,15 @@ class OptimizerV3(BaseOptimizer):
                 "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
                 "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                 "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
-                "cost_usd": round(_bid_ask_cost_usd(
-                    leg_qty, leg.vega, leg.counterparty, bid_ask_vol_pts,
-                ), 2),
+                # A box's net vega is exactly zero by construction: the call
+                # and put at a given strike share the same vol (same maturity,
+                # same strike), so their vegas are identical (BS d1 doesn't
+                # depend on option type) and cancel across the +C/-P pairing
+                # at each strike. Costing each leg by its own |vega| (as
+                # regular trades are) would quadruple-count risk that the
+                # structure doesn't actually carry — a box trades as one
+                # package with near-zero net exposure, not four naked legs.
+                "cost_usd": 0.0,
             })
 
         return box_trades
