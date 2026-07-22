@@ -178,10 +178,30 @@ async def run_optimizer(params: OptimizationParams):
 
 @router.get("/target-profiles")
 async def list_target_profiles_endpoint(asset: str = "ETH"):
-    """List the saved target-profile CSVs (in data/) available for an asset, so
-    the UI can offer them for selection alongside the built-in parametric target."""
+    """List the saved target-profile CSVs (built-in + user-created) available for
+    an asset, so the UI can offer them alongside the built-in parametric target."""
     from plgo_options.optimization.misc_utils import list_target_profiles
     return {"asset": asset.upper(), "profiles": list_target_profiles(asset.upper())}
+
+
+class SaveTargetProfileRequest(BaseModel):
+    asset: str = "ETH"
+    name: str
+    points: list[dict]  # [{x: spot, y: payoff}, ...]
+
+
+@router.post("/target-profile/save")
+async def save_target_profile_endpoint(req: SaveTargetProfileRequest):
+    """Persist the user's current target curve as a new named, selectable profile."""
+    from pathlib import Path
+    from plgo_options.optimization.misc_utils import save_target_profile
+    try:
+        filename = save_target_profile(req.asset.upper(), req.name, req.points)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save target profile: {e}")
+    return {"file": filename, "name": Path(filename).stem}
 
 
 class TargetProfileRequest(BaseModel):

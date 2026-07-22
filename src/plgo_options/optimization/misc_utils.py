@@ -1,5 +1,6 @@
 import csv as _csv
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -8,13 +9,33 @@ from scipy.interpolate import UnivariateSpline
 
 
 def _target_profile_data_dir() -> Path:
-    """Locate the data/ directory holding the saved target-profile CSVs, whether
+    """Locate the data/ directory holding the built-in target-profile CSVs, whether
     run from the repo root, a subdir, or the /app image."""
     for cand in (Path("data"), Path("../data"), Path("../../data"),
                  Path(__file__).resolve().parents[2] / "data"):
         if cand.exists():
             return cand
     return Path("data")
+
+
+def _user_target_profile_dir() -> Path:
+    """Writable, persistent dir for user-created target profiles. Uses the same
+    GCS-backed mount as the DB (DB_DIR) when set so curves survive restarts;
+    falls back to the local data/ dir in dev."""
+    db = os.environ.get("DB_DIR")
+    return (Path(db) / "target_profiles") if db else _target_profile_data_dir()
+
+
+def _target_profile_dirs() -> list[Path]:
+    """Dirs to search for target profiles — user dir first so a user curve wins
+    over a built-in of the same name."""
+    dirs, seen = [], set()
+    for d in (_user_target_profile_dir(), _target_profile_data_dir()):
+        rp = str(d.resolve()) if d.exists() else str(d)
+        if rp not in seen:
+            seen.add(rp)
+            dirs.append(d)
+    return dirs
 
 
 def _clean_currency(value) -> "float | None":
@@ -33,28 +54,34 @@ def _clean_currency(value) -> "float | None":
 
 
 def list_target_profiles(asset: str) -> list[dict]:
-    """List the saved target-profile CSVs for an asset, e.g. 'ETH - target.csv'.
-    Returns [{name, file}] sorted by filename."""
-    d = _target_profile_data_dir()
-    out: list[dict] = []
-    try:
-        for p in sorted(d.glob(f"{asset} - *.csv")):
-            out.append({"name": p.stem, "file": p.name})
-    except Exception:
-        pass
-    return out
+    """List target-profile CSVs for an asset (built-in + user-created), e.g.
+    'ETH - target.csv'. Returns [{name, file, user}] sorted by name; a user curve
+    of the same filename shadows a built-in one."""
+    out: dict[str, dict] = {}
+    for i, d in enumerate(_target_profile_dirs()):
+        is_user = (i == 0 and d.resolve() != _target_profile_data_dir().resolve()) if d.exists() else False
+        try:
+            for p in sorted(d.glob(f"{asset} - *.csv")):
+                out.setdefault(p.name, {"name": p.stem, "file": p.name, "user": is_user})
+        except Exception:
+            pass
+    return sorted(out.values(), key=lambda r: r["name"])
 
 
 def load_target_profile_file(filename: str, asset: str = "ETH") -> pd.DataFrame:
-    """Load a saved target-profile CSV (Strike, Payoff columns) into the same
-    smoothed DataFrame shape build_parametric_target_profile returns. Handles both
-    the clean ETH format and the FIL accounting format ('$0.25', '(1,000,000)')."""
-    d = _target_profile_data_dir()
-    p = (d / filename)
-    if p.suffix.lower() != ".csv" or not p.exists() or not p.is_file():
+    """Load a target-profile CSV (Strike, Payoff columns) into the same smoothed
+    DataFrame shape build_parametric_target_profile returns. Searches the user dir
+    then the built-in data dir. Handles the clean ETH format and the FIL accounting
+    format ('$0.25', '(1,000,000)')."""
+    p = None
+    for d in _target_profile_dirs():
+        cand = d / filename
+        if cand.suffix.lower() == ".csv" and cand.exists() and cand.is_file() \
+                and cand.resolve().is_relative_to(d.resolve()):
+            p = cand
+            break
+    if p is None:
         raise FileNotFoundError(f"Target profile not found: {filename}")
-    if not p.resolve().is_relative_to(d.resolve()):
-        raise ValueError("Invalid target profile path")
 
     with p.open(newline="") as f:
         rows = list(_csv.reader(f))
@@ -78,6 +105,45 @@ def load_target_profile_file(filename: str, asset: str = "ETH") -> pd.DataFrame:
         return smooth_target_profile(df)
     except Exception:
         return df  # spline can fail on sparse/stepped profiles — use the raw curve
+
+
+def save_target_profile(asset: str, name: str, points: list[dict]) -> str:
+    """Persist a user-created target curve as '{ASSET} - {name}.csv' in the user
+    profile dir (Strike($), Payoff($) columns). ``points`` is [{x, y}, ...]. Returns
+    the filename, which then appears in list_target_profiles / loads via the loader."""
+    safe = re.sub(r"[^A-Za-z0-9 _+.\-]", "", str(name or "")).strip()
+    if not safe:
+        raise ValueError("Invalid profile name")
+    rows: list[tuple[float, float]] = []
+    for pt in (points or []):
+        try:
+            x = float(pt.get("x")); y = float(pt.get("y"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if np.isfinite(x) and np.isfinite(y):
+            rows.append((x, y))
+    rows.sort(key=lambda t: t[0])
+    # de-duplicate equal strikes (keep first)
+    deduped: list[tuple[float, float]] = []
+    for x, y in rows:
+        if deduped and x <= deduped[-1][0]:
+            continue
+        deduped.append((x, y))
+    if len(deduped) < 2:
+        raise ValueError("A target profile needs at least 2 distinct points")
+
+    d = _user_target_profile_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    filename = f"{asset.upper()} - {safe}.csv"
+    path = d / filename
+    tmp = path.with_suffix(".csv.tmp")
+    with tmp.open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["Strike($)", "Payoff($)"])
+        for x, y in deduped:
+            w.writerow([x, y])
+    os.replace(tmp, path)
+    return filename
 
 
 def shift_target_profile(

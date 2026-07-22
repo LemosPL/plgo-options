@@ -9552,6 +9552,37 @@ async function optv3FetchTargetProfile() {
   optv3RenderProfileTable();
 }
 
+// The current target curve as control points, read from the editable table.
+function optv3CurrentTargetPoints() {
+  const pts = [];
+  document.querySelectorAll("#optv3-profile-tbody .optv3-target-input").forEach(i => {
+    const x = Number(i.dataset.x), y = Number(i.value);
+    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+  });
+  return pts;
+}
+
+// Save the current (possibly edited) target curve as a new named profile, then
+// select it so it drives the next Run.
+async function optv3SaveTargetProfile() {
+  const nameEl = document.getElementById("optv3-target-name");
+  const name = (nameEl && nameEl.value || "").trim();
+  if (!name) { alert("Enter a name for the new target profile."); return; }
+  const points = optv3CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+  try {
+    const res = await post("/api/optimization/target-profile/save", { asset: currentAsset, name, points });
+    if (nameEl) nameEl.value = "";
+    await optv3PopulateTargetProfiles();
+    const sel = document.getElementById("optv3-target-select");
+    if (sel && res && res.file) { sel.value = res.file; optv3TargetProfileFile = res.file; }
+    await optv3FetchTargetProfile();          // reload + show the saved curve
+    optv3UpdateTargetStatus();
+  } catch (e) {
+    alert("Failed to save target profile.\n" + (e.message || e));
+  }
+}
+
 // Preview (greeks KPI + positions + payoff + before matrix) from the loaded book.
 function optv3RenderPreview() {
   if (!optv3Data) return;
@@ -10370,6 +10401,7 @@ document.getElementById("optv3-target-select")?.addEventListener("change", (e) =
   optv3FetchTargetProfile();
 });
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
+document.getElementById("btn-optv3-target-save")?.addEventListener("click", optv3SaveTargetProfile);
 document.getElementById("btn-optv3-target-reset")?.addEventListener("click", optv3ResetTarget);
 document.getElementById("btn-optv3-target-apply")?.addEventListener("click", () => {
   if (!document.getElementById("optv3-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
