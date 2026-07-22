@@ -9553,11 +9553,16 @@ async function optv3FetchTargetProfile() {
   if (!optv3Data) return;
   optv3ManualTarget = null;
   optv3AutoTargetProfile = null;
+  // Align to whichever ladder the profile table renders on (the LP result's ladder
+  // after a run, else the /pnl ladder) so the fetched curve indexes correctly and
+  // the table numbers update when the dropdown changes.
+  const ladder = (optv3OptResult && optv3OptResult.status === "ok" && optv3OptResult.spot_ladder)
+    ? optv3OptResult.spot_ladder : optv3Data.spot_ladder;
   try {
-    const body = { asset: currentAsset, spot_ladder: optv3Data.spot_ladder, current_spot: optv3Data.eth_spot };
+    const body = { asset: currentAsset, spot_ladder: ladder, current_spot: optv3Data.eth_spot };
     if (optv3TargetProfileFile) body.profile = optv3TargetProfileFile;
     const tp = await post("/api/optimization/target-profile", body);
-    if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (optv3Data.spot_ladder || []).length) {
+    if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (ladder || []).length) {
       optv3AutoTargetProfile = tp.payoff;
     }
   } catch (e) { console.warn("target-profile fetch failed", e); }
@@ -10104,12 +10109,18 @@ let optv3TargetProfileFile = "";   // selected saved-profile filename, or "" for
 function optv3ProfileSource() {
   if (optv3OptResult && optv3OptResult.status === "ok") {
     const r = optv3OptResult;
+    const spots = r.spot_ladder || [];
+    // Prefer the currently-selected/fetched profile (aligned to this ladder) so
+    // changing the dropdown updates the shown target even after a run; fall back
+    // to the target the run actually fit to.
+    const autoTarget = (optv3AutoTargetProfile && optv3AutoTargetProfile.length === spots.length)
+      ? optv3AutoTargetProfile : (r.target_payoff || null);
     return {
-      spots: r.spot_ladder || [],
+      spots,
       S0: (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0,
       before: r.before && r.before.payoff_by_horizon && r.before.payoff_by_horizon["0"],
       after: r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon["0"],
-      autoTarget: r.target_payoff || null,
+      autoTarget,
     };
   }
   if (optv3Data && optv3Data.spot_ladder) {
