@@ -132,7 +132,7 @@ def save_target_profile(asset: str, name: str, points: list[dict]) -> str:
         except (TypeError, ValueError, AttributeError):
             continue
         if np.isfinite(x) and np.isfinite(y):
-            rows.append((x, max(0.0, y)))  # target curves are floored at 0 (no negative targets)
+            rows.append((x, y))
     rows.sort(key=lambda t: t[0])
     # de-duplicate equal strikes (keep first)
     deduped: list[tuple[float, float]] = []
