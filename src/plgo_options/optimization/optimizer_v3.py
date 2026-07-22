@@ -883,12 +883,10 @@ class OptimizerV3(BaseOptimizer):
                 raise ValueError(f"Unsupported asset: {self.asset}")
         print(f"asset: {self.asset}")
 
-        # No explicit override => fall back to this asset's per-counterparty
-        # default pricing (see DEFAULT_BID_ASK_ATM_PCT_BY_ASSET above).
-        if bid_ask_atm_pct is None:
-            bid_ask_atm_pct = DEFAULT_BID_ASK_ATM_PCT_BY_ASSET.get(self.asset, {})
         # Transaction cost is now driven by VOLpts (|vega| × VOLpts); fall back to
         # this asset's default vol-point spreads when no explicit override is given.
+        # (bid_ask_atm_pct is retained as an accepted param for back-compat but no
+        # longer drives cost, so it needs no default here.)
         if bid_ask_vol_pts is None:
             bid_ask_vol_pts = DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {})
 

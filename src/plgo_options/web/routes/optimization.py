@@ -75,11 +75,9 @@ class OptimizationParams(BaseModel):
     # target. List of {"x": spot, "y": payoff} control points (>=2), interpolated
     # onto the optimizer's spot ladder. None = use the built-in parametric target.
     manual_target: list[dict] | None = None
-    # Per-counterparty trading cost (round-trip, as a fraction of ATM price).
-    # None = use this asset's default pricing (see
-    # optimizer_v3.DEFAULT_BID_ASK_ATM_PCT_BY_ASSET); a counterparty absent
-    # from that default (or a bare float here) falls back further to
-    # CollateralOptimization's own flat default.
+    # DEPRECATED: the %-of-price bid-ask cost model was replaced by VOL points
+    # (bid_ask_vol_pts below). Still accepted for back-compat but no longer drives
+    # the optimizer's cost.
     bid_ask_atm_pct: float | dict[str, float] | None = None
     # Per-counterparty transaction cost in VOL POINTS (one-way half-spread). When
     # set, cost = |vega| × VOLpts per executed leg, replacing the %-of-price model.
