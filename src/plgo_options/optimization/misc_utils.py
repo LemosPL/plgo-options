@@ -74,11 +74,18 @@ def load_target_profile_file(filename: str, asset: str = "ETH") -> pd.DataFrame:
     then the built-in data dir. Handles the clean ETH format and the FIL accounting
     format ('$0.25', '(1,000,000)')."""
     p = None
+    from_user = False
+    _user = _user_target_profile_dir()
+    _data = _target_profile_data_dir()
     for d in _target_profile_dirs():
         cand = d / filename
         if cand.suffix.lower() == ".csv" and cand.exists() and cand.is_file() \
                 and cand.resolve().is_relative_to(d.resolve()):
             p = cand
+            try:
+                from_user = (d.resolve() == _user.resolve() and _user.resolve() != _data.resolve())
+            except Exception:
+                from_user = False
             break
     if p is None:
         raise FileNotFoundError(f"Target profile not found: {filename}")
@@ -101,6 +108,10 @@ def load_target_profile_file(filename: str, asset: str = "ETH") -> pd.DataFrame:
 
     df = pd.DataFrame({"Payoff($)": payoffs}, index=pd.Index(strikes, name="Strike($)")).sort_index()
     df = df[~df.index.duplicated(keep="first")]
+    if from_user:
+        # User-saved curves are already the exact shape the user drew — don't
+        # re-smooth (spline overshoot changes the numbers and can dip negative).
+        return df
     try:
         return smooth_target_profile(df)
     except Exception:
@@ -121,7 +132,7 @@ def save_target_profile(asset: str, name: str, points: list[dict]) -> str:
         except (TypeError, ValueError, AttributeError):
             continue
         if np.isfinite(x) and np.isfinite(y):
-            rows.append((x, y))
+            rows.append((x, max(0.0, y)))  # target curves are floored at 0 (no negative targets)
     rows.sort(key=lambda t: t[0])
     # de-duplicate equal strikes (keep first)
     deduped: list[tuple[float, float]] = []

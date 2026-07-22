@@ -9576,7 +9576,7 @@ function optv3CurrentTargetPoints() {
   const pts = [];
   document.querySelectorAll("#optv3-profile-tbody .optv3-target-input").forEach(i => {
     const x = Number(i.dataset.x), y = Number(i.value);
-    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y: Math.max(0, y) });
   });
   return pts;
 }
@@ -10159,7 +10159,8 @@ function optv3TargetDisplayIdx(spots) {
 function optv3AutoTargetAnchored(src) {
   if (!src.autoTarget) return null;
   const at = src.autoTarget[optv2NearestIdx(src.spots, src.S0)] || 0;
-  return src.autoTarget.map(v => v - at);
+  // Target curves are floored at 0 — no negative targets.
+  return src.autoTarget.map(v => Math.max(0, v - at));
 }
 
 // Linear-interpolate the manual control points onto a spot array (or null).
@@ -10218,7 +10219,7 @@ function optv3RenderProfileTable() {
     return `<tr${hl}>`
       + `<td style="font-weight:600">$${s.toLocaleString()}</td>`
       + `${cell(b)}${cell(a)}`
-      + `<td class="num"><input class="optv3-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
+      + `<td class="num"><input class="optv3-target-input" type="number" step="1000" min="0" data-x="${s}" value="${Math.max(0, Math.round(tv))}"></td>`
       + `${cell(resid)}</tr>`;
   }).join("");
 
@@ -10231,7 +10232,7 @@ function optv3RenderProfileTable() {
 function optv3OnTargetEdit() {
   const inputs = document.querySelectorAll("#optv3-profile-tbody .optv3-target-input");
   optv3ManualTarget = Array.from(inputs)
-    .map(i => ({ x: Number(i.dataset.x), y: Number(i.value) || 0 }))
+    .map(i => ({ x: Number(i.dataset.x), y: Math.max(0, Number(i.value) || 0) }))
     .filter(p => Number.isFinite(p.x))
     .sort((a, b) => a.x - b.x);
   optv3RenderProfileChart();
@@ -10270,7 +10271,7 @@ function optv3SmoothTarget() {
     return n ? s / n : vals[i];
   });
   optv3ManualTarget = Array.from(inputs)
-    .map((inp, k) => ({ x: Number(inp.dataset.x), y: sm[k] }))
+    .map((inp, k) => ({ x: Number(inp.dataset.x), y: Math.max(0, sm[k]) }))
     .filter(p => Number.isFinite(p.x)).sort((a, b) => a.x - b.x);
   optv3RenderProfileTable();
 }
