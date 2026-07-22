@@ -9143,6 +9143,8 @@ function optv2RenderResult(data) {
   const ps = data.premium_summary || {};
 
   // ── A. Summary ──
+  document.getElementById("optv2-sum-total-cost").textContent =
+    data.total_cost_usd != null ? "$" + optv2Fmt(data.total_cost_usd, 0) : "—";
   document.getElementById("optv2-sum-unwind").textContent = unwinds.length;
   document.getElementById("optv2-sum-replacement").textContent = replacements.length;
   const netPrem = data.net_premium_generated ?? ps.net_premium_generated ?? 0;
@@ -9180,7 +9182,7 @@ function optv2RenderResult(data) {
       $cashBody.innerHTML = cps.sort().map(cp => {
         const v = cashByCp[cp];
         const net = v.net || 0;
-        return `<tr><td>${cp}</td><td>$${optv2Fmt(v.outlay || 0, 0)}</td>` +
+        return `<tr><td>${cp}</td><td style="color:var(--red)">$${optv2Fmt(v.cost || 0, 0)}</td><td>$${optv2Fmt(v.outlay || 0, 0)}</td>` +
           `<td>$${optv2Fmt(v.collection || 0, 0)}</td>` +
           `<td style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
       }).join("");

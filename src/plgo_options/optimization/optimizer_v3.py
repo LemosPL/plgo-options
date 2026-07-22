@@ -1318,15 +1318,33 @@ class OptimizerV3(BaseOptimizer):
         # pre-rounding) cash_neutrality accounting closely, modulo any box
         # trades added above.
         cash_by_counterparty = _cash_by_counterparty(trades)
+
+        # cost_usd is summed across ALL trades (not just C/P, unlike outlay/
+        # collection above) so this breakdown always adds up to the same
+        # total_cost_usd shown in the Summary tile — a future/perp leg has
+        # zero vega so it naturally contributes zero cost anyway.
+        cost_by_cp: dict[str, float] = {}
+        for t in trades:
+            cp = t.get("counterparty", "")
+            cost_by_cp[cp] = cost_by_cp.get(cp, 0.0) + float(t.get("cost_usd", 0.0) or 0.0)
+
         print("=== Cash flow by counterparty ===")
         for cp, v in sorted(cash_by_counterparty.items()):
             net = v["outlay"] - v["collection"]
-            print(f"  {cp:20s}  outlay={v['outlay']:>12,.0f}  collection={v['collection']:>12,.0f}  net={net:>+12,.0f}")
+            print(f"  {cp:20s}  outlay={v['outlay']:>12,.0f}  collection={v['collection']:>12,.0f}  net={net:>+12,.0f}  cost={cost_by_cp.get(cp, 0.0):>12,.0f}")
         cash_by_counterparty = {
             cp: {"outlay": round(v["outlay"], 2), "collection": round(v["collection"], 2),
-                 "net": round(v["outlay"] - v["collection"], 2)}
+                 "net": round(v["outlay"] - v["collection"], 2),
+                 "cost": round(cost_by_cp.get(cp, 0.0), 2)}
             for cp, v in cash_by_counterparty.items()
         }
+        # A counterparty could in principle have cost but no C/P outlay/collection
+        # (e.g. a future-only leg with nonzero cost isn't possible today since
+        # futures carry zero vega, but keep this robust rather than silently
+        # dropping such a counterparty's cost from the table).
+        for cp, cost in cost_by_cp.items():
+            if cp not in cash_by_counterparty:
+                cash_by_counterparty[cp] = {"outlay": 0.0, "collection": 0.0, "net": 0.0, "cost": round(cost, 2)}
 
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]

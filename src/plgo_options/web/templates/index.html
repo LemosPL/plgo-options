@@ -1634,7 +1634,10 @@
 
       <!-- A. Summary -->
       <h3 style="margin:0 0 .5rem;font-size:.95rem">Summary</h3>
-      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(6,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+        <div style="border-radius:6px;background:rgba(248,81,73,.08);padding:.25rem 0" title="Sum of the assumed bid-ask transaction cost across every proposed trade (also shown per-row as &quot;Cost ($)&quot; in the two trade tables below).">
+          <div class="greek-label">Total Cost</div><div class="greek-value" id="optv2-sum-total-cost" style="color:var(--red);font-weight:700">--</div>
+        </div>
         <div><div class="greek-label">Unwind / Roll</div><div class="greek-value" id="optv2-sum-unwind">--</div></div>
         <div><div class="greek-label">Replacement / New</div><div class="greek-value" id="optv2-sum-replacement">--</div></div>
         <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv2-sum-net-premium">--</div></div>
@@ -1653,7 +1656,7 @@
         <h3 style="margin:0 0 .5rem;font-size:.95rem">Cash Flow by Counterparty</h3>
         <table class="pf-table" style="max-width:560px">
           <thead>
-            <tr><th>Counterparty</th><th>Outlay ($)</th><th>Collection ($)</th><th>Net ($)</th></tr>
+            <tr><th>Counterparty</th><th title="Assumed transaction cost for this counterparty's trades (vega × VOLpts), summed across all its trades — matches the row's share of the Total Cost summary tile.">Cost ($)</th><th>Outlay ($)</th><th>Collection ($)</th><th>Net ($)</th></tr>
           </thead>
           <tbody id="optv2-cash-flow-tbody"></tbody>
         </table>
@@ -2527,6 +2530,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=106"></script>
+<script src="/static/app.js?v=108"></script>
 </body>
 </html>
