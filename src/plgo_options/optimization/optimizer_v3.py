@@ -53,6 +53,38 @@ def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
     return abs(float(qty)) * abs(float(vega or 0.0)) * float(vp)
 
 
+def _structure_leg_costs_usd(legs, bid_ask_vol_pts):
+    """Allocate one structure's (naked/spread/straddle/box/...) transaction
+    cost across its legs, based on the structure's NET vega exposure rather
+    than summing each leg's own |vega| independently. A dealer prices a
+    multi-leg structure as one package, off its net risk — same-signed legs
+    (e.g. a straddle: long call + long put) add up with no reduction,
+    opposite-signed legs at different strikes (e.g. a vertical spread)
+    partially cancel, and a box's legs cancel exactly (proven zero, via
+    put-call parity — same maturity/strike gives the call and put identical
+    vega). A single-leg "structure" (a naked trade, or a roll-unwind) reduces
+    to exactly the old per-leg |qty x vega| formula, so this generalizes
+    _bid_ask_cost_usd without changing behavior for the single-leg case.
+
+    ``legs`` is [(leg, leg_qty), ...] — all legs must share one counterparty
+    (true for every structure built in this module: spreads/straddles/boxes
+    are all grouped by counterparty before pairing). Returns one cost per
+    leg, in the same order, proportional to |leg_qty x leg_vega| so no single
+    leg arbitrarily "carries" the whole structure's cost.
+    """
+    if not legs:
+        return []
+    exposures = [float(lq) * float(getattr(lg, "vega", 0.0) or 0.0) for lg, lq in legs]
+    net_exposure = sum(exposures)
+    counterparty = legs[0][0].counterparty
+    vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
+    structure_cost = abs(net_exposure) * float(vp)
+    total_abs_exposure = sum(abs(x) for x in exposures)
+    if total_abs_exposure <= 1e-12:
+        return [structure_cost / len(legs)] * len(legs)
+    return [structure_cost * abs(x) / total_abs_exposure for x in exposures]
+
+
 class OptimizerV3(BaseOptimizer):
     """Holds all data needed for portfolio optimization."""
 
@@ -692,8 +724,15 @@ class OptimizerV3(BaseOptimizer):
         else:
             raise ValueError(f"Unsupported token: {token}")
 
+        # Box legs' net vega is exactly zero by construction (put-call parity
+        # gives the call/put at a given strike identical vega, cancelling
+        # across the +C/-P pairing at each strike) — _structure_leg_costs_usd
+        # derives that generically from net exposure, same mechanism used for
+        # every other structure, rather than a box-specific hardcoded 0.
+        leg_costs = _structure_leg_costs_usd(legs, bid_ask_vol_pts)
+
         box_trades = []
-        for leg, leg_qty in legs:
+        for (leg, leg_qty), leg_cost in zip(legs, leg_costs):
             strike = int(leg.strike) if token == "ETH" else np.round(leg.strike, 2)
             instrument_name = f"{token}-{leg.expiry_code}-{strike}-{leg.opt}"
             box_trades.append({
@@ -720,15 +759,7 @@ class OptimizerV3(BaseOptimizer):
                 "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
                 "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                 "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
-                # A box's net vega is exactly zero by construction: the call
-                # and put at a given strike share the same vol (same maturity,
-                # same strike), so their vegas are identical (BS d1 doesn't
-                # depend on option type) and cancel across the +C/-P pairing
-                # at each strike. Costing each leg by its own |vega| (as
-                # regular trades are) would quadruple-count risk that the
-                # structure doesn't actually carry — a box trades as one
-                # package with near-zero net exposure, not four naked legs.
-                "cost_usd": 0.0,
+                "cost_usd": round(leg_cost, 2),
             })
 
         return box_trades
@@ -1213,7 +1244,15 @@ class OptimizerV3(BaseOptimizer):
             instrument_name = self._candidate_instrument_name(c)
             fitted_payoff += rounded_qty * np.array(c_payoffs[j])
 
-            for leg, leg_qty, strategy in self._candidate_trade_legs(c, rounded_qty):
+            # Cost is priced off the whole candidate's net vega exposure (see
+            # _structure_leg_costs_usd) — a naked leg reduces to the old
+            # per-leg formula unchanged; a spread's opposite-signed legs
+            # partially net, same mechanism that already zeroes out a box.
+            candidate_legs = self._candidate_trade_legs(c, rounded_qty)
+            leg_costs = _structure_leg_costs_usd(
+                [(leg, leg_qty) for leg, leg_qty, _ in candidate_legs], bid_ask_vol_pts,
+            )
+            for (leg, leg_qty, strategy), leg_cost in zip(candidate_legs, leg_costs):
                 leg_instrument_name = (
                     f"{self.asset}-PERPETUAL" if leg.opt == "F"
                     else f"{self.asset}-{leg.expiry_code}-{np.round(leg.strike, self.asset_precision)}-{leg.opt}"
@@ -1248,9 +1287,7 @@ class OptimizerV3(BaseOptimizer):
                     "delta_contribution": round(float(leg_qty * (leg.delta or 0.0)), 4),
                     "gamma_contribution": round(float(leg_qty * (leg.gamma or 0.0)), 6),
                     "vega_contribution": round(float(leg_qty * (leg.vega or 0.0)), 4),
-                    "cost_usd": round(_bid_ask_cost_usd(
-                        leg_qty, leg.vega, leg.counterparty, bid_ask_vol_pts,
-                    ), 2),
+                    "cost_usd": round(leg_cost, 2),
                 })
 
         trades = self._aggregate_trade_legs(trades)
