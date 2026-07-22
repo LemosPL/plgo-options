@@ -1860,6 +1860,18 @@
       <!-- ── RIGHT: results ─────────────────────────────────── -->
       <div class="optv3-main">
 
+        <!-- Error panel (persistent + copyable so the server traceback can be shared) -->
+        <section class="card optv3-error-box" id="optv3-error" style="display:none">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:.75rem;margin-bottom:.5rem">
+            <b style="color:var(--red)">⚠ Optimizer error — copy this and send it over</b>
+            <span style="display:flex;gap:.5rem">
+              <button id="btn-optv3-copy-error" class="btn-secondary" style="width:auto;font-size:.72rem">Copy</button>
+              <button id="btn-optv3-dismiss-error" class="btn-secondary" style="width:auto;font-size:.72rem">Dismiss</button>
+            </span>
+          </div>
+          <pre id="optv3-error-text" style="white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;margin:0;font-size:.72rem;line-height:1.4;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6rem;user-select:text"></pre>
+        </section>
+
         <!-- Portfolio KPI row (after Load) -->
         <section class="card" id="optv3-kpi-section" style="display:none">
           <div class="optv3-section-head">
@@ -2515,6 +2527,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=104"></script>
+<script src="/static/app.js?v=105"></script>
 </body>
 </html>

@@ -58,7 +58,19 @@ async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // Surface the server's error body (FastAPI puts the traceback in `detail`)
+    // so callers can show/copy it — not just "500 Internal Server Error".
+    let detail = "";
+    try {
+      const txt = await res.text();
+      try { detail = JSON.parse(txt).detail ?? txt; } catch { detail = txt; }
+    } catch { /* ignore */ }
+    const err = new Error(`${res.status} ${res.statusText}${detail ? "\n" + detail : ""}`);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
   return res.json();
 }
 
@@ -10402,6 +10414,35 @@ document.getElementById("optv3-target-select")?.addEventListener("change", (e) =
 });
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
 document.getElementById("btn-optv3-target-save")?.addEventListener("click", optv3SaveTargetProfile);
+
+// Persistent, copyable optimizer-error panel.
+function optv3ShowError(e) {
+  const box = document.getElementById("optv3-error");
+  const pre = document.getElementById("optv3-error-text");
+  if (!box || !pre) { alert("Optimization failed.\n" + (e && (e.detail || e.message) || e)); return; }
+  const msg = (e && (e.detail || e.message)) ? (e.detail || e.message) : String(e);
+  pre.textContent = `[${new Date().toISOString()}] Optimizer v3 run failed\n\n${msg}`;
+  box.style.display = "";
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function optv3HideError() {
+  const box = document.getElementById("optv3-error");
+  if (box) box.style.display = "none";
+}
+document.getElementById("btn-optv3-dismiss-error")?.addEventListener("click", optv3HideError);
+document.getElementById("btn-optv3-copy-error")?.addEventListener("click", async () => {
+  const pre = document.getElementById("optv3-error-text");
+  const txt = pre ? pre.textContent : "";
+  try {
+    await navigator.clipboard.writeText(txt);
+    const btn = document.getElementById("btn-optv3-copy-error");
+    if (btn) { const o = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = o; }, 1500); }
+  } catch {
+    // Clipboard API blocked (e.g. non-HTTPS) — select the text so the user can Ctrl-C.
+    const pre2 = document.getElementById("optv3-error-text");
+    if (pre2) { const r = document.createRange(); r.selectNodeContents(pre2); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+  }
+});
 document.getElementById("btn-optv3-target-reset")?.addEventListener("click", optv3ResetTarget);
 document.getElementById("btn-optv3-target-apply")?.addEventListener("click", () => {
   if (!document.getElementById("optv3-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
@@ -10466,11 +10507,12 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       target_profile_file: optv3TargetProfileFile || null,
     });
     console.log("Optimizer v3 result:", data);
+    optv3HideError();
     optv3RenderResult(data);
     if (saveRequested) { await optv3LoadSnapshots(); }
   } catch (e) {
     console.error("Optimizer v3 run failed:", e);
-    alert("Optimization failed — check console.\n" + (e.message || e));
+    optv3ShowError(e);
   } finally {
     $btn.classList.remove("loading"); $btn.textContent = "Run Optimizer"; $btn.disabled = false;
   }
