@@ -10096,13 +10096,7 @@ function optv3RenderResult(data) {
   if (data.before && data.before.payoff_by_horizon) {
     optv2RenderCompareMatrix(data, "before", "optv3-matrix-thead", "optv3-matrix-tbody");
   }
-  const $afterPanel = document.getElementById("optv3-matrix-after-panel");
-  const $matrixGrid = document.getElementById("optv3-matrix-grid");
-  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
-    $afterPanel.style.display = "";
-    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-    optv2RenderCompareMatrix(data, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody");
-  }
+  optv3RenderAfterMatrix();
 
   // Target profile table (payoff-at-Now: Before / After / Target)
   optv3RenderProfileTable();
@@ -10159,6 +10153,7 @@ function optv3WireReplCheckboxes() {
     const all = document.getElementById("optv3-repl-all");
     if (all) all.checked = optv3ReplDeselected.size === 0;
     optv3RenderPayoff();
+    optv3RenderAfterMatrix();
   }));
   const all = document.getElementById("optv3-repl-all");
   if (all) {
@@ -10168,20 +10163,22 @@ function optv3WireReplCheckboxes() {
       if (!all.checked) (optv3Replacements || []).forEach(t => optv3ReplDeselected.add(t._idx));
       tb.querySelectorAll(".optv3-repl-cb").forEach(cb => { cb.checked = !optv3ReplDeselected.has(Number(cb.dataset.idx)); });
       optv3RenderPayoff();
+      optv3RenderAfterMatrix();
     };
   }
 }
 
-// One trade's P&L-from-today curve across `spots` (0 at S0) — matches the engine's
-// After-curve basis (raw BS value minus the trade's own premium).
-function optv3TradePnlNow(t, spots, S0) {
+// One trade's P&L-from-today curve across `spots` at horizon `h` days (0 at S0) —
+// matches the engine's After-curve basis (raw BS value minus the trade's premium).
+// Time decays by h days; perps are horizon-independent.
+function optv3TradePnlNow(t, spots, S0, h = 0) {
   const qty = Number(t.qty) || 0;           // signed
   const K = Number(t.strike) || 0;
   const opt = String(t.opt || "").toUpperCase();
   const price = Number(t.bs_price_usd) || 0;
   if (opt === "F" || opt === "PERP") return spots.map(s => qty * (s - S0));
   const sigma = (Number(t.iv_pct) || Number(t.mark_iv) || 0) / 100;
-  const T = Math.max(Number(t.dte) || 0, 0) / 365.25;
+  const T = Math.max((Number(t.dte) || 0) - (Number(h) || 0), 0) / 365.25;
   return spots.map(s => {
     let val;
     if (T <= 0 || sigma <= 0) val = opt === "C" ? Math.max(s - K, 0) : Math.max(K - s, 0);
@@ -10190,23 +10187,47 @@ function optv3TradePnlNow(t, spots, S0) {
   });
 }
 
-// After payoff at Now including only the *selected* replacement trades: subtract
-// each deselected trade's P&L contribution from the full After curve.
-function optv3AfterSelectedCurve() {
+// After payoff at horizon `h` including only the *selected* replacement trades:
+// subtract each deselected trade's contribution from the full After curve at h.
+function optv3AfterSelectedAtHorizon(hKey) {
   const r = optv3OptResult;
-  if (!r || r.status !== "ok" || !r.after || !r.after.payoff_by_horizon) return null;
-  const base = r.after.payoff_by_horizon["0"];
+  const base = r && r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon[hKey];
   if (!base) return null;
   if (!optv3ReplDeselected.size) return base;   // all selected → full After
   const spots = r.spot_ladder || [];
   const S0 = (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0;
   const out = base.slice();
+  const h = Number(hKey) || 0;
   (optv3Replacements || []).forEach(t => {
     if (!optv3ReplDeselected.has(t._idx)) return;
-    const c = optv3TradePnlNow(t, spots, S0);
+    const c = optv3TradePnlNow(t, spots, S0, h);
     for (let i = 0; i < out.length && i < c.length; i++) out[i] -= c[i];
   });
   return out;
+}
+
+// Horizon-0 After curve for the payoff chart.
+function optv3AfterSelectedCurve() {
+  const r = optv3OptResult;
+  if (!r || r.status !== "ok" || !r.after || !r.after.payoff_by_horizon) return null;
+  return optv3AfterSelectedAtHorizon("0");
+}
+
+// Build an optv3OptResult-shaped object whose `after.payoff_by_horizon` reflects
+// only the selected trades, and (re)render the "After" P&L matrix from it.
+function optv3RenderAfterMatrix() {
+  const r = optv3OptResult;
+  const $afterPanel = document.getElementById("optv3-matrix-after-panel");
+  const $matrixGrid = document.getElementById("optv3-matrix-grid");
+  if (!(r && r.after && r.after.payoff_by_horizon && $afterPanel && $matrixGrid)) return;
+  const adj = {};
+  Object.keys(r.after.payoff_by_horizon).forEach(hKey => {
+    adj[hKey] = optv3AfterSelectedAtHorizon(hKey) || r.after.payoff_by_horizon[hKey];
+  });
+  const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
+  $afterPanel.style.display = "";
+  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+  optv2RenderCompareMatrix(dataSel, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody");
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
