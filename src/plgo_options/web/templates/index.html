@@ -1505,7 +1505,7 @@
             title="Holding-cost weight for posted collateral in the LP objective. Higher = optimizer works harder to avoid growing collateral usage; 0 = collateral is free.">
         </label>
         <label class="pf-filter-label">ν Cash Neutrality
-          <input type="number" id="optv2-cash-neutrality-factor" value="0.5" step="0.1" min="0" style="width:5rem"
+          <input type="number" id="optv2-cash-neutrality-factor" value="0.05" step="0.1" min="0" style="width:5rem"
             title="Penalty weight in the LP objective for imbalance between premium paid and premium collected per counterparty. Higher = optimizer works harder to self-fund trades per counterparty (avoid net cash movement); 0 = disabled. Soft cost, not a hard cap — doesn't cover forced/DTE rolls.">
         </label>
         <label class="pf-filter-label">Target Expiry
@@ -1802,7 +1802,7 @@
             <p class="optv3-hint">Holding-cost weight on posted collateral. Higher = work harder to avoid growing collateral usage; 0 = collateral is free.</p>
           </div>
           <div class="optv3-field">
-            <label for="optv3-cash-neutrality-factor">ν Cash neutrality <input type="number" id="optv3-cash-neutrality-factor" value="0.5" step="0.1" min="0"></label>
+            <label for="optv3-cash-neutrality-factor">ν Cash neutrality <input type="number" id="optv3-cash-neutrality-factor" value="0.05" step="0.1" min="0"></label>
             <p class="optv3-hint">Penalty on premium-paid vs. collected imbalance per counterparty. Higher = trades self-fund more. Soft cost, not a hard cap.</p>
           </div>
         </div>
