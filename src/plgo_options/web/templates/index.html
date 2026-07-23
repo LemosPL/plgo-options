@@ -1547,7 +1547,7 @@
             title="Per-counterparty cap on gross collateral change (0 = no increase allowed, 0.05 = allow 5% growth, -0.1 = force 10% reduction). Clear to disable the cap. Default is a small positive buffer — this is a hard constraint, unlike ν, so a counterparty already at 0% headroom can't trade at all to satisfy cash-neutrality or profile-fit without some room here.">
         </label>
         <label class="pf-filter-label">Max Qty
-          <input type="number" id="optv2-max-qty" value="10000" step="1000" min="0" style="width:6rem"
+          <input type="number" id="optv2-max-qty" value="5000" step="1000" min="0" style="width:6rem"
             title="Hard cap on any single candidate's trade size (contracts). Without it, a high λ/μ/ν can drive the LP toward unrealistically large single-line quantities — spreads especially, since their own price is the small net premium, not either leg's full notional, making them look 'cheap' to trade at huge size. Clear to disable.">
         </label>
         <label class="pf-filter-label">Max Trades
@@ -2532,6 +2532,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=113"></script>
+<script src="/static/app.js?v=114"></script>
 </body>
 </html>

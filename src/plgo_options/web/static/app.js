@@ -1083,6 +1083,11 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     btn.classList.add("active");
     document.getElementById("asset-label").textContent = asset;
 
+    // Optimizer V2 Max Qty default is asset-scaled — FIL trades in much
+    // larger contract counts at a much smaller unit price than ETH.
+    const $optv2MaxQty = document.getElementById("optv2-max-qty");
+    if ($optv2MaxQty) $optv2MaxQty.value = asset === "FIL" ? 5000000 : 5000;
+
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
