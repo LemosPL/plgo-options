@@ -9577,8 +9577,9 @@ function optv3SyncTargetControls() {
   if (!sel) return;
   const file = sel.value;
   const prof = optv3ProfilesList.find(p => p.file === file);
-  const isUser = !!(prof && prof.user);
-  if (del) del.disabled = !isUser;
+  // Enable Delete for any selected saved profile (not "Parametric"); the backend
+  // is the authority and refuses built-ins with a clear message.
+  if (del) del.disabled = !file;
   // Prefill the name with the selected profile's display name (strip "ASSET - ")
   if (nameEl && prof) {
     const display = prof.name.replace(new RegExp(`^${currentAsset}\\s*-\\s*`), "");
@@ -9642,14 +9643,15 @@ async function optv3SaveTargetProfile() {
   }
 }
 
-// Delete the currently-selected (user-created) target profile.
+// Delete the currently-selected saved target profile. The backend allows only
+// user-created profiles and refuses built-ins (surfaced here as a clear message).
 async function optv3DeleteTargetProfile() {
   const sel = document.getElementById("optv3-target-select");
   const file = sel && sel.value;
-  if (!file) return;
+  if (!file) { alert("Select a saved profile to delete."); return; }
   const prof = optv3ProfilesList.find(p => p.file === file);
-  if (!prof || !prof.user) { alert("Only profiles you created can be deleted."); return; }
-  if (!confirm(`Delete the saved target profile "${prof.name}"? This can't be undone.`)) return;
+  const label = prof ? prof.name : file;
+  if (!confirm(`Delete the saved target profile "${label}"? This can't be undone.`)) return;
   try {
     await post("/api/optimization/target-profile/delete", { asset: currentAsset, file });
     optv3TargetProfileFile = "";
@@ -9657,7 +9659,8 @@ async function optv3DeleteTargetProfile() {
     await optv3FetchTargetProfile();       // reload the parametric target
     optv3UpdateTargetStatus();
   } catch (e) {
-    alert("Failed to delete target profile.\n" + (e.detail || e.message || e));
+    // e.g. built-in profiles can't be deleted (400) — show the server's reason.
+    alert("Couldn't delete this profile.\n" + (e.detail || e.message || e));
   }
 }
 
