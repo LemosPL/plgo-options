@@ -98,6 +98,7 @@ class OptimizerRunParams:
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None
+    box_fee_per_contract: float | dict[str, float] | None = None
     target_profile_file: str | None = None
 
 

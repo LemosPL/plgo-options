@@ -8573,6 +8573,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
     optv2Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
     optv2PopulateCounterparties();
     optRenderVolPts("optv2-volpts-list", optv2Data);
+    optRenderBoxFee("optv2-boxfee-list", optv2Data);
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
@@ -8988,6 +8989,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       base_trade_ids: optv2BaseIds(),
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv2-volpts-list"),
+      // Per-counterparty box-neutralizer execution fee (USD per box unit).
+      box_fee_per_contract: optBoxFeeDict("optv2-boxfee-list"),
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -9501,6 +9504,33 @@ function optVolPtsDict(listId) {
   return Object.keys(d).length ? d : null;
 }
 
+// Render one editable box-trade-fee input per counterparty (USD per box unit).
+// No engine-side default to seed from yet (unlike VOLpts) — starts at 0 until
+// tuned per counterparty against real quotes. Mirrors optRenderVolPts.
+function optRenderBoxFee(listId, data) {
+  const box = document.getElementById(listId);
+  if (!box || !data) return;
+  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const prev = {};
+  box.querySelectorAll(".opt-boxfee-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  box.innerHTML = cps.length ? cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : 0;
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-boxfee-input" data-cpty="${cp}" value="${v}" step="10" min="0" style="width:5rem"></label></div>`;
+  }).join("") : '<p class="optv3-hint" style="margin:0">No counterparties in the loaded book.</p>';
+}
+
+// Collect {counterparty: box fee USD} from the inputs, or null if none set.
+function optBoxFeeDict(listId) {
+  const box = document.getElementById(listId);
+  if (!box) return null;
+  const d = {};
+  box.querySelectorAll(".opt-boxfee-input").forEach(i => {
+    const v = parseFloat(i.value);
+    if (i.dataset.cpty && Number.isFinite(v) && v > 0) d[i.dataset.cpty] = v;
+  });
+  return Object.keys(d).length ? d : null;
+}
+
 async function optv3Load() {
   const $btn = document.getElementById("btn-load-optv3");
   $btn.classList.add("loading"); $btn.textContent = "Loading…";
@@ -9509,6 +9539,7 @@ async function optv3Load() {
     optv3OptResult = null;
     optv3PopulateCounterparties();
     optRenderVolPts("optv3-volpts-list", optv3Data);
+    optRenderBoxFee("optv3-boxfee-list", optv3Data);
 
     const $expiry = document.getElementById("optv3-target-expiry");
     $expiry.innerHTML = '<option value="">Select maturity…</option>';
@@ -10678,6 +10709,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
+      // Per-counterparty box-neutralizer execution fee (USD per box unit).
+      box_fee_per_contract: optBoxFeeDict("optv3-boxfee-list"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv3TargetProfileFile || null,

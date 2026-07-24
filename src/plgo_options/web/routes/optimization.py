@@ -83,6 +83,12 @@ class OptimizationParams(BaseModel):
     # set, cost = |vega| × VOLpts per executed leg, replacing the %-of-price model.
     # {counterparty: vol_pts} dict (or a flat scalar). None = per-asset default.
     bid_ask_vol_pts: float | dict[str, float] | None = None
+    # Real per-contract execution cost (USD per box unit) for the box cash
+    # neutralizer, per counterparty (or a flat scalar). A box's vega-based
+    # cost is provably ~0 (put-call parity), so without this the neutralizer
+    # looks free/unlimited despite being 4 real fills against a real
+    # bid-ask. None = no fee (legacy behavior) until tuned per counterparty.
+    box_fee_per_contract: float | dict[str, float] | None = None
     # Filename of a saved target-profile CSV (in data/) to fit to, e.g.
     # "ETH - target shifted v2.csv". Overridden by manual_target if that is set;
     # None = built-in parametric target.
@@ -150,6 +156,7 @@ async def run_optimizer(params: OptimizationParams):
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,
+        box_fee_per_contract=params.box_fee_per_contract,
         target_profile_file=params.target_profile_file,
     )
 
