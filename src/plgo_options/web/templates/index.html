@@ -1572,7 +1572,7 @@
       </div>
       <div style="margin-top:.9rem;border-top:1px solid var(--border);padding-top:.75rem">
         <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:.4rem">Box neutralizer fee (per counterparty)</div>
-        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">Real USD cost per box unit for the box cash neutralizer — its vega-based cost is ~0 (put-call parity) so without this it looks free. 0 = unpriced.</p>
+        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">Real execution cost for the box cash neutralizer, in bps of notional — its vega-based cost is ~0 (put-call parity) so without this it looks free. A box is a synthetic cash loan, priced like an implied-rate spread. 0 = unpriced.</p>
         <div id="optv2-boxfee-list" style="display:flex;flex-wrap:wrap;gap:.75rem"><span style="font-size:.72rem;color:var(--muted)">Load the risk profile to list counterparties.</span></div>
       </div>
     </section>
@@ -1858,7 +1858,7 @@
         <!-- Box neutralizer fee (per counterparty) -->
         <div class="optv3-group">
           <div class="optv3-group-title">Box neutralizer fee</div>
-          <p class="optv3-hint" style="margin:0 0 .55rem">Real USD cost per box unit for the box cash neutralizer, per counterparty. Its vega-based cost is ~0 by put-call parity, so without this it looks free/unlimited despite being 4 real fills against a real bid-ask. 0 = unpriced.</p>
+          <p class="optv3-hint" style="margin:0 0 .55rem">Real execution cost for the box cash neutralizer, in bps of notional, per counterparty. Its vega-based cost is ~0 by put-call parity, so without this it looks free/unlimited despite being 4 real fills against a real bid-ask. A box is a synthetic cash loan, priced like an implied-rate spread. 0 = unpriced.</p>
           <div id="optv3-boxfee-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
         </div>
 

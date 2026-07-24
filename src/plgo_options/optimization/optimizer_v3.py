@@ -41,19 +41,22 @@ DEFAULT_BID_ASK_VOL_PTS_BY_ASSET: dict[str, "dict[str, float] | float"] = {
 # Fallback VOLpts for a counterparty absent from the resolved dict.
 _VOL_PTS_FALLBACK = 0.75
 
-# Real per-contract execution cost for a box neutralizer, in USD per box unit.
-# This is SEPARATE from the vega-based structure cost above: a box's net vega
-# is exactly zero by put-call parity (see _structure_leg_costs_usd), so that
-# model can never price a box's real cost — 4 legs actually executed against
-# a counterparty's real bid-ask, which the desk has observed running well
-# above what naive Greeks-based pricing implies (Flowdesk quotes coming in
-# "way off" vs. the model). Manually entered per counterparty from the GUI;
-# these are the fallback defaults (0 = unpriced, matching legacy behavior)
-# until tuned to what the desk is actually seeing quoted.
-DEFAULT_BOX_FEE_PER_CONTRACT_BY_ASSET: dict[str, "dict[str, float] | float"] = {}
+# Real execution cost for a box neutralizer, in basis points of the box's
+# notional (strike width × qty — with r=0 here, box_debit already equals
+# K_high-K_low exactly, so box_debit IS the per-contract notional). This is
+# SEPARATE from the vega-based structure cost above: a box's net vega is
+# exactly zero by put-call parity (see _structure_leg_costs_usd), so that
+# model can never price a box's real cost. A box is economically a synthetic
+# cash loan (riskless payoff = K_high-K_low), so inter-dealer/market-maker
+# desks price its bid-ask as bps of notional (an implied-rate spread), not a
+# flat per-contract fee — a $10k box and a $1M box don't cost the same dollar
+# amount to execute. Manually entered per counterparty from the GUI; these
+# are the fallback defaults (0 = unpriced, matching legacy behavior) until
+# tuned to what the desk is actually seeing quoted.
+DEFAULT_BOX_FEE_BPS_BY_ASSET: dict[str, "dict[str, float] | float"] = {}
 
-# Fallback box fee (USD per box unit) for a counterparty absent from the resolved dict.
-_BOX_FEE_FALLBACK = 0.0
+# Fallback box fee (bps of notional) for a counterparty absent from the resolved dict.
+_BOX_FEE_BPS_FALLBACK = 0.0
 
 
 def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
@@ -639,7 +642,7 @@ class OptimizerV3(BaseOptimizer):
             bid_ask_atm_pct: "dict[str, float] | float | None" = None,
             bid_ask_min_delta: float = 0.05,
             bid_ask_vol_pts: "dict[str, float] | float | None" = None,
-            box_fee_per_contract: "dict[str, float] | float | None" = None,
+            box_fee_bps: "dict[str, float] | float | None" = None,
     ) -> list[dict]:
         """Box spread (long call + short put at one strike, short call + long
         put at another, same expiry, single counterparty) sized to neutralize
@@ -747,11 +750,14 @@ class OptimizerV3(BaseOptimizer):
         leg_costs = _structure_leg_costs_usd(legs, bid_ask_vol_pts)
 
         # The vega-based cost above is provably ~0 for a box, but executing one
-        # is still 4 real fills against the counterparty's real bid-ask — a
-        # separate, explicit per-contract fee captures that, split evenly
-        # across the legs so no single leg "carries" the whole box's cost.
-        box_fee = CollateralOptimization._resolve(box_fee_per_contract, counterparty, default=_BOX_FEE_FALLBACK)
-        box_fee_total = abs(box_qty) * float(box_fee or 0.0)
+        # is still 4 real fills against the counterparty's real bid-ask. A box
+        # is economically a synthetic cash loan (riskless payoff = box_debit,
+        # which equals K_high-K_low exactly since r=0 here), so its bid-ask is
+        # priced as bps of that notional — same convention as an implied-rate
+        # spread on an inter-dealer box — not a flat per-contract fee. Split
+        # evenly across the legs so no single leg "carries" the whole cost.
+        box_fee_bp = CollateralOptimization._resolve(box_fee_bps, counterparty, default=_BOX_FEE_BPS_FALLBACK)
+        box_fee_total = abs(box_qty) * box_debit * float(box_fee_bp or 0.0) / 10_000.0
         if box_fee_total:
             per_leg_fee = box_fee_total / len(legs)
             leg_costs = [lc + per_leg_fee for lc in leg_costs]
@@ -912,7 +918,7 @@ class OptimizerV3(BaseOptimizer):
                  bid_ask_atm_pct: "dict[str, float] | float | None" = None,
                  bid_ask_min_delta: float = 0.05,
                  bid_ask_vol_pts: "dict[str, float] | float | None" = None,
-                 box_fee_per_contract: "dict[str, float] | float | None" = None,
+                 box_fee_bps: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
@@ -952,8 +958,8 @@ class OptimizerV3(BaseOptimizer):
         # longer drives cost, so it needs no default here.)
         if bid_ask_vol_pts is None:
             bid_ask_vol_pts = DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {})
-        if box_fee_per_contract is None:
-            box_fee_per_contract = DEFAULT_BOX_FEE_PER_CONTRACT_BY_ASSET.get(self.asset, {})
+        if box_fee_bps is None:
+            box_fee_bps = DEFAULT_BOX_FEE_BPS_BY_ASSET.get(self.asset, {})
 
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder,
                                                          current_spot=self.spot)
@@ -1379,7 +1385,7 @@ class OptimizerV3(BaseOptimizer):
                 box_legs = self._build_box_cash_neutralizer_trades(
                     self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
                     bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
-                    bid_ask_vol_pts=bid_ask_vol_pts, box_fee_per_contract=box_fee_per_contract,
+                    bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
                 )
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)
