@@ -8606,7 +8606,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
   }
 });
 
-const OPTV2_HORIZONS = [0, 16, 30, 60, 90];
+const OPTV2_HORIZONS = [0, 16, 30, 60, 90, 120, 150];
 
 function optv2RenderAll() {
   if (!optv2Data) return;
@@ -9709,6 +9709,10 @@ function optv3RenderPreview() {
 }
 
 // Current-book positions table — the loaded risk profile's per-position numbers.
+// Decimal places for prices/strikes/spots in v3 displays — FIL is O($1) so it
+// needs 2 dp (a 2.25 strike must not render as "2"); ETH is O($1000), 0 dp.
+function optv3Dp() { return (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0; }
+
 function optv3RenderPositions() {
   const tbody = document.getElementById("optv3-positions-tbody");
   const count = document.getElementById("optv3-positions-count");
@@ -9732,7 +9736,7 @@ function optv3RenderPositions() {
       <td>${p.instrument || ""}</td>
       <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
       <td style="text-align:right">${optv2Fmt(Math.abs(p.net_qty), 0)}</td>
-      <td style="text-align:right">${optv2Fmt(p.strike, 0)}</td>
+      <td style="text-align:right">${optv2Fmt(p.strike, optv3Dp())}</td>
       <td>${optv2OptType(p.opt)}</td>
       <td>${String(p.expiry || "").slice(0, 10)}</td>
       <td style="text-align:right">${p.days_remaining ?? "—"}</td>
@@ -9873,7 +9877,7 @@ function optv3ChartColors() {
     zero:   "rgba(230,237,243,0.18)",        // break-even — faint
     grid:   "rgba(139,148,158,0.12)",        // recessive grid
     // sequential cyan ramp: Now (bright) → T+90 (dim)
-    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83"],
+    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83", "#164a68", "#0e3550"],
   };
 }
 
@@ -9917,7 +9921,7 @@ function optv3RenderMatrix() {
     const tr = document.createElement("tr");
     if (si === nearestIdx) tr.classList.add("row-highlight");
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + s.toLocaleString(); tdSpot.style.fontWeight = "600";
+    tdSpot.textContent = "$" + optv2Fmt(s, optv3Dp()); tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
     OPTV2_HORIZONS.forEach(h => {
       const hKey = String(h);
@@ -10000,7 +10004,7 @@ function optv3RenderRollCandidates() {
       <td><input type="checkbox" class="optv3-rollcand-cb" data-id="${c.id}" ${optv3RollSel.has(c.id) ? "checked" : ""}></td>
       <td>${c.instrument || ""}</td>
       <td>${String(c.expiry || "").slice(0, 10)}</td>
-      <td class="num">${optv2Fmt(c.strike, 0)}</td>
+      <td class="num">${optv2Fmt(c.strike, optv3Dp())}</td>
       <td>${optv2OptType(c.opt)}</td>
       <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
       <td class="num">${optv2Fmt(Math.abs(c.net_qty), 0)}</td>
@@ -10153,7 +10157,7 @@ function optv3RenderResult(data) {
   optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
     (t) => [
       `<td><input type="checkbox" class="optv3-repl-cb" data-idx="${t._idx}" checked></td>`,
-      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, optv3Dp())}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
@@ -10410,7 +10414,7 @@ function optv3RenderProfileTable() {
     const resid = (a != null) ? a - tv : null;
     const hl = si === spotIdx ? ' class="row-highlight"' : '';
     return `<tr${hl}>`
-      + `<td style="font-weight:600">$${s.toLocaleString()}</td>`
+      + `<td style="font-weight:600">$${optv2Fmt(s, optv3Dp())}</td>`
       + `${cell(b)}${cell(a)}`
       + `<td class="num"><input class="optv3-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
       + `${cell(resid)}</tr>`;
