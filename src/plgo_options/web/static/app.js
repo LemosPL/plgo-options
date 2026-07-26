@@ -10522,7 +10522,65 @@ function optv3RenderProfileChart() {
     assetLabel, C,
   });
   layout.margin = { t: 40, b: 66, l: 78, r: 20 };
-  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true, displaylogo: false });
+  if (optv3DrawMode) layout.dragmode = false;  // let clicks register as points, not zoom
+  Plotly.newPlot("optv3-profile-chart", traces, layout, { responsive: true, displaylogo: false })
+    .then(optv3BindProfileChartClick);
+}
+
+// ── Draw-on-chart: click the target chart to set the payoff at the nearest
+// spot-ladder point, building a curve point-by-point. ───────────────────────
+let optv3DrawMode = false;
+let optv3ProfileChartClickBound = false;
+
+function optv3BindProfileChartClick() {
+  const gd = document.getElementById("optv3-profile-chart");
+  if (!gd || optv3ProfileChartClickBound) return;
+  optv3ProfileChartClickBound = true;   // gd element persists across re-plots
+  gd.addEventListener("click", (evt) => {
+    if (!optv3DrawMode || !gd._fullLayout) return;
+    const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
+    if (!xa || !ya) return;
+    const bb = gd.getBoundingClientRect();
+    const px = evt.clientX - bb.left - xa._offset;
+    const py = evt.clientY - bb.top - ya._offset;
+    if (px < 0 || py < 0 || px > xa._length || py > ya._length) return;  // outside plot area
+    const spot = xa.p2d(px);   // log-aware → actual price
+    const payoff = ya.p2d(py);
+    if (!isFinite(spot) || !isFinite(payoff)) return;
+    optv3SetTargetPointAtSpot(spot, payoff);
+  });
+}
+
+// Set the target payoff at the ladder point nearest `spot`, keeping every other
+// point at its current value (from the table, else the active auto curve).
+function optv3SetTargetPointAtSpot(spot, y) {
+  const src = optv3ProfileSource();
+  if (!src || !src.spots.length) return;
+  const spots = src.spots;
+  const displayIdx = optv3TargetDisplayIdx(spots);
+  const cur = new Map(optv3CurrentTargetPoints().map(p => [p.x, p.y]));
+  const auto = optv3AutoTargetAnchored(src);
+  let best = displayIdx[0], bd = Infinity;
+  displayIdx.forEach(si => { const d = Math.abs(spots[si] - spot); if (d < bd) { bd = d; best = si; } });
+  optv3ManualTarget = displayIdx.map(si => {
+    const s = spots[si];
+    let val = cur.has(s) ? cur.get(s) : (auto ? auto[si] : 0);
+    if (si === best) val = y;
+    return { x: s, y: val };
+  }).sort((a, b) => a.x - b.x);
+  optv3RenderProfileTable();  // regenerates the editable table + chart from the manual curve
+}
+
+function optv3ToggleDrawMode() {
+  optv3DrawMode = !optv3DrawMode;
+  const btn = document.getElementById("btn-optv3-target-draw");
+  const gd = document.getElementById("optv3-profile-chart");
+  if (btn) {
+    btn.classList.toggle("btn-primary", optv3DrawMode);
+    btn.classList.toggle("btn-secondary", !optv3DrawMode);
+    btn.textContent = optv3DrawMode ? "✏ Drawing… (click chart)" : "✏ Draw on chart";
+  }
+  if (gd) { gd.style.cursor = optv3DrawMode ? "crosshair" : ""; Plotly.relayout(gd, { dragmode: optv3DrawMode ? false : "zoom" }); }
 }
 
 async function optv3LoadSnapshots() {
@@ -10627,6 +10685,7 @@ document.getElementById("optv3-target-select")?.addEventListener("change", (e) =
 document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", optv3SmoothTarget);
 document.getElementById("btn-optv3-target-save")?.addEventListener("click", optv3SaveTargetProfile);
 document.getElementById("btn-optv3-target-delete")?.addEventListener("click", optv3DeleteTargetProfile);
+document.getElementById("btn-optv3-target-draw")?.addEventListener("click", optv3ToggleDrawMode);
 
 // Persistent, copyable optimizer-error panel.
 function optv3ShowError(e) {
