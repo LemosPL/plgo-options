@@ -8989,7 +8989,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       base_trade_ids: optv2BaseIds(),
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv2-volpts-list"),
-      // Per-counterparty box-neutralizer execution fee (bps of notional).
+      // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv2-boxfee-list"),
     });
     console.log("Optimizer v2 result:", data);
@@ -9504,11 +9504,12 @@ function optVolPtsDict(listId) {
   return Object.keys(d).length ? d : null;
 }
 
-// Render one editable box-trade-fee input per counterparty, in basis points of
+// Render one editable box-trade-fee input per counterparty, in PERCENT of
 // notional (box_debit × qty — a box is economically a synthetic cash loan, so
-// dealers price its bid-ask as bps of notional, not a flat per-contract fee).
-// No engine-side default to seed from yet (unlike VOLpts) — starts at 0 until
-// tuned per counterparty against real quotes. Mirrors optRenderVolPts.
+// dealers price its bid-ask as a % of notional, not a flat per-contract fee).
+// Displayed/entered in %; optBoxFeeDict converts to bps (engine's native unit)
+// before sending. Defaults to 1% per counterparty until tuned against real
+// quotes (no engine-side default to seed from yet, unlike VOLpts). Mirrors optRenderVolPts.
 function optRenderBoxFee(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
@@ -9516,19 +9517,20 @@ function optRenderBoxFee(listId, data) {
   const prev = {};
   box.querySelectorAll(".opt-boxfee-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
   box.innerHTML = cps.length ? cps.map(cp => {
-    const v = prev[cp] != null ? prev[cp] : 0;
-    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-boxfee-input" data-cpty="${cp}" value="${v}" step="1" min="0" style="width:5rem"></label></div>`;
+    const v = prev[cp] != null ? prev[cp] : 1;
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-boxfee-input" data-cpty="${cp}" value="${v}" step="0.1" min="0" style="width:5rem"></label></div>`;
   }).join("") : '<p class="optv3-hint" style="margin:0">No counterparties in the loaded book.</p>';
 }
 
-// Collect {counterparty: box fee bps} from the inputs, or null if none set.
+// Collect {counterparty: box fee bps} from the inputs (entered in %, so ×100
+// to reach the engine's bps unit), or null if none set.
 function optBoxFeeDict(listId) {
   const box = document.getElementById(listId);
   if (!box) return null;
   const d = {};
   box.querySelectorAll(".opt-boxfee-input").forEach(i => {
     const v = parseFloat(i.value);
-    if (i.dataset.cpty && Number.isFinite(v) && v > 0) d[i.dataset.cpty] = v;
+    if (i.dataset.cpty && Number.isFinite(v) && v > 0) d[i.dataset.cpty] = v * 100;
   });
   return Object.keys(d).length ? d : null;
 }
@@ -10774,7 +10776,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
-      // Per-counterparty box-neutralizer execution fee (bps of notional).
+      // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv3-boxfee-list"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.

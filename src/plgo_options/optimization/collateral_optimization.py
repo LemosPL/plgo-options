@@ -18,6 +18,23 @@ class CollateralOptimization:
             return default
         return param
 
+    @classmethod
+    def _cash_neutrality_rate(cls, cp, cash_neutrality_factor, box_fee_bps):
+        """$/$ penalty rate on a counterparty's net cash imbalance.
+
+        cash_neutrality_factor is an arbitrary tunable aversion to imbalance
+        (e.g. funding-cost preference); box_fee_bps is the REAL cost of the
+        box-neutralizer trade that _build_box_cash_neutralizer_trades will
+        execute post-LP to close whatever imbalance is left (box_qty × box_debit
+        ≈ imbalance, so its fee ≈ imbalance × box_fee_bps/10_000 — see that
+        function). Adding it here makes the LP internalize that real future
+        cost now, instead of only reporting it after the fact.
+        """
+        return (
+            cls._resolve(cash_neutrality_factor, cp)
+            + cls._resolve(box_fee_bps, cp, default=0.0) / 10_000.0
+        )
+
     def optimize(
         self,
         spot_ladder,
@@ -36,6 +53,7 @@ class CollateralOptimization:
         collateral_tier_free_pct=0.0,
         collateral_tier_mu=None,
         cash_neutrality_factor=0.0,
+        box_fee_bps=None,
         forced_cash_by_counterparty=None,
         max_qty=None,
         leg_groups=None,
@@ -240,7 +258,7 @@ class CollateralOptimization:
             cash_imbalance_vars[cp] = imbalance
 
         cash_neutrality_cost = pulp.lpSum(
-            self._resolve(cash_neutrality_factor, cp) * imbalance
+            self._cash_neutrality_rate(cp, cash_neutrality_factor, box_fee_bps) * imbalance
             for cp, imbalance in cash_imbalance_vars.items()
         )
 
@@ -324,9 +342,10 @@ class CollateralOptimization:
             )
             for cp, indices in ((cp, cp_indices.get(cp, [])) for cp in cash_cps)
         }
-        if any(self._resolve(cash_neutrality_factor, cp) for cp in cash_cps):
+        if any(self._cash_neutrality_rate(cp, cash_neutrality_factor, box_fee_bps) for cp in cash_cps):
             _cash_cost_val = float(sum(
-                self._resolve(cash_neutrality_factor, cp) * abs(v) for cp, v in cash_by_counterparty.items()
+                self._cash_neutrality_rate(cp, cash_neutrality_factor, box_fee_bps) * abs(v)
+                for cp, v in cash_by_counterparty.items()
             ))
             print(f"  cash_neutrality_cost={_cash_cost_val:,.0f}  " + "  ".join(
                 f"{cp}={v:+,.0f}" for cp, v in cash_by_counterparty.items()

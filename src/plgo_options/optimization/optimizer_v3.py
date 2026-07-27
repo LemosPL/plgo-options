@@ -52,7 +52,10 @@ _VOL_PTS_FALLBACK = 0.75
 # flat per-contract fee — a $10k box and a $1M box don't cost the same dollar
 # amount to execute. Manually entered per counterparty from the GUI; these
 # are the fallback defaults (0 = unpriced, matching legacy behavior) until
-# tuned to what the desk is actually seeing quoted.
+# tuned to what the desk is actually seeing quoted. Also fed into the LP
+# itself (CollateralOptimization._cash_neutrality_rate) as the real $/$ cost
+# of closing a counterparty's cash imbalance via a box, so the LP weighs it
+# against profile fit now rather than only pricing it after the fact.
 DEFAULT_BOX_FEE_BPS_BY_ASSET: dict[str, "dict[str, float] | float"] = {}
 
 # Fallback box fee (bps of notional) for a counterparty absent from the resolved dict.
@@ -1214,6 +1217,7 @@ class OptimizerV3(BaseOptimizer):
             collateral_tier_free_pct=collateral_tier_free_pct,
             collateral_tier_mu=collateral_tier_mu,
             cash_neutrality_factor=cash_neutrality_factor,
+            box_fee_bps=box_fee_bps,
             forced_cash_by_counterparty=forced_cash_by_counterparty,
             max_qty=max_qty,
             leg_groups=leg_groups,
@@ -1262,11 +1266,14 @@ class OptimizerV3(BaseOptimizer):
         # (_aggregate_trade_legs merges those shared legs additively).
         total_cash_outlay = 0.0
 
-        for j, (qty, c) in enumerate(zip(net_qty, candidates)):
-            rounded_qty = int(np.round(qty))
-            if rounded_qty == 0:
-                continue
+        traded_candidates = [
+            (j, int(np.round(qty)), c)
+            for j, (qty, c) in enumerate(zip(net_qty, candidates))
+            if int(np.round(qty)) != 0
+        ]
+        leg_group_costs = self._leg_group_costs(traded_candidates, bid_ask_vol_pts)
 
+        for j, rounded_qty, c in traded_candidates:
             est_cost = self._estimate_candidate_cash_outlay(
                 c=c,
                 qty=rounded_qty,
@@ -1278,15 +1285,17 @@ class OptimizerV3(BaseOptimizer):
             instrument_name = self._candidate_instrument_name(c)
             fitted_payoff += rounded_qty * np.array(c_payoffs[j])
 
-            # Cost is priced off the whole candidate's net vega exposure (see
-            # _structure_leg_costs_usd) — a naked leg reduces to the old
-            # per-leg formula unchanged; a spread's opposite-signed legs
-            # partially net, same mechanism that already zeroes out a box.
+            # Cost is priced off the combined net vega exposure of every
+            # candidate sharing a given real leg (see _leg_group_costs), split
+            # back across each contributing candidate's own share of that leg's
+            # quantity — a candidate that doesn't share any leg with another
+            # forms its own singleton group, reducing to exactly the old
+            # per-candidate net-exposure formula (_structure_leg_costs_usd).
             candidate_legs = self._candidate_trade_legs(c, rounded_qty)
-            leg_costs = _structure_leg_costs_usd(
-                [(leg, leg_qty) for leg, leg_qty, _ in candidate_legs], bid_ask_vol_pts,
-            )
-            for (leg, leg_qty, strategy), leg_cost in zip(candidate_legs, leg_costs):
+            for leg, leg_qty, strategy in candidate_legs:
+                group_key = (leg.counterparty, leg.expiry_code, leg.strike, leg.opt)
+                merged_qty, merged_cost = leg_group_costs.get(group_key, (leg_qty, 0.0))
+                leg_cost = merged_cost * (leg_qty / merged_qty) if merged_qty else 0.0
                 leg_instrument_name = (
                     f"{self.asset}-PERPETUAL" if leg.opt == "F"
                     else f"{self.asset}-{leg.expiry_code}-{np.round(leg.strike, self.asset_precision)}-{leg.opt}"
@@ -1487,7 +1496,7 @@ class OptimizerV3(BaseOptimizer):
 
             axes[2].plot(x, spot_weights, label="Weights")
             axes[2].legend()
-            plt.show()
+            # plt.show()
 
         return {
             "status": "ok",
@@ -2617,6 +2626,78 @@ class OptimizerV3(BaseOptimizer):
                     (c.call_low_leg, -qty, c.kind), (c.call_high_leg, qty, c.kind)]
         else:
             return [(c, qty, "NAKED")]
+
+    def _leg_group_costs(
+            self,
+            traded_candidates: list[tuple[int, int, object]],
+            bid_ask_vol_pts: "dict[str, float] | float | None",
+    ) -> dict[tuple, tuple[float, float]]:
+        """Price each real (counterparty, expiry, strike, opt) leg off the TRUE
+        combined net exposure of every candidate that trades it, not the sum of
+        each candidate's cost computed in isolation.
+
+        Without this, two LP-selected candidates that happen to land on the same
+        real leg (e.g. a naked put and a put spread sharing a strike) each get
+        costed off their OWN, smaller net exposure and their costs are simply
+        summed when _aggregate_trade_legs merges the leg — so the same final net
+        quantity at that leg reports a different total cost depending on which
+        redundant combination of structures the LP happened to pick to reach it.
+        Grouping by shared real legs (union-find: candidates are connected if
+        they share a leg) and re-pricing off the group's combined net exposure
+        makes the reported cost a function of the final position only, matching
+        _structure_leg_costs_usd's own "a dealer prices a package off net risk"
+        principle at whatever granularity the LP's picks actually overlap —
+        candidates that don't share a leg with anything form a singleton group
+        and get exactly today's per-candidate cost, unchanged.
+
+        Returns {(counterparty, expiry_code, strike, opt): (merged_qty, cost)}.
+        """
+        parent: dict[int, int] = {j: j for j, _, _ in traded_candidates}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        legs_by_idx: dict[int, list[tuple]] = {}
+        owner_by_key: dict[tuple, int] = {}
+        for j, rounded_qty, c in traded_candidates:
+            legs = self._candidate_trade_legs(c, rounded_qty)
+            legs_by_idx[j] = legs
+            for leg, _leg_qty, _strategy in legs:
+                key = (leg.counterparty, leg.expiry_code, leg.strike, leg.opt)
+                if key in owner_by_key:
+                    union(j, owner_by_key[key])
+                else:
+                    owner_by_key[key] = j
+
+        components: dict[int, list[int]] = {}
+        for j, _, _ in traded_candidates:
+            components.setdefault(find(j), []).append(j)
+
+        result: dict[tuple, tuple[float, float]] = {}
+        for member_idxs in components.values():
+            merged: dict[tuple, dict] = {}
+            for j in member_idxs:
+                for leg, leg_qty, _strategy in legs_by_idx[j]:
+                    key = (leg.counterparty, leg.expiry_code, leg.strike, leg.opt)
+                    m = merged.setdefault(key, {"leg": leg, "qty": 0})
+                    m["qty"] += leg_qty
+
+            keys = [k for k, m in merged.items() if m["qty"] != 0]
+            leg_costs = _structure_leg_costs_usd(
+                [(merged[k]["leg"], merged[k]["qty"]) for k in keys], bid_ask_vol_pts,
+            )
+            for k, cost in zip(keys, leg_costs):
+                result[k] = (merged[k]["qty"], cost)
+
+        return result
 
     def _aggregate_trade_legs(self, trades: list[dict]) -> list[dict]:
         aggregated: dict[tuple, dict] = {}
