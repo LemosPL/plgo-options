@@ -9266,7 +9266,7 @@ function optv2RenderResult(data) {
     (t) => [
       `<td>${t.instrument}</td>`,
       `<td>${optv2ExpiryText(t)}</td>`,
-      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2Fmt(t.strike, optv3Dp())}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td>${Math.abs(t.qty)}</td>`,
@@ -9284,7 +9284,7 @@ function optv2RenderResult(data) {
     (t) => [
       `<td>${t.instrument}</td>`,
       `<td>${optv2ExpiryText(t)}</td>`,
-      `<td>${optv2Fmt(t.strike, 0)}</td>`,
+      `<td>${optv2Fmt(t.strike, optv3Dp())}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td>${Math.abs(t.qty)}</td>`,
@@ -9342,7 +9342,7 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
     const legText = g.legs.map(l => {
       const c = l.side === "Buy" ? "var(--green)" : "var(--red)";
       return `<span style="white-space:nowrap"><span style="color:${c}">${l.side} ${Math.abs(l.qty)}</span> `
-        + `${optv2OptType(l.opt)} ${optv2Fmt(l.strike, 0)}</span>`;
+        + `${optv2OptType(l.opt)} ${optv2Fmt(l.strike, optv3Dp())}</span>`;
     }).join('<span style="opacity:.4"> · </span>');
     const net = g.legs.reduce((s, l) => s + (l.qty * (l.bs_price_usd || 0)), 0);
     const netLabel = (net <= 0 ? "credit +$" : "debit -$") + optv2Fmt(Math.abs(net), 0);
