@@ -2006,6 +2006,32 @@
                 </div>
               </div>
             </div>
+
+            <!-- Manual leg builder (what-if): custom legs added to After curve + matrix -->
+            <div style="margin-top:1.25rem;border-top:1px solid var(--border);padding-top:.9rem">
+              <h3 style="margin:.2rem 0 .4rem">Add a leg <span class="optv3-muted" style="font-weight:400">— what-if</span></h3>
+              <p class="optv3-hint" style="margin:0 0 .6rem">Build custom option legs (call/put, buy/sell); each is added to the <b>After (selected)</b> payoff curve and the P&amp;L matrix, client-side. Run the optimizer first so there's an "After" to add to.</p>
+              <div style="display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:.7rem">
+                <select id="optv3-leg-side" title="Buy or sell"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+                <select id="optv3-leg-type" title="Call or put"><option value="C">Call</option><option value="P">Put</option></select>
+                <input id="optv3-leg-strike" type="number" placeholder="Strike" step="1" style="width:6.5rem">
+                <select id="optv3-leg-expiry" title="Expiry" style="width:9.5rem"><option value="">Expiry…</option></select>
+                <input id="optv3-leg-qty" type="number" placeholder="Qty" step="1" min="0" style="width:5rem">
+                <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.3rem">IV %<input id="optv3-leg-iv" type="number" placeholder="auto" step="1" min="0" style="width:5rem"></label>
+                <button id="btn-optv3-add-leg" class="btn-primary" style="width:auto">Add leg</button>
+              </div>
+              <div id="optv3-manual-legs-wrap" style="display:none">
+                <div class="chain-wrapper" style="max-height:240px">
+                  <table class="pf-table">
+                    <thead><tr>
+                      <th><input type="checkbox" id="optv3-leg-all" title="Include / exclude all" checked></th>
+                      <th>Side</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">Qty</th><th class="num">IV %</th><th></th>
+                    </tr></thead>
+                    <tbody id="optv3-manual-legs-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Matrix -->
@@ -2550,6 +2576,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=118"></script>
+<script src="/static/app.js?v=119"></script>
 </body>
 </html>

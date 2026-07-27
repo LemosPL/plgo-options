@@ -9544,6 +9544,8 @@ async function optv3Load() {
     optv3PopulateCounterparties();
     optRenderVolPts("optv3-volpts-list", optv3Data);
     optv3RenderDteList();
+    optv3PopulateLegExpiries();
+    optv3RenderManualLegs();
     optRenderBoxFee("optv3-boxfee-list", optv3Data);
 
     const $expiry = document.getElementById("optv3-target-expiry");
@@ -9809,7 +9811,9 @@ function optv3RenderPayoff() {
     const afterCurve = optv3AfterSelectedCurve() || optv3OptResult.after.payoff_by_horizon["0"];
     const nTot = (optv3Replacements || []).length;
     const nSel = nTot - (optv3ReplDeselected ? optv3ReplDeselected.size : 0);
-    const afterName = (nTot && nSel !== nTot) ? `After (selected ${nSel}/${nTot} trades)` : "After (with proposed trades)";
+    const nLegs = (optv3ManualLegs || []).filter(l => l._on).length;
+    let afterName = (nTot && nSel !== nTot) ? `After (selected ${nSel}/${nTot} trades)` : "After (with proposed trades)";
+    if (nLegs) afterName += ` + ${nLegs} leg${nLegs === 1 ? "" : "s"}`;
     if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: afterName, hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
     if (optv3OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
@@ -10272,15 +10276,22 @@ function optv3AfterSelectedAtHorizon(hKey) {
   const r = optv3OptResult;
   const base = r && r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon[hKey];
   if (!base) return null;
-  if (!optv3ReplDeselected.size) return base;   // all selected → full After
+  const legs = (optv3ManualLegs || []).filter(l => l._on);
+  if (!optv3ReplDeselected.size && !legs.length) return base;   // nothing changed
   const spots = r.spot_ladder || [];
   const S0 = (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0;
   const out = base.slice();
   const h = Number(hKey) || 0;
+  // Subtract each deselected optimizer replacement...
   (optv3Replacements || []).forEach(t => {
     if (!optv3ReplDeselected.has(t._idx)) return;
     const c = optv3TradePnlNow(t, spots, S0, h);
     for (let i = 0; i < out.length && i < c.length; i++) out[i] -= c[i];
+  });
+  // ...and add each enabled user-created leg.
+  legs.forEach(l => {
+    const c = optv3TradePnlNow(l, spots, S0, h);
+    for (let i = 0; i < out.length && i < c.length; i++) out[i] += c[i];
   });
   return out;
 }
@@ -10290,6 +10301,93 @@ function optv3AfterSelectedCurve() {
   const r = optv3OptResult;
   if (!r || r.status !== "ok" || !r.after || !r.after.payoff_by_horizon) return null;
   return optv3AfterSelectedAtHorizon("0");
+}
+
+// ── Manual leg builder: user-created what-if legs added to the After curve/matrix.
+let optv3ManualLegs = [];
+let optv3LegSeq = 0;
+
+function optv3PopulateLegExpiries() {
+  const sel = document.getElementById("optv3-leg-expiry");
+  if (!sel || !optv3Data) return;
+  const vs = (optv3Data.vol_surface || []).filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte);
+  sel.innerHTML = '<option value="">Expiry…</option>'
+    + vs.map(s => {
+      const iv = (s.atm_iv != null ? s.atm_iv : (s.iv != null ? s.iv : ""));
+      return `<option value="${s.expiry_code}" data-dte="${s.dte}" data-iv="${iv}">${s.expiry_code} (${s.dte}d)</option>`;
+    }).join("");
+}
+
+function optv3RefreshAfterWhatIf() {
+  optv3RenderPayoff();
+  optv3RenderAfterMatrix();
+}
+
+function optv3AddManualLeg() {
+  if (!optv3Data) { alert("Load the risk profile first."); return; }
+  const S0 = optv3Data.eth_spot || 0;
+  const side = document.getElementById("optv3-leg-side").value;
+  const opt = document.getElementById("optv3-leg-type").value;   // C / P
+  const K = parseFloat(document.getElementById("optv3-leg-strike").value);
+  const expSel = document.getElementById("optv3-leg-expiry");
+  const exp = expSel.value;
+  const dte = expSel.selectedOptions[0] ? Number(expSel.selectedOptions[0].dataset.dte) : NaN;
+  const qtyAbs = Math.abs(parseFloat(document.getElementById("optv3-leg-qty").value));
+  let iv = parseFloat(document.getElementById("optv3-leg-iv").value);
+  if (!isFinite(K) || K <= 0) { alert("Enter a valid strike."); return; }
+  if (!exp || !isFinite(dte)) { alert("Pick an expiry."); return; }
+  if (!isFinite(qtyAbs) || qtyAbs <= 0) { alert("Enter a quantity."); return; }
+  if (!isFinite(iv) || iv <= 0) {
+    const d = expSel.selectedOptions[0] && expSel.selectedOptions[0].dataset.iv;
+    iv = d ? Number(d) : 60;   // fall back to the expiry's ATM IV, else 60%
+  }
+  const qty = side === "buy" ? qtyAbs : -qtyAbs;   // signed
+  const sigma = iv / 100;
+  const T = Math.max(dte, 0) / 365.25;
+  const price = (T > 0 && sigma > 0) ? bsPrice(S0, K, T, 0, sigma, opt)
+    : (opt === "C" ? Math.max(S0 - K, 0) : Math.max(K - S0, 0));
+  optv3ManualLegs.push({
+    _mid: ++optv3LegSeq, _on: true,
+    side: side === "buy" ? "Buy" : "Sell", opt, strike: K, qty,
+    dte, iv_pct: iv, expiry_code: exp, bs_price_usd: price,
+  });
+  document.getElementById("optv3-leg-qty").value = "";
+  optv3RenderManualLegs();
+  optv3RefreshAfterWhatIf();
+}
+
+function optv3RenderManualLegs() {
+  const tb = document.getElementById("optv3-manual-legs-tbody");
+  const wrap = document.getElementById("optv3-manual-legs-wrap");
+  if (!tb) return;
+  if (!optv3ManualLegs.length) { if (wrap) wrap.style.display = "none"; tb.innerHTML = ""; return; }
+  if (wrap) wrap.style.display = "";
+  const dp = optv3Dp();
+  tb.innerHTML = optv3ManualLegs.map(l => `<tr>
+    <td><input type="checkbox" class="optv3-leg-cb" data-mid="${l._mid}" ${l._on ? "checked" : ""}></td>
+    <td style="color:${l.side === "Buy" ? "var(--green)" : "var(--red)"}">${l.side}</td>
+    <td>${optv2OptType(l.opt)}</td>
+    <td class="num">${optv2Fmt(l.strike, dp)}</td>
+    <td>${l.expiry_code}</td>
+    <td class="num">${optv2Fmt(Math.abs(l.qty), 0)}</td>
+    <td class="num">${optv2Fmt(l.iv_pct, 1)}</td>
+    <td><button class="btn-secondary optv3-leg-rm" data-mid="${l._mid}" style="width:auto;padding:.1rem .45rem" title="Remove leg">✕</button></td>
+  </tr>`).join("");
+  tb.querySelectorAll(".optv3-leg-cb").forEach(cb => cb.addEventListener("change", () => {
+    const leg = optv3ManualLegs.find(l => l._mid === Number(cb.dataset.mid));
+    if (leg) leg._on = cb.checked;
+    const all = document.getElementById("optv3-leg-all"); if (all) all.checked = optv3ManualLegs.every(l => l._on);
+    optv3RefreshAfterWhatIf();
+  }));
+  tb.querySelectorAll(".optv3-leg-rm").forEach(b => b.addEventListener("click", () => {
+    optv3ManualLegs = optv3ManualLegs.filter(l => l._mid !== Number(b.dataset.mid));
+    optv3RenderManualLegs(); optv3RefreshAfterWhatIf();
+  }));
+  const all = document.getElementById("optv3-leg-all");
+  if (all) {
+    all.checked = optv3ManualLegs.every(l => l._on);
+    all.onchange = () => { optv3ManualLegs.forEach(l => l._on = all.checked); optv3RenderManualLegs(); optv3RefreshAfterWhatIf(); };
+  }
 }
 
 // Build an optv3OptResult-shaped object whose `after.payoff_by_horizon` reflects
@@ -10735,6 +10833,7 @@ document.getElementById("btn-optv3-target-smooth")?.addEventListener("click", op
 document.getElementById("btn-optv3-target-save")?.addEventListener("click", optv3SaveTargetProfile);
 document.getElementById("btn-optv3-target-delete")?.addEventListener("click", optv3DeleteTargetProfile);
 document.getElementById("btn-optv3-target-draw")?.addEventListener("click", optv3ToggleDrawMode);
+document.getElementById("btn-optv3-add-leg")?.addEventListener("click", optv3AddManualLeg);
 
 // Persistent, copyable optimizer-error panel.
 function optv3ShowError(e) {
