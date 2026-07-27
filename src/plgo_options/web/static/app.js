@@ -10195,7 +10195,12 @@ function optv3RenderResult(data) {
 
   // Replacement / new table — each row has a checkbox to include/exclude it from
   // the "After (selected)" payoff line above. Default: all selected.
-  optv3Replacements = replacements.map((t, i) => { t._idx = i; return t; });
+  optv3Replacements = replacements.map((t, i) => {
+    t._idx = i;
+    t._qty0 = Number(t.qty) || 0;   // original signed qty from the optimizer
+    t._qty = t._qty0;               // current (editable) signed qty
+    return t;
+  });
   optv3ReplDeselected = new Set();
   optv2RenderTradeTable("optv3-replacement-tbody", replacements, "optv3-replacement-count",
     (t) => [
@@ -10203,7 +10208,8 @@ function optv3RenderResult(data) {
       `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, optv3Dp())}</td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
-      `<td class="num">${Math.abs(t.qty)}</td>`, `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td class="num"><input class="optv3-repl-qty" data-idx="${t._idx}" type="number" min="0" step="1" value="${Math.abs(t.qty)}" style="width:5rem;text-align:right" title="Adjust this trade's size — the After curve & P&L matrix update live"></td>`,
+      `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
       `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
@@ -10249,13 +10255,23 @@ function optv3WireReplCheckboxes() {
       optv3RenderAfterMatrix();
     };
   }
+  // Editable trade sizes: adjust a suggested trade's qty → live After curve/matrix.
+  tb.querySelectorAll(".optv3-repl-qty").forEach(inp => inp.addEventListener("input", () => {
+    const t = (optv3Replacements || []).find(x => x._idx === Number(inp.dataset.idx));
+    if (!t) return;
+    const absQ = Math.abs(parseFloat(inp.value));
+    const sign = (t._qty0 || 0) < 0 ? -1 : 1;   // preserve buy/sell direction
+    t._qty = Number.isFinite(absQ) ? sign * absQ : 0;
+    optv3RenderPayoff();
+    optv3RenderAfterMatrix();
+  }));
 }
 
 // One trade's P&L-from-today curve across `spots` at horizon `h` days (0 at S0) —
 // matches the engine's After-curve basis (raw BS value minus the trade's premium).
 // Time decays by h days; perps are horizon-independent.
-function optv3TradePnlNow(t, spots, S0, h = 0) {
-  const qty = Number(t.qty) || 0;           // signed
+function optv3TradePnlNow(t, spots, S0, h = 0, qtyOverride) {
+  const qty = (qtyOverride != null ? Number(qtyOverride) : Number(t.qty)) || 0;  // signed
   const K = Number(t.strike) || 0;
   const opt = String(t.opt || "").toUpperCase();
   const price = Number(t.bs_price_usd) || 0;
@@ -10277,18 +10293,22 @@ function optv3AfterSelectedAtHorizon(hKey) {
   const base = r && r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon[hKey];
   if (!base) return null;
   const legs = (optv3ManualLegs || []).filter(l => l._on);
-  if (!optv3ReplDeselected.size && !legs.length) return base;   // nothing changed
   const spots = r.spot_ladder || [];
   const S0 = (r.eth_spot != null ? r.eth_spot : (optv3Data && optv3Data.eth_spot)) || 0;
   const out = base.slice();
   const h = Number(hKey) || 0;
-  // Subtract each deselected optimizer replacement...
+  // For each optimizer replacement, `after_full` already contains it at its
+  // ORIGINAL qty; apply the delta to its EFFECTIVE qty (0 if deselected, else the
+  // possibly-edited size).
   (optv3Replacements || []).forEach(t => {
-    if (!optv3ReplDeselected.has(t._idx)) return;
-    const c = optv3TradePnlNow(t, spots, S0, h);
-    for (let i = 0; i < out.length && i < c.length; i++) out[i] -= c[i];
+    const q0 = (t._qty0 != null ? t._qty0 : Number(t.qty)) || 0;
+    const qEff = optv3ReplDeselected.has(t._idx) ? 0 : ((t._qty != null ? t._qty : q0) || 0);
+    if (qEff === q0) return;
+    const cEff = optv3TradePnlNow(t, spots, S0, h, qEff);
+    const c0 = optv3TradePnlNow(t, spots, S0, h, q0);
+    for (let i = 0; i < out.length && i < c0.length; i++) out[i] += cEff[i] - c0[i];
   });
-  // ...and add each enabled user-created leg.
+  // Add each enabled user-created leg (at its current qty).
   legs.forEach(l => {
     const c = optv3TradePnlNow(l, spots, S0, h);
     for (let i = 0; i < out.length && i < c.length; i++) out[i] += c[i];
@@ -10369,7 +10389,7 @@ function optv3RenderManualLegs() {
     <td>${optv2OptType(l.opt)}</td>
     <td class="num">${optv2Fmt(l.strike, dp)}</td>
     <td>${l.expiry_code}</td>
-    <td class="num">${optv2Fmt(Math.abs(l.qty), 0)}</td>
+    <td class="num"><input class="optv3-leg-qty-edit" data-mid="${l._mid}" type="number" min="0" step="1" value="${Math.abs(l.qty)}" style="width:5rem;text-align:right" title="Adjust leg size — updates the After curve & P&L matrix live"></td>
     <td class="num">${optv2Fmt(l.iv_pct, 1)}</td>
     <td><button class="btn-secondary optv3-leg-rm" data-mid="${l._mid}" style="width:auto;padding:.1rem .45rem" title="Remove leg">✕</button></td>
   </tr>`).join("");
@@ -10382,6 +10402,14 @@ function optv3RenderManualLegs() {
   tb.querySelectorAll(".optv3-leg-rm").forEach(b => b.addEventListener("click", () => {
     optv3ManualLegs = optv3ManualLegs.filter(l => l._mid !== Number(b.dataset.mid));
     optv3RenderManualLegs(); optv3RefreshAfterWhatIf();
+  }));
+  tb.querySelectorAll(".optv3-leg-qty-edit").forEach(inp => inp.addEventListener("input", () => {
+    const leg = optv3ManualLegs.find(l => l._mid === Number(inp.dataset.mid));
+    if (!leg) return;
+    const absQ = Math.abs(parseFloat(inp.value));
+    const sign = leg.qty < 0 ? -1 : 1;   // preserve buy/sell
+    leg.qty = Number.isFinite(absQ) ? sign * absQ : 0;
+    optv3RefreshAfterWhatIf();
   }));
   const all = document.getElementById("optv3-leg-all");
   if (all) {
