@@ -1841,8 +1841,13 @@
         <div class="optv3-group">
           <div class="optv3-group-title">Rolls</div>
           <div class="optv3-field">
-            <label for="optv3-roll-dte-threshold">Roll DTE threshold <input type="number" id="optv3-roll-dte-threshold" value="7" min="-1" step="1"></label>
-            <p class="optv3-hint">Roll positions with DTE ≤ this. Clear to disable forced rolls. −1 = force-roll exactly the trades checked in Trade Management.</p>
+            <label for="optv3-roll-dte-threshold">Default roll DTE <input type="number" id="optv3-roll-dte-threshold" value="7" min="-1" step="1"></label>
+            <p class="optv3-hint">Default DTE cutoff, used to seed the per-counterparty list below and as the fallback. −1 = roll all.</p>
+          </div>
+          <div class="optv3-field">
+            <div style="font-size:.7rem;color:var(--muted);font-weight:600;margin-bottom:.35rem">Roll DTE — per counterparty</div>
+            <p class="optv3-hint" style="margin:0 0 .45rem">Roll each counterparty's trades with DTE ≤ its value; the ticked candidates below are exactly what the optimizer rolls. Clear a counterparty to exclude it.</p>
+            <div id="optv3-dte-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
           </div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-roll-itm-only" checked> ITM-only rolls</label>
           <p class="optv3-hint">When rolling, only touch in-the-money positions.</p>
@@ -2545,6 +2550,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=117"></script>
+<script src="/static/app.js?v=118"></script>
 </body>
 </html>

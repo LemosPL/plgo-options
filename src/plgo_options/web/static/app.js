@@ -9543,6 +9543,7 @@ async function optv3Load() {
     optv3OptResult = null;
     optv3PopulateCounterparties();
     optRenderVolPts("optv3-volpts-list", optv3Data);
+    optv3RenderDteList();
     optRenderBoxFee("optv3-boxfee-list", optv3Data);
 
     const $expiry = document.getElementById("optv3-target-expiry");
@@ -9947,12 +9948,29 @@ let optv3RollCandSig = "";      // signature of the current candidate set (to re
 
 // Positions eligible to roll: DTE <= threshold (or all if threshold = -1), in
 // the selected counterparty scope. Each tagged with _itm (call: K<spot, put: K>spot).
+// Per-counterparty roll-DTE map from the GUI inputs (empty input = exclude that
+// counterparty). {counterparty: dte}.
+function optv3DteMap() {
+  const box = document.getElementById("optv3-dte-list");
+  const m = {};
+  if (!box) return m;
+  box.querySelectorAll(".optv3-dte-input").forEach(i => {
+    if (!i.dataset.cpty) return;
+    if (i.value === "" || i.value == null) { m[i.dataset.cpty] = null; return; }  // present but cleared → excluded
+    const v = parseInt(i.value, 10);
+    m[i.dataset.cpty] = Number.isNaN(v) ? null : v;
+  });
+  return m;
+}
+
+// Roll candidates: a position is eligible if its DTE <= its counterparty's
+// threshold (per-counterparty inputs, falling back to the global default). -1 =
+// roll all of that counterparty's trades. Also honours the counterparty scope.
 function optv3RollCandidates() {
   if (!optv3Data) return [];
-  const raw = document.getElementById("optv3-roll-dte-threshold")?.value;
-  if (raw === "" || raw == null) return [];   // rolls disabled → no candidates
-  const thr = parseInt(raw, 10);
-  if (Number.isNaN(thr)) return [];
+  const gRaw = document.getElementById("optv3-roll-dte-threshold")?.value;
+  const gThr = (gRaw === "" || gRaw == null) ? null : parseInt(gRaw, 10);
+  const dteMap = optv3DteMap();
   const spot = optv3Data.eth_spot || 0;
   const cptySel = document.getElementById("optv3-counterparties");
   const scope = new Set(cptySel ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : []);
@@ -9960,6 +9978,9 @@ function optv3RollCandidates() {
     const opt = String(p.opt || "");
     if (!["C", "P", "F"].includes(opt)) return false;
     if (scope.size && !scope.has(p.counterparty)) return false;
+    // Per-counterparty DTE threshold, else the global default.
+    let thr = Object.prototype.hasOwnProperty.call(dteMap, p.counterparty) ? dteMap[p.counterparty] : gThr;
+    if (thr == null || Number.isNaN(thr)) return false;   // no threshold for this cpty → not a candidate
     if (thr === -1) return true;
     const dte = Number(p.days_remaining);
     return Number.isFinite(dte) && dte <= thr;
@@ -9968,6 +9989,22 @@ function optv3RollCandidates() {
     const itm = (opt === "C" && p.strike < spot) || (opt === "P" && p.strike > spot);
     return Object.assign({ _itm: itm }, p);
   });
+}
+
+// Render one editable Roll-DTE input per counterparty in the loaded book,
+// seeded from the global default; preserves any value the user already typed.
+function optv3RenderDteList() {
+  const box = document.getElementById("optv3-dte-list");
+  if (!box || !optv3Data) return;
+  const cps = [...new Set((optv3Data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const gRaw = document.getElementById("optv3-roll-dte-threshold")?.value;
+  const def = (gRaw === "" || gRaw == null) ? "" : gRaw;
+  const prev = {};
+  box.querySelectorAll(".optv3-dte-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  box.innerHTML = cps.length ? cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : def;
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="optv3-dte-input" data-cpty="${cp}" value="${v}" step="1" min="-1" style="width:5rem" title="Roll ${cp} trades with DTE ≤ this. Clear to exclude ${cp}. -1 = roll all ${cp} trades."></label></div>`;
+  }).join("") : '<p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p>';
 }
 
 function optv3RenderRollCandidates() {
@@ -10676,8 +10713,18 @@ document.getElementById("btn-load-optv3")?.addEventListener("click", optv3Load);
 document.getElementById("optv3-target-expiry")?.addEventListener("change", optv3SyncRunEnabled);
 // Recompute roll candidates (and re-default the ITM ticks) when the DTE
 // threshold or counterparty scope changes.
-document.getElementById("optv3-roll-dte-threshold")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
+document.getElementById("optv3-roll-dte-threshold")?.addEventListener("change", (e) => {
+  if (!optv3Data) return;
+  // "Default" applies to every counterparty; users then tweak individual rows.
+  const v = e.target.value;
+  const inputs = document.querySelectorAll("#optv3-dte-list .optv3-dte-input");
+  if (inputs.length) inputs.forEach(i => { i.value = v; });
+  else optv3RenderDteList();
+  optv3RenderRollCandidates();
+});
 document.getElementById("optv3-counterparties")?.addEventListener("change", () => { if (optv3Data) optv3RenderRollCandidates(); });
+// Per-counterparty DTE inputs are dynamic — delegate their change to re-filter candidates.
+document.getElementById("optv3-dte-list")?.addEventListener("input", () => { if (optv3Data) optv3RenderRollCandidates(); });
 document.getElementById("btn-optv3-refresh-snapshots")?.addEventListener("click", () => optv3LoadSnapshots());
 document.getElementById("optv3-target-select")?.addEventListener("change", (e) => {
   optv3TargetProfileFile = e.target.value || "";
