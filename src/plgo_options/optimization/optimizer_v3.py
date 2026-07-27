@@ -220,6 +220,7 @@ class OptimizerV3(BaseOptimizer):
             bid_ask_atm_pct: "dict[str, float] | float | None" = None,
             bid_ask_min_delta: float = 0.05,
             bid_ask_vol_pts: "dict[str, float] | float | None" = None,
+            box_fee_bps: "dict[str, float] | float | None" = None,
     ) -> list[dict]:
         trades = []
 
@@ -237,6 +238,8 @@ class OptimizerV3(BaseOptimizer):
             opt = str(getattr(p, "opt", "") or "")
             strike = float(getattr(p, "strike", 0.0) or 0.0)
             expiry_code = get_expiry_code(getattr(p, "expiry_date", getattr(p, "expiry", "")))
+            counterparty = getattr(p, "counterparty", "")
+            mark_price = float(getattr(p, "mark_price_usd", 0.0) or 0.0)
 
             if token == "ETH":
                 instrument_name = (
@@ -251,8 +254,24 @@ class OptimizerV3(BaseOptimizer):
             else:
                 raise ValueError(f"Unsupported token: {token}")
 
+            notional = abs(float(unwind_qty)) * mark_price
+            vega_cost = _bid_ask_cost_usd(
+                unwind_qty, getattr(p, "vega", 0.0), counterparty, bid_ask_vol_pts,
+            )
+            # DTE-triggered rolls are, by construction, near expiry — vega (and
+            # so the cost above) collapses toward zero even when the position
+            # is deep ITM with real intrinsic value left to unwind, the same
+            # blind spot a box's ~0 net vega has for its own real execution
+            # cost (see _build_box_cash_neutralizer_trades). These positions
+            # are typically ITM, so reuse box_fee_bps as a notional-based fee
+            # on top of the vega cost: closing a large ITM position is
+            # economically similar to unwinding a box — real dollar bid-ask
+            # proportional to notional, not to vol risk that's already gone.
+            roll_fee_bp = CollateralOptimization._resolve(box_fee_bps, counterparty, default=_BOX_FEE_BPS_FALLBACK)
+            notional_cost = notional * float(roll_fee_bp or 0.0) / 10_000.0
+
             trades.append({
-                "counterparty": getattr(p, "counterparty", ""),
+                "counterparty": counterparty,
                 "instrument": instrument_name,
                 "strategy": "ROLL_UNWIND",
                 "strategy_instrument": instrument_name,
@@ -263,9 +282,9 @@ class OptimizerV3(BaseOptimizer):
                 "qty": unwind_qty,
                 "side": "Buy" if unwind_qty > 0 else "Sell",
                 "iv_pct": round(float(getattr(p, "iv_pct", 0.0) or 0.0), 1),
-                "bs_price_usd": round(float(getattr(p, "mark_price_usd", 0.0) or 0.0), 2),
+                "bs_price_usd": round(mark_price, 2),
                 "vega": round(float(getattr(p, "vega", 0.0) or 0.0), 4),
-                "notional": round(abs(float(unwind_qty)) * float(getattr(p, "mark_price_usd", 0.0) or 0.0), 2),
+                "notional": round(notional, 2),
                 "is_unwind": True,
                 "unwind_qty": abs(int(unwind_qty)),
                 "new_qty": 0,
@@ -275,10 +294,7 @@ class OptimizerV3(BaseOptimizer):
                 "delta_contribution": round(float(unwind_qty * (getattr(p, "delta", 0.0) or 0.0)), 4),
                 "gamma_contribution": round(float(unwind_qty * (getattr(p, "gamma", 0.0) or 0.0)), 6),
                 "vega_contribution": round(float(unwind_qty * (getattr(p, "vega", 0.0) or 0.0)), 4),
-                "cost_usd": round(_bid_ask_cost_usd(
-                    unwind_qty, getattr(p, "vega", 0.0),
-                    getattr(p, "counterparty", ""), bid_ask_vol_pts,
-                ), 2),
+                "cost_usd": round(vega_cost + notional_cost, 2),
             })
 
         return trades
@@ -1167,7 +1183,7 @@ class OptimizerV3(BaseOptimizer):
         roll_unwind_trades = self._build_roll_unwind_trades(
             self.asset, roll_positions,
             bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
-            bid_ask_vol_pts=bid_ask_vol_pts,
+            bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
         )
         forced_cash_by_counterparty: dict[str, float] = {}
         for t in roll_unwind_trades:
