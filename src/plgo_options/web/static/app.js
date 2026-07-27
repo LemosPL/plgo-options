@@ -10897,6 +10897,18 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
     const rollThresholdParam = rollCandsActive ? -1 : (Number.isNaN(rollDteThreshold) ? null : rollDteThreshold);
     const forcedRollIds = rollCandsActive ? [...optv3RollSel] : [...tmSelected];
 
+    // Scope the NEW/replacement trades to the counterparties actually being
+    // rolled, so "roll only G20" doesn't spawn trades for Wave/KeyRock/Flowdesk.
+    // An explicit Counterparties selection still wins; otherwise derive scope
+    // from the ticked roll candidates.
+    let cptiesParam = selectedCounterparties.length ? selectedCounterparties : null;
+    if (rollCandsActive && !cptiesParam) {
+      const rolledCps = [...new Set(
+        optv3RollCandidates().filter(c => optv3RollSel.has(c.id)).map(c => c.counterparty).filter(Boolean)
+      )];
+      if (rolledCps.length) cptiesParam = rolledCps;
+    }
+
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv3-lam-factor").value || "0.2"),
@@ -10915,7 +10927,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       enable_box_neutralizer: enableBoxNeutralizer,
       save_usecase_snapshot: saveRequested,
       is_replay: false,
-      counterparties: selectedCounterparties.length ? selectedCounterparties : null,
+      counterparties: cptiesParam,
       forced_roll_ids: forcedRollIds,
       base_trade_ids: optv2BaseIds(),
       // User-edited target profile (Target Profile tab). null = auto parametric.

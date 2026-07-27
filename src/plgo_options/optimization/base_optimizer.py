@@ -207,6 +207,11 @@ class BaseOptimizer:
                         strike = option_key[1]
                         opt = option_key[2]
                         counterparty = option_key[3]
+                        # Respect the counterparty scope for held-option candidates too —
+                        # otherwise "roll only G20" still lets the LP trade every other
+                        # counterparty's held instruments. (No scope set => unchanged.)
+                        if selected_counterparties and counterparty not in selected_counterparties:
+                            continue
                         dte = (expiry - self.today).days
                         sigma = option_smile.compute_vol(expiry, strike)
                         c = self.create_candidate(S, strike, 0., sigma, opt, exp_code, expiry, dte, counterparty)
