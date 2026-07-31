@@ -8961,6 +8961,9 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const maxQty = maxQtyRaw === "" || maxQtyRaw === undefined ? null : parseFloat(maxQtyRaw);
     const maxTradesRaw = document.getElementById("optv2-max-trades")?.value;
     const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
+    const maxCpLossRaw = document.getElementById("optv2-max-cp-loss")?.value;
+    const maxCpLoss = maxCpLossRaw === "" || maxCpLossRaw === undefined ? null : parseFloat(maxCpLossRaw);
+    const useCollateralCap = document.getElementById("optv2-use-collateral-cap")?.checked || false;
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
@@ -8968,6 +8971,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       t90_weight: parseFloat(document.getElementById("optv2-t90-weight")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv2-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
+      max_cp_loss_usd: maxCpLoss,
+      use_collateral_cap: useCollateralCap,
       target_expiry: document.getElementById("optv2-target-expiry").value || null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
@@ -9207,6 +9212,32 @@ function optv2RenderResult(data) {
       }).join("");
     } else {
       $cashSection.style.display = "none";
+    }
+  }
+
+  // Worst-case stress P&L by counterparty — see cp_worst_case_stress in
+  // run_lp's response. Independent of the fleet-wide fit shown above: a
+  // counterparty can be left with a large standalone loss here even when
+  // the aggregate summary looks fine, if another counterparty's gain
+  // happens to net it out.
+  const $cpStressSection = document.getElementById("optv2-cp-stress-section");
+  const $cpStressBody = document.getElementById("optv2-cp-stress-tbody");
+  const cpStress = data.cp_worst_case_stress || {};
+  if ($cpStressSection && $cpStressBody) {
+    const cps = Object.keys(cpStress);
+    if (cps.length) {
+      $cpStressSection.style.display = "";
+      $cpStressBody.innerHTML = cps
+        .sort((a, b) => cpStress[a].pnl - cpStress[b].pnl)
+        .map(cp => {
+          const v = cpStress[cp];
+          const pnl = v.pnl || 0;
+          return `<tr><td>${cp}</td>` +
+            `<td style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">${pnl >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(pnl), 0)}</td>` +
+            `<td>${optv2Fmt(v.spot, 4)}</td></tr>`;
+        }).join("");
+    } else {
+      $cpStressSection.style.display = "none";
     }
   }
 

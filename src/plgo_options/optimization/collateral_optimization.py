@@ -61,6 +61,9 @@ class CollateralOptimization:
         residual_payoff_90=None,
         c_payoffs_90=None,
         t90_weight=0.0,
+        max_cp_loss_usd=None,
+        base_stress_by_cp=None,
+        collateral_floor_by_cp=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -262,6 +265,51 @@ class CollateralOptimization:
             for cp, imbalance in cash_imbalance_vars.items()
         )
 
+        # Per-counterparty loss cap: the profile_error term above is a
+        # FLEET-WIDE fit — a big loss with one counterparty on some move can be
+        # invisible to the objective if it's netted out by a gain elsewhere,
+        # even though that counterparty can't see the other side of the book
+        # and would still object to the position (e.g. demand extra collateral)
+        # on its own. This is a HARD floor, not a soft cost: for each CP with a
+        # floor, its existing non-rolled book + its own share of this run's
+        # trades may never be worth more than the floor less than it is today,
+        # at any spot on the ladder. Two independent sources feed the floor,
+        # combined by taking whichever is tighter at each spot:
+        #   - max_cp_loss_usd: a flat manual $ number (same at every spot).
+        #   - collateral_floor_by_cp: an actual posted-collateral curve (USD
+        #     cash + native-asset qty x that spot on the SAME ladder), so
+        #     native-asset collateral is marked down exactly where the loss is
+        #     worst — capturing wrong-way risk instead of a flat $ guess.
+        # Neither present (both None/empty) disables this entirely. Unlike the
+        # soft weights elsewhere in this objective, too tight a floor here
+        # (relative to the other constraints) can make the LP infeasible
+        # outright rather than just trading off against a worse fit.
+        applied_floor_min: dict[str, float] = {}
+        if base_stress_by_cp and (max_cp_loss_usd is not None or collateral_floor_by_cp):
+            for cp, indices in cp_indices.items():
+                base_cp = base_stress_by_cp.get(cp)
+                if base_cp is None:
+                    continue
+                manual_cap = (
+                    self._resolve(max_cp_loss_usd, cp, default=None)
+                    if max_cp_loss_usd is not None else None
+                )
+                coll_floor = (collateral_floor_by_cp or {}).get(cp)
+                if manual_cap is None and coll_floor is None:
+                    continue
+                floor_curve = np.full(n_spots, np.inf)
+                if coll_floor is not None:
+                    floor_curve = np.minimum(floor_curve, np.asarray(coll_floor, dtype=float))
+                if manual_cap is not None:
+                    floor_curve = np.minimum(floor_curve, abs(float(manual_cap)))
+                for i in range(n_spots):
+                    cp_trade_payoff_i = pulp.lpSum(
+                        (buy_vars[j] - sell_vars[j]) * float(c_payoffs[j][i]) for j in indices
+                    )
+                    cp_total_i = float(base_cp[i]) + cp_trade_payoff_i
+                    prob += cp_total_i >= -float(floor_curve[i]), f"cp_loss_cap_{cp}_{i}"
+                applied_floor_min[cp] = float(np.min(floor_curve))
+
         prob += lam_factor * profile_error + trading_cost + collateral_cost + cash_neutrality_cost
 
         # Per-counterparty signed net notional constraint (existing + net new <= max).
@@ -351,11 +399,70 @@ class CollateralOptimization:
                 f"{cp}={v:+,.0f}" for cp, v in cash_by_counterparty.items()
             ))
 
+        # Worst-case stress P&L per counterparty (post-trade), for reporting —
+        # same (base_stress_by_cp + this counterparty's own trade payoff) curve
+        # the cp_downside penalty above is built from, just read off at its min
+        # rather than fed through the shortfall/spot_weights objective.
+        cp_worst_case_stress: dict[str, dict] = {}
+        if base_stress_by_cp:
+            for cp, indices in cp_indices.items():
+                base_cp = base_stress_by_cp.get(cp)
+                if base_cp is None:
+                    continue
+                cp_trade_curve = net_qty[indices] @ c_payoffs_arr[indices] if indices else np.zeros(n_spots)
+                cp_total_curve = np.asarray(base_cp, dtype=float) + cp_trade_curve
+                worst_idx = int(np.argmin(cp_total_curve))
+                cp_worst_case_stress[cp] = {
+                    "spot": float(spot_ladder[worst_idx]),
+                    "pnl": float(cp_total_curve[worst_idx]),
+                }
+            if cp_worst_case_stress:
+                print("  per-CP worst-case stress P&L: " + "  ".join(
+                    f"{cp}: {v['pnl']:+,.0f} @ spot={v['spot']:,.4f}" for cp, v in cp_worst_case_stress.items()
+                ))
+
+        # Flag counterparties where the loss floor (manual cap and/or
+        # collateral-derived) only "held" by pinning trades at max_qty — the
+        # earlier one-dollar-cap experiment showed the LP will happily max out
+        # every candidate's group_net at max_qty to chase an unrealistically
+        # tight floor rather than come back infeasible, producing a
+        # technically-satisfied but practically non-executable trade size.
+        # Two conditions must both hold to flag a CP: (a) its floor is
+        # actually binding (worst-case stress sits at ~the floor, not
+        # comfortably inside it), and (b) at least one of its own legs is
+        # pinned at the max_qty group bound — a CP hitting max_qty for
+        # unrelated reasons (a big ordinary replacement trade) with a loose
+        # floor is not a red flag on its own.
+        cp_loss_cap_warnings: list[str] = []
+        if applied_floor_min and cp_worst_case_stress:
+            maxed_out_cps: set = set()
+            if max_qty is not None and leg_groups:
+                qty_tol = max(1e-6, 0.01 * float(max_qty))
+                for key, members in leg_groups.items():
+                    group_net_val = sum(sign * (buy_qty[j] - sell_qty[j]) for j, sign in members)
+                    if abs(abs(group_net_val) - float(max_qty)) <= qty_tol:
+                        cp = key[3] if len(key) > 3 else None
+                        if cp:
+                            maxed_out_cps.add(cp)
+
+            for cp, floor in applied_floor_min.items():
+                info = cp_worst_case_stress.get(cp)
+                if info is None or not np.isfinite(floor):
+                    continue
+                is_binding = abs(info["pnl"] - (-floor)) <= max(1.0, 0.01 * floor)
+                if is_binding and cp in maxed_out_cps:
+                    cp_loss_cap_warnings.append(cp)
+
+            if cp_loss_cap_warnings:
+                print(f"  ⚠ max_cp_loss_usd only held by pinning trades at max_qty for: {cp_loss_cap_warnings}")
+
         return {
             "net_qty": net_qty,
             "trade_payoff": trade_payoff,
             "profile_error": profile_error_val,
             "cash_by_counterparty": cash_by_counterparty,
+            "cp_worst_case_stress": cp_worst_case_stress,
+            "cp_loss_cap_warnings": cp_loss_cap_warnings,
         }
 
     def _solve_problem(self, prob, algo):

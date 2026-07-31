@@ -17,6 +17,7 @@ from plgo_options.optimization.optim_usecase import (
     OptimizerRunParams,
     OptimizerUseCase,
 )
+from plgo_options.data.database import get_db
 
 router = APIRouter()
 
@@ -44,6 +45,26 @@ def _resolve_snapshot_root() -> Path:
 SNAPSHOT_ROOT = _resolve_snapshot_root()
 
 
+async def _fetch_collateral_by_cp() -> dict[str, dict[str, float]]:
+    """Posted collateral per counterparty per asset, summed across books —
+    same query/table the Collateral tab and reconciliation already use
+    (counterparty_collateral). Feeds the optimizer's collateral-derived
+    per-CP loss floor when use_collateral_cap is set."""
+    db = await get_db()
+    result: dict[str, dict[str, float]] = {}
+    try:
+        cur = await db.execute(
+            "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset"
+        )
+        for row in await cur.fetchall():
+            cp = str(row["counterparty"])
+            asset = str(row["asset"]).upper()
+            result.setdefault(cp, {})[asset] = float(row["qty"] or 0.0)
+    except Exception:
+        result = {}  # table may not exist yet — treat as no collateral data
+    return result
+
+
 class OptimizationParams(BaseModel):
     asset: str = "ETH"
     lam_factor: float = 0.2
@@ -66,6 +87,22 @@ class OptimizationParams(BaseModel):
     enable_box_neutralizer: bool = True
     downside_factor: float = 1.0
     t90_weight: float = 0.0
+    # Per-counterparty hard loss cap: a counterparty's own (non-rolled book +
+    # this run's trades for that CP) may never be worth more than this many
+    # dollars less than it is today, at any spot on the ladder — the fleet-wide
+    # profile fit above can hide a large single-CP loss if it's netted out by a
+    # gain elsewhere in the book, which that counterparty can't see and
+    # wouldn't accept. None (default) disables it. Unlike the soft weights
+    # above, this is a hard constraint — too tight a cap can make a run
+    # infeasible instead of just trading off against a worse fit.
+    max_cp_loss_usd: float | dict[str, float] | None = None
+    # Opt-in: when true, also derive a per-counterparty loss floor from actual
+    # posted collateral (Collateral tab data — USD/USDC + this run's own asset
+    # only, e.g. ETH collateral for an ETH run). Off (default) leaves the
+    # per-CP cap exactly as max_cp_loss_usd alone controls it, unchanged from
+    # before this existed. When both are set, the tighter of the two applies
+    # at each spot.
+    use_collateral_cap: bool = False
     # Optional allow-list of DB trade ids: when set, the optimizer's *input book*
     # is scoped to exactly these trades (the "current portfolio" it optimizes
     # against becomes only this subset), instead of the whole asset book. Sourced
@@ -133,6 +170,8 @@ async def run_optimizer(params: OptimizationParams):
         pnl_data["positions"] = filtered
         print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
 
+    collateral_by_cp = await _fetch_collateral_by_cp() if params.use_collateral_cap else None
+
     print(params)
     run_params = OptimizerRunParams(
         asset=params.asset.upper(),
@@ -155,6 +194,8 @@ async def run_optimizer(params: OptimizationParams):
         enable_box_neutralizer=params.enable_box_neutralizer,
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
+        max_cp_loss_usd=params.max_cp_loss_usd,
+        collateral_by_cp=collateral_by_cp,
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,

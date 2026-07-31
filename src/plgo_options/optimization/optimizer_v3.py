@@ -23,6 +23,7 @@ from .misc_utils import build_parametric_target_profile, load_target_profile_fil
 import matplotlib.pyplot as plt
 
 from ..pricing import options
+from ..web.routes.collateral import HAIRCUTS
 
 # Transaction cost is modelled in VOL POINTS. Per execution (one leg),
 #   cost = |qty| × |vega| × VOLpts
@@ -960,6 +961,8 @@ class OptimizerV3(BaseOptimizer):
                  t90_weight: float = 0.0,
                  manual_target: list[dict] | None = None,
                  target_profile_file: str | None = None,
+                 max_cp_loss_usd: "dict[str, float] | float | None" = None,
+                 collateral_by_cp: "dict[str, dict[str, float]] | None" = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1105,6 +1108,7 @@ class OptimizerV3(BaseOptimizer):
         spot_weights /= np.sum(spot_weights)
 
         base_payoff = np.zeros_like(spot_arr)
+        base_payoff_by_cp: dict[str, np.ndarray] = {}
         for p in self.positions:
             if id(p) in roll_position_ids:
                 continue
@@ -1112,6 +1116,45 @@ class OptimizerV3(BaseOptimizer):
             if np.isnan(bs_value.sum()):
                 continue
             base_payoff += bs_value
+            cp = getattr(p, "counterparty", "")
+            base_payoff_by_cp[cp] = base_payoff_by_cp.get(cp, np.zeros_like(spot_arr)) + bs_value
+
+        # Per-counterparty "P&L from today" baseline for the max_cp_loss_usd cap
+        # below (and the cp_worst_case_stress reported diagnostic): each
+        # counterparty's own (non-rolled) held book, repriced across the ladder,
+        # anchored to its value at today's spot — so a negative value there
+        # means "this CP is worse off than today," independent of whatever else
+        # the rest of the fleet is doing.
+        spot_idx0 = int(np.argmin(np.abs(spot_arr - self.spot)))
+        base_stress_by_cp = {
+            cp: arr - arr[spot_idx0] for cp, arr in base_payoff_by_cp.items()
+        }
+
+        # Posted-collateral floor per counterparty, marked to the SAME stress
+        # ladder: USD/USDC collateral is currency-stable, but native-asset
+        # collateral (ETH for an ETH book, FIL for a FIL book) is worth less
+        # exactly where the loss is worst — this is what actually captures the
+        # wrong-way risk of a counterparty posting collateral in the same
+        # asset it's trading, instead of a flat $ guess. Deliberately scoped to
+        # USD + this run's own asset only — collateral posted in an unrelated
+        # asset (e.g. ETH collateral backing a FIL book) would need a
+        # cross-asset correlation assumption this model doesn't make, so it's
+        # left out rather than guessed at. Haircut with the SAME per-token
+        # discounts already used on the Collateral tab (ETH 10%, FIL/WAVE 50%,
+        # BTC 15%, USDC 0%) — full face value overstates how much cushion is
+        # actually there to absorb a loss.
+        collateral_floor_by_cp: dict[str, np.ndarray] = {}
+        if collateral_by_cp:
+            usd_haircut = HAIRCUTS.get("USDC", 0.0)
+            native_haircut = HAIRCUTS.get(self.asset, 0.0)
+            for cp, by_asset in collateral_by_cp.items():
+                usd_qty = float(by_asset.get("USDC", 0.0) or 0.0) + float(by_asset.get("USD", 0.0) or 0.0)
+                native_qty = float(by_asset.get(self.asset, 0.0) or 0.0)
+                if usd_qty == 0.0 and native_qty == 0.0:
+                    continue
+                collateral_floor_by_cp[cp] = (
+                    usd_qty * (1.0 - usd_haircut) + native_qty * (1.0 - native_haircut) * spot_arr
+                )
 
         raw_residual = target_interp - base_payoff
         cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
@@ -1241,6 +1284,9 @@ class OptimizerV3(BaseOptimizer):
             residual_payoff_90=residual_90,
             c_payoffs_90=c_payoffs_90,
             t90_weight=t90_weight,
+            max_cp_loss_usd=max_cp_loss_usd,
+            base_stress_by_cp=base_stress_by_cp,
+            collateral_floor_by_cp=collateral_floor_by_cp,
         )
 
         if lp_result is None:
@@ -1514,8 +1560,26 @@ class OptimizerV3(BaseOptimizer):
             axes[2].legend()
             # plt.show()
 
+        # max_cp_loss_usd is a hard constraint, so the LP always reports a
+        # number at or inside the cap — but "feasible" isn't the same as
+        # "sensible": if the only way to hold that cap is pinning trades at
+        # max_qty, the cap is effectively unenforceable at a realistic trade
+        # size (raising max_qty would just let it keep "working" the same
+        # degenerate way). Surface that rather than let a technically-ok
+        # result look clean.
+        cp_loss_cap_warnings = lp_result.get("cp_loss_cap_warnings", [])
+        message = None
+        if cp_loss_cap_warnings:
+            message = (
+                f"Max CP Loss cap is only being met by pinning trades at Max Qty for: "
+                f"{', '.join(cp_loss_cap_warnings)}. The cap may be unrealistically tight for the "
+                f"current Max Qty — consider raising Max Qty, loosening the cap, or treating this "
+                f"result as non-executable at its stated size."
+            )
+
         return {
             "status": "ok",
+            "message": message,
             "asset": self.asset,
             "target_expiry": target_expiry,
             "optimizer_converged": True,
@@ -1525,6 +1589,9 @@ class OptimizerV3(BaseOptimizer):
             "premium_summary": premium_summary,
             "net_premium_generated": premium_summary["net_premium_generated"],
             "cash_by_counterparty": cash_by_counterparty,
+            # Worst-case P&L-from-today each counterparty is left with after
+            # this run's trades, across the spot ladder — see max_cp_loss_usd.
+            "cp_worst_case_stress": lp_result.get("cp_worst_case_stress", {}),
             "fit_error_before": round(weighted_fit_error_before, 2),
             "fit_error_after": round(weighted_fit_error_after, 2),
             "spot_ladder": spot_arr.tolist(),

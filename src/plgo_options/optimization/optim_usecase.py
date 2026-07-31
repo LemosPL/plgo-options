@@ -95,6 +95,11 @@ class OptimizerRunParams:
     enable_box_neutralizer: bool = True
     downside_factor: float = 1.0
     t90_weight: float = 0.0
+    max_cp_loss_usd: float | dict[str, float] | None = None
+    # Posted collateral per counterparty, per asset (e.g. {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}),
+    # sourced from the Collateral tab. None = collateral-derived floor disabled (opt-in via use_collateral_cap
+    # on the request; only USD + this run's own asset are used, see optimizer_v3.run_lp).
+    collateral_by_cp: dict[str, dict[str, float]] | None = None
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None

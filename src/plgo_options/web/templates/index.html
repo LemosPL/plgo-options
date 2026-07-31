@@ -1508,6 +1508,15 @@
           <input type="number" id="optv2-cash-neutrality-factor" value="0.05" step="0.1" min="0" style="width:5rem"
             title="Penalty weight in the LP objective for imbalance between premium paid and premium collected per counterparty. Higher = optimizer works harder to self-fund trades per counterparty (avoid net cash movement); 0 = disabled. Soft cost, not a hard cap — doesn't cover forced/DTE rolls.">
         </label>
+        <label class="pf-filter-label">Max CP Loss ($)
+          <input type="number" id="optv2-max-cp-loss" step="100000" min="0" style="width:7rem"
+            title="Hard cap: no single counterparty's own book (its non-rolled existing positions plus its own trades from this run) may be worth more than this many dollars less than it is today, at any spot on the stress ladder. The λ/κ profile fit above is fleet-wide, so a large loss at one counterparty can be invisible to it if another counterparty's gain nets it out — that counterparty only sees its own book and would still object (e.g. demand extra collateral) without seeing the offsetting position. Blank = no cap (default). Unlike the other weights here, this is a hard constraint — set too tight given your other settings (Max Qty, Max Trades, Gross Collateral Δ), the run can come back infeasible instead of just trading off against a worse fit. When 'Cap to posted collateral' is also on, the tighter of the two applies.">
+        </label>
+        <label class="toggle-label" style="margin:0"
+          title="Also derive each counterparty's loss floor from its actual posted collateral (Collateral tab data) — USD/USDC plus this run's own asset only (e.g. ETH collateral for an ETH run; a different asset's collateral is left out rather than guessing a cross-asset correlation). Native-asset collateral is marked down at the same stress spot as the loss, capturing the case where a counterparty's cushion shrinks in the same move that hurts it. Off (default) = Max CP Loss above is the only floor, unchanged from before this existed. When both are on, the tighter of the two applies at each spot.">
+          <input type="checkbox" id="optv2-use-collateral-cap">
+          Cap to posted collateral
+        </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
             <option value="">Select maturity…</option>
@@ -1664,6 +1673,26 @@
             <tr><th>Counterparty</th><th title="Assumed transaction cost for this counterparty's trades (vega × VOLpts), summed across all its trades — matches the row's share of the Total Cost summary tile.">Cost ($)</th><th>Outlay ($)</th><th>Collection ($)</th><th>Net ($)</th></tr>
           </thead>
           <tbody id="optv2-cash-flow-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- Worst-case stress P&L by counterparty: each counterparty's own book
+           (existing non-rolled positions + its own trades from this run) at
+           its worst point across the spot ladder, relative to today. A large
+           red number here can be hidden entirely from the fleet-wide fit
+           above if another counterparty's gain nets it out. -->
+      <div id="optv2-cp-stress-section" style="margin-bottom:1.5rem;display:none">
+        <h3 style="margin:0 0 .5rem;font-size:.95rem">Worst-Case Stress P&amp;L by Counterparty</h3>
+        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">
+          Per-counterparty view of the same stress ladder used elsewhere — for each counterparty, its own book
+          (existing non-rolled positions + its own trades from this run) at the worst spot for it, relative to today.
+          A large loss here can be masked in the fleet-wide summary above by an offsetting gain at another counterparty.
+        </p>
+        <table class="pf-table" style="max-width:480px">
+          <thead>
+            <tr><th>Counterparty</th><th>Worst P&amp;L ($)</th><th>At Spot</th></tr>
+          </thead>
+          <tbody id="optv2-cp-stress-tbody"></tbody>
         </table>
       </div>
 
