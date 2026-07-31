@@ -97,9 +97,13 @@ class OptimizerRunParams:
     t90_weight: float = 0.0
     max_cp_loss_usd: float | dict[str, float] | None = None
     # Posted collateral per counterparty, per asset (e.g. {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}),
-    # sourced from the Collateral tab. None = collateral-derived floor disabled (opt-in via use_collateral_cap
-    # on the request; only USD + this run's own asset are used, see optimizer_v3.run_lp).
+    # sourced from the Collateral tab (always fetched by the route; only USD + this run's own asset are
+    # used, see optimizer_v3.run_lp). Drives the cp_worst_case_net diagnostic regardless of
+    # enforce_collateral_cap, and additionally constrains the LP's own trade choices when that's on.
     collateral_by_cp: dict[str, dict[str, float]] | None = None
+    # Opt-in: when true, the collateral-derived floor above also constrains the LP's trade choices
+    # (not just reported). Off (default) = informational only, matching pre-existing behavior.
+    enforce_collateral_cap: bool = False
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None

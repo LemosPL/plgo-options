@@ -9219,10 +9219,14 @@ function optv2RenderResult(data) {
   // run_lp's response. Independent of the fleet-wide fit shown above: a
   // counterparty can be left with a large standalone loss here even when
   // the aggregate summary looks fine, if another counterparty's gain
-  // happens to net it out.
+  // happens to net it out. cp_worst_case_net (Worst Net columns) is a
+  // separate metric — same book, netted against posted collateral at the
+  // same stress spot — populated only for counterparties with collateral
+  // data, and can peak at a different spot than the P&L-only worst case.
   const $cpStressSection = document.getElementById("optv2-cp-stress-section");
   const $cpStressBody = document.getElementById("optv2-cp-stress-tbody");
   const cpStress = data.cp_worst_case_stress || {};
+  const cpNet = data.cp_worst_case_net || {};
   if ($cpStressSection && $cpStressBody) {
     const cps = Object.keys(cpStress);
     if (cps.length) {
@@ -9232,9 +9236,14 @@ function optv2RenderResult(data) {
         .map(cp => {
           const v = cpStress[cp];
           const pnl = v.pnl || 0;
+          const n = cpNet[cp];
+          const netCells = n
+            ? `<td style="color:${n.net >= 0 ? "var(--green)" : "var(--red)"}">${n.net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(n.net), 0)}</td>` +
+              `<td>${optv2Fmt(n.spot, 4)}</td>`
+            : `<td>—</td><td>—</td>`;
           return `<tr><td>${cp}</td>` +
             `<td style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">${pnl >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(pnl), 0)}</td>` +
-            `<td>${optv2Fmt(v.spot, 4)}</td></tr>`;
+            `<td>${optv2Fmt(v.spot, 4)}</td>${netCells}</tr>`;
         }).join("");
     } else {
       $cpStressSection.style.display = "none";

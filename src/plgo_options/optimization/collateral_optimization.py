@@ -64,6 +64,7 @@ class CollateralOptimization:
         max_cp_loss_usd=None,
         base_stress_by_cp=None,
         collateral_floor_by_cp=None,
+        enforce_collateral_floor=False,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -284,8 +285,13 @@ class CollateralOptimization:
         # soft weights elsewhere in this objective, too tight a floor here
         # (relative to the other constraints) can make the LP infeasible
         # outright rather than just trading off against a worse fit.
+        # collateral_floor_by_cp only participates in ENFORCEMENT when
+        # enforce_collateral_floor is set — it's always available below for
+        # the (purely informational) cp_worst_case_net diagnostic regardless,
+        # so you can see the collateral-adjusted worst case without forcing
+        # the LP to trade around it.
         applied_floor_min: dict[str, float] = {}
-        if base_stress_by_cp and (max_cp_loss_usd is not None or collateral_floor_by_cp):
+        if base_stress_by_cp and (max_cp_loss_usd is not None or (enforce_collateral_floor and collateral_floor_by_cp)):
             for cp, indices in cp_indices.items():
                 base_cp = base_stress_by_cp.get(cp)
                 if base_cp is None:
@@ -294,7 +300,7 @@ class CollateralOptimization:
                     self._resolve(max_cp_loss_usd, cp, default=None)
                     if max_cp_loss_usd is not None else None
                 )
-                coll_floor = (collateral_floor_by_cp or {}).get(cp)
+                coll_floor = (collateral_floor_by_cp or {}).get(cp) if enforce_collateral_floor else None
                 if manual_cap is None and coll_floor is None:
                     continue
                 floor_curve = np.full(n_spots, np.inf)
@@ -403,7 +409,20 @@ class CollateralOptimization:
         # same (base_stress_by_cp + this counterparty's own trade payoff) curve
         # the cp_downside penalty above is built from, just read off at its min
         # rather than fed through the shortfall/spot_weights objective.
+        #
+        # cp_worst_case_net is a DIFFERENT question, computed independently of
+        # whether enforce_collateral_floor is on: "worst P&L" and "worst
+        # NET position (P&L + collateral value AT THAT SAME SPOT)" don't
+        # necessarily happen at the same spot — native-asset collateral moves
+        # with the stress too, so a spot where the loss is merely moderate but
+        # the same-asset collateral has also cratered can be a worse net
+        # outcome than the spot with the single biggest raw loss. Always
+        # computed when collateral_floor_by_cp has data for a CP, regardless
+        # of whether that floor is actually being enforced as a constraint —
+        # this is purely "what does the real cushion-adjusted picture look
+        # like," independent of "should the LP be forced to respect it."
         cp_worst_case_stress: dict[str, dict] = {}
+        cp_worst_case_net: dict[str, dict] = {}
         if base_stress_by_cp:
             for cp, indices in cp_indices.items():
                 base_cp = base_stress_by_cp.get(cp)
@@ -416,9 +435,26 @@ class CollateralOptimization:
                     "spot": float(spot_ladder[worst_idx]),
                     "pnl": float(cp_total_curve[worst_idx]),
                 }
+
+                coll_curve = (collateral_floor_by_cp or {}).get(cp)
+                if coll_curve is not None:
+                    coll_curve = np.asarray(coll_curve, dtype=float)
+                    net_curve = cp_total_curve + coll_curve
+                    net_idx = int(np.argmin(net_curve))
+                    cp_worst_case_net[cp] = {
+                        "spot": float(spot_ladder[net_idx]),
+                        "net": float(net_curve[net_idx]),
+                        "pnl": float(cp_total_curve[net_idx]),
+                        "collateral": float(coll_curve[net_idx]),
+                    }
             if cp_worst_case_stress:
                 print("  per-CP worst-case stress P&L: " + "  ".join(
                     f"{cp}: {v['pnl']:+,.0f} @ spot={v['spot']:,.4f}" for cp, v in cp_worst_case_stress.items()
+                ))
+            if cp_worst_case_net:
+                print("  per-CP worst-case NET (P&L + collateral): " + "  ".join(
+                    f"{cp}: {v['net']:+,.0f} (pnl={v['pnl']:+,.0f}, collateral={v['collateral']:,.0f}) @ spot={v['spot']:,.4f}"
+                    for cp, v in cp_worst_case_net.items()
                 ))
 
         # Flag counterparties where the loss floor (manual cap and/or
@@ -462,6 +498,7 @@ class CollateralOptimization:
             "profile_error": profile_error_val,
             "cash_by_counterparty": cash_by_counterparty,
             "cp_worst_case_stress": cp_worst_case_stress,
+            "cp_worst_case_net": cp_worst_case_net,
             "cp_loss_cap_warnings": cp_loss_cap_warnings,
         }
 

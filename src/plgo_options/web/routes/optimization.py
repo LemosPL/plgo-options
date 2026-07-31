@@ -48,8 +48,9 @@ SNAPSHOT_ROOT = _resolve_snapshot_root()
 async def _fetch_collateral_by_cp() -> dict[str, dict[str, float]]:
     """Posted collateral per counterparty per asset, summed across books —
     same query/table the Collateral tab and reconciliation already use
-    (counterparty_collateral). Feeds the optimizer's collateral-derived
-    per-CP loss floor when use_collateral_cap is set."""
+    (counterparty_collateral). Always fetched; feeds the reported
+    cp_worst_case_net diagnostic, and additionally constrains the LP's own
+    trade choices when use_collateral_cap is set."""
     db = await get_db()
     result: dict[str, dict[str, float]] = {}
     try:
@@ -96,12 +97,13 @@ class OptimizationParams(BaseModel):
     # above, this is a hard constraint — too tight a cap can make a run
     # infeasible instead of just trading off against a worse fit.
     max_cp_loss_usd: float | dict[str, float] | None = None
-    # Opt-in: when true, also derive a per-counterparty loss floor from actual
-    # posted collateral (Collateral tab data — USD/USDC + this run's own asset
-    # only, e.g. ETH collateral for an ETH run). Off (default) leaves the
-    # per-CP cap exactly as max_cp_loss_usd alone controls it, unchanged from
-    # before this existed. When both are set, the tighter of the two applies
-    # at each spot.
+    # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
+    # only) is always fetched and reported as cp_worst_case_net in the
+    # response, regardless of this flag. Opt-in: when true, that
+    # collateral-derived floor ALSO constrains the LP's own trade choices (not
+    # just reported) — combined with max_cp_loss_usd by taking whichever is
+    # tighter at each spot. Off (default) = informational only, unchanged
+    # trade selection from before this existed.
     use_collateral_cap: bool = False
     # Optional allow-list of DB trade ids: when set, the optimizer's *input book*
     # is scoped to exactly these trades (the "current portfolio" it optimizes
@@ -170,7 +172,10 @@ async def run_optimizer(params: OptimizationParams):
         pnl_data["positions"] = filtered
         print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
 
-    collateral_by_cp = await _fetch_collateral_by_cp() if params.use_collateral_cap else None
+    # Always fetched — drives the cp_worst_case_net diagnostic in the response
+    # regardless of use_collateral_cap; that flag only controls whether it
+    # additionally constrains the LP's own trade choices (see below).
+    collateral_by_cp = await _fetch_collateral_by_cp()
 
     print(params)
     run_params = OptimizerRunParams(
@@ -196,6 +201,7 @@ async def run_optimizer(params: OptimizationParams):
         t90_weight=params.t90_weight,
         max_cp_loss_usd=params.max_cp_loss_usd,
         collateral_by_cp=collateral_by_cp,
+        enforce_collateral_cap=params.use_collateral_cap,
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,

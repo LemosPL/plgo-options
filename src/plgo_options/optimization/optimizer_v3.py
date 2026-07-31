@@ -963,6 +963,7 @@ class OptimizerV3(BaseOptimizer):
                  target_profile_file: str | None = None,
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,
                  collateral_by_cp: "dict[str, dict[str, float]] | None" = None,
+                 enforce_collateral_cap: bool = False,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1287,6 +1288,7 @@ class OptimizerV3(BaseOptimizer):
             max_cp_loss_usd=max_cp_loss_usd,
             base_stress_by_cp=base_stress_by_cp,
             collateral_floor_by_cp=collateral_floor_by_cp,
+            enforce_collateral_floor=enforce_collateral_cap,
         )
 
         if lp_result is None:
@@ -1592,6 +1594,13 @@ class OptimizerV3(BaseOptimizer):
             # Worst-case P&L-from-today each counterparty is left with after
             # this run's trades, across the spot ladder — see max_cp_loss_usd.
             "cp_worst_case_stress": lp_result.get("cp_worst_case_stress", {}),
+            # Worst NET position (P&L + posted collateral value, both at the
+            # SAME stress spot) per counterparty — can peak at a different spot
+            # than cp_worst_case_stress above, since native-asset collateral
+            # moves with the same stress. Only populated for counterparties
+            # with collateral data (see collateral_by_cp); always computed
+            # when available, independent of enforce_collateral_cap.
+            "cp_worst_case_net": lp_result.get("cp_worst_case_net", {}),
             "fit_error_before": round(weighted_fit_error_before, 2),
             "fit_error_after": round(weighted_fit_error_after, 2),
             "spot_ladder": spot_arr.tolist(),
