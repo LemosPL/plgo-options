@@ -1680,26 +1680,32 @@
            (existing non-rolled positions + its own trades from this run) at
            its worst point across the spot ladder, relative to today. A large
            red number here can be hidden entirely from the fleet-wide fit
-           above if another counterparty's gain nets it out. The Worst Net
-           columns are a separate question — same book, but netted against
-           that counterparty's own posted collateral (marked to the SAME
-           stress spot, so native-asset collateral moves with the loss) —
-           and can peak at a different spot than the P&L-only worst case. -->
+           above if another counterparty's gain nets it out. The Min
+           Collateral Headroom columns are a separate question — the same
+           book's worst point netted against that counterparty's own posted
+           collateral (marked to the SAME stress spot, so native-asset
+           collateral moves with the loss) — how much cushion is left in the
+           worst case, which can peak at a different spot than the P&L-only
+           worst case. Framed as remaining headroom (big/green = safe, small
+           or negative/red = at risk) rather than a raw P&L-plus-collateral
+           sum, since that sum is dominated by the collateral principal and
+           reads backwards next to a column called "worst." -->
       <div id="optv2-cp-stress-section" style="margin-bottom:1.5rem;display:none">
         <h3 style="margin:0 0 .5rem;font-size:.95rem">Worst-Case Stress P&amp;L by Counterparty</h3>
         <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">
           Per-counterparty view of the same stress ladder used elsewhere — for each counterparty, its own book
           (existing non-rolled positions + its own trades from this run) at the worst spot for it, relative to today.
           A large loss here can be masked in the fleet-wide summary above by an offsetting gain at another counterparty.
-          "Worst Net" nets that same book against posted collateral (Collateral tab data) at each stress spot —
-          since native-asset collateral moves with the stress too, its worst point can differ from the P&L-only one.
+          "Min Collateral Headroom" is how much cushion (P&L + haircut-adjusted posted collateral) is left at that
+          counterparty's single worst point — since native-asset collateral moves with the stress too, its worst point
+          can differ from the P&L-only one. Big/green = comfortable cushion; small or negative/red = at risk.
         </p>
-        <table class="pf-table" style="max-width:760px">
+        <table class="pf-table" style="max-width:780px">
           <thead>
             <tr>
               <th>Counterparty</th><th>Worst P&amp;L ($)</th><th>At Spot</th>
-              <th title="Worst (P&L + posted collateral value) at that same spot — '—' when no collateral data exists for this counterparty.">Worst Net ($)</th>
-              <th>Net At Spot</th>
+              <th title="Cushion left (P&L + haircut-adjusted posted collateral) at this counterparty's worst point across the ladder — '—' when no collateral data exists for it. Big/green = safe, small or negative/red = at risk.">Min Collateral Headroom ($)</th>
+              <th title="FIL spot price this Min Collateral Headroom figure occurs at — a price level, not a dollar amount (same kind of column as the 'At Spot' next to Worst P&L).">At Spot</th>
             </tr>
           </thead>
           <tbody id="optv2-cp-stress-tbody"></tbody>

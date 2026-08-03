@@ -9219,10 +9219,13 @@ function optv2RenderResult(data) {
   // run_lp's response. Independent of the fleet-wide fit shown above: a
   // counterparty can be left with a large standalone loss here even when
   // the aggregate summary looks fine, if another counterparty's gain
-  // happens to net it out. cp_worst_case_net (Worst Net columns) is a
-  // separate metric — same book, netted against posted collateral at the
-  // same stress spot — populated only for counterparties with collateral
-  // data, and can peak at a different spot than the P&L-only worst case.
+  // happens to net it out. cp_worst_case_net (rendered as "Min Collateral
+  // Headroom") is a separate metric — same book, netted against posted
+  // collateral at the same stress spot, framed as cushion remaining rather
+  // than a raw P&L-plus-collateral sum (which reads backwards next to
+  // "worst" once the collateral principal dominates) — populated only for
+  // counterparties with collateral data, and can peak at a different spot
+  // than the P&L-only worst case.
   const $cpStressSection = document.getElementById("optv2-cp-stress-section");
   const $cpStressBody = document.getElementById("optv2-cp-stress-tbody");
   const cpStress = data.cp_worst_case_stress || {};
