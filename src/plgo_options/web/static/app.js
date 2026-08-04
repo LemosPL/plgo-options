@@ -2252,8 +2252,9 @@ function rcNormDate(v) {
   // Excel serial date (number like 46185 = days since 1899-12-30)
   const n = typeof v === "number" ? v : parseFloat(v);
   if (!isNaN(n) && n > 30000 && n < 60000) {
-    const base = new Date(1899, 11, 30); // Dec 30, 1899
-    const d = new Date(base.getTime() + n * 86400000);
+    // Use a UTC epoch (Dec 30 1899) so the result is timezone-independent — a local
+    // `new Date(1899,11,30)` shifts the date back a day under positive UTC offsets.
+    const d = new Date(Date.UTC(1899, 11, 30) + n * 86400000);
     return d.toISOString().split("T")[0];
   }
   const s = String(v).trim();
@@ -2298,8 +2299,10 @@ function rcGuessAsset(trades) {
 // unwound legs), the option type in an unlabelled column (FIL) or none at all (ETH,
 // all calls), and the real trading venue in the Counterparty column (Orbit Markets,
 // Genesis, …) — which we book under a single "Wave" counterparty. Returns rows in the
-// same shape as rcParseRow, filtered to OPEN positions only (expiry >= today) so it
-// lines up with our book, which excludes expired legs.
+// same shape as rcParseRow, filtered to OPEN positions only so it lines up with our
+// book (which excludes expired legs). A leg is OPEN when its "Days Remaining to
+// Expiry" cell shows a plain day-count number — expired legs read "Expired", closed
+// legs are blank, and some junk rows carry a date there (a huge Excel serial).
 function rcDetectWaveSheetName(wb, asset) {
   return wb.SheetNames.find(sn => {
     const lc = sn.toLowerCase();
@@ -2327,24 +2330,32 @@ function rcParseWaveSheet(sheet) {
   const expIdx    = find(h => h.includes("expiry date") || h.includes("expiry"));
   const strikeIdx = find(h => h.includes("strike"));
   const qtyIdx    = find(h => h.includes("options"));  // "# of FIL Options" / "# of ETH Options"
+  const daysIdx   = find(h => h.includes("days remaining"));
   const premIdx   = find(h => h.includes("premium") && (h.includes("total") || h.includes("received") || h.includes("paid")));
   // Option type: FIL keeps it in an unlabelled column between Counterparty and Buy/Sell;
   // ETH has no type column at all (the book is all calls).
   const typeIdx = (cpIdx >= 0 && bsIdx - cpIdx === 2) ? cpIdx + 1 : -1;
 
-  const todayISO = new Date().toISOString().split("T")[0];
   const at = (row, idx) => (idx >= 0 && idx < row.length) ? row[idx] : null;
+  const todayISO = new Date().toISOString().split("T")[0];
   const out = [];
   for (let i = hdr + 1; i < aoa.length; i++) {
     const row = aoa[i] || [];
-    const bsRaw = String(at(row, bsIdx) == null ? "" : at(row, bsIdx)).trim();
-    if (!bsRaw) continue;
-    const side = rcNormSide(bsRaw);
+    // OPEN only: keep rows whose "Days Remaining to Expiry" is a plain day-count.
+    // Excludes "Expired" / blank, and date-valued junk rows (serials in the 30k-60k range).
+    // Fallback to an expiry>=today check if that column is ever absent.
+    if (daysIdx >= 0) {
+      const dr = at(row, daysIdx);
+      if (!(typeof dr === "number" && isFinite(dr) && dr > 0 && dr < 3650)) continue;
+    } else {
+      const e = rcNormDate(at(row, expIdx));
+      if (!e || e < todayISO) continue;
+    }
+    const side = rcNormSide(String(at(row, bsIdx) == null ? "" : at(row, bsIdx)).trim());
     if (side !== "Buy" && side !== "Sell") continue;   // skip section/junk rows
     const strike = pf(at(row, strikeIdx));
     const expiry = rcNormDate(at(row, expIdx));
     if (!expiry || strike <= 0) continue;
-    if (expiry < todayISO) continue;                    // OPEN only — drop expired/settled legs
     out.push({
       trade_id: "",
       trade_date: rcNormDate(at(row, tdIdx)),
