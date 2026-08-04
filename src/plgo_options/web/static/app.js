@@ -2234,6 +2234,9 @@ function rcNormSide(s) {
   s = (s || "").trim().toUpperCase();
   if (["BUY","BUYS","BOUGHT","LONG","B","L"].includes(s)) return "Buy";
   if (["SELL","SELLS","SOLD","SHORT","S"].includes(s)) return "Sell";
+  // Phrases like "Buy to unwind" / "Sell to close" (e.g. Wave's Buy/Sell/Unwind column)
+  if (s.includes("BUY")) return "Buy";
+  if (s.includes("SELL")) return "Sell";
   return s.charAt(0) + s.slice(1).toLowerCase();
 }
 
@@ -2289,6 +2292,73 @@ function rcGuessAsset(trades) {
   return avgStrike < 50 ? "FIL" : "ETH";
 }
 
+// ── Wave counterparty format ────────────────────────────────
+// Wave sends one sheet per asset ("FIL Option Positions" / "ETH Option Positions")
+// with 2-3 metadata rows above the header, a full trade HISTORY (incl. expired /
+// unwound legs), the option type in an unlabelled column (FIL) or none at all (ETH,
+// all calls), and the real trading venue in the Counterparty column (Orbit Markets,
+// Genesis, …) — which we book under a single "Wave" counterparty. Returns rows in the
+// same shape as rcParseRow, filtered to OPEN positions only (expiry >= today) so it
+// lines up with our book, which excludes expired legs.
+function rcDetectWaveSheetName(wb, asset) {
+  return wb.SheetNames.find(sn => {
+    const lc = sn.toLowerCase();
+    return lc.includes("option position") && lc.includes(asset.toLowerCase());
+  });
+}
+
+function rcParseWaveSheet(sheet) {
+  const pf = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, blankrows: false, defval: null });
+
+  // Locate the header row (the one whose first cells include "Counterparty").
+  let hdr = -1;
+  for (let i = 0; i < Math.min(aoa.length, 15); i++) {
+    const row = aoa[i] || [];
+    if (row.some(c => String(c == null ? "" : c).trim().toLowerCase() === "counterparty")) { hdr = i; break; }
+  }
+  if (hdr < 0) return [];
+
+  const header = (aoa[hdr] || []).map(c => String(c == null ? "" : c).trim().toLowerCase());
+  const find = (pred) => header.findIndex(pred);
+  const cpIdx     = find(h => h === "counterparty");
+  const bsIdx     = find(h => h.includes("buy/sell") || h.includes("buy / sell"));
+  const tdIdx     = find(h => h.includes("trade date"));
+  const expIdx    = find(h => h.includes("expiry date") || h.includes("expiry"));
+  const strikeIdx = find(h => h.includes("strike"));
+  const qtyIdx    = find(h => h.includes("options"));  // "# of FIL Options" / "# of ETH Options"
+  const premIdx   = find(h => h.includes("premium") && (h.includes("total") || h.includes("received") || h.includes("paid")));
+  // Option type: FIL keeps it in an unlabelled column between Counterparty and Buy/Sell;
+  // ETH has no type column at all (the book is all calls).
+  const typeIdx = (cpIdx >= 0 && bsIdx - cpIdx === 2) ? cpIdx + 1 : -1;
+
+  const todayISO = new Date().toISOString().split("T")[0];
+  const at = (row, idx) => (idx >= 0 && idx < row.length) ? row[idx] : null;
+  const out = [];
+  for (let i = hdr + 1; i < aoa.length; i++) {
+    const row = aoa[i] || [];
+    const bsRaw = String(at(row, bsIdx) == null ? "" : at(row, bsIdx)).trim();
+    if (!bsRaw) continue;
+    const side = rcNormSide(bsRaw);
+    if (side !== "Buy" && side !== "Sell") continue;   // skip section/junk rows
+    const strike = pf(at(row, strikeIdx));
+    const expiry = rcNormDate(at(row, expIdx));
+    if (!expiry || strike <= 0) continue;
+    if (expiry < todayISO) continue;                    // OPEN only — drop expired/settled legs
+    out.push({
+      trade_id: "",
+      trade_date: rcNormDate(at(row, tdIdx)),
+      side,
+      option_type: typeIdx >= 0 ? rcNormType(String(at(row, typeIdx) || "")) : "Call",
+      strike,
+      expiry,
+      qty: Math.abs(pf(at(row, qtyIdx))),
+      premium_usd: pf(at(row, premIdx)),
+    });
+  }
+  return out;
+}
+
 document.getElementById("rc-upload").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -2296,6 +2366,18 @@ document.getElementById("rc-upload").addEventListener("change", (e) => {
   reader.onload = (evt) => {
     try {
       const wb = XLSX.read(evt.target.result, { type: "array" });
+
+      // Strategy 0: Wave format — per-asset "FIL/ETH Option Positions" sheet with
+      // metadata rows above the header and full trade history. Parsed specially and
+      // filtered to open legs. Take this branch before the generic strategies.
+      const waveName = rcDetectWaveSheetName(wb, currentAsset);
+      if (waveName) {
+        rcTheirTrades = rcParseWaveSheet(wb.Sheets[waveName]);
+        rcRenderRows();
+        alert(`Wave file detected — sheet "${waveName}".\n\nImported ${rcTheirTrades.length} open ${currentAsset} position(s). Expired/closed legs and other-asset sheets were excluded.\n\nMake sure the counterparty is set to "Wave" before running.`);
+        e.target.value = "";
+        return;
+      }
 
       // Strategy 1: find sheet named after current asset
       let sheetName = wb.SheetNames.find(s => s.toLowerCase() === currentAsset.toLowerCase());
