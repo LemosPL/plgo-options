@@ -86,6 +86,14 @@ class OptimizationParams(BaseModel):
     max_qty: float | None = None
     max_trades: int | None = None
     enable_box_neutralizer: bool = True
+    # Post-LP delta cleanup: after the LP's own trades, if the resulting book's
+    # net option delta (offset by the current perp holding) still sits outside
+    # delta_band, propose one perp trade to flatten it back to zero. Orthogonal
+    # to the LP's own shape fit, which rarely reaches for the perp itself.
+    enable_delta_rehedge: bool = True
+    # Band width in underlying units (e.g. ETH contracts). 75 is the value this
+    # codebase's band-triggered control policy was calibrated against for ETH.
+    delta_band: float = 75.0
     downside_factor: float = 1.0
     t90_weight: float = 0.0
     # Per-counterparty hard loss cap: a counterparty's own (non-rolled book +
@@ -130,6 +138,11 @@ class OptimizationParams(BaseModel):
     # dealers as bps of notional (an implied-rate spread), not a flat fee.
     # None = no fee (legacy behavior) until tuned per counterparty.
     box_fee_bps: float | dict[str, float] | None = None
+    # Perp/future trading cost, in basis points of notional (price × qty), per
+    # counterparty (or a flat scalar). A perp carries zero vega, so the
+    # VOLpts model above prices it as free to trade without this. None = engine
+    # default (2 bps).
+    perp_cost_bps: float | dict[str, float] | None = None
     # Filename of a saved target-profile CSV (in data/) to fit to, e.g.
     # "ETH - target shifted v2.csv". Overridden by manual_target if that is set;
     # None = built-in parametric target.
@@ -197,6 +210,8 @@ async def run_optimizer(params: OptimizationParams):
         max_qty=params.max_qty,
         max_trades=params.max_trades,
         enable_box_neutralizer=params.enable_box_neutralizer,
+        enable_delta_rehedge=params.enable_delta_rehedge,
+        delta_band=params.delta_band,
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
         max_cp_loss_usd=params.max_cp_loss_usd,
@@ -206,6 +221,7 @@ async def run_optimizer(params: OptimizationParams):
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,
         box_fee_bps=params.box_fee_bps,
+        perp_cost_bps=params.perp_cost_bps,
         target_profile_file=params.target_profile_file,
     )
 

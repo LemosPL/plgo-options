@@ -1567,6 +1567,14 @@
           <input type="checkbox" id="optv2-enable-box-neutralizer" checked>
           Box Neutralizer
         </label>
+        <label class="toggle-label" style="margin:0" title="Post-LP step: if the resulting book's net option delta (existing positions plus every option trade just proposed), offset by the current perp holding, still sits outside the band below, propose one perp trade on Binance Futures to flatten it back to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.">
+          <input type="checkbox" id="optv2-enable-delta-rehedge" checked>
+          Delta Rehedge (perp)
+        </label>
+        <label class="pf-filter-label">Delta Band
+          <input type="number" id="optv2-delta-band" value="75" step="1" min="0" style="width:5rem"
+            title="Mismatches within this many underlying units (e.g. ETH contracts) are left alone. 75 is the value this codebase's band-triggered control policy was calibrated against for ETH.">
+        </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
@@ -1583,6 +1591,11 @@
         <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:.4rem">Box neutralizer fee (per counterparty, %)</div>
         <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">Real execution cost for the box cash neutralizer, in % of notional — its vega-based cost is ~0 (put-call parity) so without this it looks free. A box is a synthetic cash loan, priced like an implied-rate spread. 0 = unpriced.</p>
         <div id="optv2-boxfee-list" style="display:flex;flex-wrap:wrap;gap:.75rem"><span style="font-size:.72rem;color:var(--muted)">Load the risk profile to list counterparties.</span></div>
+      </div>
+      <div style="margin-top:.9rem;border-top:1px solid var(--border);padding-top:.75rem">
+        <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:.4rem">Perp/future trading cost — bps of notional</div>
+        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">The optimizer always hedges via a perp on Binance Futures (perps for both ETH and FIL) — an always-available venue, independent of the book's OTC options counterparties. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
+        <div id="optv2-perpcost-list" style="display:flex;flex-wrap:wrap;gap:.75rem"><div class="optv3-field"><label>Binance Futures<input type="number" class="opt-perpcost-input" data-cpty="Binance Futures" value="2" step="0.25" min="0" style="width:5rem"></label></div></div>
       </div>
     </section>
 
@@ -1912,11 +1925,21 @@
           <div id="optv3-boxfee-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
         </div>
 
+        <!-- Perp/future trading cost -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Perp/future trading cost (bps of notional)</div>
+          <p class="optv3-hint" style="margin:0 0 .55rem">The optimizer always hedges via a perp on Binance Futures (perps for both ETH and FIL) — an always-available venue, independent of the book's OTC options counterparties. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
+          <div id="optv3-perpcost-list"><div class="optv3-field"><label>Binance Futures<input type="number" class="opt-perpcost-input" data-cpty="Binance Futures" value="2" step="0.25" min="0" style="width:5rem"></label></div></div>
+        </div>
+
         <!-- Output -->
         <div class="optv3-group">
           <div class="optv3-group-title">Output</div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
+          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
+          <div class="optv3-field"><label>Delta band<input type="number" id="optv3-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
           <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
         </div>

@@ -9,8 +9,9 @@ from datetime import date, datetime
 from matplotlib import figure
 from scipy.ndimage import gaussian_filter1d
 
-from .base_optimizer import BaseOptimizer, RiskMode
+from .base_optimizer import BaseOptimizer, RiskMode, PERP_COUNTERPARTY
 from .collateral_optimization import CollateralOptimization
+from .delta_hedger import check_rehedge, perp_trade_cost
 from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
 from .math_utils import bs_vec
@@ -62,6 +63,11 @@ DEFAULT_BOX_FEE_BPS_BY_ASSET: dict[str, "dict[str, float] | float"] = {}
 # Fallback box fee (bps of notional) for a counterparty absent from the resolved dict.
 _BOX_FEE_BPS_FALLBACK = 0.0
 
+# Fallback perp trading cost, in bps of notional (price × qty) — a perp has
+# zero vega so the vol-points cost model above can't price it; matches the
+# legacy OptimizerV2.compute_costs convention.
+_PERP_COST_BPS_FALLBACK = 2.0
+
 
 def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
     """One execution's transaction cost (USD) for a trade leg, modelled in vol
@@ -74,7 +80,7 @@ def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
     return abs(float(qty)) * abs(float(vega or 0.0)) * float(vp)
 
 
-def _structure_leg_costs_usd(legs, bid_ask_vol_pts):
+def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None):
     """Allocate one structure's (naked/spread/straddle/box/...) transaction
     cost across its legs, based on the structure's NET vega exposure rather
     than summing each leg's own |vega| independently. A dealer prices a
@@ -92,18 +98,39 @@ def _structure_leg_costs_usd(legs, bid_ask_vol_pts):
     are all grouped by counterparty before pairing). Returns one cost per
     leg, in the same order, proportional to |leg_qty x leg_vega| so no single
     leg arbitrarily "carries" the whole structure's cost.
+
+    A perp leg (opt=="F") has zero vega, so it can't participate in that
+    net-exposure netting at all — it's costed independently, as bps of its
+    own notional (see _PERP_COST_BPS_FALLBACK), and excluded from the option
+    legs' net-exposure calculation entirely.
     """
     if not legs:
         return []
-    exposures = [float(lq) * float(getattr(lg, "vega", 0.0) or 0.0) for lg, lq in legs]
-    net_exposure = sum(exposures)
-    counterparty = legs[0][0].counterparty
-    vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
-    structure_cost = abs(net_exposure) * float(vp)
-    total_abs_exposure = sum(abs(x) for x in exposures)
-    if total_abs_exposure <= 1e-12:
-        return [structure_cost / len(legs)] * len(legs)
-    return [structure_cost * abs(x) / total_abs_exposure for x in exposures]
+    option_idx = [i for i, (lg, _lq) in enumerate(legs) if getattr(lg, "opt", "") != "F"]
+    perp_idx = [i for i, (lg, _lq) in enumerate(legs) if getattr(lg, "opt", "") == "F"]
+    costs = [0.0] * len(legs)
+
+    if option_idx:
+        option_legs = [legs[i] for i in option_idx]
+        exposures = [float(lq) * float(getattr(lg, "vega", 0.0) or 0.0) for lg, lq in option_legs]
+        net_exposure = sum(exposures)
+        counterparty = option_legs[0][0].counterparty
+        vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
+        structure_cost = abs(net_exposure) * float(vp)
+        total_abs_exposure = sum(abs(x) for x in exposures)
+        if total_abs_exposure <= 1e-12:
+            per_leg = [structure_cost / len(option_legs)] * len(option_legs)
+        else:
+            per_leg = [structure_cost * abs(x) / total_abs_exposure for x in exposures]
+        for i, cost in zip(option_idx, per_leg):
+            costs[i] = cost
+
+    for i in perp_idx:
+        leg, leg_qty = legs[i]
+        vp_perp = CollateralOptimization._resolve(perp_cost_bps, leg.counterparty, default=_PERP_COST_BPS_FALLBACK)
+        costs[i] = abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0) * float(vp_perp) / 10_000.0
+
+    return costs
 
 
 class OptimizerV3(BaseOptimizer):
@@ -815,6 +842,98 @@ class OptimizerV3(BaseOptimizer):
 
         return box_trades
 
+    def _build_delta_rehedge_trade(
+            self,
+            trades: list[dict],
+            roll_position_ids: set,
+            delta_band: float,
+            perp_cost_bps: "dict[str, float] | float | None",
+            unwind_discount: float,
+            new_position_penalty: float,
+    ) -> dict | None:
+        """Delta-band cleanup via delta_hedger.check_rehedge, run on the book
+        this LP call just produced (existing positions minus whatever's being
+        rolled off, plus every option trade just proposed) rather than on a
+        live/intraday snapshot. ``trades`` already includes roll-unwind and
+        box-neutralizer legs by the time this runs; only C/P legs count toward
+        the option-delta mismatch (a "F" leg the LP itself proposed already
+        carries delta 1:1 and is folded into ``perp_position`` instead, so it
+        isn't double-counted).
+
+        Returns None if the band isn't breached, or if it rounds to a zero
+        trade — otherwise one perp trade dict on PERP_COUNTERPARTY, sized to
+        flatten the mismatch back to zero (delta_hedger's policy, not just to
+        the edge of the band).
+        """
+        live_positions = [p for p in self.positions if id(p) not in roll_position_ids]
+
+        trade_option_delta = sum(
+            float(t.get("delta_contribution", 0.0) or 0.0)
+            for t in trades if t.get("opt") in ("C", "P")
+        )
+        existing_perp_qty = sum(
+            float(getattr(p, "net_qty", 0.0) or 0.0)
+            for p in live_positions if str(getattr(p, "opt", "") or "") == "F"
+        )
+        lp_perp_qty = sum(
+            float(t.get("qty", 0.0) or 0.0)
+            for t in trades if t.get("opt") == "F"
+        )
+
+        decision = check_rehedge(
+            positions=live_positions,
+            spot=self.spot,
+            perp_position=existing_perp_qty + lp_perp_qty,
+            band=delta_band,
+            extra_option_delta=trade_option_delta,
+        )
+        print(f"  delta rehedge: option_delta={decision.net_option_delta:,.1f} "
+              f"perp_position={decision.perp_position:,.1f} mismatch={decision.mismatch:,.1f} "
+              f"band={decision.band:,.1f} breached={decision.breached}")
+        if not decision.breached:
+            return None
+
+        trade_qty = int(round(decision.trade_qty))
+        if trade_qty == 0:
+            return None
+
+        cost_bps = CollateralOptimization._resolve(
+            perp_cost_bps, PERP_COUNTERPARTY, default=_PERP_COST_BPS_FALLBACK,
+        )
+        cost = perp_trade_cost(trade_qty, self.spot, cost_bps)
+        est_cash_outlay = self._estimate_trade_cash_outlay(
+            qty=trade_qty, price=self.spot, held_qty=0.0,
+            unwind_discount=unwind_discount, new_position_penalty=new_position_penalty,
+            is_held=False,
+        )
+        instrument_name = f"{self.asset}-PERPETUAL"
+        return {
+            "counterparty": PERP_COUNTERPARTY,
+            "instrument": instrument_name,
+            "strategy": "DELTA_REHEDGE",
+            "strategy_instrument": instrument_name,
+            "expiry": "",
+            "dte": 0,
+            "strike": round(self.spot, 2),
+            "opt": "F",
+            "qty": trade_qty,
+            "side": "Buy" if trade_qty > 0 else "Sell",
+            "iv_pct": 0.0,
+            "bs_price_usd": round(self.spot, 2),
+            "vega": 0.0,
+            "notional": round(abs(trade_qty) * self.spot, 2),
+            "is_unwind": False,
+            "unwind_qty": 0,
+            "new_qty": abs(trade_qty),
+            "estimated_cash_outlay": round(est_cash_outlay, 2),
+            "normalized_benefit": 0.0,
+            "net_benefit": 0.0,
+            "delta_contribution": round(float(trade_qty), 4),
+            "gamma_contribution": 0.0,
+            "vega_contribution": 0.0,
+            "cost_usd": round(cost, 2),
+        }
+
     def _risk_neutral_spot_weights(
             self,
             spot_arr: np.ndarray,
@@ -939,6 +1058,7 @@ class OptimizerV3(BaseOptimizer):
                  bid_ask_min_delta: float = 0.05,
                  bid_ask_vol_pts: "dict[str, float] | float | None" = None,
                  box_fee_bps: "dict[str, float] | float | None" = None,
+                 perp_cost_bps: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
                  unwind_discount: float = 0.2,
@@ -957,6 +1077,8 @@ class OptimizerV3(BaseOptimizer):
                  max_qty: float | None = None,
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
+                 enable_delta_rehedge: bool = True,
+                 delta_band: float = 75.0,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.0,
                  manual_target: list[dict] | None = None,
@@ -1271,6 +1393,7 @@ class OptimizerV3(BaseOptimizer):
             bid_ask_atm_pct=bid_ask_atm_pct,
             bid_ask_min_delta=bid_ask_min_delta,
             bid_ask_vol_pts=bid_ask_vol_pts,
+            perp_cost_bps=perp_cost_bps,
             min_trade_delta=min_trade_delta,
             max_exposure_by_counterparty=max_exposure_by_counterparty,
             max_gross_exposure_by_counterparty=max_gross_exposure_by_counterparty,
@@ -1335,7 +1458,7 @@ class OptimizerV3(BaseOptimizer):
             for j, (qty, c) in enumerate(zip(net_qty, candidates))
             if int(np.round(qty)) != 0
         ]
-        leg_group_costs = self._leg_group_costs(traded_candidates, bid_ask_vol_pts)
+        leg_group_costs = self._leg_group_costs(traded_candidates, bid_ask_vol_pts, perp_cost_bps)
 
         for j, rounded_qty, c in traded_candidates:
             est_cost = self._estimate_candidate_cash_outlay(
@@ -1463,6 +1586,28 @@ class OptimizerV3(BaseOptimizer):
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)
 
+        # Post-LP delta cleanup: the LP fits the WHOLE payoff curve shape, so it
+        # only reaches for the perp itself when options can't do that job more
+        # cheaply — a naked perp is a straight line across the ENTIRE spot
+        # ladder (tail risk far beyond the money), so the LP avoids it even when
+        # it's nearly free, as long as options can cover the same local
+        # correction (see run_lp's own candidate universe — options are almost
+        # always preferred). This step is orthogonal to that: independent of
+        # what the LP just picked, check whether the resulting book's net
+        # option delta (existing positions plus every option trade just
+        # proposed) still sits within a band once offset by the current perp
+        # holding, and if not, propose ONE additional perp trade — a cheap,
+        # bounded, delta-only cleanup — to flatten it back to zero.
+        if enable_delta_rehedge:
+            rehedge_trade = self._build_delta_rehedge_trade(
+                trades, roll_position_ids, delta_band=delta_band,
+                perp_cost_bps=perp_cost_bps,
+                unwind_discount=unwind_discount, new_position_penalty=new_position_penalty,
+            )
+            if rehedge_trade is not None:
+                trades.append(rehedge_trade)
+                trades = self._aggregate_trade_legs(trades)
+
         # This is the "does the desk need to wire cash, or does it self-fund"
         # figure to monitor; it should track the LP's own (continuous,
         # pre-rounding) cash_neutrality accounting closely, modulo any box
@@ -1488,10 +1633,10 @@ class OptimizerV3(BaseOptimizer):
                  "cost": round(cost_by_cp.get(cp, 0.0), 2)}
             for cp, v in cash_by_counterparty.items()
         }
-        # A counterparty could in principle have cost but no C/P outlay/collection
-        # (e.g. a future-only leg with nonzero cost isn't possible today since
-        # futures carry zero vega, but keep this robust rather than silently
-        # dropping such a counterparty's cost from the table).
+        # A counterparty could have cost but no C/P outlay/collection — e.g. a
+        # perp-only leg: real (bps-of-notional) cost, but _cash_by_counterparty
+        # only tracks C/P premium, so keep this robust rather than silently
+        # dropping such a counterparty's cost from the table.
         for cp, cost in cost_by_cp.items():
             if cp not in cash_by_counterparty:
                 cash_by_counterparty[cp] = {"outlay": 0.0, "collection": 0.0, "net": 0.0, "cost": round(cost, 2)}
@@ -2680,6 +2825,12 @@ class OptimizerV3(BaseOptimizer):
                 curve_list.append(value - entry_price)
 
             return np.array(curve_list, dtype=float)
+        if c.opt == "F":
+            # Linear payoff, no vol/maturity dependence — matches
+            # bs_value_for_position's own opt=="F" handling. c.strike holds
+            # the entry spot (see BaseOptimizer._build_candidates), horizon-
+            # independent since a perp has no time value to bleed off.
+            return spot_arr - float(c.strike or 0.0)
         if c.opt not in ("C", "P", "F"):
             return np.zeros_like(spot_arr, dtype=float)
 
@@ -2723,6 +2874,7 @@ class OptimizerV3(BaseOptimizer):
             self,
             traded_candidates: list[tuple[int, int, object]],
             bid_ask_vol_pts: "dict[str, float] | float | None",
+            perp_cost_bps: "dict[str, float] | float | None" = None,
     ) -> dict[tuple, tuple[float, float]]:
         """Price each real (counterparty, expiry, strike, opt) leg off the TRUE
         combined net exposure of every candidate that trades it, not the sum of
@@ -2784,7 +2936,7 @@ class OptimizerV3(BaseOptimizer):
 
             keys = [k for k, m in merged.items() if m["qty"] != 0]
             leg_costs = _structure_leg_costs_usd(
-                [(merged[k]["leg"], merged[k]["qty"]) for k in keys], bid_ask_vol_pts,
+                [(merged[k]["leg"], merged[k]["qty"]) for k in keys], bid_ask_vol_pts, perp_cost_bps,
             )
             for k, cost in zip(keys, leg_costs):
                 result[k] = (merged[k]["qty"], cost)
@@ -2875,7 +3027,7 @@ class OptimizerV3(BaseOptimizer):
                 f"{self.asset}-{c.expiry_code}-{int(c.call_high_leg.strike)}-C"
             )
         return (
-            "{self.asset}-PERPETUAL" if c.opt == "F"
+            f"{self.asset}-PERPETUAL" if c.opt == "F"
             else f"{self.asset}-{c.expiry_code}-{int(c.strike)}-{c.opt}"
         )
 

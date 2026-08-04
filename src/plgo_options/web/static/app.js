@@ -8574,6 +8574,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
     optv2PopulateCounterparties();
     optRenderVolPts("optv2-volpts-list", optv2Data);
     optRenderBoxFee("optv2-boxfee-list", optv2Data);
+    optRenderPerpCost("optv2-perpcost-list", optv2Data);
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
@@ -8996,6 +8997,11 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       bid_ask_vol_pts: optVolPtsDict("optv2-volpts-list"),
       // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv2-boxfee-list"),
+      // Per-counterparty perp/future trading cost, in bps of notional.
+      perp_cost_bps: optPerpCostDict("optv2-perpcost-list"),
+      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
+      delta_band: parseFloat(document.getElementById("optv2-delta-band")?.value || "75"),
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -9021,6 +9027,7 @@ const OPTV2_STRATEGY_LABELS = {
   ROLL_UNWIND: "Unwind",
   ROLL_REPLACEMENT: "Roll replacement",
   BOX_NEUTRALIZER: "Box (collateral)",
+  DELTA_REHEDGE: "Delta rehedge (perp)",
   CALL_SPREAD: "Call spread",
   PUT_SPREAD: "Put spread",
   STRADDLE: "Straddle",
@@ -9547,6 +9554,38 @@ function optVolPtsDict(listId) {
   return Object.keys(d).length ? d : null;
 }
 
+// Default perp/future trading cost (bps of notional) — mirrors the engine's
+// _PERP_COST_BPS_FALLBACK so the input seeds with the same fallback.
+const OPT_DEFAULT_PERP_COST_BPS = 2;
+
+// The synthetic perp candidate always trades on this one venue (engine's
+// PERP_COUNTERPARTY) — independent of which OTC options counterparties are in
+// the loaded book, so unlike VOLpts/box-fee this always renders exactly one
+// row, never derived from data.positions.
+const OPT_PERP_COUNTERPARTY = "Binance Futures";
+
+// Render the editable perp-cost input, in BPS of notional (price × qty) — a
+// perp has zero vega so the VOLpts model can't price it.
+function optRenderPerpCost(listId, data) {
+  const box = document.getElementById(listId);
+  if (!box) return;
+  const prev = box.querySelector(".opt-perpcost-input")?.value;
+  const v = prev != null ? prev : OPT_DEFAULT_PERP_COST_BPS;
+  box.innerHTML = `<div class="optv3-field"><label>${OPT_PERP_COUNTERPARTY}<input type="number" class="opt-perpcost-input" data-cpty="${OPT_PERP_COUNTERPARTY}" value="${v}" step="0.25" min="0" style="width:5rem"></label></div>`;
+}
+
+// Collect {counterparty: perp cost bps} from the inputs, or null if none set.
+function optPerpCostDict(listId) {
+  const box = document.getElementById(listId);
+  if (!box) return null;
+  const d = {};
+  box.querySelectorAll(".opt-perpcost-input").forEach(i => {
+    const v = parseFloat(i.value);
+    if (i.dataset.cpty && Number.isFinite(v)) d[i.dataset.cpty] = v;
+  });
+  return Object.keys(d).length ? d : null;
+}
+
 // Render one editable box-trade-fee input per counterparty, in PERCENT of
 // notional (box_debit × qty — a box is economically a synthetic cash loan, so
 // dealers price its bid-ask as a % of notional, not a flat per-contract fee).
@@ -9590,6 +9629,7 @@ async function optv3Load() {
     optv3PopulateLegExpiries();
     optv3RenderManualLegs();
     optRenderBoxFee("optv3-boxfee-list", optv3Data);
+    optRenderPerpCost("optv3-perpcost-list", optv3Data);
 
     const $expiry = document.getElementById("optv3-target-expiry");
     $expiry.innerHTML = '<option value="">Select maturity…</option>';
@@ -11007,6 +11047,11 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
       // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv3-boxfee-list"),
+      // Per-counterparty perp/future trading cost, in bps of notional.
+      perp_cost_bps: optPerpCostDict("optv3-perpcost-list"),
+      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
+      delta_band: parseFloat(document.getElementById("optv3-delta-band")?.value || "75"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv3TargetProfileFile || null,

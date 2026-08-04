@@ -47,6 +47,7 @@ class CollateralOptimization:
         bid_ask_atm_pct=0.03,
         bid_ask_min_delta=0.05,
         bid_ask_vol_pts=None,
+        perp_cost_bps=None,
         min_trade_delta=0.10,
         max_exposure_by_counterparty=None,
         max_gross_exposure_by_counterparty=None,
@@ -172,7 +173,17 @@ class CollateralOptimization:
             self._resolve(bid_ask_vol_pts, getattr(c, "counterparty", ""), default=0.75)
             for c in candidates
         ])
-        c_costs = c_vegas * c_vol_pts
+        # A perp carries zero vega by construction, so the vol-points formula
+        # above would price it as free to trade. Cost it instead as bps of
+        # notional (price x qty) — the convention already used for perps
+        # elsewhere in this codebase (e.g. optimizer_v3._build_roll_unwind_trades'
+        # notional_cost, and the legacy OptimizerV2.compute_costs).
+        is_perp = np.array([getattr(c, "opt", "") == "F" for c in candidates])
+        c_perp_bps = np.array([
+            self._resolve(perp_cost_bps, getattr(c, "counterparty", ""), default=2.0)
+            for c in candidates
+        ])
+        c_costs = np.where(is_perp, c_prices * c_perp_bps / 10_000.0, c_vegas * c_vol_pts)
 
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.
         # effective_mu → 1 as mu_factor → ∞, so the LP never unwinds purely for collateral

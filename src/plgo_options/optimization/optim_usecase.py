@@ -93,6 +93,17 @@ class OptimizerRunParams:
     max_qty: float | None = None
     max_trades: int | None = None
     enable_box_neutralizer: bool = True
+    # Post-LP delta cleanup: after the LP's own trades, check whether the
+    # resulting book's net option delta (offset by the current perp holding)
+    # still sits within delta_band — if not, propose one perp trade (on
+    # base_optimizer.PERP_COUNTERPARTY) to flatten it back to zero. Orthogonal
+    # to the LP's own (rarely perp-using) shape fit — see optimizer_v3
+    # run_lp._build_delta_rehedge_trade.
+    enable_delta_rehedge: bool = True
+    # Band width in underlying units (e.g. ETH contracts) — mismatches within
+    # the band are left alone. 75 is the value this codebase's band-triggered
+    # control policy was calibrated against for ETH; tune per asset/book.
+    delta_band: float = 75.0
     downside_factor: float = 1.0
     t90_weight: float = 0.0
     max_cp_loss_usd: float | dict[str, float] | None = None
@@ -108,6 +119,11 @@ class OptimizerRunParams:
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None
     box_fee_bps: float | dict[str, float] | None = None
+    # Perp/future trading cost, in bps of notional (price × qty), per
+    # counterparty (or a flat scalar). A perp carries zero vega so the
+    # bid_ask_vol_pts model can't price it — see run_lp/CollateralOptimization.
+    # None = engine default (2 bps).
+    perp_cost_bps: float | dict[str, float] | None = None
     target_profile_file: str | None = None
 
 

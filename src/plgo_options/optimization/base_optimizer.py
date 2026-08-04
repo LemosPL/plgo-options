@@ -35,6 +35,11 @@ from .optimizer_utils import expiry_sort_key, safe_num
 
 Counterparties = ["Keyrock", "Flowdesk", "Deribit"]
 
+# Venue for the synthetic perp/future candidate — Binance Futures lists perps
+# for both ETH and FIL (Deribit doesn't offer FIL perpetuals), so it's the one
+# venue that works across both assets this optimizer supports.
+PERP_COUNTERPARTY = "Binance Futures"
+
 
 class RiskMode(Enum):
     DELTA_ONLY = "delta_only"
@@ -194,6 +199,11 @@ class BaseOptimizer:
                             continue
 
                     for counterparty in counterparties:
+                        if counterparty == PERP_COUNTERPARTY:
+                            # Not an options venue — it only ever appears here if a
+                            # caller explicitly scopes counterparties to include it;
+                            # the perp candidate itself is added unconditionally below.
+                            continue
                         c = self.create_candidate(S, strike, 0., sigma, opt, expiry_code, expiry_date, dte, counterparty)
                         candidates.append(c)
 
@@ -218,12 +228,21 @@ class BaseOptimizer:
                         candidate_by_key[(c.expiry_code, c.strike, c.opt, c.counterparty)] = c
                         candidates.append(c)
                 tt += 1
-        # ETH perpetual future: delta=1, no gamma/theta/vega, price = spot
-        if target_expiry is None:
-            perp_candidate = self.create_candidate(S, S, 0.0, 0.0, "F", "PERP", "",
-                                                   0, "Deribit")
-            perp_candidate.delta = 1
-            candidates.append(perp_candidate)
+        # Perpetual future: delta=1, no gamma/theta/vega. A perp is a standing
+        # instrument, not tied to any options expiry, so it's always in the
+        # candidate universe (unlike option legs, which are scoped to
+        # target_expiry). Always available regardless of the run's options
+        # counterparty scope too — PERP_COUNTERPARTY (Binance Futures) is a
+        # distinct hedging venue from the OTC options counterparties being
+        # scoped in/out above, not one more of them, and the book never holds
+        # a position there yet for it to be auto-selected by.
+        perp_candidate = self.create_candidate(S, S, 0.0, 0.0, "F", "PERP", "",
+                                               0, PERP_COUNTERPARTY)
+        perp_candidate.delta = 1
+        # bs_greeks prices "F" at max(K-S, 0) = 0 for S==K, but a perp's
+        # price for notional/collateral/cash-flow purposes is just spot.
+        perp_candidate.bs_price_usd = S
+        candidates.append(perp_candidate)
 
         return candidates
 
