@@ -89,8 +89,9 @@ class OptimizationParams(BaseModel):
     # Post-LP delta cleanup: after the LP's own trades, if the resulting book's
     # net option delta (offset by the current perp holding) still sits outside
     # delta_band, propose one perp trade to flatten it back to zero. Orthogonal
-    # to the LP's own shape fit, which rarely reaches for the perp itself.
-    enable_delta_rehedge: bool = True
+    # to the LP's own shape fit, which rarely reaches for the perp itself. Off
+    # by default — a new, opt-in feature until users have tried it.
+    enable_delta_rehedge: bool = False
     # Band width in underlying units (e.g. ETH contracts). 75 is the value this
     # codebase's band-triggered control policy was calibrated against for ETH.
     delta_band: float = 75.0

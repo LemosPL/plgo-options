@@ -1077,7 +1077,7 @@ class OptimizerV3(BaseOptimizer):
                  max_qty: float | None = None,
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
-                 enable_delta_rehedge: bool = True,
+                 enable_delta_rehedge: bool = False,
                  delta_band: float = 75.0,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.0,

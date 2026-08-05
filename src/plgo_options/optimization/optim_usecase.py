@@ -98,8 +98,9 @@ class OptimizerRunParams:
     # still sits within delta_band — if not, propose one perp trade (on
     # base_optimizer.PERP_COUNTERPARTY) to flatten it back to zero. Orthogonal
     # to the LP's own (rarely perp-using) shape fit — see optimizer_v3
-    # run_lp._build_delta_rehedge_trade.
-    enable_delta_rehedge: bool = True
+    # run_lp._build_delta_rehedge_trade. Off by default — a new, opt-in
+    # feature until users have tried it.
+    enable_delta_rehedge: bool = False
     # Band width in underlying units (e.g. ETH contracts) — mismatches within
     # the band are left alone. 75 is the value this codebase's band-triggered
     # control policy was calibrated against for ETH; tune per asset/book.

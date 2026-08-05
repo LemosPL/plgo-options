@@ -1568,7 +1568,7 @@
           Box Neutralizer
         </label>
         <label class="toggle-label" style="margin:0" title="Post-LP step: if the resulting book's net option delta (existing positions plus every option trade just proposed), offset by the current perp holding, still sits outside the band below, propose one perp trade on Binance Futures to flatten it back to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.">
-          <input type="checkbox" id="optv2-enable-delta-rehedge" checked>
+          <input type="checkbox" id="optv2-enable-delta-rehedge">
           Delta Rehedge (perp)
         </label>
         <label class="pf-filter-label">Delta Band
@@ -1937,7 +1937,7 @@
           <div class="optv3-group-title">Output</div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
-          <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge"> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
           <div class="optv3-field"><label>Delta band<input type="number" id="optv3-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
