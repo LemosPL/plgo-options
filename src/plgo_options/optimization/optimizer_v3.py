@@ -1649,7 +1649,19 @@ class OptimizerV3(BaseOptimizer):
         # list — see the "after_book_mtm" result field below for why this is
         # kept separate from the Before/After payoff curves.
         total_cost_usd = sum(float(t.get("cost_usd", 0.0) or 0.0) for t in trades)
-        pnl_today_final = sum(float(t.get("bs_price_usd", 0.0) or 0.0) * float(t.get("qty", 0.0) or 0.0) for t in trades)
+        # Value of each new trade AT ENTRY (mirrors build_payoffs' own pnl_today):
+        # for an option that's qty x bs_price_usd (the premium IS its value at
+        # entry); for a perp (opt=="F") bs_price_usd is spot itself, not a
+        # premium, and a perp is a zero-cost contract at entry — its real value
+        # there is qty x (spot - entry strike), ~0 since entry IS today's spot.
+        # Using bs_price_usd for a perp here would add its full notional
+        # instead, wrongly inflating/deflating after_book_mtm below.
+        pnl_today_final = sum(
+            float(t.get("qty", 0.0) or 0.0) * (self.spot - float(t.get("strike", 0.0) or 0.0))
+            if t.get("opt") == "F"
+            else float(t.get("bs_price_usd", 0.0) or 0.0) * float(t.get("qty", 0.0) or 0.0)
+            for t in trades
+        )
 
         horizons = sorted(set(self.chart_horizons + [0, 90]))
         before_payoff_by_horizon, after_payoff_by_horizon, current_book_mtm = self.build_payoffs(
@@ -2576,7 +2588,20 @@ class OptimizerV3(BaseOptimizer):
         # essentially never exactly on it; interpolation error shrinks with the
         # square of the gap, vs. linearly for nearest-point snapping.
         today_value_before = float(np.interp(self.spot, spot_arr, before_payoff["0"]))
-        pnl_today = sum(trade["bs_price_usd"] * trade["qty"] for trade in trades)
+        # bs_price_usd IS the raw curve's value at today's spot for an option
+        # (same S/K/T/sigma used to price it), so netting qty x bs_price_usd
+        # cancels the trade curve's own contribution there — but for a perp
+        # (opt=="F"), bs_price_usd is spot itself (see BaseOptimizer's
+        # create_candidate / PERP_COUNTERPARTY handling), not a premium; its
+        # raw curve value at today's spot is qty x (spot - entry), which is
+        # ~0 since entry IS today's spot. Using bs_price_usd there instead
+        # would net out qty x spot — an extra, spurious shift of the entire
+        # "after" curve by the trade's full notional.
+        pnl_today = sum(
+            trade["qty"] * (self.spot - trade["strike"]) if trade["opt"] == "F"
+            else trade["qty"] * trade["bs_price_usd"]
+            for trade in trades
+        )
         # NOTE: deliberately NOT netting transaction cost into this anchor.
         # cost_usd is a one-time, permanent hit applied identically at every
         # horizon (paid once at execution, never repeated) — so it cancels
