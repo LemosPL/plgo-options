@@ -352,6 +352,11 @@
       Live Greeks, IV, and mark prices are unavailable for this asset (no Deribit feed). Payoffs use Black-Scholes with manual IV (80%).
     </div>
 
+    <!-- Stale spot fallback banner (live feed down — e.g. Deribit maintenance) -->
+    <div id="pf-stale-spot-banner" class="under-construction-banner" style="display:none">
+      Live spot price is unavailable right now (market data feed down) — showing the most recent trade's reference spot instead. Greeks, IV, and P&amp;L below are computed off this stale price.
+    </div>
+
     <!-- Summary banner -->
     <section class="card" id="portfolio-summary">
       <h2>Portfolio MTM Summary</h2>

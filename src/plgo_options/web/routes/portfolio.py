@@ -230,6 +230,34 @@ def _iv_from_surface(
 # Shared market context (reused by /pnl and the Deals/Risk page)
 # ---------------------------------------------------------------------------
 
+async def _fallback_spot_from_trade_history(asset: str) -> float | None:
+    """Best-effort 'last known' spot price for *asset*, used when the live
+    market-data feed (Deribit) is down — e.g. during their own maintenance
+    windows, which return a 503 with no retry that would help. Reads the most
+    recently entered trade's own reference spot from the DB (falling back to
+    the legacy xlsx if the DB has no rows for this asset). Returns None if
+    there's no trade history to fall back to at all — callers decide what to
+    do with that (portfolio_pnl still fails loudly; build_market_context's
+    "never raises" contract means it settles for 0.0).
+    """
+    try:
+        db = await get_db()
+        db_trades = await list_trades(db, include_expired=True, include_deleted=False, asset=asset.upper())
+        spots = [_safe_float(t.get("ref_spot")) for t in db_trades if _safe_float(t.get("ref_spot")) > 0]
+        if spots:
+            return spots[-1]
+    except Exception:
+        pass
+    try:
+        legacy_trades = read_fil_trades() if asset.upper() == "FIL" else read_eth_trades()
+        spots = [_safe_float(t.get("Ref. Spot Price")) for t in legacy_trades if _safe_float(t.get("Ref. Spot Price")) > 0]
+        if spots:
+            return spots[-1]
+    except Exception:
+        pass
+    return None
+
+
 async def build_market_context(asset: str) -> dict:
     """Fetch spot + vol smiles for an asset, returning a reusable context.
 
@@ -266,6 +294,13 @@ async def build_market_context(asset: str) -> dict:
     else:
         try:
             spot = await client.get_eth_spot_price()
+        except Exception:
+            # Leaving spot at its 0.0 default here (this function's documented
+            # "never raises" contract) would silently feed a $0 spot into
+            # every caller's pricing — worse than the outage itself. Fall back
+            # to the most recent trade's own reference spot instead.
+            spot = await _fallback_spot_from_trade_history(asset) or 0.0
+        try:
             smiles = await _fetch_smiles()
         except Exception:
             smiles = {}
@@ -335,6 +370,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     # 2. Fetch market data — spot, smiles (for scenario curves), and batch tickers
     smiles = {}
     tickers = {}
+    stale_spot = False
 
     if is_fil:
         # FIL: fetch live spot + ETH vol surface scaled by HV ratio
@@ -343,6 +379,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         except Exception:
             spots_from_trades = [_safe_float(t.get("Ref. Spot Price")) for t in trades if _safe_float(t.get("Ref. Spot Price")) > 0]
             eth_spot = spots_from_trades[0] if spots_from_trades else 3.0
+            stale_spot = True
 
         # Build FIL vol surface = ETH vol surface × (FIL HV / ETH HV)
         # Project strikes from ETH moneyness to FIL price space
@@ -362,9 +399,27 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
     else:
         try:
             eth_spot = await client.get_eth_spot_price()
-            smiles = await _fetch_smiles()
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Market data error: {e}")
+            # No retry helps here — this is typically Deribit's own maintenance
+            # window (a 503 with no retry-after that would make retrying
+            # useful), not a transient blip. Fall back to the most recent
+            # trade's own reference spot rather than blocking the whole
+            # portfolio view — flagged via stale_spot so the UI can warn this
+            # isn't a live mark. Searches full trade history (not just
+            # `trades`, which honors include_expired and can be active-only —
+            # active trades don't always have ref_spot populated, so scoping
+            # the fallback to them can leave nothing to fall back to even
+            # when older trades have perfectly good history). Only re-raise
+            # if there's truly no trade anywhere to fall back to.
+            fallback_spot = await _fallback_spot_from_trade_history(asset)
+            if fallback_spot is None:
+                raise HTTPException(status_code=502, detail=f"Market data error (no fallback spot available): {e}")
+            eth_spot = fallback_spot
+            stale_spot = True
+        try:
+            smiles = await _fetch_smiles()
+        except Exception:
+            pass  # fall back to DEFAULT_IV, same as the FIL branch above
 
         # Collect unique Deribit instrument names for batch ticker fetch.
         unique_instruments: set[str] = set()
@@ -671,6 +726,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         "all_horizons": sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0])),
         "vol_surface": vol_surface,
         "no_live_data": False,
+        # True when eth_spot came from a fallback (most recent trade's own
+        # reference spot) rather than a live feed — e.g. a Deribit outage/
+        # maintenance window. The UI should warn the user this isn't a live
+        # mark rather than presenting it as one.
+        "stale_spot": stale_spot,
         "positions": enriched,
         "totals": {
             "total_entry_premium": round(total_entry, 2),

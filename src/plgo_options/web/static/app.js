@@ -3146,6 +3146,10 @@ async function loadPortfolio() {
     // Show/hide no-live-data banner for FIL
     const banner = document.getElementById("pf-no-live-banner");
     if (banner) banner.style.display = pfData.no_live_data ? "" : "none";
+    // Show/hide stale-spot banner — live feed down (e.g. Deribit maintenance),
+    // eth_spot fell back to the most recent trade's own reference spot.
+    const staleSpotBanner = document.getElementById("pf-stale-spot-banner");
+    if (staleSpotBanner) staleSpotBanner.style.display = pfData.stale_spot ? "" : "none";
     document.getElementById("pf-spot-label").textContent = `${currentAsset} Spot`;
 
     pfRenderAll();
