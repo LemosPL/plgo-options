@@ -8672,6 +8672,10 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
     optRenderVolPts("optv2-volpts-list", optv2Data);
     optRenderBoxFee("optv2-boxfee-list", optv2Data);
     optRenderPerpCost("optv2-perpcost-list", optv2Data);
+    // Hint the live spot as the placeholder — blank still means "use live
+    // spot", this is just so the field isn't a mystery number to fill in.
+    const $customSpot = document.getElementById("optv2-custom-spot");
+    if ($customSpot) $customSpot.placeholder = optv2Fmt(optv2Data.eth_spot, 2);
     optv2OptResult = null;  // reset so chart shows all horizons
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
@@ -9062,8 +9066,14 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const maxCpLossRaw = document.getElementById("optv2-max-cp-loss")?.value;
     const maxCpLoss = maxCpLossRaw === "" || maxCpLossRaw === undefined ? null : parseFloat(maxCpLossRaw);
     const useCollateralCap = document.getElementById("optv2-use-collateral-cap")?.checked || false;
+    const customSpotRaw = document.getElementById("optv2-custom-spot")?.value;
+    const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
+      // Blank (null) = live spot, unchanged from before this existed. Set =
+      // run the whole optimization (candidates, greeks, target anchor,
+      // payoff ladder) as if spot were this price instead.
+      custom_spot: customSpot,
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv2-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv2-t90-weight")?.value || "0"),
@@ -9102,6 +9112,16 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
+    // Surface whether this run used a hypothetical spot instead of the live
+    // mark — the "before" curve above is the CURRENT book repriced at that
+    // hypothetical spot, not what the book is actually worth right now.
+    const $customSpotWrap = document.getElementById("optv2-sum-custom-spot-wrap");
+    if ($customSpotWrap) {
+      $customSpotWrap.style.display = customSpot != null ? "" : "none";
+      if (customSpot != null) {
+        document.getElementById("optv2-sum-custom-spot").textContent = "$" + optv2Fmt(customSpot, 2);
+      }
+    }
     // If the run was saved, reveal + refresh the snapshots list so the new file
     // shows immediately with its download link.
     if (saveRequested) {

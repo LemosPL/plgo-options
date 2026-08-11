@@ -1527,6 +1527,10 @@
             <option value="">Select maturity…</option>
           </select>
         </label>
+        <label class="pf-filter-label">Custom Spot
+          <input type="number" id="optv2-custom-spot" step="1" min="0" style="width:6.5rem"
+            title="Run the whole optimization as if spot were this price instead of the live mark — candidate strikes, greeks, the target profile anchor, and the payoff ladder all re-center on it (existing positions are repriced sticky-strike, same as the payoff chart). Useful for anticipating what you'd trade if spot gapped to a given level. Blank = live spot (default, unchanged from before this existed).">
+        </label>
         <label class="pf-filter-label">Unwind Discount
           <input type="number" id="optv2-unwind-discount" value="0.2" step="0.05" min="0" max="1" style="width:5rem"
             title="Fraction of mark value assumed lost when unwinding an existing position (0.2 = 20% slippage on close).">
@@ -1681,6 +1685,7 @@
         <span>Premium sold: <strong id="optv2-sum-prem-sold">--</strong></span>
         <span>Premium bought: <strong id="optv2-sum-prem-bought">--</strong></span>
         <span>Target expiry: <strong id="optv2-sum-target-expiry">--</strong></span>
+        <span id="optv2-sum-custom-spot-wrap" style="display:none">Custom spot: <strong id="optv2-sum-custom-spot" style="color:var(--orange)">--</strong></span>
       </div>
 
       <!-- Cash flow by counterparty: does the desk self-fund these trades, or does it need to wire cash? -->

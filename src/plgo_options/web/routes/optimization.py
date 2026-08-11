@@ -78,6 +78,13 @@ class OptimizationParams(BaseModel):
     collateral_budget_pct: float | None = None
     save_usecase_snapshot: bool = False
     is_replay: bool = False
+    # Run the whole optimization as if spot were this price instead of the
+    # live mark — candidate strikes, greeks, the target profile anchor, and
+    # the payoff ladder all re-center on it (see run_optimizer below; the
+    # optimizer engine itself needs no changes, since spot_ladder is already
+    # rebuilt fresh from whatever spot it's given on every run). None
+    # (default) = live spot, unchanged from before this existed.
+    custom_spot: float | None = None
     counterparties: list[str] | None = None
     collateral_tier_free_pct: float | dict[str, float] = 0.0
     collateral_tier_mu: float | dict[str, float] | None = None
@@ -167,6 +174,20 @@ async def run_optimizer(params: OptimizationParams):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to gather portfolio data: {e}")
+
+    # Hypothetical spot: override before OptimizerUseCase.from_portfolio_payload
+    # reads it. That's the ONE place spot enters the optimizer — it re-derives
+    # spot_ladder fresh (still centered on whatever spot it's given, still
+    # bounded by the same shared min/max) every call, and every downstream
+    # candidate/greek/target-profile calculation reads spot from there, so no
+    # other change is needed for the whole run to re-center on it. Existing
+    # positions are still the real book — bs_value_for_position reprices them
+    # sticky-strike (same as the payoff chart), not literally repriced at the
+    # live spot, so this is a real "what would I trade if spot gapped to X"
+    # scenario, not just a display trick.
+    if params.custom_spot is not None and params.custom_spot > 0:
+        pnl_data["spot"] = params.custom_spot
+        pnl_data["eth_spot"] = params.custom_spot
 
     # Scope the input book to a caller-selected subset of trades, if requested.
     # Positions in the /pnl payload carry the DB trade id under "id" (same id the
