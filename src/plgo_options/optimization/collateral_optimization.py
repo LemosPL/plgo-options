@@ -2,6 +2,16 @@
 import pulp
 import numpy as np
 
+# A composite whose net-vega discount (see optimize()'s composite_groups
+# handling) falls at or below this fraction of its gross leg exposure is
+# treated as "box-like" — vega has all but cancelled, same as a box's
+# provably-zero net vega under put-call parity — and gets a bps-of-notional
+# cost floor added back in (box_fee_bps) so it doesn't look free to trade.
+# Small (not exactly 0) to tolerate floating-point/quantity-rounding noise
+# on a real book without also catching genuinely directional composites that
+# just happen to be partially hedged.
+_BOX_LIKE_DISCOUNT_THRESHOLD = 0.05
+
 
 class CollateralOptimization:
     def __init__(self, asset, counterparties):
@@ -230,10 +240,26 @@ class CollateralOptimization:
                     for j in members
                 ]
                 total_abs_exposure = sum(abs(x) for x in leg_exposure)
-                if total_abs_exposure > 1e-9:
-                    discount = abs(sum(leg_exposure)) / total_abs_exposure
+                discount = abs(sum(leg_exposure)) / total_abs_exposure if total_abs_exposure > 1e-9 else 0.0
+                for j in members:
+                    c_trade_costs[j] *= discount
+                # Put-call parity makes a box's (long call/short put at one
+                # strike, the reverse at another) net vega exactly zero, so
+                # the discount above prices it at ~0 — correct for what vega
+                # can see, but a box is still 4 real fills against the
+                # counterparty's real bid-ask, priced by dealers as bps of
+                # notional (an implied-rate spread on the synthetic loan),
+                # same convention already used for a newly-built box in
+                # optimizer_v3._build_box_cash_neutralizer_trades. Add that
+                # floor back in whenever the discount has all but zeroed the
+                # cost out, using each leg's own price as the notional base
+                # (mirrors the perp bps-of-notional cost above).
+                if discount <= _BOX_LIKE_DISCOUNT_THRESHOLD:
                     for j in members:
-                        c_trade_costs[j] *= discount
+                        box_fee_bp = self._resolve(
+                            box_fee_bps, getattr(candidates[j], "counterparty", ""), default=0.0,
+                        )
+                        c_trade_costs[j] += float(c_prices[j]) * float(box_fee_bp or 0.0) / 10_000.0
 
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.
         # effective_mu → 1 as mu_factor → ∞, so the LP never unwinds purely for collateral

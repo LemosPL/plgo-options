@@ -74,6 +74,19 @@ def classify_structure(legs: list[dict]) -> tuple[str, str]:
         return "2-Leg Structure", "Two-leg combination"
 
     if n == 4 and len(calls) == 2 and len(puts) == 2:
+        # Box: a call AND a put at each of exactly two strikes (long the low
+        # strike's call, short its put; the reverse at the high strike, or
+        # vice versa) — a synthetic loan, flat vs. spot by put-call parity.
+        # Checked first because it degenerates the iron condor/butterfly
+        # bracket check below (short_strikes == long_strikes == {K1, K2}),
+        # which would otherwise misclassify it as an Iron Condor.
+        strikes = {round(l["strike"], 6) for l in legs}
+        if len(strikes) == 2:
+            low_k, high_k = sorted(strikes)
+            low_call = next(l for l in calls if abs(l["strike"] - low_k) < 1e-9)
+            direction = "Long" if low_call["sign"] > 0 else "Short"
+            return f"{direction} Box", f"Box spread {_fmt_k(low_k)}/{_fmt_k(high_k)}"
+
         # Iron condor / butterfly: short the inner strikes, long the outer wings.
         # Reverse (long inner, short outer) is the debit "reverse" variant.
         short_strikes = sorted(l["strike"] for l in shorts)
@@ -154,9 +167,9 @@ def _decompose_one_expiry(legs: list[dict]) -> list[list[dict]]:
             used.add(a["id"]); used.add(b["id"])
 
     # 1b. Reassemble a call vertical + put vertical of matching size into a
-    # single iron condor / butterfly, so the whole 4-leg structure stays one
-    # deal (correct label + net premium) instead of two split spreads. Only
-    # merge when it actually classifies as an iron structure; otherwise keep
+    # single iron condor / butterfly / box, so the whole 4-leg structure stays
+    # one deal (correct label + net premium) instead of two split spreads.
+    # Only merge when it actually classifies as one of those; otherwise keep
     # the two spreads separate.
     used_put_v: set = set()
     for cv in call_verticals:
@@ -168,7 +181,7 @@ def _decompose_one_expiry(legs: list[dict]) -> list[list[dict]]:
             if abs(min(l["qty"] for l in pv) - cv_qty) < 1e-6:
                 combo = cv + pv
                 label, _ = classify_structure(combo)
-                if "Iron" in label:
+                if "Iron" in label or "Box" in label:
                     structures.append(combo)
                     used_put_v.add(pi)
                     merged = True
