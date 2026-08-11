@@ -1088,6 +1088,14 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     const $optv2MaxQty = document.getElementById("optv2-max-qty");
     if ($optv2MaxQty) $optv2MaxQty.value = asset === "FIL" ? 5000000 : 5000;
 
+    // Delta rehedge band is likewise asset-scaled (same ~1000x factor as Max
+    // Qty above) — 75 is calibrated for ETH; left at that for FIL it's ~$52
+    // of notional, trivial next to real FIL position sizes, so the rehedge
+    // would fire on virtually any nonzero mismatch and fully flatten delta
+    // every time instead of acting as an actual band.
+    const $optv2DeltaBand = document.getElementById("optv2-delta-band");
+    if ($optv2DeltaBand) $optv2DeltaBand.value = asset === "FIL" ? 75000 : 75;
+
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
