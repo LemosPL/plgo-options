@@ -1086,6 +1086,7 @@ class OptimizerV3(BaseOptimizer):
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,
                  collateral_by_cp: "dict[str, dict[str, float]] | None" = None,
                  enforce_collateral_cap: bool = False,
+                 enable_composite_unwind: bool = True,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1178,6 +1179,28 @@ class OptimizerV3(BaseOptimizer):
         n_with_existing = sum(1 for c in candidates if getattr(c, "existing_qty", 0.0) != 0.0)
         n_unwind_only = sum(1 for c in candidates if getattr(c, "unwind_only", False))
         print(f"candidates: {len(candidates)} total, {n_with_existing} with existing_qty≠0, {n_unwind_only} unwind_only")
+
+        # Held multi-leg deals ("composites") that can be safely unwound as one
+        # unit — see base_optimizer.get_composite_groups for what "safely"
+        # means. Only vanilla (single-leg) Candidates correspond 1:1 to a real
+        # leg, so composite membership is resolved against option_legs only,
+        # never the synthetic spread/straddle/condor candidates built above.
+        composite_leg_groups: dict[str, list[int]] = {}
+        if enable_composite_unwind:
+            candidate_index_by_key = {
+                (c.expiry_code, c.strike, c.opt, c.counterparty): j
+                for j, c in enumerate(option_legs)
+            }
+            n_skipped = 0
+            for cid, leg_qtys in self.get_composite_groups().items():
+                indices = [candidate_index_by_key.get(key) for key, _qty in leg_qtys]
+                if len(indices) >= 2 and all(j is not None for j in indices):
+                    composite_leg_groups[cid] = indices
+                else:
+                    n_skipped += 1
+            if composite_leg_groups or n_skipped:
+                print(f"  composite unwind: {len(composite_leg_groups)} composites linked, "
+                      f"{n_skipped} skipped (a leg fell outside this run's candidate universe)")
 
         # Manual target (user-drawn on the Optimizer v3 screen) overrides the
         # parametric one when supplied — the LP fits the book to these control
@@ -1404,6 +1427,7 @@ class OptimizerV3(BaseOptimizer):
             forced_cash_by_counterparty=forced_cash_by_counterparty,
             max_qty=max_qty,
             leg_groups=leg_groups,
+            composite_groups=composite_leg_groups,
             downside_factor=downside_factor,
             residual_payoff_90=residual_90,
             c_payoffs_90=c_payoffs_90,

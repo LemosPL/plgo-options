@@ -21,7 +21,7 @@ consistent across the app.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import date
 
 from fastapi import APIRouter, HTTPException
@@ -29,6 +29,11 @@ from pydantic import BaseModel
 import numpy as np
 
 from plgo_options.data.database import get_db
+from plgo_options.data.deal_grouping import (
+    classify_structure as _classify,
+    decompose_legs,
+    group_composite_legs,
+)
 from plgo_options.data.trade_repository import list_trades
 from plgo_options.web.routes.portfolio import (
     DEFAULT_IV,
@@ -46,180 +51,10 @@ router = APIRouter()
 GRID_POINTS = 161
 
 
-# ---------------------------------------------------------------------------
-# Strategy classification
-# ---------------------------------------------------------------------------
-
-def _classify(legs: list[dict]) -> tuple[str, str]:
-    """Classify a set of legs into (short_label, description).
-
-    Each leg dict needs ``opt`` ("C"/"P"), ``sign`` (+1 long / -1 short) and
-    ``strike``.
-    """
-    n = len(legs)
-    calls = [l for l in legs if l["opt"] == "C"]
-    puts = [l for l in legs if l["opt"] == "P"]
-    longs = [l for l in legs if l["sign"] > 0]
-    shorts = [l for l in legs if l["sign"] < 0]
-
-    if n == 1:
-        l = legs[0]
-        side = "Long" if l["sign"] > 0 else "Short"
-        kind = "Call" if l["opt"] == "C" else "Put"
-        return f"{side} {kind}", f"Single {side.lower()} {kind.lower()} @ {_fmt_k(l['strike'])}"
-
-    if n == 2:
-        a, b = sorted(legs, key=lambda x: x["strike"])
-        # Vertical spreads (same option type, one long one short)
-        if len(calls) == 2 and len(longs) == 1:
-            bull = a["sign"] > 0  # long the lower strike => bullish
-            label = "Bull Call Spread" if bull else "Bear Call Spread"
-            return label, f"Call spread {_fmt_k(a['strike'])}/{_fmt_k(b['strike'])}"
-        if len(puts) == 2 and len(longs) == 1:
-            bull = b["sign"] > 0  # long the higher strike => bullish (debit) ... else bearish
-            label = "Bull Put Spread" if a["sign"] < 0 else "Bear Put Spread"
-            return label, f"Put spread {_fmt_k(a['strike'])}/{_fmt_k(b['strike'])}"
-        # Straddle / strangle (one call one put)
-        if len(calls) == 1 and len(puts) == 1:
-            same_k = abs(calls[0]["strike"] - puts[0]["strike"]) < 1e-9
-            if len(longs) == 2:
-                return ("Long Straddle" if same_k else "Long Strangle",
-                        "Long call + long put")
-            if len(shorts) == 2:
-                return ("Short Straddle" if same_k else "Short Strangle",
-                        "Short call + short put")
-            # Mixed: risk reversal / collar
-            return "Risk Reversal / Collar", "Long one side, short the other"
-        return "2-Leg Structure", "Two-leg combination"
-
-    if n == 4 and len(calls) == 2 and len(puts) == 2:
-        # Iron condor / butterfly: short the inner strikes, long the outer wings.
-        # Reverse (long inner, short outer) is the debit "reverse" variant.
-        short_strikes = sorted(l["strike"] for l in shorts)
-        long_strikes = sorted(l["strike"] for l in longs)
-        if len(shorts) == 2 and len(longs) == 2:
-            short_inner = (min(long_strikes) <= min(short_strikes)
-                           and max(long_strikes) >= max(short_strikes))
-            long_inner = (min(short_strikes) <= min(long_strikes)
-                          and max(short_strikes) >= max(long_strikes))
-            if short_inner:
-                if abs(short_strikes[0] - short_strikes[1]) < 1e-9:
-                    return "Iron Butterfly", "Short straddle + protective wings"
-                return "Iron Condor", "Short strangle + protective wings"
-            if long_inner:
-                if abs(long_strikes[0] - long_strikes[1]) < 1e-9:
-                    return "Reverse Iron Butterfly", "Long straddle funded by short wings"
-                return "Reverse Iron Condor", "Long strangle funded by short wings"
-        return "4-Leg Structure", "Four-leg combination"
-
-    nc, npu = len(calls), len(puts)
-    return f"Custom ({n}-leg)", f"{nc} call leg(s), {npu} put leg(s)"
-
-
 def _fmt_k(k: float) -> str:
     if k >= 100:
         return f"{int(round(k))}"
     return f"{k:g}"
-
-
-# ---------------------------------------------------------------------------
-# Structure decomposition
-# ---------------------------------------------------------------------------
-# A same-counterparty, same-day booking may actually be several distinct
-# structures (e.g. two call spreads + a put spread + naked legs) rather than one
-# big "Custom (N-leg)" blob. Without a trade/ticket id we can't know for sure,
-# so we *suggest* a decomposition by greedily pairing legs into recognisable
-# structures. The user can override the grouping in the UI.
-
-def decompose_legs(legs: list[dict]) -> list[list[dict]]:
-    """Split a leg set into a list of recognisable sub-structures.
-
-    Small, already-clean structures (<=4 legs that classify to a named strategy)
-    are kept intact. Anything else is decomposed within each expiry: vertical
-    spreads first, then straddles/strangles, then risk reversals, then the
-    remaining naked legs as singles.
-    """
-    label, _ = _classify(legs)
-    clean = len(legs) <= 4 and "Custom" not in label and "Structure" not in label
-    if clean:
-        return [legs]
-
-    by_exp: dict[str, list[dict]] = defaultdict(list)
-    for l in legs:
-        by_exp[l["expiry"]].append(l)
-    out: list[list[dict]] = []
-    for _exp, elegs in by_exp.items():
-        out.extend(_decompose_one_expiry(elegs))
-    return out
-
-
-def _decompose_one_expiry(legs: list[dict]) -> list[list[dict]]:
-    used: set = set()
-
-    def avail(pred):
-        return [l for l in legs if l["id"] not in used and pred(l)]
-
-    structures: list[list[dict]] = []
-
-    # 1. Vertical spreads — same option type, opposite side, paired by size.
-    call_verticals: list[list[dict]] = []
-    put_verticals: list[list[dict]] = []
-    for opt in ("C", "P"):
-        longs = sorted(avail(lambda l: l["opt"] == opt and l["sign"] > 0), key=lambda l: -l["qty"])
-        shorts = sorted(avail(lambda l: l["opt"] == opt and l["sign"] < 0), key=lambda l: -l["qty"])
-        bucket = call_verticals if opt == "C" else put_verticals
-        for a, b in zip(longs, shorts):
-            bucket.append([a, b])
-            used.add(a["id"]); used.add(b["id"])
-
-    # 1b. Reassemble a call vertical + put vertical of matching size into a
-    # single iron condor / butterfly, so the whole 4-leg structure stays one
-    # deal (correct label + net premium) instead of two split spreads. Only
-    # merge when it actually classifies as an iron structure; otherwise keep
-    # the two spreads separate.
-    used_put_v: set = set()
-    for cv in call_verticals:
-        cv_qty = min(l["qty"] for l in cv)
-        merged = False
-        for pi, pv in enumerate(put_verticals):
-            if pi in used_put_v:
-                continue
-            if abs(min(l["qty"] for l in pv) - cv_qty) < 1e-6:
-                combo = cv + pv
-                label, _ = _classify(combo)
-                if "Iron" in label:
-                    structures.append(combo)
-                    used_put_v.add(pi)
-                    merged = True
-                    break
-        if not merged:
-            structures.append(cv)
-    for pi, pv in enumerate(put_verticals):
-        if pi not in used_put_v:
-            structures.append(pv)
-
-    # 2. Straddles / strangles — same-side call + put.
-    for sgn in (1, -1):
-        cs = sorted(avail(lambda l: l["opt"] == "C" and l["sign"] == sgn), key=lambda l: -l["qty"])
-        ps = sorted(avail(lambda l: l["opt"] == "P" and l["sign"] == sgn), key=lambda l: -l["qty"])
-        for a, b in zip(cs, ps):
-            structures.append([a, b])
-            used.add(a["id"]); used.add(b["id"])
-
-    # 3. Risk reversals / collars — remaining call + put (necessarily opposite side).
-    cs = sorted(avail(lambda l: l["opt"] == "C"), key=lambda l: -l["qty"])
-    ps = sorted(avail(lambda l: l["opt"] == "P"), key=lambda l: -l["qty"])
-    for a, b in zip(cs, ps):
-        structures.append([a, b])
-        used.add(a["id"]); used.add(b["id"])
-
-    # 4. Whatever is left over — naked single legs.
-    for l in legs:
-        if l["id"] not in used:
-            structures.append([l])
-            used.add(l["id"])
-
-    return structures
 
 
 # ---------------------------------------------------------------------------
@@ -376,51 +211,17 @@ async def _assemble(asset: str, include_expired: bool,
     grid_hi = hi_ref * 1.6
     grid = np.linspace(grid_lo, grid_hi, GRID_POINTS)
 
-    # 5. Resolve each counterparty's legs into structures (deals).
+    # 5. Resolve each counterparty's legs into structures (deals). Grouping
+    # itself (manual override > shared trade_id > trade-date + heuristic
+    # decomposition) lives in data.deal_grouping so the optimizer can build
+    # the exact same composites when deciding what to unwind.
     deals = []
     for cpty, legs in by_cpty.items():
         omap = overrides.get(cpty) or {}
-        if omap:
-            # Manual grouping: bucket legs by their assigned group_id.
-            grouped: dict[str, list[dict]] = defaultdict(list)
-            for leg in legs:
-                gid = omap.get(str(leg["id"])) or f"date:{leg['trade_date']}"
-                grouped[gid].append(leg)
-            for gid, glegs in grouped.items():
-                tdate = min((l["trade_date"] for l in glegs), default="")
-                deals.append(_build_deal(cpty, tdate, glegs, gid, grid, spot,
-                                         smiles, deribit_dates, today, manual=True))
-        else:
-            # Auto grouping. Prefer the booking's real ticket id (``trade_id``)
-            # when it actually ties several legs together — it groups a whole
-            # structure (including legs rolled in on later dates) as one deal,
-            # which is authoritative. But ``trade_id`` semantics vary by
-            # counterparty: some book one id per structure, others one id per
-            # leg. A singleton id carries no grouping information, so treat only
-            # ids shared by >=2 legs as tickets; everything else falls back to
-            # grouping by trade date + heuristic decomposition.
-            tid_counts = Counter(leg.get("trade_id") or "" for leg in legs)
-            with_id: dict[str, list[dict]] = defaultdict(list)
-            without_id: list[dict] = []
-            for leg in legs:
-                tid = leg.get("trade_id") or ""
-                if tid and tid_counts[tid] >= 2:
-                    with_id[tid].append(leg)
-                else:
-                    without_id.append(leg)
-
-            for tid, glegs in with_id.items():
-                tdate = min((l["trade_date"] for l in glegs), default="")
-                deals.append(_build_deal(cpty, tdate, glegs, f"tid:{tid}",
-                                         grid, spot, smiles, deribit_dates, today))
-
-            by_date: dict[str, list[dict]] = defaultdict(list)
-            for leg in without_id:
-                by_date[leg["trade_date"]].append(leg)
-            for tdate, dlegs in by_date.items():
-                for i, struct in enumerate(decompose_legs(dlegs)):
-                    deals.append(_build_deal(cpty, tdate, struct, f"{tdate}#{i}",
-                                             grid, spot, smiles, deribit_dates, today))
+        for gid, glegs in group_composite_legs(legs, omap or None):
+            tdate = min((l["trade_date"] for l in glegs), default="")
+            deals.append(_build_deal(cpty, tdate, glegs, gid, grid, spot,
+                                     smiles, deribit_dates, today, manual=bool(omap)))
 
     # Sort by soonest expiry, then counterparty.
     deals.sort(key=lambda d: (d["expiry"] or "9999", d["counterparty"], d["group_id"]))

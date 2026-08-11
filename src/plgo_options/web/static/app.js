@@ -9098,6 +9098,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
+      enable_composite_unwind: document.getElementById("optv2-enable-composite-unwind")?.checked ?? true,
+      composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: selectedCounterparties.length ? selectedCounterparties : null,
@@ -11161,6 +11163,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
+      enable_composite_unwind: document.getElementById("optv3-enable-composite-unwind")?.checked ?? true,
+      composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: cptiesParam,
@@ -12548,6 +12552,15 @@ function loadOverrides() {
 }
 function saveOverrides() {
   try { localStorage.setItem(_ovKey(), JSON.stringify(dealsOverrides)); } catch {}
+}
+
+// Same manual grouping the Deals screen uses, for the optimizer's
+// composite_overrides param — re-reads localStorage so it's fresh even if
+// the Deals screen wasn't opened this session (e.g. a stale in-memory
+// dealsOverrides from a previously viewed asset).
+function currentCompositeOverrides() {
+  loadOverrides();
+  return dealsOverrides;
 }
 
 // Current resolved grouping for a counterparty, read back from the rendered

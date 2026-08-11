@@ -41,6 +41,7 @@ def load_snapshot_dict(data: dict) -> tuple[dict, list[Position]]:
             payoff_by_horizon=p["payoff_by_horizon"],
             mtm_by_horizon=p["mtm_by_horizon"],
             counterparty=p.get("counterparty", "brokerage"),
+            composite_id=p.get("composite_id"),
         )
         for p in data["positions"]
     ]

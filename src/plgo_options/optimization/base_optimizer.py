@@ -633,3 +633,41 @@ class BaseOptimizer:
             # net_qty is already signed (negative=Short, positive=Long) — no side multiplier needed.
             held_positions[key] = held_positions.get(key, 0.0) + p.net_qty
         return held_positions
+
+    def get_composite_groups(self) -> dict[str, list[tuple[tuple, float]]]:
+        """Multi-leg composites ("deals") that can be safely unwound as one
+        unit, keyed by composite_id -> [(leg_key, leg_qty), ...] where
+        leg_key is the same (expiry_code, strike, opt, counterparty) tuple
+        get_held_positions() uses.
+
+        A composite only qualifies when EVERY leg it touches is exclusively
+        its own — i.e. the leg's total held quantity across the whole book
+        (from get_held_positions()) equals exactly this composite's own
+        contribution to that leg. If some other position (a naked trade, or a
+        different composite) also sits on the same instrument, that leg's
+        true exposure isn't fully explained by this composite alone, so
+        forcing it to trade in lockstep with the rest of the composite could
+        unwind risk that isn't actually part of it — skip the whole composite
+        rather than guess. Single-leg "composites" (nothing to keep
+        together) are dropped too.
+        """
+        held = self.get_held_positions()
+        composite_leg_qty: dict[str, dict[tuple, float]] = {}
+        for p in self.positions:
+            cid = getattr(p, "composite_id", None)
+            if not cid:
+                continue
+            parts = p.instrument.split("-")
+            exp_code = parts[1] if len(parts) >= 4 else ""
+            key = (exp_code, p.strike, p.opt, p.counterparty)
+            legs = composite_leg_qty.setdefault(cid, {})
+            legs[key] = legs.get(key, 0.0) + p.net_qty
+
+        groups: dict[str, list[tuple[tuple, float]]] = {}
+        for cid, legs in composite_leg_qty.items():
+            if len(legs) < 2:
+                continue
+            if any(abs(qty - held.get(key, 0.0)) > 1e-9 for key, qty in legs.items()):
+                continue
+            groups[cid] = list(legs.items())
+        return groups

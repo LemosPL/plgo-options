@@ -126,6 +126,12 @@ class OptimizerRunParams:
     # None = engine default (2 bps).
     perp_cost_bps: float | dict[str, float] | None = None
     target_profile_file: str | None = None
+    # When true (default), legs belonging to the same multi-leg "deal" (see
+    # data.deal_grouping / base_optimizer.get_composite_groups) are forced to
+    # unwind together, proportionally, and priced off the composite's net
+    # vega rather than each leg's own — see collateral_optimization.optimize.
+    # Off = every leg is an independent LP decision, the pre-existing behavior.
+    enable_composite_unwind: bool = True
 
 
 @dataclass

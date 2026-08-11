@@ -58,6 +58,7 @@ class CollateralOptimization:
         forced_cash_by_counterparty=None,
         max_qty=None,
         leg_groups=None,
+        composite_groups=None,
         downside_factor=1.0,
         residual_payoff_90=None,
         c_payoffs_90=None,
@@ -185,6 +186,55 @@ class CollateralOptimization:
         ])
         c_costs = np.where(is_perp, c_prices * c_perp_bps / 10_000.0, c_vegas * c_vol_pts)
 
+        # Composite unwind: legs of a multi-leg deal (see
+        # base_optimizer.get_composite_groups) are forced to trade in
+        # lockstep — one "how much of this deal is still on" variable per
+        # composite, rather than letting the LP cherry-pick individual legs —
+        # and their shared transaction cost is repriced off the composite's
+        # NET vega instead of summing each leg's own |vega| independently
+        # (same package-pricing idea as optimizer_v3._structure_leg_costs_usd,
+        # applied here to a HELD structure instead of a newly proposed one).
+        # Members are candidate indices into `candidates` (all must be plain,
+        # single-leg Candidates with existing_qty != 0 — see caller).
+        #
+        # The net-vega discount below is applied to a SEPARATE c_trade_costs
+        # array, used only for the trading_cost term (the cost of actually
+        # executing the unwind) — never to c_costs itself, which also feeds
+        # collateral_cost (the holding-cost penalty on gross position, in the
+        # non-tiered branch below). Discounting c_costs directly would make an
+        # untouched composite look cheaper to keep holding too, which cuts
+        # against the whole point of this feature: it should make unwinding a
+        # composite cheaper, not make leaving it alone cheaper.
+        c_trade_costs = c_costs.copy()
+        composite_vars: dict = {}
+        if composite_groups:
+            for cid, members in composite_groups.items():
+                members = [j for j in members if 0 <= j < n_candidates]
+                if len(members) < 2:
+                    continue
+                if any(not tradeable[j] for j in members):
+                    # A leg with no liquidity can't trade at all — forcing the
+                    # rest of the composite to move in lockstep with a leg
+                    # that's pinned at zero would just freeze the whole
+                    # composite. Leave every leg independent instead.
+                    continue
+                r = pulp.LpVariable(f"composite_remaining_{cid}", lowBound=0, upBound=1, cat="Continuous")
+                composite_vars[cid] = r
+                for j in members:
+                    prob += (
+                        buy_vars[j] - sell_vars[j] == (r - 1.0) * float(existing_qty[j]),
+                        f"composite_link_{cid}_{j}",
+                    )
+                leg_exposure = [
+                    float(existing_qty[j]) * float(getattr(candidates[j], "vega", 0.0) or 0.0)
+                    for j in members
+                ]
+                total_abs_exposure = sum(abs(x) for x in leg_exposure)
+                if total_abs_exposure > 1e-9:
+                    discount = abs(sum(leg_exposure)) / total_abs_exposure
+                    for j in members:
+                        c_trade_costs[j] *= discount
+
         # Saturate mu_factor so holding cost ≤ 1 × price × qty at any mu_factor.
         # effective_mu → 1 as mu_factor → ∞, so the LP never unwinds purely for collateral
         # (holding cost < trading cost always); unwinding happens only when profile improvement
@@ -209,7 +259,7 @@ class CollateralOptimization:
             profile_error = (1.0 - float(t90_weight)) * profile_error_t0 + float(t90_weight) * profile_error_t90
         else:
             profile_error = profile_error_t0
-        trading_cost = pulp.lpSum(float(c_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
+        trading_cost = pulp.lpSum(float(c_trade_costs[j]) * (buy_vars[j] + sell_vars[j]) for j in range(n_candidates))
 
         tiered_mode = collateral_tier_mu is not None
         tier_vars: dict = {}  # cp → (t_base, t_steep, mu_base, mu_steep) — populated when tiered_mode
@@ -374,7 +424,7 @@ class CollateralOptimization:
         # Objective breakdown
         _profile_err_before = float(np.sum(np.array(spot_weights) * np.abs(residual_payoff)))
         _notional_traded = float(np.sum(c_prices * np.abs(net_qty)))
-        _trading_cost_val = float(np.sum(c_costs * (buy_qty + sell_qty)))
+        _trading_cost_val = float(np.sum(c_trade_costs * (buy_qty + sell_qty)))
         _net_pos = existing_qty + net_qty
         if tiered_mode:
             _tier_base_val = float(sum(pulp.value(t_base) or 0.0 for (t_base, _, _, _) in tier_vars.values()))
@@ -503,6 +553,12 @@ class CollateralOptimization:
             if cp_loss_cap_warnings:
                 print(f"  ⚠ max_cp_loss_usd only held by pinning trades at max_qty for: {cp_loss_cap_warnings}")
 
+        composite_remaining = {cid: float(pulp.value(r) or 0.0) for cid, r in composite_vars.items()}
+        if composite_remaining:
+            _n_closed = sum(1 for v in composite_remaining.values() if v <= 0.01)
+            print(f"  composite unwind: {len(composite_remaining)} linked deals, {_n_closed} fully closed "
+                  f"({ {cid: round(v, 2) for cid, v in composite_remaining.items()} })")
+
         return {
             "net_qty": net_qty,
             "trade_payoff": trade_payoff,
@@ -511,6 +567,7 @@ class CollateralOptimization:
             "cp_worst_case_stress": cp_worst_case_stress,
             "cp_worst_case_net": cp_worst_case_net,
             "cp_loss_cap_warnings": cp_loss_cap_warnings,
+            "composite_remaining": composite_remaining,
         }
 
     def _solve_problem(self, prob, algo):

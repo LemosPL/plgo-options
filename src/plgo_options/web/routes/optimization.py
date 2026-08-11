@@ -18,6 +18,7 @@ from plgo_options.optimization.optim_usecase import (
     OptimizerUseCase,
 )
 from plgo_options.data.database import get_db
+from plgo_options.data.deal_grouping import compute_composite_ids
 
 router = APIRouter()
 
@@ -155,6 +156,16 @@ class OptimizationParams(BaseModel):
     # "ETH - target shifted v2.csv". Overridden by manual_target if that is set;
     # None = built-in parametric target.
     target_profile_file: str | None = None
+    # When true (default), legs belonging to the same multi-leg "deal" with a
+    # counterparty are forced to unwind together (proportionally) rather than
+    # letting the LP cherry-pick individual legs, and priced off the deal's
+    # net vega. See data.deal_grouping / base_optimizer.get_composite_groups.
+    enable_composite_unwind: bool = True
+    # Manual composite-grouping overrides from the Deals screen ({counterparty:
+    # {leg_id: group_id}}), same shape /api/deals accepts — lets a trader's
+    # manual re-grouping there also govern what the optimizer treats as one
+    # deal. None/empty = pure auto-detection.
+    composite_overrides: dict[str, dict[str, str]] | None = None
 
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
@@ -207,6 +218,16 @@ async def run_optimizer(params: OptimizationParams):
         pnl_data["positions"] = filtered
         print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
 
+    # Tag each position with the multi-leg "deal"/composite it belongs to
+    # (same grouping the Deals screen shows), so the LP can prefer unwinding
+    # a whole composite over cherry-picking one of its legs. Cheap and always
+    # computed — enable_composite_unwind (below) is what actually gates
+    # whether the LP acts on it.
+    positions = pnl_data.get("positions", []) or []
+    composite_ids = compute_composite_ids(positions, params.composite_overrides)
+    for p in positions:
+        p["composite_id"] = composite_ids.get(p.get("id"))
+
     # Always fetched — drives the cp_worst_case_net diagnostic in the response
     # regardless of use_collateral_cap; that flag only controls whether it
     # additionally constrains the LP's own trade choices (see below).
@@ -245,6 +266,7 @@ async def run_optimizer(params: OptimizationParams):
         box_fee_bps=params.box_fee_bps,
         perp_cost_bps=params.perp_cost_bps,
         target_profile_file=params.target_profile_file,
+        enable_composite_unwind=params.enable_composite_unwind,
     )
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)

@@ -27,6 +27,13 @@ class Position:
     current_mtm: float
     payoff_by_horizon: dict[str, list[float]]
     mtm_by_horizon: list[float]
+    # Id of the multi-leg "deal"/structure this leg was booked as part of (see
+    # data.deal_grouping.compute_composite_ids) — None when unknown/unset. Two
+    # Positions sharing a composite_id came from the same counterparty ticket
+    # (or the same heuristically-decomposed structure); the optimizer uses
+    # this to prefer unwinding a composite as a whole over cherry-picking one
+    # of its legs.
+    composite_id: str | None = None
 
     @property
     def expiry_date(self) -> date:
