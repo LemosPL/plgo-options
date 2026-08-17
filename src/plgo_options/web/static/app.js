@@ -3521,9 +3521,25 @@ function pfBookQtysFor(cp) {
   return (cp && cp.books && cp.books[currentAsset]) || {};
 }
 
-function pfCollMapValueAt(qtys, spot, applyHaircut) {
+// Blended haircut rate for holding `qty` of `asset` at `cp`, mirroring the
+// backend's effective_haircut_rate(). Concentration tiers (e.g. KeyRock's 50%
+// on FIL above 5.5M) are quantity-based, so the rate is price-independent and
+// can be applied to a per-book slice of the counterparty's total holding.
+// `totalQty` is the counterparty's full position — the threshold is measured
+// against that, not against the slice being valued.
+function pfHaircutRate(cp, asset, totalQty) {
+  const flat = (pfCollateralMap.haircuts || {})[asset] || 0;
+  const tiers = (pfCollateralMap.haircut_tiers || {})[(cp?.counterparty || "").toLowerCase()] || [];
+  const tier = tiers.find(t => t.asset === asset);
+  if (!tier || !totalQty) return flat;
+  const excess = Math.max(0, Math.abs(totalQty) - tier.threshold_qty);
+  if (!excess) return flat;
+  const rate = Math.max(flat, tier.rate);
+  return flat + (excess / Math.abs(totalQty)) * (rate - flat);
+}
+
+function pfCollMapValueAt(qtys, spot, applyHaircut, cp) {
   const prices = pfCollateralMap.prices || {};
-  const hc = pfCollateralMap.haircuts || {};
   let sum = 0;
   for (const asset of Object.keys(qtys)) {
     const q = qtys[asset] || 0;
@@ -3531,7 +3547,10 @@ function pfCollMapValueAt(qtys, spot, applyHaircut) {
     const px = asset === currentAsset ? spot
       : asset === "USDC" ? 1
       : (prices[asset] || 0);
-    const cut = applyHaircut ? (1 - (hc[asset] || 0)) : 1;
+    // Threshold is measured against the counterparty's total holding of the
+    // asset across both books, then the blended rate hits this book's slice.
+    const totalQty = (cp && cp.qtys && cp.qtys[asset]) || q;
+    const cut = applyHaircut ? (1 - pfHaircutRate(cp, asset, totalQty)) : 1;
     sum += q * px * cut;
   }
   return sum;
@@ -3539,7 +3558,7 @@ function pfCollMapValueAt(qtys, spot, applyHaircut) {
 
 function pfCollMapCurve(cptys, spots, applyHaircut) {
   return spots.map(s => cptys.reduce((sum, c) =>
-    sum + pfCollMapValueAt(pfBookQtysFor(c), s, applyHaircut), 0));
+    sum + pfCollMapValueAt(pfBookQtysFor(c), s, applyHaircut, c), 0));
 }
 
 // Counterparties with any collateral allocated to the current book.
