@@ -24,7 +24,7 @@ from .misc_utils import build_parametric_target_profile, load_target_profile_fil
 import matplotlib.pyplot as plt
 
 from ..pricing import options
-from ..web.routes.collateral import HAIRCUTS
+from ..web.routes.collateral import effective_haircut_rate
 
 # Transaction cost is modelled in VOL POINTS. Per execution (one leg),
 #   cost = |qty| × |vega| × VOLpts
@@ -1262,19 +1262,22 @@ class OptimizerV3(BaseOptimizer):
         # USD + this run's own asset only — collateral posted in an unrelated
         # asset (e.g. ETH collateral backing a FIL book) would need a
         # cross-asset correlation assumption this model doesn't make, so it's
-        # left out rather than guessed at. Haircut with the SAME per-token
-        # discounts already used on the Collateral tab (ETH 10%, FIL/WAVE 50%,
-        # BTC 15%, USDC 0%) — full face value overstates how much cushion is
-        # actually there to absorb a loss.
+        # left out rather than guessed at. Haircut with the SAME rates already
+        # used on the Collateral tab — currently every asset at face value plus
+        # each counterparty's concentration tiers (see collateral.HAIRCUTS /
+        # TIERED_HAIRCUTS), so this stays in step with that policy instead of
+        # hardcoding percentages that drift out of date.
         collateral_floor_by_cp: dict[str, np.ndarray] = {}
         if collateral_by_cp:
-            usd_haircut = HAIRCUTS.get("USDC", 0.0)
-            native_haircut = HAIRCUTS.get(self.asset, 0.0)
             for cp, by_asset in collateral_by_cp.items():
                 usd_qty = float(by_asset.get("USDC", 0.0) or 0.0) + float(by_asset.get("USD", 0.0) or 0.0)
                 native_qty = float(by_asset.get(self.asset, 0.0) or 0.0)
                 if usd_qty == 0.0 and native_qty == 0.0:
                     continue
+                # Rates are per counterparty: a concentration tier keyed to one
+                # counterparty must not be applied to everyone else's posting.
+                usd_haircut = effective_haircut_rate(cp, "USDC", usd_qty)
+                native_haircut = effective_haircut_rate(cp, self.asset, native_qty)
                 collateral_floor_by_cp[cp] = (
                     usd_qty * (1.0 - usd_haircut) + native_qty * (1.0 - native_haircut) * spot_arr
                 )

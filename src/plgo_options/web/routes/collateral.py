@@ -40,9 +40,19 @@ router = APIRouter()
 _PRICE_TTL_SECONDS = 600
 _live_price_cache: dict = {"ts": 0.0, "prices": None}
 
-# Haircuts applied to posted collateral. ETH counted at 90% of spot, FIL at
-# 50%, BTC at 85%, WAVE at 50% (illiquid), USD/USDC at face (no haircut).
-HAIRCUTS = {"ETH": 0.10, "FIL": 0.50, "BTC": 0.15, "WAVE": 0.50, "USDC": 0.0}
+# Flat haircuts applied to posted collateral, per asset. Currently every asset
+# counts at face value — the blanket ETH 10% / FIL 50% / BTC 15% / WAVE 50%
+# haircuts were removed in favour of counterparty-specific terms (below), so
+# the only haircut in force is the KeyRock FIL concentration tier.
+HAIRCUTS = {"ETH": 0.0, "FIL": 0.0, "BTC": 0.0, "WAVE": 0.0, "USDC": 0.0}
+
+# Counterparty-specific concentration haircuts. Quantity *up to* threshold_qty
+# counts at the flat rate above; only the excess above it is haircut at `rate`.
+# Thresholds are in native token units (not USD) — KeyRock's 5.5M is 5.5M FIL,
+# so their 7.4M FIL posts 5.5M at face and 1.9M at 50%.
+TIERED_HAIRCUTS: dict[str, list[dict]] = {
+    "keyrock": [{"asset": "FIL", "threshold_qty": 5_500_000.0, "rate": 0.50}],
+}
 TARGET_MARGIN = 1.00
 
 # Collateral asset legs (other than USDC, which is always face value).
@@ -58,11 +68,43 @@ async def _gather_portfolio(asset: str) -> dict | None:
         raise
 
 
-def _haircut_value(qtys: dict[str, float], prices: dict[str, float]) -> tuple[float, float]:
+def _tiers_for(counterparty: str | None) -> dict[str, dict]:
+    """Concentration-haircut tiers for a counterparty, keyed by asset."""
+    if not counterparty:
+        return {}
+    return {t["asset"]: t for t in TIERED_HAIRCUTS.get(counterparty.strip().lower(), [])}
+
+
+def effective_haircut_rate(counterparty: str | None, asset: str, qty: float) -> float:
+    """Blended haircut rate for holding `qty` of `asset` at `counterparty`.
+
+    Price-independent (it depends only on quantity), so callers holding just a
+    slice of a counterparty's position can apply this rate to their slice.
+    """
+    flat = HAIRCUTS.get(asset, 0.0)
+    tier = _tiers_for(counterparty).get(asset)
+    if not tier or not qty:
+        return flat
+    excess = max(0.0, abs(qty) - float(tier["threshold_qty"]))
+    if not excess:
+        return flat
+    # Stricter of the two applies to the excess; the base keeps the flat rate.
+    rate = max(flat, float(tier["rate"]))
+    return flat + (excess / abs(qty)) * (rate - flat)
+
+
+def _haircut_value(
+    qtys: dict[str, float],
+    prices: dict[str, float],
+    counterparty: str | None = None,
+) -> tuple[float, float]:
     """Value a bundle of collateral in USD.
 
     qtys keyed by asset (ETH/FIL/BTC/WAVE/USDC). prices is USD per unit for
     each token (USDC is always 1.0). Returns (no_haircut_usd, haircut_usd).
+
+    Pass `counterparty` to apply that counterparty's concentration tiers
+    (see TIERED_HAIRCUTS); without it only the flat HAIRCUTS apply.
     """
     nh = hc = 0.0
     for asset, qty in qtys.items():
@@ -71,7 +113,7 @@ def _haircut_value(qtys: dict[str, float], prices: dict[str, float]) -> tuple[fl
         px = 1.0 if asset == "USDC" else prices.get(asset, 0.0)
         usd = qty * px
         nh += usd
-        hc += usd * (1 - HAIRCUTS.get(asset, 0.0))
+        hc += usd * (1 - effective_haircut_rate(counterparty, asset, qty))
     return nh, hc
 
 
@@ -251,7 +293,7 @@ async def collateral_summary(asset: str = "all"):
                 continue
 
             prices = {"ETH": eth_spot, "FIL": fil_spot, "BTC": btc_spot, "WAVE": wave_price}
-            nh, hc = _haircut_value(qtys, prices)
+            nh, hc = _haircut_value(qtys, prices, counterparty=k)
             ratio_nh = (nh / liability) if liability > 0 else None
             ratio_hc = (hc / liability) if liability > 0 else None
 
@@ -483,13 +525,25 @@ async def collateral_scenario(asset: str = "ETH"):
 
         eth_px = s if a == "ETH" else other_spot
         fil_px = s if a == "FIL" else other_spot
-        nh, hc = _haircut_value(
-            {"ETH": total_eth_qty, "FIL": total_fil_qty, "BTC": total_btc_qty, "USDC": total_usdc},
-            {"ETH": eth_px, "FIL": fil_px, "BTC": btc_spot},
-        )
-        # WAVE already in USD; apply its haircut.
-        nh += total_wave_usd
-        hc += total_wave_usd * (1 - HAIRCUTS["WAVE"])
+        px_map = {"ETH": eth_px, "FIL": fil_px, "BTC": btc_spot}
+        # Concentration tiers are per counterparty, so value each counterparty's
+        # bundle on its own and sum — valuing one aggregate bundle would blow
+        # through a single counterparty's threshold using everyone's holdings.
+        nh = hc = 0.0
+        for m in rows_for_book:
+            cp = m["counterparty"]
+            r_nh, r_hc = _haircut_value(
+                {"ETH": m["eth_qty"], "FIL": m["fil_qty"],
+                 "BTC": m["btc_qty"], "USDC": m["usdc_usd"]},
+                px_map,
+                counterparty=cp,
+            )
+            nh += r_nh
+            hc += r_hc
+            # WAVE is already in USD (no price feed); haircut it in place.
+            w_usd = m["wave_qty"] * m["wave_price"]
+            nh += w_usd
+            hc += w_usd * (1 - effective_haircut_rate(cp, "WAVE", m["wave_qty"]))
 
         residual_nh = nh - liability
         residual_hc = hc - liability
@@ -666,7 +720,7 @@ async def collateral_map():
         qtys = {a: sum(books[b][a] for b in COLLATERAL_BOOKS) for a in assets}
         usd = {a: round(qtys[a] * prices[a], 2) for a in assets}
         total = round(sum(usd.values()), 2)
-        _nh, hc = _haircut_value(qtys, prices)
+        _nh, hc = _haircut_value(qtys, prices, counterparty=k)
         l = liab.get(k, 0.0)
         out_cps.append({
             "counterparty": info["display"],
@@ -690,6 +744,9 @@ async def collateral_map():
         "price_overrides": overrides,
         "live_prices": live,
         "haircuts": HAIRCUTS,
+        # Keyed by lowercased counterparty so the frontend can apply the same
+        # concentration tiers client-side (Portfolio P&L collateral overlay).
+        "haircut_tiers": TIERED_HAIRCUTS,
         "counterparties": out_cps,
         "asset_totals": asset_totals,
         "grand_total_usd": grand_total,
