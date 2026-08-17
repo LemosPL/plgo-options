@@ -1096,6 +1096,13 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     const $optv2DeltaBand = document.getElementById("optv2-delta-band");
     if ($optv2DeltaBand) $optv2DeltaBand.value = asset === "FIL" ? 75000 : 75;
 
+    // Same asset scaling for v4's band. NOT applied to v3 — it is frozen on its
+    // previous behaviour (flat 75 for both assets) so its runs stay comparable.
+    // Max Qty is deliberately left alone: v3's default (10000) differs from v2's
+    // and no change asked for it to be scaled, so v4 inherits v3's.
+    const $optv4DeltaBand = document.getElementById("optv4-delta-band");
+    if ($optv4DeltaBand) $optv4DeltaBand.value = asset === "FIL" ? 75000 : 75;
+
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
@@ -1196,6 +1203,10 @@ document.querySelectorAll(".nav-item").forEach(item => {
     if (pg === "optv3" && !optv3Loaded) optv3Init();
     if (pg === "optv3") {
       setTimeout(() => { const c = document.getElementById("optv3-payoff-chart"); if (c && c.data) Plotly.Plots.resize(c); }, 50);
+    }
+    if (pg === "optv4" && !optv4Loaded) optv4Init();
+    if (pg === "optv4") {
+      setTimeout(() => { const c = document.getElementById("optv4-payoff-chart"); if (c && c.data) Plotly.Plots.resize(c); }, 50);
     }
     if (pg === "structurer" && !sbLoaded) sbInit();
     if (pg === "volcurve" && !vcLoaded) vcInit();
@@ -1837,7 +1848,10 @@ function wireCounterpartyMultiSelect(selectId, selectAllBtnId, clearBtnId) {
   });
 }
 wireCounterpartyMultiSelect("optv2-counterparties", "optv2-cpty-select-all", "optv2-cpty-clear");
-wireCounterpartyMultiSelect("optv3-counterparties", "optv3-cpty-select-all", "optv3-cpty-clear");
+// Deliberately NOT wired for optv3: v3 is frozen on its previous behaviour so
+// its runs stay comparable with what production has been producing. New UI work
+// goes to v4.
+wireCounterpartyMultiSelect("optv4-counterparties", "optv4-cpty-select-all", "optv4-cpty-clear");
 
 // Auto-fill ref spot and compute % OTM / notional when strike or qty changes
 function tfAutoCalc() {
@@ -9696,7 +9710,9 @@ function optDefaultVolPts(asset, cpty) {
 }
 
 // Render one editable VOLpts input per counterparty in the loaded book,
-// preserving any value the user already typed. (Shared v2/v3 by listId.)
+// preserving any value the user already typed. (Shared v2/v3/v4 by listId —
+// these opt* helpers are deliberately page-agnostic, so the v4 page reuses
+// these definitions rather than carrying its own copies.)
 function optRenderVolPts(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
@@ -11204,8 +11220,14 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      enable_composite_unwind: document.getElementById("optv3-enable-composite-unwind")?.checked ?? true,
-      composite_overrides: currentCompositeOverrides(),
+      // v3 IS FROZEN on its pre-2026-08-05 behaviour so its output stays
+      // comparable with what production has been running. Both of these are
+      // pinned rather than read off the UI: the server-side default for
+      // enable_composite_unwind is now true, so leaving it out would silently
+      // opt v3 into composite unwinding (and the box cost floor that rides
+      // along with it). Use Optimizer v4 for the new behaviour.
+      enable_composite_unwind: false,
+      composite_overrides: null,
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: cptiesParam,
@@ -11220,6 +11242,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       // Per-counterparty perp/future trading cost, in bps of notional.
       perp_cost_bps: optPerpCostDict("optv3-perpcost-list"),
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      // Still read from the checkbox, which v3 keeps ticked by default (the
+      // server default flipped to off in b2cd070; v3 predates that).
       enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
       delta_band: parseFloat(document.getElementById("optv3-delta-band")?.value || "75"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -11233,6 +11257,1531 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
   } catch (e) {
     console.error("Optimizer v3 run failed:", e);
     optv3ShowError(e);
+  } finally {
+    $btn.classList.remove("loading"); $btn.textContent = "Run Optimizer"; $btn.disabled = false;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// OPTIMIZER V4 — copy of the v3 UI carrying the latest optimizer work
+// (composite unwind, hypothetical-spot override, click-to-toggle
+// counterparties, opt-in delta rehedge). v3 is pinned to its previous
+// behaviour so its numbers stay comparable; this is where new work lands.
+// Reuses the pure helpers + param-friendly renderers above
+// (optv2Fmt / optv2NearestIdx / optv2MatrixDisplayIdx / optv2OptType /
+//  optv2StrategyLabel / optv2ExpiryText / optv2RenderTradeTable /
+//  optv2RenderCompareMatrix / optv2RenderStrategyGroups) and the same
+// endpoints (/api/portfolio/pnl, /api/optimization/run, /snapshots).
+// ═══════════════════════════════════════════════════════════════
+let optv4Data = null;
+let optv4OptResult = null;
+let optv4Loaded = false;
+
+// Base-book scoping shares the same global the Deals "Send to Optimizer" sets,
+// so a selection works whether you open v2 or v3.
+function optv4ActivePositions() {
+  const all = (optv4Data && optv4Data.positions) || [];
+  const ids = optv2BaseIds();
+  if (!ids) return all;
+  const set = new Set(ids.map(Number));
+  return all.filter(p => set.has(Number(p.id)));
+}
+
+function optv4SyncRunEnabled() {
+  const runBtn = document.getElementById("btn-run-optv4");
+  if (!runBtn) return;
+  const hasExpiry = !!(document.getElementById("optv4-target-expiry")?.value);
+  runBtn.disabled = !(!!optv4Data && hasExpiry);
+  runBtn.title = (optv4Data && !hasExpiry) ? "Choose a target maturity before running" : "";
+}
+
+function optv4RenderBasePill() {
+  const el = document.getElementById("optv4-base-pill");
+  if (!el) return;
+  const ids = optv2BaseIds();
+  if (!ids) { el.style.display = "none"; el.innerHTML = ""; return; }
+  const matched = optv4Data ? optv4ActivePositions().length : ids.length;
+  const missing = optv4Data ? ids.length - matched : 0;
+  el.style.display = "";
+  el.innerHTML = `<span class="optv2-base-pill-text">🎯 Base book scoped to <b>${matched}</b> trade${matched === 1 ? "" : "s"} from Deals`
+    + (missing > 0 ? ` <span style="color:var(--red)">(${missing} not in book)</span>` : "")
+    + `</span><button id="optv4-base-clear" class="btn-secondary" style="width:auto;padding:.15rem .55rem;margin-left:.6rem">Clear ✕</button>`;
+  document.getElementById("optv4-base-clear")?.addEventListener("click", () => {
+    window._optv2BaseTradeIds = null; window._optv2BaseMeta = null;
+    optv4RenderBasePill();
+    if (optv4Data) optv4RenderPreview();
+  });
+}
+
+function optv4PopulateCounterparties() {
+  const select = document.getElementById("optv4-counterparties");
+  if (!select || !optv4Data) return;
+  const cps = [...new Set((optv4Data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  select.innerHTML = '<option value="ALL" selected>ALL</option>'
+    + cps.map(c => `<option value="${c}">${c}</option>`).join("");
+}
+
+async function optv4Load() {
+  const $btn = document.getElementById("btn-load-optv4");
+  $btn.classList.add("loading"); $btn.textContent = "Loading…";
+  try {
+    optv4Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
+    optv4OptResult = null;
+    optv4PopulateCounterparties();
+    optRenderVolPts("optv4-volpts-list", optv4Data);
+    optv4RenderDteList();
+    optv4PopulateLegExpiries();
+    optv4RenderManualLegs();
+    optRenderBoxFee("optv4-boxfee-list", optv4Data);
+    optRenderPerpCost("optv4-perpcost-list", optv4Data);
+
+    const $expiry = document.getElementById("optv4-target-expiry");
+    $expiry.innerHTML = '<option value="">Select maturity…</option>';
+    if (optv4Data.vol_surface) {
+      optv4Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte).forEach(s => {
+        const o = document.createElement("option");
+        o.value = s.expiry_code; o.textContent = `${s.expiry_code} (${s.dte}d)`;
+        $expiry.appendChild(o);
+      });
+    }
+
+    document.getElementById("optv4-kpi-section").style.display = "";
+    document.getElementById("optv4-payoff-empty").style.display = "none";
+    // Reset the "after" matrix panel until a run produces one.
+    document.getElementById("optv4-matrix-after-panel").style.display = "none";
+    document.getElementById("optv4-matrix-grid").style.gridTemplateColumns = "1fr";
+    // Reset the run-only trades block until a new run. The Target Profile pane is
+    // managed by optv4RenderProfileTable() (called from optv4RenderPreview) so it
+    // stays editable off the loaded book even before the first run.
+    const $tu = document.getElementById("optv4-trades-under-chart");
+    if ($tu) $tu.style.display = "none";
+
+    // Populate the saved-profile dropdown and fetch the active target profile
+    // (parametric by default) so the Target Profile tab shows/seeds it pre-run.
+    await optv4PopulateTargetProfiles();
+    await optv4FetchTargetProfile();
+
+    optv4RenderBasePill();
+    optv4RenderPreview();
+    optv4SyncRunEnabled();
+  } catch (e) {
+    console.error("Optimizer v3: failed to load portfolio:", e);
+    alert("Failed to load portfolio data — check console.\n" + e.message);
+  } finally {
+    $btn.classList.remove("loading"); $btn.textContent = "Load Risk Profile";
+  }
+}
+
+// Populate the "Profile" dropdown with the saved target-profile CSVs for the asset.
+let optv4ProfilesList = [];  // [{name, file, user}] from /target-profiles
+
+async function optv4PopulateTargetProfiles() {
+  const sel = document.getElementById("optv4-target-select");
+  if (!sel) return;
+  const keep = optv4TargetProfileFile;
+  let profiles = [];
+  try {
+    const res = await get(`/api/optimization/target-profiles?asset=${currentAsset}`);
+    profiles = (res && res.profiles) || [];
+  } catch (e) { console.warn("target-profiles list failed", e); }
+  optv4ProfilesList = profiles;
+  sel.innerHTML = '<option value="">Parametric (auto)</option>'
+    + profiles.map(p => `<option value="${p.file}">${p.user ? "★ " : ""}${p.name}</option>`).join("");
+  // Keep the current selection if it still exists; else fall back to parametric.
+  if (keep && profiles.some(p => p.file === keep)) sel.value = keep;
+  else { sel.value = ""; optv4TargetProfileFile = ""; }
+  optv4SyncTargetControls();
+}
+
+// Enable Delete only for user-created profiles, and prefill the name field with
+// the selected profile's name so "Save / Update" overwrites it.
+function optv4SyncTargetControls() {
+  const sel = document.getElementById("optv4-target-select");
+  const del = document.getElementById("btn-optv4-target-delete");
+  const nameEl = document.getElementById("optv4-target-name");
+  if (!sel) return;
+  const file = sel.value;
+  const prof = optv4ProfilesList.find(p => p.file === file);
+  // Enable Delete for any selected saved profile (not "Parametric"); the backend
+  // is the authority and refuses built-ins with a clear message.
+  if (del) del.disabled = !file;
+  // Prefill the name with the selected profile's display name (strip "ASSET - ")
+  if (nameEl && prof) {
+    const display = prof.name.replace(new RegExp(`^${currentAsset}\\s*-\\s*`), "");
+    nameEl.value = display;
+  } else if (nameEl && !file) {
+    nameEl.value = "";
+  }
+}
+
+// Fetch the active target profile (selected saved CSV, or parametric) aligned to
+// the loaded ladder, and use it as the shown/editable target. Clears any manual
+// edits so the selection is what drives the next Run.
+async function optv4FetchTargetProfile() {
+  if (!optv4Data) return;
+  optv4ManualTarget = null;
+  optv4AutoTargetProfile = null;
+  // Align to whichever ladder the profile table renders on (the LP result's ladder
+  // after a run, else the /pnl ladder) so the fetched curve indexes correctly and
+  // the table numbers update when the dropdown changes.
+  const ladder = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.spot_ladder)
+    ? optv4OptResult.spot_ladder : optv4Data.spot_ladder;
+  try {
+    const body = { asset: currentAsset, spot_ladder: ladder, current_spot: optv4Data.eth_spot };
+    if (optv4TargetProfileFile) body.profile = optv4TargetProfileFile;
+    const tp = await post("/api/optimization/target-profile", body);
+    if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (ladder || []).length) {
+      optv4AutoTargetProfile = tp.payoff;
+    }
+  } catch (e) { console.warn("target-profile fetch failed", e); }
+  optv4RenderProfileTable();
+}
+
+// The current target curve as control points, read from the editable table.
+function optv4CurrentTargetPoints() {
+  const pts = [];
+  document.querySelectorAll("#optv4-profile-tbody .optv4-target-input").forEach(i => {
+    const x = Number(i.dataset.x), y = Number(i.value);
+    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+  });
+  return pts;
+}
+
+// Save the current (possibly edited) target curve as a new named profile, then
+// select it so it drives the next Run.
+async function optv4SaveTargetProfile() {
+  const nameEl = document.getElementById("optv4-target-name");
+  const name = (nameEl && nameEl.value || "").trim();
+  if (!name) { alert("Enter a name for the new target profile."); return; }
+  const points = optv4CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+  try {
+    const res = await post("/api/optimization/target-profile/save", { asset: currentAsset, name, points });
+    if (nameEl) nameEl.value = "";
+    await optv4PopulateTargetProfiles();
+    const sel = document.getElementById("optv4-target-select");
+    if (sel && res && res.file) { sel.value = res.file; optv4TargetProfileFile = res.file; }
+    await optv4FetchTargetProfile();          // reload + show the saved curve
+    optv4UpdateTargetStatus();
+  } catch (e) {
+    alert("Failed to save target profile.\n" + (e.message || e));
+  }
+}
+
+// Delete the currently-selected saved target profile. The backend allows only
+// user-created profiles and refuses built-ins (surfaced here as a clear message).
+async function optv4DeleteTargetProfile() {
+  const sel = document.getElementById("optv4-target-select");
+  const file = sel && sel.value;
+  if (!file) { alert("Select a saved profile to delete."); return; }
+  const prof = optv4ProfilesList.find(p => p.file === file);
+  const label = prof ? prof.name : file;
+  if (!confirm(`Delete the saved target profile "${label}"? This can't be undone.`)) return;
+  try {
+    await post("/api/optimization/target-profile/delete", { asset: currentAsset, file });
+    optv4TargetProfileFile = "";
+    await optv4PopulateTargetProfiles();   // repopulate (selection resets to parametric)
+    await optv4FetchTargetProfile();       // reload the parametric target
+    optv4UpdateTargetStatus();
+  } catch (e) {
+    // e.g. built-in profiles can't be deleted (400) — show the server's reason.
+    alert("Couldn't delete this profile.\n" + (e.detail || e.message || e));
+  }
+}
+
+// Preview (greeks KPI + positions + payoff + before matrix) from the loaded book.
+function optv4RenderPreview() {
+  if (!optv4Data) return;
+  optv4RenderKpi();
+  optv4RenderPositions();
+  optv4RenderRollCandidates();  // populates the tick-to-unwind panel; also refreshes the chart
+  optv4RenderPayoff();
+  optv4RenderMatrix();
+  optv4RenderProfileTable();
+}
+
+// Current-book positions table — the loaded risk profile's per-position numbers.
+// Decimal places for prices/strikes/spots in v3 displays — FIL is O($1) so it
+// needs 2 dp (a 2.25 strike must not render as "2"); ETH is O($1000), 0 dp.
+function optv4Dp() { return (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0; }
+
+function optv4RenderPositions() {
+  const tbody = document.getElementById("optv4-positions-tbody");
+  const count = document.getElementById("optv4-positions-count");
+  if (!tbody) return;
+  const ps = optv4ActivePositions();
+  if (count) count.textContent = ps.length ? `(${ps.length})` : "";
+  if (!ps.length) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:var(--muted);padding:2rem">No positions in the current book.</td></tr>';
+    return;
+  }
+  const rows = [...ps].sort((a, b) =>
+    String(a.expiry).localeCompare(String(b.expiry)) || (a.strike - b.strike));
+  const sum = fn => rows.reduce((t, p) => t + (fn(p) || 0), 0);
+  const money = v => (v >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(v), 0);
+
+  const body = rows.map(p => {
+    const long = p.net_qty >= 0;
+    const mtm = p.current_mtm || 0;
+    return `<tr>
+      <td>${p.counterparty || "—"}</td>
+      <td>${p.instrument || ""}</td>
+      <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
+      <td style="text-align:right">${optv2Fmt(Math.abs(p.net_qty), 0)}</td>
+      <td style="text-align:right">${optv2Fmt(p.strike, optv4Dp())}</td>
+      <td>${optv2OptType(p.opt)}</td>
+      <td>${String(p.expiry || "").slice(0, 10)}</td>
+      <td style="text-align:right">${p.days_remaining ?? "—"}</td>
+      <td style="text-align:right">${optv2Fmt(p.iv_pct, 1)}</td>
+      <td style="text-align:right">${optv2Fmt((p.delta || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right">${optv2Fmt((p.gamma || 0) * p.net_qty, 4)}</td>
+      <td style="text-align:right">${optv2Fmt((p.theta || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right">${optv2Fmt((p.vega || 0) * p.net_qty, 2)}</td>
+      <td style="text-align:right;color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${money(mtm)}</td>
+    </tr>`;
+  }).join("");
+
+  const totalMtm = sum(p => p.current_mtm);
+  const footer = `<tr class="row-highlight" style="font-weight:600">
+    <td colspan="9">Total (${rows.length})</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.delta || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.gamma || 0) * p.net_qty), 4)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.theta || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right">${optv2Fmt(sum(p => (p.vega || 0) * p.net_qty), 2)}</td>
+    <td style="text-align:right;color:${totalMtm >= 0 ? "var(--green)" : "var(--red)"}">${money(totalMtm)}</td>
+  </tr>`;
+  tbody.innerHTML = body + footer;
+}
+
+function optv4RenderKpi() {
+  document.getElementById("optv4-eth-spot").textContent = "$" + optv2Fmt(optv4Data.eth_spot, 2);
+  // Hint the live spot as the Hypothetical Spot placeholder — blank still means
+  // "use live spot", this just stops the field being a mystery number to fill in.
+  const $customSpot = document.getElementById("optv4-custom-spot");
+  if ($customSpot) $customSpot.placeholder = optv2Fmt(optv4Data.eth_spot, 2);
+  const ids = optv2BaseIds();
+  if (!ids) {
+    const t = optv4Data.totals || {};
+    document.getElementById("optv4-total-delta").textContent = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv4-total-gamma").textContent = optv2Fmt(t.portfolio_gamma, 4);
+    document.getElementById("optv4-total-theta").textContent = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv4-total-vega").textContent = optv2Fmt(t.portfolio_vega, 2);
+    document.getElementById("optv4-total-mtm").textContent = "$" + optv2Fmt(t.current_total_mtm, 2);
+    return;
+  }
+  const ps = optv4ActivePositions();
+  const sum = fn => ps.reduce((a, p) => a + (fn(p) || 0), 0);
+  document.getElementById("optv4-total-delta").textContent = optv2Fmt(sum(p => (p.delta || 0) * p.net_qty), 2);
+  document.getElementById("optv4-total-gamma").textContent = optv2Fmt(sum(p => (p.gamma || 0) * p.net_qty), 4);
+  document.getElementById("optv4-total-theta").textContent = optv2Fmt(sum(p => (p.theta || 0) * p.net_qty), 2);
+  document.getElementById("optv4-total-vega").textContent = optv2Fmt(sum(p => (p.vega || 0) * p.net_qty), 2);
+  document.getElementById("optv4-total-mtm").textContent = "$" + optv2Fmt(sum(p => p.current_mtm), 2);
+}
+
+// Payoff chart — plots actual spot price on a LOG x-axis so it works at any
+// scale (ETH ~$1-14k, FIL ~$0.2-10). Plotly auto-generates price ticks, so no
+// asset-specific tick snapping is needed. Labels are asset-aware via currentAsset.
+function optv4RenderPayoff() {
+  const spots = optv4Data.spot_ladder;
+  const positions = optv4ActivePositions();
+  const S0 = optv4Data.eth_spot;  // /pnl uses "eth_spot" for the spot of any asset
+  if (!positions.length || !spots || !spots.length) return;
+
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
+
+  const C = optv4ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
+  const traces = [];
+  if (optv4OptResult && optv4OptResult.status === "ok") {
+    // x = actual spot prices (Plotly log-transforms them for the log axis).
+    const optSpots = optv4OptResult.spot_ladder || spots;
+    const beforeCurve = optv4OptResult.before.payoff_by_horizon["0"];
+    if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
+    // After reflects only the *selected* replacement trades (checkboxes below).
+    const afterCurve = optv4AfterSelectedCurve() || optv4OptResult.after.payoff_by_horizon["0"];
+    const nTot = (optv4Replacements || []).length;
+    const nSel = nTot - (optv4ReplDeselected ? optv4ReplDeselected.size : 0);
+    const nLegs = (optv4ManualLegs || []).filter(l => l._on).length;
+    let afterName = (nTot && nSel !== nTot) ? `After (selected ${nSel}/${nTot} trades)` : "After (with proposed trades)";
+    if (nLegs) afterName += ` + ${nLegs} leg${nLegs === 1 ? "" : "s"}`;
+    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: afterName, hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+    if (optv4OptResult.target_payoff) {
+      const spotIdx = optv2NearestIdx(optSpots, S0);
+      const targetAtSpot = optv4OptResult.target_payoff[spotIdx];
+      const targetCurve = optv4OptResult.target_payoff.map(v => v - targetAtSpot);
+      traces.push({ x: optSpots, y: targetCurve, mode: "lines", name: "Target", hovertemplate: HT, line: { color: C.target, width: 2, dash: "dot" } });
+    }
+  } else {
+    // Sequential ramp (bright = Now, fading into the future) — a proper time
+    // encoding instead of a rainbow.
+    OPTV2_HORIZONS.forEach((h, k) => {
+      const hKey = String(h);
+      const totalPayoff = new Array(spots.length).fill(0);
+      let hasData = false;
+      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve) { hasData = true; for (let i = 0; i < curve.length; i++) totalPayoff[i] += curve[i]; } });
+      if (!hasData) return;
+      const isNow = h === 0;
+      traces.push({
+        x: spots, y: totalPayoff, mode: "lines",
+        name: isNow ? "Now (current book)" : `T+${h}d`,
+        hovertemplate: HT,
+        line: { color: C.ramp[k] || "#8b949e", width: isNow ? 3 : 1.5 },
+        ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
+      });
+    });
+  }
+
+  // What-if: book payoff (Now) excluding the ticked roll candidates — the unwind
+  // preview. Lets you compare the book with vs. without the ITM/selected trades.
+  if (typeof optv4RollSel !== "undefined" && optv4RollSel && optv4RollSel.size) {
+    const excl = new Array(spots.length).fill(0);
+    let any = false;
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon && p.payoff_by_horizon["0"];
+      if (!curve) return;
+      if (!optv4RollSel.has(p.id)) { for (let i = 0; i < curve.length; i++) excl[i] += curve[i]; }
+      else any = true;
+    });
+    if (any) traces.push({ x: spots, y: excl, mode: "lines", name: "Book excl. ticked unwinds (Now)", hovertemplate: HT, line: { color: C.excl, width: 2, dash: "dashdot" } });
+  }
+
+  // Break-even line (y=0) — recessive, no hover.
+  traces.push({ x: [spots[0], spots[spots.length - 1]], y: [0, 0], mode: "lines", name: "Break-even", line: { color: C.zero, dash: "dot", width: 1 }, showlegend: false, hoverinfo: "skip" });
+
+  // Vertical line at the current spot — thin, semi-transparent, no hover.
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => { if (Array.isArray(t.y)) t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }); });
+  traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+  traces.push({ x: [S0], y: [0], mode: "markers", name: `${assetLabel} Spot`, hovertemplate: `${assetLabel} spot: $${fmtPrice(S0)}<extra></extra>`, marker: { color: C.spotDot, size: 9, symbol: "diamond" } });
+
+  const layout = optv4ChartLayout({
+    title: optv4OptResult ? "Payoff at Now — Before vs After vs Target" : `Portfolio payoff — current book across horizons`,
+    assetLabel, C,
+  });
+  Plotly.newPlot("optv4-payoff-chart", traces, layout, { responsive: true, displaylogo: false });
+}
+
+// Shared chart palette (coherent, semi-transparent) + layout for the v3 charts.
+function optv4ChartColors() {
+  return {
+    before: "#e5737e",                       // current book — soft red, dashed
+    after:  "#4fc3f7",                       // resulting book — cyan
+    afterFill: "rgba(79,195,247,0.08)",      // faint area under the primary curve
+    target: "#ffca28",                       // target — amber, dotted
+    excl:   "#b388ff",                       // what-if excl. unwinds — violet
+    spot:   "rgba(255,202,40,0.45)",         // spot rule — faint amber
+    spotDot: "#ffca28",
+    zero:   "rgba(230,237,243,0.18)",        // break-even — faint
+    grid:   "rgba(139,148,158,0.12)",        // recessive grid
+    // sequential cyan ramp: Now (bright) → T+90 (dim)
+    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83", "#164a68", "#0e3550"],
+  };
+}
+
+function optv4ChartLayout({ title, assetLabel, C, height }) {
+  return {
+    title: { text: title, font: { color: "#e6edf3", size: 15 } },
+    hovermode: "x unified",
+    hoverlabel: { bgcolor: "#161b22", bordercolor: "#30363d", font: { color: "#e6edf3", size: 11 } },
+    xaxis: {
+      title: `${assetLabel} Spot (USD, log scale)`,
+      type: "log", tickprefix: "$", exponentformat: "none", separatethousands: true,
+      xhoverformat: "$,.0f", color: "#8b949e", gridcolor: C.grid, zeroline: false,
+    },
+    yaxis: { title: "P&L from today (USD)", tickformat: "$,.0f", zeroline: true, zerolinecolor: "rgba(248,81,73,0.55)", zerolinewidth: 1, color: "#8b949e", gridcolor: C.grid },
+    paper_bgcolor: "#161b22", plot_bgcolor: "#0d1117", font: { color: "#e0e0e0" },
+    legend: { font: { color: "#8b949e", size: 11 }, orientation: "h", y: -0.22, bgcolor: "rgba(0,0,0,0)" },
+    margin: { t: 46, b: 72, l: 84, r: 24 },
+  };
+}
+
+// Preview P&L matrix (before) — faithful copy of optv2RenderMatrix on v3 ids.
+function optv4RenderMatrix() {
+  const spots = optv4Data.spot_ladder;
+  const positions = optv4ActivePositions();
+  const ethSpot = optv4Data.eth_spot;
+  if (!positions.length) return;
+
+  const $thead = document.getElementById("optv4-matrix-thead");
+  $thead.innerHTML = "";
+  const headRow = document.createElement("tr");
+  headRow.innerHTML = "<th>ETH Spot</th>";
+  OPTV2_HORIZONS.forEach(h => { const th = document.createElement("th"); th.textContent = h === 0 ? "Now" : `${h}d`; headRow.appendChild(th); });
+  $thead.appendChild(headRow);
+
+  const $tbody = document.getElementById("optv4-matrix-tbody");
+  $tbody.innerHTML = "";
+  const nearestIdx = optv2NearestIdx(spots, ethSpot);
+  const displayIdx = optv2MatrixDisplayIdx(spots);
+  displayIdx.forEach((si) => {
+    const s = spots[si];
+    const tr = document.createElement("tr");
+    if (si === nearestIdx) tr.classList.add("row-highlight");
+    const tdSpot = document.createElement("td");
+    tdSpot.textContent = "$" + optv2Fmt(s, optv4Dp()); tdSpot.style.fontWeight = "600";
+    tr.appendChild(tdSpot);
+    OPTV2_HORIZONS.forEach(h => {
+      const hKey = String(h);
+      let cellVal = 0;
+      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve && curve[si] !== undefined) cellVal += curve[si]; });
+      const td = document.createElement("td");
+      td.textContent = Math.round(cellVal).toLocaleString(); td.style.textAlign = "right";
+      if (cellVal > 0) td.style.color = "#66bb6a";
+      if (cellVal < 0) td.style.color = "#ef5350";
+      tr.appendChild(td);
+    });
+    $tbody.appendChild(tr);
+  });
+}
+
+// ── Roll candidates: tick-to-unwind selection. Previews on the payoff chart
+// (a "Book excl. ticked unwinds" line) and drives exactly what the optimizer
+// rolls on the next Run (roll_dte_threshold = -1 + forced_roll_ids). ─────────
+let optv4RollSel = new Set();   // ticked position ids
+let optv4RollCandSig = "";      // signature of the current candidate set (to re-default ITM)
+
+// Positions eligible to roll: DTE <= threshold (or all if threshold = -1), in
+// the selected counterparty scope. Each tagged with _itm (call: K<spot, put: K>spot).
+// Per-counterparty roll-DTE map from the GUI inputs (empty input = exclude that
+// counterparty). {counterparty: dte}.
+function optv4DteMap() {
+  const box = document.getElementById("optv4-dte-list");
+  const m = {};
+  if (!box) return m;
+  box.querySelectorAll(".optv4-dte-input").forEach(i => {
+    if (!i.dataset.cpty) return;
+    if (i.value === "" || i.value == null) { m[i.dataset.cpty] = null; return; }  // present but cleared → excluded
+    const v = parseInt(i.value, 10);
+    m[i.dataset.cpty] = Number.isNaN(v) ? null : v;
+  });
+  return m;
+}
+
+// Roll candidates: a position is eligible if its DTE <= its counterparty's
+// threshold (per-counterparty inputs, falling back to the global default). -1 =
+// roll all of that counterparty's trades. Also honours the counterparty scope.
+function optv4RollCandidates() {
+  if (!optv4Data) return [];
+  const gRaw = document.getElementById("optv4-roll-dte-threshold")?.value;
+  const gThr = (gRaw === "" || gRaw == null) ? null : parseInt(gRaw, 10);
+  const dteMap = optv4DteMap();
+  const spot = optv4Data.eth_spot || 0;
+  const cptySel = document.getElementById("optv4-counterparties");
+  const scope = new Set(cptySel ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : []);
+  return optv4ActivePositions().filter(p => {
+    const opt = String(p.opt || "");
+    if (!["C", "P", "F"].includes(opt)) return false;
+    if (scope.size && !scope.has(p.counterparty)) return false;
+    // Per-counterparty DTE threshold, else the global default.
+    let thr = Object.prototype.hasOwnProperty.call(dteMap, p.counterparty) ? dteMap[p.counterparty] : gThr;
+    if (thr == null || Number.isNaN(thr)) return false;   // no threshold for this cpty → not a candidate
+    if (thr === -1) return true;
+    const dte = Number(p.days_remaining);
+    return Number.isFinite(dte) && dte <= thr;
+  }).map(p => {
+    const opt = String(p.opt || "");
+    const itm = (opt === "C" && p.strike < spot) || (opt === "P" && p.strike > spot);
+    return Object.assign({ _itm: itm }, p);
+  });
+}
+
+// Render one editable Roll-DTE input per counterparty in the loaded book,
+// seeded from the global default; preserves any value the user already typed.
+function optv4RenderDteList() {
+  const box = document.getElementById("optv4-dte-list");
+  if (!box || !optv4Data) return;
+  const cps = [...new Set((optv4Data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const gRaw = document.getElementById("optv4-roll-dte-threshold")?.value;
+  const def = (gRaw === "" || gRaw == null) ? "" : gRaw;
+  const prev = {};
+  box.querySelectorAll(".optv4-dte-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  box.innerHTML = cps.length ? cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : def;
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="optv4-dte-input" data-cpty="${cp}" value="${v}" step="1" min="-1" style="width:5rem" title="Roll ${cp} trades with DTE ≤ this. Clear to exclude ${cp}. -1 = roll all ${cp} trades."></label></div>`;
+  }).join("") : '<p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p>';
+}
+
+function optv4RenderRollCandidates() {
+  const tbody = document.getElementById("optv4-rollcand-tbody");
+  const grid = document.getElementById("optv4-trades-under-chart");
+  const count = document.getElementById("optv4-rollcand-count");
+  if (!tbody) return;
+  const cands = optv4RollCandidates();
+  if (grid) grid.style.display = (cands.length || optv4OptResult) ? "" : "none";
+
+  // Re-default the ticked set to the ITM candidates whenever the candidate set changes.
+  const sig = cands.map(c => c.id).sort((a, b) => a - b).join(",");
+  if (sig !== optv4RollCandSig) {
+    optv4RollCandSig = sig;
+    optv4RollSel = new Set(cands.filter(c => c._itm).map(c => c.id));
+  }
+  if (count) count.textContent = cands.length ? `(${optv4RollSel.size}/${cands.length} ticked)` : "";
+
+  // Right column placeholder until a run produces new trades.
+  const repl = document.getElementById("optv4-replacement-tbody");
+  if (repl && !optv4OptResult) repl.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:1.5rem">Run the optimizer to see replacement / new trades.</td></tr>';
+
+  if (!cands.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--muted);padding:1.5rem">No roll candidates at this DTE threshold.</td></tr>';
+    optv4RenderPayoff();
+    return;
+  }
+
+  const rows = [...cands].sort((a, b) => (Number(a.days_remaining) - Number(b.days_remaining)) || (a.strike - b.strike));
+  const money = v => (v >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(v), 0);
+  tbody.innerHTML = rows.map(c => {
+    const long = c.net_qty >= 0;
+    const mtm = c.current_mtm || 0;
+    const itmBadge = c._itm ? '<span style="color:var(--green);font-weight:600">ITM</span>' : '<span style="color:var(--muted)">—</span>';
+    return `<tr>
+      <td><input type="checkbox" class="optv4-rollcand-cb" data-id="${c.id}" ${optv4RollSel.has(c.id) ? "checked" : ""}></td>
+      <td>${c.instrument || ""}</td>
+      <td>${String(c.expiry || "").slice(0, 10)}</td>
+      <td class="num">${optv2Fmt(c.strike, optv4Dp())}</td>
+      <td>${optv2OptType(c.opt)}</td>
+      <td style="color:${long ? "var(--green)" : "var(--red)"}">${long ? "Long" : "Short"}</td>
+      <td class="num">${optv2Fmt(Math.abs(c.net_qty), 0)}</td>
+      <td class="num">${c.days_remaining ?? "—"}</td>
+      <td>${itmBadge}</td>
+      <td class="num" style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${money(mtm)}</td>
+    </tr>`;
+  }).join("");
+
+  // Totals row for the ticked set — total qty + total cost to unwind (Σ MTM).
+  const ticked = rows.filter(c => optv4RollSel.has(c.id));
+  const totQty = ticked.reduce((s, c) => s + Math.abs(Number(c.net_qty) || 0), 0);
+  const totMtm = ticked.reduce((s, c) => s + (Number(c.current_mtm) || 0), 0);
+  const tr = document.createElement("tr");
+  tr.className = "row-highlight"; tr.style.fontWeight = "600";
+  tr.innerHTML = `<td></td><td colspan="5">Ticked to unwind (${ticked.length})</td>`
+    + `<td class="num">${optv2Fmt(totQty, 0)}</td><td></td><td></td>`
+    + `<td class="num" style="color:${totMtm >= 0 ? "var(--green)" : "var(--red)"}">${money(totMtm)}</td>`;
+  tbody.appendChild(tr);
+
+  tbody.querySelectorAll(".optv4-rollcand-cb").forEach(cb => cb.addEventListener("change", () => {
+    const id = Number(cb.dataset.id);
+    if (cb.checked) optv4RollSel.add(id); else optv4RollSel.delete(id);
+    optv4RenderRollCandidates();
+  }));
+  const allCb = document.getElementById("optv4-rollcand-all");
+  if (allCb) {
+    allCb.checked = ticked.length === rows.length && rows.length > 0;
+    allCb.onchange = () => {
+      if (allCb.checked) rows.forEach(c => optv4RollSel.add(c.id)); else rows.forEach(c => optv4RollSel.delete(c.id));
+      optv4RenderRollCandidates();
+    };
+  }
+
+  optv4RenderPayoff();  // refresh the "Book excl. ticked unwinds" what-if line
+}
+
+// Render optimization result into the v3 KPI row + tabbed detail.
+function optv4RenderResult(data) {
+  if (data.status !== "ok") { alert(data.message || "Optimization returned no results."); return; }
+
+  document.getElementById("optv4-result-kpi").style.display = "";
+  const $tradesUnder = document.getElementById("optv4-trades-under-chart");
+  if ($tradesUnder) $tradesUnder.style.display = "";  // reveal unwind/new under the chart
+  optv4OptResult = data;
+  optv4RenderPayoff();  // now overlays before/after/target
+
+  document.getElementById("optv4-result-status").textContent = data.optimizer_converged ? "Converged" : "Did not converge";
+
+  const $warn = document.getElementById("optv4-warnings");
+  if (data.message) { $warn.style.display = ""; $warn.textContent = data.message; } else { $warn.style.display = "none"; }
+
+  const unwinds = data.roll_unwind_trades || [];
+  const replacements = data.replacement_trades || [];
+  const allTrades = data.trades || [];
+  const ps = data.premium_summary || {};
+
+  document.getElementById("optv4-sum-unwind").textContent = unwinds.length;
+  document.getElementById("optv4-sum-replacement").textContent = replacements.length;
+  const netPrem = data.net_premium_generated ?? ps.net_premium_generated ?? 0;
+  const $netPrem = document.getElementById("optv4-sum-net-premium");
+  $netPrem.textContent = (netPrem >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(netPrem), 0);
+  $netPrem.style.color = netPrem >= 0 ? "var(--green)" : "var(--red)";
+  const cash = data.cash_shift || 0;
+  document.getElementById("optv4-sum-cash-shift").textContent = (cash >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(cash), 0);
+  const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;
+  const $fit = document.getElementById("optv4-sum-fit");
+  if (fitBefore != null && fitAfter != null) {
+    const pct = fitBefore > 0 ? (100 * (fitBefore - fitAfter) / fitBefore) : 0;
+    $fit.textContent = optv2Fmt(pct, 1) + "%";
+    $fit.style.color = pct >= 0 ? "var(--green)" : "var(--red)";
+  } else { $fit.textContent = "—"; }
+  document.getElementById("optv4-candidates").textContent = data.candidates_evaluated ?? "—";
+  document.getElementById("optv4-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
+  document.getElementById("optv4-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
+  document.getElementById("optv4-sum-target-expiry").textContent = data.target_expiry || "All";
+  // Per-counterparty transaction cost + after-execution MTM (net of cost) —
+  // same figures the v2 screen shows; the pricing itself is applied by the
+  // shared engine on every v3 run.
+  const $cost = document.getElementById("optv4-sum-cost");
+  if ($cost) $cost.textContent = data.total_cost_usd != null ? "$" + optv2Fmt(data.total_cost_usd, 0) : "—";
+  const $am = document.getElementById("optv4-sum-after-mtm");
+  if ($am) {
+    if (data.after_book_mtm != null) {
+      const am = data.after_book_mtm;
+      $am.textContent = (am >= 0 ? "$" : "-$") + optv2Fmt(Math.abs(am), 0);
+      $am.style.color = am >= 0 ? "var(--green)" : "var(--red)";
+    } else { $am.textContent = "—"; $am.style.color = ""; }
+  }
+
+  // Cash flow by counterparty
+  const $cashBody = document.getElementById("optv4-cash-flow-tbody");
+  const $cashEmpty = document.getElementById("optv4-cash-empty");
+  const cashByCp = data.cash_by_counterparty || {};
+  const cps = Object.keys(cashByCp);
+  if (cps.length) {
+    if ($cashEmpty) $cashEmpty.style.display = "none";
+    $cashBody.innerHTML = cps.sort().map(cp => {
+      const v = cashByCp[cp]; const net = v.net || 0;
+      return `<tr><td>${cp}</td><td class="num">$${optv2Fmt(v.outlay || 0, 0)}</td>`
+        + `<td class="num">$${optv2Fmt(v.collection || 0, 0)}</td>`
+        + `<td class="num" style="color:${net >= 0 ? "var(--red)" : "var(--green)"}">${net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(net), 0)}</td></tr>`;
+    }).join("");
+  } else {
+    $cashBody.innerHTML = "";
+    if ($cashEmpty) $cashEmpty.style.display = "";
+  }
+
+  // Matrix note + before/after matrices (reuse the shared renderer)
+  const $mtmNote = document.getElementById("optv4-matrix-mtm-note");
+  if ($mtmNote) {
+    if (data.current_book_mtm != null) {
+      const mtm = data.current_book_mtm;
+      let noteHtml = `Both matrices show P&amp;L <b>from today</b>, not absolute value — current book MTM is `
+        + `<b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> `
+        + `(the implicit $0 anchor at Now / current spot).`;
+      // After-execution book MTM, net of the assumed per-counterparty trading
+      // cost (deliberately NOT netted into the curves — a one-time cost cancels
+      // out of a P&L-relative-to-now comparison).
+      if (data.after_book_mtm != null && data.total_cost_usd != null) {
+        const am = data.after_book_mtm;
+        noteHtml += ` After executing the proposed trades (net of ~$${optv2Fmt(data.total_cost_usd, 0)} `
+          + `assumed transaction cost), book MTM would be <b style="color:${am >= 0 ? "var(--green)" : "var(--red)"}">`
+          + `${am >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(am), 0)}</b>.`;
+      }
+      $mtmNote.innerHTML = noteHtml;
+    } else { $mtmNote.textContent = ""; }
+  }
+  if (data.before && data.before.payoff_by_horizon) {
+    optv2RenderCompareMatrix(data, "before", "optv4-matrix-thead", "optv4-matrix-tbody");
+  }
+  optv4RenderAfterMatrix();
+
+  // Target profile table (payoff-at-Now: Before / After / Target)
+  optv4RenderProfileTable();
+
+  // Structures
+  const $structEmpty = document.getElementById("optv4-structures-empty");
+  if ($structEmpty) $structEmpty.style.display = allTrades.length ? "none" : "";
+  optv2RenderStrategyGroups(allTrades, "optv4-strategy-groups");
+
+  // Trades to unwind are shown by the interactive Roll-candidates panel (left of
+  // the chart), which persists the ticked selection that drove this run.
+  optv4RenderRollCandidates();
+
+  // Replacement / new table — each row has a checkbox to include/exclude it from
+  // the "After (selected)" payoff line above. Default: all selected.
+  optv4Replacements = replacements.map((t, i) => {
+    t._idx = i;
+    t._qty0 = Number(t.qty) || 0;   // original signed qty from the optimizer
+    t._qty = t._qty0;               // current (editable) signed qty
+    return t;
+  });
+  optv4ReplDeselected = new Set();
+  optv2RenderTradeTable("optv4-replacement-tbody", replacements, "optv4-replacement-count",
+    (t) => [
+      `<td><input type="checkbox" class="optv4-repl-cb" data-idx="${t._idx}" checked></td>`,
+      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, optv4Dp())}</td>`,
+      `<td>${optv2OptType(t.opt)}</td>`,
+      `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
+      `<td class="num"><input class="optv4-repl-qty" data-idx="${t._idx}" type="number" min="0" step="1" value="${Math.abs(t.qty)}" style="width:5rem;text-align:right" title="Adjust this trade's size — the After curve & P&L matrix update live"></td>`,
+      `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
+      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
+      `<td>${optv2StrategyLabel(t.strategy)}</td>`,
+      `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
+    ], 13, "No replacement or new trades proposed.");
+
+  // Totals row (leading blank for the checkbox column).
+  optv4AppendTradeTotals("optv4-replacement-tbody", replacements, [
+    {},                                               // checkbox column
+    { colspan: 5, label: "Total new / replacement" },
+    { key: t => Math.abs(Number(t.qty) || 0) },       // Qty
+    {},                                               // Price (blank)
+    { key: t => Number(t.notional) || 0 },            // Value ($)
+    { key: t => Number(t.cost_usd) || 0 },            // Cost ($)
+    { colspan: 3 },                                   // Strategy / Counterparty / Comment
+  ]);
+  optv4WireReplCheckboxes();
+}
+
+// ── Replacement-trade selection: tick to include a suggested trade in the
+// "After (selected)" payoff line. Recomputed client-side (BS) so it's live. ──
+let optv4Replacements = [];
+let optv4ReplDeselected = new Set();
+
+function optv4WireReplCheckboxes() {
+  const tb = document.getElementById("optv4-replacement-tbody");
+  if (!tb) return;
+  tb.querySelectorAll(".optv4-repl-cb").forEach(cb => cb.addEventListener("change", () => {
+    const idx = Number(cb.dataset.idx);
+    if (cb.checked) optv4ReplDeselected.delete(idx); else optv4ReplDeselected.add(idx);
+    const all = document.getElementById("optv4-repl-all");
+    if (all) all.checked = optv4ReplDeselected.size === 0;
+    optv4RenderPayoff();
+    optv4RenderAfterMatrix();
+  }));
+  const all = document.getElementById("optv4-repl-all");
+  if (all) {
+    all.checked = optv4ReplDeselected.size === 0;
+    all.onchange = () => {
+      optv4ReplDeselected = new Set();
+      if (!all.checked) (optv4Replacements || []).forEach(t => optv4ReplDeselected.add(t._idx));
+      tb.querySelectorAll(".optv4-repl-cb").forEach(cb => { cb.checked = !optv4ReplDeselected.has(Number(cb.dataset.idx)); });
+      optv4RenderPayoff();
+      optv4RenderAfterMatrix();
+    };
+  }
+  // Editable trade sizes: adjust a suggested trade's qty → live After curve/matrix.
+  tb.querySelectorAll(".optv4-repl-qty").forEach(inp => inp.addEventListener("input", () => {
+    const t = (optv4Replacements || []).find(x => x._idx === Number(inp.dataset.idx));
+    if (!t) return;
+    const absQ = Math.abs(parseFloat(inp.value));
+    const sign = (t._qty0 || 0) < 0 ? -1 : 1;   // preserve buy/sell direction
+    t._qty = Number.isFinite(absQ) ? sign * absQ : 0;
+    optv4RenderPayoff();
+    optv4RenderAfterMatrix();
+  }));
+}
+
+// One trade's P&L-from-today curve across `spots` at horizon `h` days (0 at S0) —
+// matches the engine's After-curve basis (raw BS value minus the trade's premium).
+// Time decays by h days; perps are horizon-independent.
+function optv4TradePnlNow(t, spots, S0, h = 0, qtyOverride) {
+  const qty = (qtyOverride != null ? Number(qtyOverride) : Number(t.qty)) || 0;  // signed
+  const K = Number(t.strike) || 0;
+  const opt = String(t.opt || "").toUpperCase();
+  const price = Number(t.bs_price_usd) || 0;
+  if (opt === "F" || opt === "PERP") return spots.map(s => qty * (s - S0));
+  const sigma = (Number(t.iv_pct) || Number(t.mark_iv) || 0) / 100;
+  const T = Math.max((Number(t.dte) || 0) - (Number(h) || 0), 0) / 365.25;
+  return spots.map(s => {
+    let val;
+    if (T <= 0 || sigma <= 0) val = opt === "C" ? Math.max(s - K, 0) : Math.max(K - s, 0);
+    else val = bsPrice(s, K, T, 0, sigma, opt);
+    return qty * (val - price);
+  });
+}
+
+// After payoff at horizon `h` including only the *selected* replacement trades:
+// subtract each deselected trade's contribution from the full After curve at h.
+function optv4AfterSelectedAtHorizon(hKey) {
+  const r = optv4OptResult;
+  const base = r && r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon[hKey];
+  if (!base) return null;
+  const legs = (optv4ManualLegs || []).filter(l => l._on);
+  const spots = r.spot_ladder || [];
+  const S0 = (r.eth_spot != null ? r.eth_spot : (optv4Data && optv4Data.eth_spot)) || 0;
+  const out = base.slice();
+  const h = Number(hKey) || 0;
+  // For each optimizer replacement, `after_full` already contains it at its
+  // ORIGINAL qty; apply the delta to its EFFECTIVE qty (0 if deselected, else the
+  // possibly-edited size).
+  (optv4Replacements || []).forEach(t => {
+    const q0 = (t._qty0 != null ? t._qty0 : Number(t.qty)) || 0;
+    const qEff = optv4ReplDeselected.has(t._idx) ? 0 : ((t._qty != null ? t._qty : q0) || 0);
+    if (qEff === q0) return;
+    const cEff = optv4TradePnlNow(t, spots, S0, h, qEff);
+    const c0 = optv4TradePnlNow(t, spots, S0, h, q0);
+    for (let i = 0; i < out.length && i < c0.length; i++) out[i] += cEff[i] - c0[i];
+  });
+  // Add each enabled user-created leg (at its current qty).
+  legs.forEach(l => {
+    const c = optv4TradePnlNow(l, spots, S0, h);
+    for (let i = 0; i < out.length && i < c.length; i++) out[i] += c[i];
+  });
+  return out;
+}
+
+// Horizon-0 After curve for the payoff chart.
+function optv4AfterSelectedCurve() {
+  const r = optv4OptResult;
+  if (!r || r.status !== "ok" || !r.after || !r.after.payoff_by_horizon) return null;
+  return optv4AfterSelectedAtHorizon("0");
+}
+
+// ── Manual leg builder: user-created what-if legs added to the After curve/matrix.
+let optv4ManualLegs = [];
+let optv4LegSeq = 0;
+
+function optv4PopulateLegExpiries() {
+  const sel = document.getElementById("optv4-leg-expiry");
+  if (!sel || !optv4Data) return;
+  const vs = (optv4Data.vol_surface || []).filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte);
+  sel.innerHTML = '<option value="">Expiry…</option>'
+    + vs.map(s => {
+      const iv = (s.atm_iv != null ? s.atm_iv : (s.iv != null ? s.iv : ""));
+      return `<option value="${s.expiry_code}" data-dte="${s.dte}" data-iv="${iv}">${s.expiry_code} (${s.dte}d)</option>`;
+    }).join("");
+}
+
+function optv4RefreshAfterWhatIf() {
+  optv4RenderPayoff();
+  optv4RenderAfterMatrix();
+}
+
+function optv4AddManualLeg() {
+  if (!optv4Data) { alert("Load the risk profile first."); return; }
+  const S0 = optv4Data.eth_spot || 0;
+  const side = document.getElementById("optv4-leg-side").value;
+  const opt = document.getElementById("optv4-leg-type").value;   // C / P
+  const K = parseFloat(document.getElementById("optv4-leg-strike").value);
+  const expSel = document.getElementById("optv4-leg-expiry");
+  const exp = expSel.value;
+  const dte = expSel.selectedOptions[0] ? Number(expSel.selectedOptions[0].dataset.dte) : NaN;
+  const qtyAbs = Math.abs(parseFloat(document.getElementById("optv4-leg-qty").value));
+  let iv = parseFloat(document.getElementById("optv4-leg-iv").value);
+  if (!isFinite(K) || K <= 0) { alert("Enter a valid strike."); return; }
+  if (!exp || !isFinite(dte)) { alert("Pick an expiry."); return; }
+  if (!isFinite(qtyAbs) || qtyAbs <= 0) { alert("Enter a quantity."); return; }
+  if (!isFinite(iv) || iv <= 0) {
+    const d = expSel.selectedOptions[0] && expSel.selectedOptions[0].dataset.iv;
+    iv = d ? Number(d) : 60;   // fall back to the expiry's ATM IV, else 60%
+  }
+  const qty = side === "buy" ? qtyAbs : -qtyAbs;   // signed
+  const sigma = iv / 100;
+  const T = Math.max(dte, 0) / 365.25;
+  const price = (T > 0 && sigma > 0) ? bsPrice(S0, K, T, 0, sigma, opt)
+    : (opt === "C" ? Math.max(S0 - K, 0) : Math.max(K - S0, 0));
+  optv4ManualLegs.push({
+    _mid: ++optv4LegSeq, _on: true,
+    side: side === "buy" ? "Buy" : "Sell", opt, strike: K, qty,
+    dte, iv_pct: iv, expiry_code: exp, bs_price_usd: price,
+  });
+  document.getElementById("optv4-leg-qty").value = "";
+  optv4RenderManualLegs();
+  optv4RefreshAfterWhatIf();
+}
+
+function optv4RenderManualLegs() {
+  const tb = document.getElementById("optv4-manual-legs-tbody");
+  const wrap = document.getElementById("optv4-manual-legs-wrap");
+  if (!tb) return;
+  if (!optv4ManualLegs.length) { if (wrap) wrap.style.display = "none"; tb.innerHTML = ""; return; }
+  if (wrap) wrap.style.display = "";
+  const dp = optv4Dp();
+  tb.innerHTML = optv4ManualLegs.map(l => `<tr>
+    <td><input type="checkbox" class="optv4-leg-cb" data-mid="${l._mid}" ${l._on ? "checked" : ""}></td>
+    <td style="color:${l.side === "Buy" ? "var(--green)" : "var(--red)"}">${l.side}</td>
+    <td>${optv2OptType(l.opt)}</td>
+    <td class="num">${optv2Fmt(l.strike, dp)}</td>
+    <td>${l.expiry_code}</td>
+    <td class="num"><input class="optv4-leg-qty-edit" data-mid="${l._mid}" type="number" min="0" step="1" value="${Math.abs(l.qty)}" style="width:5rem;text-align:right" title="Adjust leg size — updates the After curve & P&L matrix live"></td>
+    <td class="num">${optv2Fmt(l.iv_pct, 1)}</td>
+    <td><button class="btn-secondary optv4-leg-rm" data-mid="${l._mid}" style="width:auto;padding:.1rem .45rem" title="Remove leg">✕</button></td>
+  </tr>`).join("");
+  tb.querySelectorAll(".optv4-leg-cb").forEach(cb => cb.addEventListener("change", () => {
+    const leg = optv4ManualLegs.find(l => l._mid === Number(cb.dataset.mid));
+    if (leg) leg._on = cb.checked;
+    const all = document.getElementById("optv4-leg-all"); if (all) all.checked = optv4ManualLegs.every(l => l._on);
+    optv4RefreshAfterWhatIf();
+  }));
+  tb.querySelectorAll(".optv4-leg-rm").forEach(b => b.addEventListener("click", () => {
+    optv4ManualLegs = optv4ManualLegs.filter(l => l._mid !== Number(b.dataset.mid));
+    optv4RenderManualLegs(); optv4RefreshAfterWhatIf();
+  }));
+  tb.querySelectorAll(".optv4-leg-qty-edit").forEach(inp => inp.addEventListener("input", () => {
+    const leg = optv4ManualLegs.find(l => l._mid === Number(inp.dataset.mid));
+    if (!leg) return;
+    const absQ = Math.abs(parseFloat(inp.value));
+    const sign = leg.qty < 0 ? -1 : 1;   // preserve buy/sell
+    leg.qty = Number.isFinite(absQ) ? sign * absQ : 0;
+    optv4RefreshAfterWhatIf();
+  }));
+  const all = document.getElementById("optv4-leg-all");
+  if (all) {
+    all.checked = optv4ManualLegs.every(l => l._on);
+    all.onchange = () => { optv4ManualLegs.forEach(l => l._on = all.checked); optv4RenderManualLegs(); optv4RefreshAfterWhatIf(); };
+  }
+}
+
+// Build an optv4OptResult-shaped object whose `after.payoff_by_horizon` reflects
+// only the selected trades, and (re)render the "After" P&L matrix from it.
+function optv4RenderAfterMatrix() {
+  const r = optv4OptResult;
+  const $afterPanel = document.getElementById("optv4-matrix-after-panel");
+  const $matrixGrid = document.getElementById("optv4-matrix-grid");
+  if (!(r && r.after && r.after.payoff_by_horizon && $afterPanel && $matrixGrid)) return;
+  const adj = {};
+  Object.keys(r.after.payoff_by_horizon).forEach(hKey => {
+    adj[hKey] = optv4AfterSelectedAtHorizon(hKey) || r.after.payoff_by_horizon[hKey];
+  });
+  const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
+  $afterPanel.style.display = "";
+  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead", "optv4-matrix-after-main-tbody");
+}
+
+// Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
+// spec entries map to cells: {colspan?, label?} for a label cell, {key: fn} to sum
+// a numeric column, {} for a blank cell, {colspan, } for a blank span.
+function optv4AppendTradeTotals(tbodyId, rows, spec) {
+  const tb = document.getElementById(tbodyId);
+  if (!tb || !rows || !rows.length) return;
+  const tr = document.createElement("tr");
+  tr.className = "row-highlight";
+  tr.style.fontWeight = "600";
+  tr.innerHTML = spec.map(c => {
+    const cs = c.colspan ? ` colspan="${c.colspan}"` : "";
+    if (c.label != null) return `<td${cs}>${c.label} (${rows.length})</td>`;
+    if (typeof c.key === "function") {
+      const sum = rows.reduce((s, t) => s + (c.key(t) || 0), 0);
+      return `<td class="num"${cs}>${optv2Fmt(sum, 0)}</td>`;
+    }
+    return `<td${cs}></td>`;
+  }).join("");
+  tb.appendChild(tr);
+}
+
+// ── Target Profile: editable table + smoothing + live chart preview ─────────
+// The user can type target payoff values per spot (or smooth them), and the LP
+// fits to those on the next Run (sent as manual_target). All values are at
+// horizon 0 and anchored to $0 at the current spot — same basis as the chart.
+let optv4ManualTarget = null;     // [{x: spot, y: payoff}, ...] control points, or null = auto
+let optv4ProfileState = null;     // {spots, after, displayIdx} cached for live residual updates
+let optv4AutoTargetProfile = null; // active target payoff aligned to optv4Data.spot_ladder (from /target-profile)
+let optv4TargetProfileFile = "";   // selected saved-profile filename, or "" for parametric
+
+// Where the profile table/chart get their curves: a run result if present, else
+// the loaded book (so you can define a target before ever running).
+function optv4ProfileSource() {
+  if (optv4OptResult && optv4OptResult.status === "ok") {
+    const r = optv4OptResult;
+    const spots = r.spot_ladder || [];
+    // Prefer the currently-selected/fetched profile (aligned to this ladder) so
+    // changing the dropdown updates the shown target even after a run; fall back
+    // to the target the run actually fit to.
+    const autoTarget = (optv4AutoTargetProfile && optv4AutoTargetProfile.length === spots.length)
+      ? optv4AutoTargetProfile : (r.target_payoff || null);
+    return {
+      spots,
+      S0: (r.eth_spot != null ? r.eth_spot : (optv4Data && optv4Data.eth_spot)) || 0,
+      before: r.before && r.before.payoff_by_horizon && r.before.payoff_by_horizon["0"],
+      after: r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon["0"],
+      autoTarget,
+    };
+  }
+  if (optv4Data && optv4Data.spot_ladder) {
+    const spots = optv4Data.spot_ladder;
+    const ps = optv4ActivePositions();
+    const before = spots.map((_, i) => ps.reduce((a, p) =>
+      a + ((p.payoff_by_horizon && p.payoff_by_horizon["0"] && p.payoff_by_horizon["0"][i]) || 0), 0));
+    // Default target = built-in parametric profile (fetched on Load), so it's
+    // visible/editable before the first run.
+    const autoTarget = (optv4AutoTargetProfile && optv4AutoTargetProfile.length === spots.length)
+      ? optv4AutoTargetProfile : null;
+    return { spots, S0: optv4Data.eth_spot || 0, before, after: null, autoTarget };
+  }
+  return null;
+}
+
+// Finer control-point grid for the editable target table: ladder points nearest
+// each fixed price step (ETH $250 / FIL $0.25) so the curve can be shaped at
+// ≤250-USD granularity, instead of the coarse ~14-row matrix thinning. Where the
+// ladder itself is sparser than the step (deep wings), it follows the ladder.
+function optv4TargetDisplayIdx(spots) {
+  if (!spots || !spots.length) return [];
+  const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const step = asset === "FIL" ? 0.25 : 250;
+  const lo = spots[0], hi = spots[spots.length - 1];
+  const idxs = new Set([0, spots.length - 1]);  // always include both ends
+  for (let g = Math.ceil(lo / step) * step; g <= hi + 1e-9; g += step) {
+    idxs.add(optv2NearestIdx(spots, g));
+  }
+  return [...idxs].sort((a, b) => a - b);
+}
+
+// Auto target, anchored to $0 at current spot (matches the display convention).
+function optv4AutoTargetAnchored(src) {
+  if (!src.autoTarget) return null;
+  const at = src.autoTarget[optv2NearestIdx(src.spots, src.S0)] || 0;
+  // Not floored at 0: a trough is, by definition, a point that reads worse
+  // (more negative) than the anchor — clamping that away made the curve
+  // structurally unable to show the exact dip shape these curves exist to
+  // represent (both ETH's built-in target and any hand-shaped one).
+  return src.autoTarget.map(v => v - at);
+}
+
+// Linear-interpolate the manual control points onto a spot array (or null).
+function optv4ManualTargetInterp(spots) {
+  if (!optv4ManualTarget || optv4ManualTarget.length < 2) return null;
+  const pts = optv4ManualTarget;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return spots.map(s => {
+    if (s <= xs[0]) return ys[0];
+    if (s >= xs[xs.length - 1]) return ys[ys.length - 1];
+    let i = 1; while (i < xs.length && xs[i] < s) i++;
+    const x0 = xs[i - 1], x1 = xs[i], y0 = ys[i - 1], y1 = ys[i];
+    return x1 === x0 ? y0 : y0 + (y1 - y0) * (s - x0) / (x1 - x0);
+  });
+}
+
+function optv4RenderProfileTable() {
+  const tbody = document.getElementById("optv4-profile-tbody");
+  const empty = document.getElementById("optv4-profile-empty");
+  const wrap = document.getElementById("optv4-profile-wrap");
+  const toolbar = document.getElementById("optv4-target-toolbar");
+  if (!tbody) return;
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) {
+    tbody.innerHTML = ""; optv4ProfileState = null;
+    if (wrap) wrap.style.display = "none";
+    if (toolbar) toolbar.style.display = "none";
+    if (empty) { empty.style.display = ""; empty.textContent = "Load the risk profile to define a target."; }
+    optv4RenderProfileChart();
+    return;
+  }
+  if (empty) empty.style.display = "none";
+  if (wrap) wrap.style.display = "";
+  if (toolbar) toolbar.style.display = "";
+
+  const spots = src.spots, S0 = src.S0;
+  const spotIdx = optv2NearestIdx(spots, S0);
+  const displayIdx = optv4TargetDisplayIdx(spots);
+  const auto = optv4AutoTargetAnchored(src);
+  const manualMap = optv4ManualTarget ? new Map(optv4ManualTarget.map(p => [p.x, p.y])) : null;
+  optv4ProfileState = { spots, after: src.after, displayIdx };
+
+  const cell = v => {
+    if (v == null || isNaN(v)) return `<td class="num">—</td>`;
+    const c = v > 0 ? "#66bb6a" : v < 0 ? "#ef5350" : "";
+    return `<td class="num" style="color:${c}">${Math.round(v).toLocaleString()}</td>`;
+  };
+
+  tbody.innerHTML = displayIdx.map(si => {
+    const s = spots[si];
+    const b = src.before ? src.before[si] : null;
+    const a = src.after ? src.after[si] : null;
+    const tv = (manualMap && manualMap.has(s)) ? manualMap.get(s) : (auto ? auto[si] : 0);
+    const resid = (a != null) ? a - tv : null;
+    const hl = si === spotIdx ? ' class="row-highlight"' : '';
+    return `<tr${hl}>`
+      + `<td style="font-weight:600">$${optv2Fmt(s, optv4Dp())}</td>`
+      + `${cell(b)}${cell(a)}`
+      + `<td class="num"><input class="optv4-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
+      + `${cell(resid)}</tr>`;
+  }).join("");
+
+  tbody.querySelectorAll(".optv4-target-input").forEach(inp => inp.addEventListener("input", optv4OnTargetEdit));
+  optv4RenderProfileChart();
+  optv4UpdateTargetStatus();
+}
+
+// Rebuild the manual target from the current inputs; refresh chart + residuals live.
+function optv4OnTargetEdit() {
+  const inputs = document.querySelectorAll("#optv4-profile-tbody .optv4-target-input");
+  optv4ManualTarget = Array.from(inputs)
+    .map(i => ({ x: Number(i.dataset.x), y: Number(i.value) || 0 }))
+    .filter(p => Number.isFinite(p.x))
+    .sort((a, b) => a.x - b.x);
+  optv4RenderProfileChart();
+  optv4UpdateResiduals();
+  optv4UpdateTargetStatus();
+}
+
+// Update just the After−Target column in place (no input rebuild → no focus loss).
+function optv4UpdateResiduals() {
+  const st = optv4ProfileState; if (!st) return;
+  const rows = document.querySelectorAll("#optv4-profile-tbody tr");
+  rows.forEach((tr, k) => {
+    const si = st.displayIdx[k]; if (si == null) return;
+    const a = st.after ? st.after[si] : null;
+    const inp = tr.querySelector(".optv4-target-input");
+    const tds = tr.querySelectorAll("td");
+    const residTd = tds[tds.length - 1];
+    if (!residTd) return;
+    if (a == null || !inp) { residTd.textContent = "—"; residTd.style.color = ""; return; }
+    const r = a - (Number(inp.value) || 0);
+    residTd.textContent = Math.round(r).toLocaleString();
+    residTd.style.color = r > 0 ? "#66bb6a" : r < 0 ? "#ef5350" : "";
+  });
+}
+
+// Moving-average smooth over the current target control points.
+function optv4SmoothTarget() {
+  const st = optv4ProfileState; if (!st) return;
+  const inputs = document.querySelectorAll("#optv4-profile-tbody .optv4-target-input");
+  if (!inputs.length) return;
+  const vals = Array.from(inputs).map(i => Number(i.value) || 0);
+  const win = Math.max(1, Math.round(Number(document.getElementById("optv4-target-smooth-strength")?.value || 3)));
+  const sm = vals.map((_, i) => {
+    let s = 0, n = 0;
+    for (let j = i - win; j <= i + win; j++) if (j >= 0 && j < vals.length) { s += vals[j]; n++; }
+    return n ? s / n : vals[i];
+  });
+  optv4ManualTarget = Array.from(inputs)
+    .map((inp, k) => ({ x: Number(inp.dataset.x), y: sm[k] }))
+    .filter(p => Number.isFinite(p.x)).sort((a, b) => a.x - b.x);
+  optv4RenderProfileTable();
+}
+
+function optv4ResetTarget() {
+  // Back to the selected profile (or parametric): drop manual edits and reload it.
+  optv4ManualTarget = null;
+  optv4FetchTargetProfile();
+}
+
+function optv4UpdateTargetStatus() {
+  const el = document.getElementById("optv4-target-status"); if (!el) return;
+  const n = optv4ManualTarget ? optv4ManualTarget.length : 0;
+  if (n >= 2) {
+    el.textContent = `Manual target active (${n} points) — click Apply & Re-run to optimize to it.`;
+    return;
+  }
+  const sel = document.getElementById("optv4-target-select");
+  const label = sel && sel.value ? (sel.options[sel.selectedIndex]?.text || "saved profile") : null;
+  el.textContent = label
+    ? `Fitting to saved profile "${label}". Edit any Target cell — or Smooth — to override.`
+    : "Using the parametric (auto) target. Pick a saved profile, or edit / Smooth the Target column.";
+}
+
+// Target-profile chart (Before / After / Target). Target = manual override if set.
+function optv4RenderProfileChart() {
+  const el = document.getElementById("optv4-profile-chart");
+  if (!el) return;
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) { el.style.display = "none"; return; }
+  el.style.display = "";
+  const spots = src.spots, S0 = src.S0;
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const manual = optv4ManualTargetInterp(spots);
+  const auto = optv4AutoTargetAnchored(src);
+  const targetCurve = manual || auto;
+  const C = optv4ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
+
+  const traces = [];
+  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
+  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (with trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", hovertemplate: HT, line: { color: C.target, width: 2.5, dash: "dot" } });
+
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
+  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+
+  const layout = optv4ChartLayout({
+    title: manual ? "Target Profile — your manual target" : "Target Profile — Before vs After vs Target",
+    assetLabel, C,
+  });
+  layout.margin = { t: 40, b: 66, l: 78, r: 20 };
+  if (optv4DrawMode) layout.dragmode = false;  // let clicks register as points, not zoom
+  Plotly.newPlot("optv4-profile-chart", traces, layout, { responsive: true, displaylogo: false })
+    .then(optv4BindProfileChartClick);
+}
+
+// ── Draw-on-chart: click the target chart to set the payoff at the nearest
+// spot-ladder point, building a curve point-by-point. ───────────────────────
+let optv4DrawMode = false;
+let optv4ProfileChartClickBound = false;
+
+function optv4BindProfileChartClick() {
+  const gd = document.getElementById("optv4-profile-chart");
+  if (!gd || optv4ProfileChartClickBound) return;
+  optv4ProfileChartClickBound = true;   // gd element persists across re-plots
+  gd.addEventListener("click", (evt) => {
+    if (!optv4DrawMode || !gd._fullLayout) return;
+    const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
+    if (!xa || !ya) return;
+    const bb = gd.getBoundingClientRect();
+    const px = evt.clientX - bb.left - xa._offset;
+    const py = evt.clientY - bb.top - ya._offset;
+    if (px < 0 || py < 0 || px > xa._length || py > ya._length) return;  // outside plot area
+    const spot = xa.p2d(px);   // log-aware → actual price
+    const payoff = ya.p2d(py);
+    if (!isFinite(spot) || !isFinite(payoff)) return;
+    optv4SetTargetPointAtSpot(spot, payoff);
+  });
+}
+
+// Set the target payoff at the ladder point nearest `spot`, keeping every other
+// point at its current value (from the table, else the active auto curve).
+function optv4SetTargetPointAtSpot(spot, y) {
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) return;
+  const spots = src.spots;
+  const displayIdx = optv4TargetDisplayIdx(spots);
+  const cur = new Map(optv4CurrentTargetPoints().map(p => [p.x, p.y]));
+  const auto = optv4AutoTargetAnchored(src);
+  let best = displayIdx[0], bd = Infinity;
+  displayIdx.forEach(si => { const d = Math.abs(spots[si] - spot); if (d < bd) { bd = d; best = si; } });
+  optv4ManualTarget = displayIdx.map(si => {
+    const s = spots[si];
+    let val = cur.has(s) ? cur.get(s) : (auto ? auto[si] : 0);
+    if (si === best) val = y;
+    return { x: s, y: val };
+  }).sort((a, b) => a.x - b.x);
+  optv4RenderProfileTable();  // regenerates the editable table + chart from the manual curve
+}
+
+function optv4ToggleDrawMode() {
+  optv4DrawMode = !optv4DrawMode;
+  const btn = document.getElementById("btn-optv4-target-draw");
+  const gd = document.getElementById("optv4-profile-chart");
+  if (btn) {
+    btn.classList.toggle("btn-primary", optv4DrawMode);
+    btn.classList.toggle("btn-secondary", !optv4DrawMode);
+    btn.textContent = optv4DrawMode ? "✏ Drawing… (click chart)" : "✏ Draw on chart";
+  }
+  if (gd) { gd.style.cursor = optv4DrawMode ? "crosshair" : ""; Plotly.relayout(gd, { dragmode: optv4DrawMode ? false : "zoom" }); }
+}
+
+async function optv4LoadSnapshots() {
+  const tbody = document.getElementById("optv4-snapshots-body");
+  if (!tbody) return;
+  try {
+    const res = await get("/api/optimization/snapshots");
+    const snaps = res.snapshots || [];
+    if (!snaps.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">No saved runs yet. Tick "Save run snapshot" before running.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = snaps.map(s => {
+      const d = s.modified ? new Date(s.modified * 1000) : null;
+      const dateStr = d ? d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+      const timeStr = d ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+      const statusColor = s.status === "ok" ? "var(--green)" : s.status ? "var(--red)" : "var(--muted)";
+      return `<tr>
+        <td style="white-space:nowrap">${dateStr} <span style="color:var(--muted)">${timeStr}</span></td>
+        <td>${s.asset || "ETH"}</td><td>${s.target_expiry || "--"}</td><td>${s.lam_factor || "--"}</td>
+        <td>${s.trades_count != null ? s.trades_count : "--"}</td>
+        <td style="color:${statusColor}">${s.status || "--"}</td><td>${s.size_kb || 0} KB</td>
+        <td><a href="/api/optimization/snapshots/${encodeURIComponent(s.filename)}" download style="font-size:.75rem">&darr;</a></td>
+      </tr>`;
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:1rem;color:var(--muted)">${e.message}</td></tr>`;
+  }
+}
+
+// One-time init when the page is first opened.
+function optv4Init() {
+  optv4Loaded = true;
+  optv4LoadSnapshots();
+  // Resize the Plotly chart when its (previously-hidden) tab becomes visible.
+  document.querySelectorAll('#page-optv4 .sub-tab-btn').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.subtab === "optv4-payoff" ? "optv4-payoff-chart"
+        : btn.dataset.subtab === "optv4-profile" ? "optv4-profile-chart" : null;
+      if (id) setTimeout(() => { const c = document.getElementById(id); if (c && c.data) Plotly.Plots.resize(c); }, 40);
+    });
+  });
+}
+
+// Send the v3 optimizer's proposed trades to the Pricing screen (mirrors the v2
+// btn-optv2-send-to-pricing flow: load legs, switch page, auto-price).
+document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", () => {
+  const res = optv4OptResult;
+  const source = (res && ((res.replacement_trades && res.replacement_trades.length)
+    ? res.replacement_trades : res.trades)) || [];
+  if (!source.length) { alert("No optimizer trades to send. Run the optimizer first."); return; }
+
+  legs.length = 0;  // clear existing Pricing legs
+  let sent = 0, skipped = 0;
+  const usedCodes = new Set();
+  for (const t of source) {
+    const opt = String(t.opt || "").toUpperCase();
+    if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures
+    const qty = Math.abs(Number(t.qty) || 0);
+    if (!qty) { skipped++; continue; }
+    const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
+    const premium = t.bs_price_usd ? String(Math.round(t.bs_price_usd * 100) / 100) : "0";
+    let expCode = optv2ExpiryText(t);
+    if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
+    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    if (expCode) usedCodes.add(expCode);
+    sent++;
+  }
+  if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+
+  const existing = new Set([...$expSel.options].map(o => o.value));
+  for (const ec of usedCodes) {
+    if (!existing.has(ec)) {
+      const dte = _expiryCodeToDte(ec);
+      const o = document.createElement("option");
+      o.value = ec;
+      o.textContent = `${ec} (${dte != null ? dte + 'd' : '?'}) [interpolated]`;
+      $expSel.appendChild(o);
+      existing.add(ec);
+    }
+  }
+
+  const pricingNav = document.querySelector('.nav-item[data-page="pricing"]');
+  if (pricingNav) pricingNav.click();
+  setTimeout(() => { document.getElementById("btn-replicate")?.click(); }, 300);
+  if (skipped) console.log(`Optimizer v3 → Pricing: sent ${sent} leg(s), skipped ${skipped} (perp/zero-qty).`);
+});
+
+// ── Event wiring (elements exist in the initial HTML) ──
+document.getElementById("btn-load-optv4")?.addEventListener("click", optv4Load);
+document.getElementById("optv4-target-expiry")?.addEventListener("change", optv4SyncRunEnabled);
+// Recompute roll candidates (and re-default the ITM ticks) when the DTE
+// threshold or counterparty scope changes.
+document.getElementById("optv4-roll-dte-threshold")?.addEventListener("change", (e) => {
+  if (!optv4Data) return;
+  // "Default" applies to every counterparty; users then tweak individual rows.
+  const v = e.target.value;
+  const inputs = document.querySelectorAll("#optv4-dte-list .optv4-dte-input");
+  if (inputs.length) inputs.forEach(i => { i.value = v; });
+  else optv4RenderDteList();
+  optv4RenderRollCandidates();
+});
+document.getElementById("optv4-counterparties")?.addEventListener("change", () => { if (optv4Data) optv4RenderRollCandidates(); });
+// Per-counterparty DTE inputs are dynamic — delegate their change to re-filter candidates.
+document.getElementById("optv4-dte-list")?.addEventListener("input", () => { if (optv4Data) optv4RenderRollCandidates(); });
+document.getElementById("btn-optv4-refresh-snapshots")?.addEventListener("click", () => optv4LoadSnapshots());
+document.getElementById("optv4-target-select")?.addEventListener("change", (e) => {
+  optv4TargetProfileFile = e.target.value || "";
+  optv4SyncTargetControls();
+  optv4FetchTargetProfile();
+});
+document.getElementById("btn-optv4-target-smooth")?.addEventListener("click", optv4SmoothTarget);
+document.getElementById("btn-optv4-target-save")?.addEventListener("click", optv4SaveTargetProfile);
+document.getElementById("btn-optv4-target-delete")?.addEventListener("click", optv4DeleteTargetProfile);
+document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
+document.getElementById("btn-optv4-add-leg")?.addEventListener("click", optv4AddManualLeg);
+
+// Persistent, copyable optimizer-error panel.
+function optv4ShowError(e) {
+  const box = document.getElementById("optv4-error");
+  const pre = document.getElementById("optv4-error-text");
+  if (!box || !pre) { alert("Optimization failed.\n" + (e && (e.detail || e.message) || e)); return; }
+  const msg = (e && (e.detail || e.message)) ? (e.detail || e.message) : String(e);
+  pre.textContent = `[${new Date().toISOString()}] Optimizer v3 run failed\n\n${msg}`;
+  box.style.display = "";
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function optv4HideError() {
+  const box = document.getElementById("optv4-error");
+  if (box) box.style.display = "none";
+}
+document.getElementById("btn-optv4-dismiss-error")?.addEventListener("click", optv4HideError);
+document.getElementById("btn-optv4-copy-error")?.addEventListener("click", async () => {
+  const pre = document.getElementById("optv4-error-text");
+  const txt = pre ? pre.textContent : "";
+  try {
+    await navigator.clipboard.writeText(txt);
+    const btn = document.getElementById("btn-optv4-copy-error");
+    if (btn) { const o = btn.textContent; btn.textContent = "Copied!"; setTimeout(() => { btn.textContent = o; }, 1500); }
+  } catch {
+    // Clipboard API blocked (e.g. non-HTTPS) — select the text so the user can Ctrl-C.
+    const pre2 = document.getElementById("optv4-error-text");
+    if (pre2) { const r = document.createRange(); r.selectNodeContents(pre2); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
+  }
+});
+document.getElementById("btn-optv4-target-reset")?.addEventListener("click", optv4ResetTarget);
+document.getElementById("btn-optv4-target-apply")?.addEventListener("click", () => {
+  if (!document.getElementById("optv4-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
+  document.getElementById("btn-run-optv4")?.click();
+});
+
+document.getElementById("btn-run-optv4")?.addEventListener("click", async () => {
+  const $btn = document.getElementById("btn-run-optv4");
+  if (!document.getElementById("optv4-target-expiry")?.value) {
+    alert("Choose a target maturity before running the optimizer."); return;
+  }
+  $btn.classList.add("loading"); $btn.textContent = "Running…"; $btn.disabled = true;
+  try {
+    const rollDteThreshold = document.getElementById("optv4-roll-dte-threshold").value || null;
+    const cptySel = document.getElementById("optv4-counterparties");
+    const selectedCounterparties = cptySel
+      ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : [];
+    const saveRequested = document.getElementById("optv4-save-usecase")?.checked || false;
+    const rollItmOnly = document.getElementById("optv4-roll-itm-only")?.checked || false;
+    const enableBoxNeutralizer = document.getElementById("optv4-enable-box-neutralizer")?.checked || false;
+    const collateralBudgetRaw = document.getElementById("optv4-collateral-budget-pct")?.value;
+    const collateralBudgetPct = collateralBudgetRaw === "" || collateralBudgetRaw === undefined ? null : parseFloat(collateralBudgetRaw);
+    const maxQtyRaw = document.getElementById("optv4-max-qty")?.value;
+    const maxQty = maxQtyRaw === "" || maxQtyRaw === undefined ? null : parseFloat(maxQtyRaw);
+    const maxTradesRaw = document.getElementById("optv4-max-trades")?.value;
+    const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
+
+    // When there are roll candidates, the tick-to-unwind panel is authoritative:
+    // force exactly the ticked set (roll_dte_threshold = -1 → manual mode). With
+    // no candidates, fall back to the threshold / ITM-only inputs.
+    const rollCandsActive = optv4RollCandidates().length > 0;
+    const rollThresholdParam = rollCandsActive ? -1 : (Number.isNaN(rollDteThreshold) ? null : rollDteThreshold);
+    const forcedRollIds = rollCandsActive ? [...optv4RollSel] : [...tmSelected];
+
+    // Scope the NEW/replacement trades to the counterparties actually being
+    // rolled, so "roll only G20" doesn't spawn trades for Wave/KeyRock/Flowdesk.
+    // An explicit Counterparties selection still wins; otherwise derive scope
+    // from the ticked roll candidates.
+    let cptiesParam = selectedCounterparties.length ? selectedCounterparties : null;
+    if (rollCandsActive && !cptiesParam) {
+      const rolledCps = [...new Set(
+        optv4RollCandidates().filter(c => optv4RollSel.has(c.id)).map(c => c.counterparty).filter(Boolean)
+      )];
+      if (rolledCps.length) cptiesParam = rolledCps;
+    }
+
+    // Hypothetical spot: blank means live spot (unchanged from v3). Set, and
+    // the whole run re-centers on it — candidates, greeks, target anchor and
+    // the payoff ladder. The "before" curve is then the CURRENT book repriced
+    // at that spot, not what it is worth right now.
+    const optv4CustomSpotRaw = document.getElementById("optv4-custom-spot")?.value;
+    const optv4CustomSpot = (optv4CustomSpotRaw === "" || optv4CustomSpotRaw === undefined)
+      ? null : parseFloat(optv4CustomSpotRaw);
+
+    const data = await post("/api/optimization/run", {
+      asset: currentAsset,
+      custom_spot: optv4CustomSpot,
+      lam_factor: parseFloat(document.getElementById("optv4-lam-factor").value || "0.2"),
+      downside_factor: parseFloat(document.getElementById("optv4-downside-factor")?.value || "1"),
+      t90_weight: parseFloat(document.getElementById("optv4-t90-weight")?.value || "0"),
+      mu_factor: parseFloat(document.getElementById("optv4-mu-factor")?.value || "0"),
+      cash_neutrality_factor: parseFloat(document.getElementById("optv4-cash-neutrality-factor")?.value || "0"),
+      target_expiry: document.getElementById("optv4-target-expiry").value || null,
+      unwind_discount: parseFloat(document.getElementById("optv4-unwind-discount")?.value || "0.2"),
+      new_position_penalty: parseFloat(document.getElementById("optv4-new-position-penalty")?.value || "0.04"),
+      roll_dte_threshold: rollThresholdParam,
+      roll_itm_only: rollItmOnly,
+      collateral_budget_pct: collateralBudgetPct,
+      max_qty: maxQty,
+      max_trades: maxTrades,
+      enable_box_neutralizer: enableBoxNeutralizer,
+      enable_composite_unwind: document.getElementById("optv4-enable-composite-unwind")?.checked ?? true,
+      composite_overrides: currentCompositeOverrides(),
+      save_usecase_snapshot: saveRequested,
+      is_replay: false,
+      counterparties: cptiesParam,
+      forced_roll_ids: forcedRollIds,
+      base_trade_ids: optv2BaseIds(),
+      // User-edited target profile (Target Profile tab). null = auto parametric.
+      manual_target: (optv4ManualTarget && optv4ManualTarget.length >= 2) ? optv4ManualTarget : null,
+      // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
+      bid_ask_vol_pts: optVolPtsDict("optv4-volpts-list"),
+      // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
+      box_fee_bps: optBoxFeeDict("optv4-boxfee-list"),
+      // Per-counterparty perp/future trading cost, in bps of notional.
+      perp_cost_bps: optPerpCostDict("optv4-perpcost-list"),
+      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      enable_delta_rehedge: document.getElementById("optv4-enable-delta-rehedge")?.checked || false,
+      delta_band: parseFloat(document.getElementById("optv4-delta-band")?.value || "75"),
+      // Saved target profile selected in the dropdown (engine loads the CSV).
+      // Overridden by manual_target when the Target column has been edited.
+      target_profile_file: optv4TargetProfileFile || null,
+    });
+    console.log("Optimizer v3 result:", data);
+    optv4HideError();
+    optv4RenderResult(data);
+    if (saveRequested) { await optv4LoadSnapshots(); }
+  } catch (e) {
+    console.error("Optimizer v3 run failed:", e);
+    optv4ShowError(e);
   } finally {
     $btn.classList.remove("loading"); $btn.textContent = "Run Optimizer"; $btn.disabled = false;
   }
