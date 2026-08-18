@@ -1096,13 +1096,6 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     const $optv2DeltaBand = document.getElementById("optv2-delta-band");
     if ($optv2DeltaBand) $optv2DeltaBand.value = asset === "FIL" ? 75000 : 75;
 
-    // Same asset scaling for v4's band. NOT applied to v3 — it is frozen on its
-    // previous behaviour (flat 75 for both assets) so its runs stay comparable.
-    // Max Qty is deliberately left alone: v3's default (10000) differs from v2's
-    // and no change asked for it to be scaled, so v4 inherits v3's.
-    const $optv4DeltaBand = document.getElementById("optv4-delta-band");
-    if ($optv4DeltaBand) $optv4DeltaBand.value = asset === "FIL" ? 75000 : 75;
-
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
@@ -1848,10 +1841,9 @@ function wireCounterpartyMultiSelect(selectId, selectAllBtnId, clearBtnId) {
   });
 }
 wireCounterpartyMultiSelect("optv2-counterparties", "optv2-cpty-select-all", "optv2-cpty-clear");
-// Deliberately NOT wired for optv3: v3 is frozen on its previous behaviour so
-// its runs stay comparable with what production has been producing. New UI work
-// goes to v4.
-wireCounterpartyMultiSelect("optv4-counterparties", "optv4-cpty-select-all", "optv4-cpty-clear");
+// Not wired for v3 or v4: v3 is frozen on its previous behaviour, and v4's UI is
+// a pure copy of v3's, so neither page has the Select All / Clear buttons this
+// needs. The click-to-toggle UX lives on the Optimizer v2 page only for now.
 
 // Auto-fill ref spot and compute % OTM / notional when strike or qty changes
 function tfAutoCalc() {
@@ -9710,9 +9702,7 @@ function optDefaultVolPts(asset, cpty) {
 }
 
 // Render one editable VOLpts input per counterparty in the loaded book,
-// preserving any value the user already typed. (Shared v2/v3/v4 by listId —
-// these opt* helpers are deliberately page-agnostic, so the v4 page reuses
-// these definitions rather than carrying its own copies.)
+// preserving any value the user already typed. (Shared v2/v3 by listId.)
 function optRenderVolPts(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
@@ -11220,14 +11210,14 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      // v3 IS FROZEN on its pre-2026-08-05 behaviour so its output stays
-      // comparable with what production has been running. Both of these are
-      // pinned rather than read off the UI: the server-side default for
-      // enable_composite_unwind is now true, so leaving it out would silently
-      // opt v3 into composite unwinding (and the box cost floor that rides
-      // along with it). Use Optimizer v4 for the new behaviour.
+      // v3 IS FROZEN on its pre-2026-08-05 behaviour so its runs stay comparable
+      // with what production has been producing. Pinned rather than read from a
+      // control: the server default is now true, so omitting it would silently
+      // opt v3 into composite unwinding (and the box cost floor that rides along
+      // with it). Use Optimizer v4 for the new behaviour.
       enable_composite_unwind: false,
       composite_overrides: null,
+      composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: cptiesParam,
@@ -11242,8 +11232,6 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       // Per-counterparty perp/future trading cost, in bps of notional.
       perp_cost_bps: optPerpCostDict("optv3-perpcost-list"),
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
-      // Still read from the checkbox, which v3 keeps ticked by default (the
-      // server default flipped to off in b2cd070; v3 predates that).
       enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
       delta_band: parseFloat(document.getElementById("optv3-delta-band")?.value || "75"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -11263,10 +11251,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
 });
 
 // ═══════════════════════════════════════════════════════════════
-// OPTIMIZER V4 — copy of the v3 UI carrying the latest optimizer work
-// (composite unwind, hypothetical-spot override, click-to-toggle
-// counterparties, opt-in delta rehedge). v3 is pinned to its previous
-// behaviour so its numbers stay comparable; this is where new work lands.
+// OPTIMIZER V3 — reorganized UI over the exact same v2 engine.
 // Reuses the pure helpers + param-friendly renderers above
 // (optv2Fmt / optv2NearestIdx / optv2MatrixDisplayIdx / optv2OptType /
 //  optv2StrategyLabel / optv2ExpiryText / optv2RenderTradeTable /
@@ -11555,10 +11540,6 @@ function optv4RenderPositions() {
 
 function optv4RenderKpi() {
   document.getElementById("optv4-eth-spot").textContent = "$" + optv2Fmt(optv4Data.eth_spot, 2);
-  // Hint the live spot as the Hypothetical Spot placeholder — blank still means
-  // "use live spot", this just stops the field being a mystery number to fill in.
-  const $customSpot = document.getElementById("optv4-custom-spot");
-  if ($customSpot) $customSpot.placeholder = optv2Fmt(optv4Data.eth_spot, 2);
   const ids = optv2BaseIds();
   if (!ids) {
     const t = optv4Data.totals || {};
@@ -12728,17 +12709,8 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       if (rolledCps.length) cptiesParam = rolledCps;
     }
 
-    // Hypothetical spot: blank means live spot (unchanged from v3). Set, and
-    // the whole run re-centers on it — candidates, greeks, target anchor and
-    // the payoff ladder. The "before" curve is then the CURRENT book repriced
-    // at that spot, not what it is worth right now.
-    const optv4CustomSpotRaw = document.getElementById("optv4-custom-spot")?.value;
-    const optv4CustomSpot = (optv4CustomSpotRaw === "" || optv4CustomSpotRaw === undefined)
-      ? null : parseFloat(optv4CustomSpotRaw);
-
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
-      custom_spot: optv4CustomSpot,
       lam_factor: parseFloat(document.getElementById("optv4-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv4-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv4-t90-weight")?.value || "0"),
@@ -12753,7 +12725,11 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      enable_composite_unwind: document.getElementById("optv4-enable-composite-unwind")?.checked ?? true,
+      // THE difference between v4 and v3. v4 opts into composite unwinding (and
+      // the box cost floor inside it); v3 pins it false. Hardcoded because v4's
+      // UI is a pure copy of v3's, which has no checkbox for it — the pages look
+      // identical and diverge only here.
+      enable_composite_unwind: true,
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,

@@ -1959,8 +1959,6 @@
           <div class="optv3-group-title">Output</div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
-          <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-composite-unwind" checked> Unwind whole composites</label>
-          <p class="optv3-hint">Force multi-leg deals (spreads, straddles, risk reversals, iron condors, ...) to unwind together, proportionally, instead of cherry-picking individual legs — priced off the deal's net vega. Uncheck to let every leg trade independently. Respects manual grouping from the Deals screen.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
           <div class="optv3-field"><label>Delta band<input type="number" id="optv3-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
@@ -2221,7 +2219,7 @@
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
-  <!-- PAGE: Optimizer v4  (v3 layout + the latest optimizer work)   -->
+  <!-- PAGE: Optimizer v4  (UI identical to v3, only params differ)  -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-optv4" class="page">
     <div class="optv3-layout">
@@ -2232,7 +2230,7 @@
           <button id="btn-load-optv4" class="btn-primary" style="width:auto">Load Risk Profile</button>
           <button id="btn-run-optv4" class="btn-primary" style="width:auto" disabled>Run Optimizer</button>
         </div>
-        <p class="optv3-hint" style="margin-top:-.4rem">Load the current book, choose a target maturity, then run. Same engine as v3, with composite unwind, the hypothetical-spot override and click-to-toggle counterparties. v3 is frozen on its previous behaviour for comparison.</p>
+        <p class="optv3-hint" style="margin-top:-.4rem">Load the current book, choose a target maturity, then run. Same engine as Optimizer v2.</p>
         <div id="optv4-base-pill" class="optv2-base-pill" style="display:none"></div>
 
         <!-- Scope -->
@@ -2244,19 +2242,9 @@
             <p class="optv3-hint">The expiry the optimizer rolls/rebuilds the book into. Required.</p>
           </div>
           <div class="optv3-field optv3-field-full">
-            <label for="optv4-custom-spot">Hypothetical Spot</label>
-            <input type="number" id="optv4-custom-spot" step="1" min="0"
-              title="Run the whole optimization as if spot were this price - candidates, greeks, target anchor and payoff ladder all re-center on it.">
-            <p class="optv3-hint">Blank = live spot. Set it to ask "what would I trade if spot gapped to X".</p>
-          </div>
-          <div class="optv3-field optv3-field-full">
             <label for="optv4-counterparties">Counterparties</label>
             <select id="optv4-counterparties" multiple size="3"><option value="ALL" selected>ALL</option></select>
-            <div style="display:flex;gap:.3rem;margin-top:.3rem">
-              <button type="button" id="optv4-cpty-select-all" class="btn-secondary" style="width:auto;margin:0;padding:.2rem .5rem;font-size:.7rem">Select All</button>
-              <button type="button" id="optv4-cpty-clear" class="btn-secondary" style="width:auto;margin:0;padding:.2rem .5rem;font-size:.7rem">Clear</button>
-            </div>
-            <p class="optv3-hint">Click a counterparty to toggle it on/off — no Ctrl/Cmd needed. None selected = all counterparties.</p>
+            <p class="optv3-hint">Ctrl/Cmd-click for multiple. None selected = all counterparties.</p>
           </div>
         </div>
 
@@ -2352,9 +2340,7 @@
           <div class="optv3-group-title">Output</div>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
-          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-composite-unwind" checked> Unwind whole composites</label>
-          <p class="optv3-hint">Force multi-leg deals (spreads, straddles, risk reversals, iron condors, ...) to unwind together, proportionally, instead of cherry-picking individual legs — priced off the deal's net vega. Uncheck to let every leg trade independently. Respects manual grouping from the Deals screen.</p>
-          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
           <div class="optv3-field"><label>Delta band<input type="number" id="optv4-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-save-usecase"> Save run snapshot</label>
