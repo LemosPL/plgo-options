@@ -1477,25 +1477,36 @@ select { margin-bottom: .5rem; }
    instead of forcing the grid (and the page) wider than the viewport. */
 .optv3-trades-grid > div { min-width: 0; }
 
-/* v3 tables — match the app's standard table look (cf. #chain-table / #mtm-matrix-table).
-   pf-table has no global styles, so scope the standard to the v3 page. */
-#page-optv3 .pf-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
-#page-optv3 .pf-table thead th {
+/* v3 + v4 tables — match the app's standard table look (cf. #chain-table / #mtm-matrix-table).
+   pf-table has no global styles, so scope the standard to these pages. NOTE: these
+   are ID-scoped, so every rule must list #page-optv4 alongside #page-optv3 — the
+   .optv3-* CLASS rules above are shared by both pages automatically, but these are
+   not, and omitting v4 leaves its tables with no padding, borders or striping. */
+#page-optv3 .pf-table,
+#page-optv4 .pf-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+#page-optv3 .pf-table thead th,
+#page-optv4 .pf-table thead th {
   position: sticky; top: 0; z-index: 1;
   background: var(--surface); color: var(--muted); font-weight: 600;
   text-align: left; padding: .5rem .65rem; white-space: nowrap;
   border-bottom: 1px solid var(--border);
 }
-#page-optv3 .pf-table tbody td {
+#page-optv3 .pf-table tbody td,
+#page-optv4 .pf-table tbody td {
   padding: .45rem .65rem; white-space: nowrap;
   border-bottom: 1px solid var(--row-border, var(--border));
   font-variant-numeric: tabular-nums;
 }
-#page-optv3 .pf-table tbody tr:nth-child(even) { background: rgba(127, 127, 127, .05); }
-#page-optv3 .pf-table tbody tr:hover { background: var(--hover-bg); }
-#page-optv3 .pf-table tbody tr.row-highlight { background: var(--hover-bg); font-weight: 600; }
-#page-optv3 .pf-table tbody tr.row-highlight td { border-top: 1px solid var(--border); }
-#page-optv3 .pf-table th.num, #page-optv3 .pf-table td.num {
+#page-optv3 .pf-table tbody tr:nth-child(even),
+#page-optv4 .pf-table tbody tr:nth-child(even) { background: rgba(127, 127, 127, .05); }
+#page-optv3 .pf-table tbody tr:hover,
+#page-optv4 .pf-table tbody tr:hover { background: var(--hover-bg); }
+#page-optv3 .pf-table tbody tr.row-highlight,
+#page-optv4 .pf-table tbody tr.row-highlight { background: var(--hover-bg); font-weight: 600; }
+#page-optv3 .pf-table tbody tr.row-highlight td,
+#page-optv4 .pf-table tbody tr.row-highlight td { border-top: 1px solid var(--border); }
+#page-optv3 .pf-table th.num, #page-optv3 .pf-table td.num,
+#page-optv4 .pf-table th.num, #page-optv4 .pf-table td.num {
   text-align: right; font-variant-numeric: tabular-nums;
 }
 .optv3-warn {
