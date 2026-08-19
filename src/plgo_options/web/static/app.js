@@ -1136,7 +1136,12 @@ document.getElementById("btn-send-to-sb").addEventListener("click", () => {
 });
 $btnLoad.addEventListener("click", loadChain);
 
-document.querySelectorAll(".btn-template").forEach(btn => {
+// Pricing-screen templates only. The Strategy Builder's buttons carry BOTH
+// classes (class="btn-template sb-template"), so an unqualified .btn-template
+// selector also bound applyTemplate to them — clicking an SB template silently
+// rewrote the Pricing screen's legs behind your back, on top of running SB's own
+// handler. Exclude them.
+document.querySelectorAll(".btn-template:not(.sb-template)").forEach(btn => {
   btn.addEventListener("click", () => applyTemplate(btn.dataset.strategy));
 });
 
@@ -1714,6 +1719,22 @@ document.querySelectorAll(".tf-preset").forEach(btn => {
   });
 });
 
+// Snap a strike to the asset's own step. Bare Math.round() is ETH-centric: at a
+// FIL spot near $0.63 it collapses every percentage offset to 1, and the
+// straddle's Math.round(spot/50)*50 snapped all the way to 0 — so every FIL
+// preset came out degenerate (a "straddle" at strike 0, spreads with both legs
+// on the same strike). FIL needs 0.01 granularity, not 0.05: the condor's
+// tightest pair (0.85x vs 0.90x of spot) is only ~0.03 apart at FIL spot and
+// would collide on a coarser step. The book already holds strikes like 0.535
+// and 0.698, so 0.01 matches how these are really quoted.
+function tfRoundStrike(v) {
+  const isFil = typeof currentAsset !== "undefined" && currentAsset === "FIL";
+  const step = isFil ? 0.01 : 50;
+  const snapped = Math.round(v / step) * step;
+  // Kill binary-float dust (0.05*13 = 0.6500000000000001).
+  return isFil ? Math.round(snapped * 100) / 100 : snapped;
+}
+
 function tfApplyPreset() {
   const isSingle = tfPreset === "single";
   document.getElementById("tf-single-section").style.display = isSingle ? "" : "none";
@@ -1726,13 +1747,13 @@ function tfApplyPreset() {
     tfLegs = template.map((leg, i) => {
       let strike = leg.strike;
       if (spot > 0 && strike === 0) {
-        if (tfPreset === "put_spread") strike = i === 0 ? Math.round(spot * 0.9) : Math.round(spot * 0.8);
-        else if (tfPreset === "call_spread") strike = i === 0 ? Math.round(spot * 1.1) : Math.round(spot * 1.2);
-        else if (tfPreset === "straddle") strike = Math.round(spot / 50) * 50;
-        else if (tfPreset === "strangle") strike = i === 0 ? Math.round(spot * 1.1) : Math.round(spot * 0.9);
+        if (tfPreset === "put_spread") strike = tfRoundStrike(spot * (i === 0 ? 0.9 : 0.8));
+        else if (tfPreset === "call_spread") strike = tfRoundStrike(spot * (i === 0 ? 1.1 : 1.2));
+        else if (tfPreset === "straddle") strike = tfRoundStrike(spot);
+        else if (tfPreset === "strangle") strike = tfRoundStrike(spot * (i === 0 ? 1.1 : 0.9));
         else if (tfPreset === "iron_condor") {
           const offsets = [0.85, 0.9, 1.1, 1.15];
-          strike = Math.round(spot * offsets[i]);
+          strike = tfRoundStrike(spot * offsets[i]);
         }
       }
       return { ...leg, strike, qty: 1000, premium_per: 0, premium_usd: 0 };
