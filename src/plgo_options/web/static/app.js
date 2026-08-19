@@ -213,16 +213,33 @@ function pricerDelta(S, K, T, r, sigma, type) {
 // We calibrate a methodology per counterparty AS WE TRADE with them, per asset.
 // Anything left blank falls back to the mid vol surface (theoretical fair value).
 //
-// Flowdesk (FIL) was reverse-engineered from the 28 Aug 26 structure (44d):
+// Two shapes are supported, tagged by `model`:
+//
+// "otmFlatVolItmIntrinsic" (Flowdesk FIL, reverse-engineered from the 28 Aug 26
+// structure, 44d) — the split is by MONEYNESS:
 //   • Out-of-the-money legs → a flat, elevated wing vol (~95%), ignoring your skew.
 //   • In-the-money legs      → intrinsic value only (no time premium), with the
 //                              forward shaded a few % AGAINST the option they trade
 //                              (down for a call they buy from you, up for a put).
+//
+// "twoSidedVol" (Keyrock FIL, from the 23 Dec 26 structure, 126d) — the split is
+// by WHICH SIDE WE TRADE, not by strike. Backing implied vols out of their six
+// quoted premiums separates almost perfectly into two flat levels:
+//   we SELL (they buy):  0.68C 115.0%   0.80C 116.0%   2.22P 118.6%  -> ~116%
+//   we BUY  (they sell): 0.85P 162.8%   0.45P 163.4%   1.80C 184.9%  -> ~163%,
+//                                                       widening far out
+// i.e. a bid/ask quoted in vol (~116 bid / ~163 ask, ~47 vol points wide), not a
+// skew. Note it is flat in strike on each side: the 0.80 CALL implies 116% while
+// the neighbouring 0.85 PUT implies 163%, which no single arbitrage-free surface
+// can produce — so this must be modelled per side, not as one smile. Unlike
+// Flowdesk they charge full time value on ITM legs (their 0.85P, 1.34x in the
+// money, still carries 80% of its intrinsic again in time premium).
 const CPTY_PRICING = {
   flowdesk: {
     name: "Flowdesk",
     byAsset: {
       FIL: {
+        model: "otmFlatVolItmIntrinsic",
         otmFlatVol: 95,          // flat wing vol (%) applied to every OTM leg
         itmForwardLeanPct: 4.5,  // forward shaded against the traded option on ITM legs
         calibratedNote: "Calibrated from your 28 Aug 26 FIL structure (44d).",
@@ -230,7 +247,22 @@ const CPTY_PRICING = {
       // ETH: not calibrated yet — fill in as you trade ETH with Flowdesk.
     },
   },
-  keyrock: { name: "Keyrock", byAsset: {} },  // not calibrated yet
+  keyrock: {
+    name: "Keyrock",
+    byAsset: {
+      FIL: {
+        model: "twoSidedVol",
+        bidVol: 116,             // vol they BUY from us at (legs we sell)
+        askVol: 163,             // vol they SELL to us at (legs we buy)
+        farAskVol: 185,          // ask vol once the strike is far from spot
+        farWingThreshold: 0.5,   // |ln(K/spot)| beyond which farAskVol applies
+        calibratedNote: "Calibrated from your 23 Dec 26 FIL structure (126d) — " +
+          "reprices all six legs to within $3.6k total, and the net premium to " +
+          "$282 on $1.26m (0.02%).",
+      },
+      // ETH: not calibrated yet — fill in as you trade ETH with Keyrock.
+    },
+  },
   wave:    { name: "Wave",    byAsset: {} },  // not calibrated yet
   g20:     { name: "G20",     byAsset: {} },  // not calibrated yet
 };
@@ -250,6 +282,27 @@ function getCptyMethod(cptyKey, asset) {
 // Returns { prem, ivShown, mode } or null if it can't be applied.
 function applyCptyPricing(method, { spot, K, T, type, side }) {
   if (!method || method.uncalibrated) return null;
+
+  // Two-sided vol market: the vol depends on which side WE trade, not on the
+  // strike. They buy from us at their bid vol and sell to us at their ask vol,
+  // with the ask widening once the strike is far from spot. ITM legs are priced
+  // the same way — full time value, no intrinsic-only rule.
+  if (method.model === "twoSidedVol") {
+    let volPct;
+    if (side === "sell") {
+      volPct = method.bidVol;                      // they are buying it from us
+    } else {
+      const m = Math.abs(Math.log(K / spot));      // log-moneyness
+      volPct = (method.farAskVol != null && m > method.farWingThreshold)
+        ? method.farAskVol : method.askVol;
+    }
+    return {
+      prem: pricerBs(spot, K, T, 0, volPct / 100, type),
+      ivShown: volPct,
+      mode: side === "sell" ? "bid" : "ask",
+    };
+  }
+
   const intrinsic = type === "C" ? Math.max(spot - K, 0) : Math.max(K - spot, 0);
   if (intrinsic <= 0) {
     // OTM leg → flat elevated wing vol (their skew, not yours)
@@ -276,6 +329,19 @@ function cptyMethodBoxHtml(cptyKey, asset) {
     return `<strong>${method.name}</strong> — no pricing methodology calibrated for ` +
       `${asset} yet. Legs are priced at the <strong>mid vol surface</strong> ` +
       `(theoretical fair value). We'll fill this in as you trade ${asset} with them.`;
+  }
+  if (method.model === "twoSidedVol") {
+    return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
+      `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
+      `<li><strong>Legs you sell:</strong> marked at a flat <strong>~${method.bidVol}% vol</strong> ` +
+      `— what they pay to buy from you.</li>` +
+      `<li><strong>Legs you buy:</strong> marked at <strong>~${method.askVol}% vol</strong>, ` +
+      `rising to <strong>~${method.farAskVol}%</strong> once the strike is far from spot ` +
+      `(|ln(K/spot)| &gt; ${method.farWingThreshold}) — what they charge to sell to you.</li>` +
+      `<li>That is a <strong>bid/ask quoted in vol, roughly ${method.askVol - method.bidVol} vol points wide</strong> — ` +
+      `not a skew. It applies the same way whichever side of the strike you are on, and ` +
+      `<strong>in-the-money legs still carry full time value</strong> (no intrinsic-only rule).</li>` +
+      `</ul>`;
   }
   return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
     `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
@@ -874,9 +940,14 @@ function replicateStrategy() {
     let srcLabel;
     if (d.cp_mode) {
       const cpName = cptyMethod.name;
-      srcLabel = d.cp_mode === "otm"
-        ? `<span style="color:#58a6ff;font-weight:600" title="${cpName} marks OTM legs at a flat wing vol">${cpName} · flat vol</span>`
-        : `<span style="color:#58a6ff;font-weight:600" title="${cpName} marks ITM legs at intrinsic, forward shaded against you">${cpName} · intrinsic</span>`;
+      const CP_MODE_LABEL = {
+        otm: ["flat vol", `${cpName} marks OTM legs at a flat wing vol`],
+        itm: ["intrinsic", `${cpName} marks ITM legs at intrinsic, forward shaded against you`],
+        bid: ["bid vol", `${cpName} is buying this leg from you — marked at their bid vol`],
+        ask: ["ask vol", `${cpName} is selling this leg to you — marked at their ask vol`],
+      };
+      const [modeText, modeTitle] = CP_MODE_LABEL[d.cp_mode] || ["marks", `${cpName} methodology`];
+      srcLabel = `<span style="color:#58a6ff;font-weight:600" title="${modeTitle}">${cpName} · ${modeText}</span>`;
     } else if (d._synthetic) {
       srcLabel = `<span style="color:#f0883e;font-weight:600" title="Vol interpolated between nearest Deribit expiries — theoretical, not live">Interpolated*</span>`;
     } else {
