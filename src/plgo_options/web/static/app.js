@@ -1933,9 +1933,10 @@ function wireCounterpartyMultiSelect(selectId, selectAllBtnId, clearBtnId) {
   });
 }
 wireCounterpartyMultiSelect("optv2-counterparties", "optv2-cpty-select-all", "optv2-cpty-clear");
-// Not wired for v3 or v4: v3 is frozen on its previous behaviour, and v4's UI is
-// a pure copy of v3's, so neither page has the Select All / Clear buttons this
-// needs. The click-to-toggle UX lives on the Optimizer v2 page only for now.
+wireCounterpartyMultiSelect("optv3-counterparties", "optv3-cpty-select-all", "optv3-cpty-clear");
+// v4 mirrors v3's UI exactly, so it gets the same wiring. v3 and v4 differ only
+// in the params they send (see optv4Run), never in their controls.
+wireCounterpartyMultiSelect("optv4-counterparties", "optv4-cpty-select-all", "optv4-cpty-clear");
 
 // Auto-fill ref spot and compute % OTM / notional when strike or qty changes
 function tfAutoCalc() {
@@ -9243,6 +9244,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       lam_factor: parseFloat(document.getElementById("optv2-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv2-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv2-t90-weight")?.value || "0"),
+      atm_concentration: parseFloat(document.getElementById("optv2-atm-concentration")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv2-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       max_cp_loss_usd: maxCpLoss,
@@ -11310,6 +11312,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       lam_factor: parseFloat(document.getElementById("optv3-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv3-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv3-t90-weight")?.value || "0"),
+      atm_concentration: parseFloat(document.getElementById("optv3-atm-concentration")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv3-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv3-cash-neutrality-factor")?.value || "0"),
       target_expiry: document.getElementById("optv3-target-expiry").value || null,
@@ -12825,6 +12828,7 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       lam_factor: parseFloat(document.getElementById("optv4-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv4-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv4-t90-weight")?.value || "0"),
+      atm_concentration: parseFloat(document.getElementById("optv4-atm-concentration")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv4-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv4-cash-neutrality-factor")?.value || "0"),
       target_expiry: document.getElementById("optv4-target-expiry").value || null,
@@ -12839,8 +12843,11 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       // THE difference between v4 and v3. v4 opts into composite unwinding (and
       // the box cost floor inside it); v3 pins it false. Hardcoded because v4's
       // UI is a pure copy of v3's, which has no checkbox for it — the pages look
-      // identical and diverge only here.
+      // identical and diverge only here. composite_overrides carries the manual
+      // grouping from the Deals screen — without it v4 would enable composite
+      // unwinding but ignore any regrouping a trader did there.
       enable_composite_unwind: true,
+      composite_overrides: currentCompositeOverrides(),
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
