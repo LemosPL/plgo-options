@@ -331,17 +331,33 @@ function cptyMethodBoxHtml(cptyKey, asset) {
       `(theoretical fair value). We'll fill this in as you trade ${asset} with them.`;
   }
   if (method.model === "twoSidedVol") {
-    return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
+    // Express the far-wing cut-off as a plain multiple of spot rather than
+    // |ln(K/spot)|, so the box reads like a desk note and not a formula.
+    const hi = Math.exp(method.farWingThreshold).toFixed(2);
+    const lo = Math.exp(-method.farWingThreshold).toFixed(2);
+    return `<strong>How ${method.name} prices your trades</strong>` +
+      `<p style="margin:.4rem 0 0">${method.name} does not use one fair value and add a spread ` +
+      `around it. They run <strong>two different volatilities</strong> — a cheap one for ` +
+      `everything they buy, an expensive one for everything they sell. Which one you get ` +
+      `depends only on <strong>which way you are trading</strong>, not on the strike:</p>` +
       `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
-      `<li><strong>Legs you sell:</strong> marked at a flat <strong>~${method.bidVol}% vol</strong> ` +
-      `— what they pay to buy from you.</li>` +
-      `<li><strong>Legs you buy:</strong> marked at <strong>~${method.askVol}% vol</strong>, ` +
-      `rising to <strong>~${method.farAskVol}%</strong> once the strike is far from spot ` +
-      `(|ln(K/spot)| &gt; ${method.farWingThreshold}) — what they charge to sell to you.</li>` +
-      `<li>That is a <strong>bid/ask quoted in vol, roughly ${method.askVol - method.bidVol} vol points wide</strong> — ` +
-      `not a skew. It applies the same way whichever side of the strike you are on, and ` +
-      `<strong>in-the-money legs still carry full time value</strong> (no intrinsic-only rule).</li>` +
-      `</ul>`;
+      `<li><strong>You sell to them → ${method.bidVol}% vol.</strong> This is their bid. ` +
+      `The same for every strike.</li>` +
+      `<li><strong>You buy from them → ${method.askVol}% vol</strong>, or ` +
+      `<strong>${method.farAskVol}%</strong> if the strike is a long way from spot ` +
+      `(above ${hi}× or below ${lo}× spot). This is their offer.</li>` +
+      `</ul>` +
+      `<p style="margin:.4rem 0 0">The gap between the two — about ` +
+      `<strong>${method.askVol - method.bidVol} vol points</strong> — is their spread, and it is ` +
+      `wide. The practical effect is that <strong>the same option is worth noticeably more when ` +
+      `you are buying it than when you are selling it</strong>, so a structure that looks flat at ` +
+      `mid can still cost you real money with them.</p>` +
+      `<p style="margin:.4rem 0 0">Two things worth remembering: this is a two-way price, ` +
+      `<strong>not a skew</strong> — they are not charging more for downside puts than upside ` +
+      `calls, they are charging more for whatever you are buying. And unlike Flowdesk, ` +
+      `<strong>in-the-money options keep their full time value</strong> — nothing is priced at ` +
+      `intrinsic only.</p>` +
+      `<p style="margin:.4rem 0 0;font-size:.68rem;opacity:.75">${method.calibratedNote}</p>`;
   }
   return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
     `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
