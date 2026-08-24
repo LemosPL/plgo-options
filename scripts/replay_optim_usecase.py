@@ -34,7 +34,7 @@ def run(self) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        path = Path("../data/optimization_snapshots/usecases/20260713_115517_ALL_ETH.json")
+        path = Path("../data/optimization_snapshots/usecases/20260728_171409_25DEC26.json")
     else:
         path = Path(sys.argv[1])
     usecase = OptimizerUseCase.load(path)
@@ -48,11 +48,11 @@ def main() -> None:
     #result = usecase.run_test()
     run_params = {}
     run_params['target_expiry'] = "25SEP26"
-    run_params['roll_dte_threshold'] = 23
+    run_params['roll_dte_threshold'] = -1
     run_params['is_replay'] = True
     run_params['lam_factor'] = 0.5
     run_params['mu_factor'] = 2.3
-    run_params['counterparties'] = ['Flowdesk']#['KeyRock']#
+    #run_params['counterparties'] = ['Flowdesk']#['KeyRock']#
     result = usecase.run(run_params=run_params)
 
     #out_path = path.with_name(path.stem + "_replayed.json")

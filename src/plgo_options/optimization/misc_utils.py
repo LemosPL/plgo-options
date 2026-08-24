@@ -224,72 +224,100 @@ def load_target_profile():
     smoothed_profile = smooth_target_profile(target_profile)
     return smoothed_profile
 
-def build_parametric_target_profile(asset: str, spot_ladder: list[float] | np.ndarray, current_spot: float):
+def build_parametric_target_profile(
+    asset: str, spot_ladder: list[float] | np.ndarray, current_spot: float, **kwargs,
+):
     if asset == "ETH":
-        return build_parametric_target_profile_eth(spot_ladder, current_spot)
+        return build_parametric_target_profile_eth(spot_ladder, current_spot, **kwargs)
     elif asset == "FIL":
-        return build_parametric_target_profile_fil(spot_ladder, current_spot)
+        return build_parametric_target_profile_fil(spot_ladder, current_spot, **kwargs)
     else:
         raise ValueError(
             f"Unsupported asset: {asset}. Supported assets are 'ETH' and 'FIL'."
         )
 
-def build_parametric_target_profile_eth(
-    spot_ladder: list[float] | np.ndarray,
-    current_spot: float,
-    payoff_col: str = "Payoff($)",
-    low_floor_ratio: float = 0.5,
-    trough_ratio: float = 1.0,
-    high_plateau_ratio: float = 1.7,
-    low_floor_payoff: float = -5_000_000.0,
-    trough_payoff: float = -19_000_000.0,
-    high_plateau_payoff: float = -10_000_000.0,
-) -> pd.DataFrame:
+def _scaled_linear_v_target_profile(
+    spot_ladder, current_spot, payoff_col,
+    low_floor_ratio, high_plateau_ratio, trough_payoff,
+):
+    """Client-specified shape (2026-08-24 screenshot, "always scale to current
+    spot and max loss"): a straight, UNBOUNDED line in raw price on each side of
+    current_spot — no flattening plateau at all, unlike the old log-moneyness
+    engine this replaces. trough_payoff ("max loss") sets the depth exactly at
+    spot; low_floor_ratio/high_plateau_ratio place the $0-breakeven crossing at
+    spot*(1 - low_floor_ratio) and spot*(1 + high_plateau_ratio) — same
+    ratio-as-%-of-spot meaning the UI's down/up-% knobs already had, so slope is
+    simply |max_loss| / (ratio * spot) on each side and stays fixed forever
+    beyond breakeven instead of leveling off. Reverse-engineered from the ETH
+    example (spot $2,200, max loss -$20M, breakeven $200/$4,200 -> ratio
+    2000/2200=0.909 both sides) and the FIL example (spot $0.75, max loss
+    -$15.75M matching its own downside slope, breakeven $0.00/$2.0625 ->
+    ratio 1.0 down / 1.75 up)."""
     strikes = np.asarray(spot_ladder, dtype=float)
-    ratios = strikes / float(current_spot)
-
-    payoffs = np.interp(
-        ratios,
-        [low_floor_ratio, trough_ratio, high_plateau_ratio],
-        [low_floor_payoff, trough_payoff, high_plateau_payoff],
+    spot = float(current_spot)
+    max_loss = abs(float(trough_payoff))
+    slope_down = max_loss / (float(low_floor_ratio) * spot)
+    slope_up = max_loss / (float(high_plateau_ratio) * spot)
+    payoffs = np.where(
+        strikes <= spot,
+        -max_loss + slope_down * (spot - strikes),
+        -max_loss + slope_up * (strikes - spot),
     )
 
-    target_profile = pd.DataFrame(
+    # No smooth_target_profile() here, unlike the old log-moneyness engine: that
+    # spline (fixed s=1e13) was tuned for a gentle curve and barely touched it,
+    # but this shape is a much sharper straight-line V — the same tolerance
+    # rounded the trough off by over $2M against the client's exact numbers.
+    # A piecewise-linear target is already well-behaved for the LP fit, so
+    # there's nothing to smooth for.
+    return pd.DataFrame(
         {payoff_col: payoffs},
         index=pd.Index(strikes, name="Strike($)"),
     )
 
-    smoothed_profile = smooth_target_profile(target_profile)
-    return smoothed_profile
+def build_parametric_target_profile_eth(
+    spot_ladder: list[float] | np.ndarray,
+    current_spot: float,
+    payoff_col: str = "Payoff($)",
+    low_floor_ratio: float = 10 / 11,  # $2,000 breakeven distance at the client's $2,200 example spot
+    trough_ratio: float = 1.0,
+    high_plateau_ratio: float = 10 / 11,
+    low_floor_payoff: float = None,
+    trough_payoff: float = -20_000_000.0,
+    high_plateau_payoff: float = None,
+) -> pd.DataFrame:
+    """low_floor_ratio/high_plateau_ratio are breakeven distance as a fraction of
+    spot (0.909091 = $2,000 away when spot is $2,200, the client's ETH example);
+    trough_payoff is the "max loss" hit exactly at spot. low_floor_payoff/
+    high_plateau_payoff/trough_ratio are accepted but unused — kept only so the
+    existing API/UI plumbing (OptimizerRunParams, the /target-profile and /run
+    request schemas, v2's Wing-recovery knobs) doesn't need to change; the new
+    shape has no flat plateau for them to set the level of. See
+    _scaled_linear_v_target_profile for the actual math."""
+    return _scaled_linear_v_target_profile(
+        spot_ladder, current_spot, payoff_col,
+        low_floor_ratio, high_plateau_ratio, trough_payoff,
+    )
 
 def build_parametric_target_profile_fil(
     spot_ladder: list[float] | np.ndarray,
     current_spot: float,
     payoff_col: str = "Payoff($)",
-    low_floor_ratio: float = 0.5,
+    low_floor_ratio: float = 1.0,
     trough_ratio: float = 1.0,
-    high_plateau_ratio: float = 1.7,
-    low_floor_payoff: float = -5_000_000.0,
-    trough_payoff: float = -19_000_000.0,
-    high_plateau_payoff: float = -10_000_000.0,
+    high_plateau_ratio: float = 1.75,
+    low_floor_payoff: float = None,
+    trough_payoff: float = -15_750_000.0,
+    high_plateau_payoff: float = None,
 ) -> pd.DataFrame:
-    """FIL parametric target — same spot-relative floor/trough/plateau engine as
-    ETH (ratios of current_spot, interpolated across the spot ladder, smoothed),
-    instead of the old fixed 0–5 linear grid. Payoff levels default to the ETH
-    magnitudes; tune the *_payoff args for FIL's book size if needed."""
-    strikes = np.asarray(spot_ladder, dtype=float)
-    ratios = strikes / float(current_spot)
-
-    payoffs = np.interp(
-        ratios,
-        [low_floor_ratio, trough_ratio, high_plateau_ratio],
-        [low_floor_payoff, trough_payoff, high_plateau_payoff],
+    """FIL version of build_parametric_target_profile_eth (see there for the
+    parameter meanings and the "unused, kept for plumbing compat" note).
+    Reverse-engineered from the client's FIL example (spot $0.75): downside
+    breakeven exactly at $0 (ratio 1.0), upside breakeven at $2.0625 (ratio
+    1.75), max loss -$15.75M — taken from the example's downside slope
+    (-$21M per $1 of FIL), since the screenshot's own trough cell (-$21M)
+    was inconsistent with its downside rows by exactly that amount."""
+    return _scaled_linear_v_target_profile(
+        spot_ladder, current_spot, payoff_col,
+        low_floor_ratio, high_plateau_ratio, trough_payoff,
     )
-
-    target_profile = pd.DataFrame(
-        {payoff_col: payoffs},
-        index=pd.Index(strikes, name="Strike($)"),
-    )
-
-    smoothed_profile = smooth_target_profile(target_profile)
-    return smoothed_profile

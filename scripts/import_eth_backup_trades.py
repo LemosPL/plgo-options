@@ -24,7 +24,7 @@ from plgo_options.data.database import (  # noqa: E402
 from plgo_options.data.trades import read_eth_trades  # noqa: E402
 
 
-BACKUP_XLSX = PROJECT_ROOT / "data" / "positions" / "PLGO_Trades_2026-05-26.xlsx"
+BACKUP_XLSX = PROJECT_ROOT / "data" / "positions" / "PLGO_Trades_2026-07-14.xlsx"
 
 
 async def main() -> None:

@@ -112,6 +112,14 @@ class OptimizerRunParams:
     # (tails matter relatively less); <0 flattens toward a uniform spread across
     # the ladder. See optimizer_v3.run_lp for the actual application.
     atm_concentration: float = 0.0
+    # Parametric (auto) target-profile shape overrides — see
+    # misc_utils.build_parametric_target_profile_eth. None = engine default.
+    # Ignored once manual_target or target_profile_file is set.
+    parametric_low_floor_ratio: float | None = None
+    parametric_low_floor_payoff: float | None = None
+    parametric_trough_payoff: float | None = None
+    parametric_high_plateau_ratio: float | None = None
+    parametric_high_plateau_payoff: float | None = None
     max_cp_loss_usd: float | dict[str, float] | None = None
     # Posted collateral per counterparty, per asset (e.g. {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}),
     # sourced from the Collateral tab (always fetched by the route; only USD + this run's own asset are

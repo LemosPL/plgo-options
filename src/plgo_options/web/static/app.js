@@ -1172,6 +1172,22 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     const $optv2DeltaBand = document.getElementById("optv2-delta-band");
     if ($optv2DeltaBand) $optv2DeltaBand.value = asset === "FIL" ? 75000 : 75;
 
+    // Target-profile shape defaults are asset-scaled too (client spec,
+    // 2026-08-24, see misc_utils.py's build_parametric_target_profile_eth/
+    // _fil): ETH breaks even ~91% of spot away on both sides with a $20M max
+    // loss; FIL's downside breaks even exactly at $0 (100%) with a wider,
+    // cheaper upside (175%) and a smaller $15.75M max loss. Unconditional
+    // overwrite on switch, same as Max Qty/Delta Band above.
+    const $optv2Trough = document.getElementById("optv2-target-trough-payoff");
+    if ($optv2Trough) $optv2Trough.value = asset === "FIL" ? -15750000 : -20000000;
+    const $optv2Wing = document.getElementById("optv2-target-wing-pct");
+    if ($optv2Wing) $optv2Wing.value = asset === "FIL" ? 100 : 90.91;
+    const $optv2Down = document.getElementById("optv2-target-down-pct");
+    if ($optv2Down) $optv2Down.value = asset === "FIL" ? 100 : 90.91;
+    const $optv2Up = document.getElementById("optv2-target-up-pct");
+    if ($optv2Up) $optv2Up.value = asset === "FIL" ? 175 : 90.91;
+    if (typeof optv2UpdateTargetShapeReadouts === "function") optv2UpdateTargetShapeReadouts();
+
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
@@ -8847,6 +8863,13 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
     // Hide the "After" matrix panel
     document.getElementById("optv2-matrix-after-panel").style.display = "none";
     document.getElementById("optv2-matrix-grid").style.gridTemplateColumns = "1fr";
+
+    // Populate the saved-profile dropdown and fetch the active target profile
+    // (parametric by default) so the Target Profile section shows/seeds it
+    // pre-run — mirrors optv3's "Load Risk Profile" handler.
+    await optv2PopulateTargetProfiles();
+    await optv2FetchTargetProfile();
+
     optv2RenderAll();
 
     // Populate expiry dropdown from vol surface
@@ -8883,11 +8906,13 @@ function optv2RenderAll() {
   document.getElementById("optv2-greeks-section").style.display = "";
   document.getElementById("optv2-payoff-section").style.display = "";
   document.getElementById("optv2-matrix-section").style.display = "";
+  document.getElementById("optv2-profile-section").style.display = "";
 
   optv2RenderBasePill();
   optv2RenderGreeks();
   optv2RenderPayoff();
   optv2RenderMatrix();
+  optv2RenderProfileTable();
 }
 
 /* ── Greeks summary ─────────────────────────────────────────── */
@@ -9169,6 +9194,577 @@ function optv2NearestIdx(arr, val) {
   return best;
 }
 
+/* ── Target Profile: editable table + smoothing + live chart preview ─────────
+ * Faithful copy of the Optimizer v3 Target Profile pane on v2 ids/data — see
+ * optv3RenderProfileTable and friends for the annotated original. The user can
+ * type target payoff values per spot (or smooth them), and the LP fits to
+ * those on the next Run (sent as manual_target). All values are at horizon 0
+ * and anchored to $0 at the current spot — same basis as the payoff chart. */
+let optv2ManualTarget = null;      // [{x: spot, y: payoff}, ...] control points, or null = auto
+let optv2ProfileState = null;      // {spots, after, displayIdx} cached for live residual updates
+let optv2AutoTargetProfile = null; // active target payoff aligned to optv2Data.spot_ladder (from /target-profile)
+let optv2TargetProfileFile = "";   // selected saved-profile filename, or "" for parametric
+let optv2ProfilesList = [];        // [{name, file, user}] from /target-profiles
+
+function optv2Dp() { return (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0; }
+
+async function optv2PopulateTargetProfiles() {
+  const sel = document.getElementById("optv2-target-select");
+  if (!sel) return;
+  const keep = optv2TargetProfileFile;
+  let profiles = [];
+  try {
+    const res = await get(`/api/optimization/target-profiles?asset=${currentAsset}`);
+    profiles = (res && res.profiles) || [];
+  } catch (e) { console.warn("target-profiles list failed", e); }
+  optv2ProfilesList = profiles;
+  sel.innerHTML = '<option value="">Parametric (auto)</option>'
+    + profiles.map(p => `<option value="${p.file}">${p.user ? "★ " : ""}${p.name}</option>`).join("");
+  if (keep && profiles.some(p => p.file === keep)) sel.value = keep;
+  else { sel.value = ""; optv2TargetProfileFile = ""; }
+  optv2SyncTargetControls();
+}
+
+function optv2SyncTargetControls() {
+  const sel = document.getElementById("optv2-target-select");
+  const del = document.getElementById("btn-optv2-target-delete");
+  const nameEl = document.getElementById("optv2-target-name");
+  const parametricControls = document.getElementById("optv2-target-parametric-controls");
+  if (!sel) return;
+  const file = sel.value;
+  const prof = optv2ProfilesList.find(p => p.file === file);
+  if (del) del.disabled = !file;
+  // The V-shape knobs only shape the built-in parametric target — hide them
+  // once a saved CSV profile is selected, where they're not in play.
+  if (parametricControls) parametricControls.style.display = file ? "none" : "";
+  if (nameEl && prof) {
+    const display = prof.name.replace(new RegExp(`^${currentAsset}\\s*-\\s*`), "");
+    nameEl.value = display;
+  } else if (nameEl && !file) {
+    nameEl.value = "";
+  }
+}
+
+// Show/hide the separate downside/upside fields based on the Asymmetric checkbox.
+function optv2SyncAsymmetricFields() {
+  const on = document.getElementById("optv2-target-asymmetric-toggle")?.checked || false;
+  const sym1 = document.getElementById("optv2-target-symmetric-row");
+  const sym2 = document.getElementById("optv2-target-recovery-row");
+  const asym = document.getElementById("optv2-target-asymmetric-fields");
+  if (sym1) sym1.style.display = on ? "none" : "";
+  if (sym2) sym2.style.display = on ? "none" : "";
+  if (asym) asym.style.display = on ? "" : "none";
+  optv2UpdateTargetShapeReadouts();
+}
+
+// Read the Target Shape knobs (trough + symmetric width, or the 2 asymmetric
+// width fields when that checkbox is on) and convert to the ratios
+// build_parametric_target_profile_eth expects. Client-specified linear-V model
+// (2026-08-24): low_floor_ratio/high_plateau_ratio are now the BREAKEVEN
+// DISTANCE as a fraction of spot (e.g. down 90.91% -> low_floor_ratio 0.9091,
+// meaning the $0 crossing sits 90.91% of spot away) — a straight percent-to-
+// fraction conversion, unlike the old flattening-point model this replaced
+// (which needed "1 - pct/100" because its ratio was the strike/spot at the
+// point itself, not a distance). low_floor_payoff/high_plateau_payoff no
+// longer mean anything (no flat plateau to set the level of) so they're not
+// sent at all.
+function optv2ParametricOverrides() {
+  const num = (id, fallback) => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    return Number.isFinite(v) ? v : fallback;
+  };
+  // Each field's min/max attribute is display-only (doesn't stop the value
+  // being typed/pasted out of range) — clamp to the field's own declared
+  // bounds here rather than hardcoding them a second time.
+  const pctAttrClamped = (id, fallback) => {
+    const el = document.getElementById(id);
+    const v = num(id, fallback);
+    const lo = parseFloat(el?.min), hi = parseFloat(el?.max);
+    return Math.min(Number.isFinite(hi) ? hi : Infinity, Math.max(Number.isFinite(lo) ? lo : -Infinity, v));
+  };
+  const asymmetric = document.getElementById("optv2-target-asymmetric-toggle")?.checked || false;
+  const trough = num("optv2-target-trough-payoff", -20_000_000);
+  const downPct = asymmetric ? pctAttrClamped("optv2-target-down-pct", 90.91) : pctAttrClamped("optv2-target-wing-pct", 90.91);
+  const upPct = asymmetric ? pctAttrClamped("optv2-target-up-pct", 90.91) : pctAttrClamped("optv2-target-wing-pct", 90.91);
+  return {
+    parametric_low_floor_ratio: downPct / 100,
+    parametric_trough_payoff: trough,
+    parametric_high_plateau_ratio: upPct / 100,
+  };
+}
+
+// Live "= $X" readouts beside the % inputs, so a breakeven-distance % reads as
+// an actual spot price, not just an abstract number you have to mentally
+// translate. Strike-at-breakeven = spot * (1 ∓ ratio) — the ratio here is a
+// DISTANCE fraction, not the strike/spot ratio itself (see
+// optv2ParametricOverrides), so it's spot*(1-ratio) down / spot*(1+ratio) up.
+function optv2UpdateTargetShapeReadouts() {
+  const spot = (optv2Data && optv2Data.eth_spot) || 0;
+  const dp = optv2Dp();
+  const fmtSpot = v => "$" + optv2Fmt(v, dp);
+  const o = optv2ParametricOverrides();
+  const asymmetric = document.getElementById("optv2-target-asymmetric-toggle")?.checked || false;
+  const downBreakeven = spot * (1 - o.parametric_low_floor_ratio);
+  const upBreakeven = spot * (1 + o.parametric_high_plateau_ratio);
+
+  if (!asymmetric) {
+    const wingEl = document.getElementById("optv2-target-wing-readout");
+    if (wingEl) {
+      wingEl.textContent = spot ? `→ breakeven below ${fmtSpot(downBreakeven)} / above ${fmtSpot(upBreakeven)}` : "";
+    }
+  } else {
+    const downWing = document.getElementById("optv2-target-down-wing-readout");
+    if (downWing) downWing.textContent = spot ? `→ breakeven at ${fmtSpot(downBreakeven)}` : "";
+    const upWing = document.getElementById("optv2-target-up-wing-readout");
+    if (upWing) upWing.textContent = spot ? `→ breakeven at ${fmtSpot(upBreakeven)}` : "";
+  }
+}
+
+// --- Target-profile shape summary (shared by v2/v3/v4) -----------------
+//
+// The per-wing readouts above (and their v3/v4 equivalents) describe the
+// requested shape in terms of the raw knobs. That can be misleading: e.g. a
+// "flat target: $37.5M" readout is what the parametric formula asks for at
+// high_plateau_ratio, but if that ratio sits beyond the optimizer's actual
+// spot ladder (as happened in the 2026-08-24 "absurd results" debug session
+// — a 3.7x plateau ratio against a ladder that only reached 2.85x), the LP
+// never actually sees that value; it's fitting a milder curve than the knobs
+// imply. And a wing-recovery % typed past 100 flips the flat target's sign
+// entirely without any of the number inputs stopping it (their `max`
+// attribute only styles the field as :invalid, it doesn't clamp the value).
+//
+// So instead of re-deriving the shape from the knobs, this reads the actual
+// payoff array returned by POST /api/optimization/target-profile — exactly
+// what the LP fits against, on the real ladder — and reports the requested
+// payoff at the current spot plus the min/max anywhere on the ladder. That's
+// the number that should be sanity-checked against the current book MTM
+// before hitting Run.
+function fmtTargetShapeMoney(v) {
+  if (!Number.isFinite(v)) return "n/a";
+  return (v < 0 ? "-$" : "$") + (Math.abs(v) / 1e6).toFixed(1) + "M";
+}
+
+function targetShapeSummary(payoff, ladder, spot) {
+  if (!Array.isArray(payoff) || !Array.isArray(ladder) || !payoff.length
+      || payoff.length !== ladder.length || !Number.isFinite(spot)) {
+    return null;
+  }
+  let atSpotIdx = 0, atSpotDist = Infinity, min = Infinity, max = -Infinity;
+  for (let i = 0; i < ladder.length; i++) {
+    const dist = Math.abs(ladder[i] - spot);
+    if (dist < atSpotDist) { atSpotDist = dist; atSpotIdx = i; }
+    if (payoff[i] < min) min = payoff[i];
+    if (payoff[i] > max) max = payoff[i];
+  }
+  return { atSpot: payoff[atSpotIdx], min, max };
+}
+
+// bookMtm is whatever current-book MTM is on hand (pre-run pnl total, or the
+// LP result's current_book_mtm after a run) — used only to flag when the
+// requested payoff dwarfs it, not to rescale anything.
+function renderTargetShapeSummary(elId, payoff, ladder, spot, bookMtm) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const s = targetShapeSummary(payoff, ladder, spot);
+  if (!s) { el.textContent = ""; return; }
+  const scale = Math.max(Math.abs(bookMtm) || 0, 1_000_000);
+  const extreme = Math.max(Math.abs(s.min), Math.abs(s.max), Math.abs(s.atSpot)) > 4 * scale;
+  el.innerHTML = `Requested payoff — at spot: <b>${fmtTargetShapeMoney(s.atSpot)}</b>`
+    + ` · min: <b>${fmtTargetShapeMoney(s.min)}</b> · max: <b>${fmtTargetShapeMoney(s.max)}</b>`
+    + (extreme
+        ? ` <span style="color:#ef5350" title="Far larger than the current book MTM (${fmtTargetShapeMoney(bookMtm)}) — double check the shape knobs before running">⚠ large vs. book</span>`
+        : "");
+}
+
+async function optv2FetchTargetProfile() {
+  if (!optv2Data) return;
+  optv2ManualTarget = null;
+  optv2AutoTargetProfile = null;
+  const ladder = (optv2OptResult && optv2OptResult.status === "ok" && optv2OptResult.spot_ladder)
+    ? optv2OptResult.spot_ladder : optv2Data.spot_ladder;
+  try {
+    const body = { asset: currentAsset, spot_ladder: ladder, current_spot: optv2Data.eth_spot };
+    if (optv2TargetProfileFile) body.profile = optv2TargetProfileFile;
+    else Object.assign(body, optv2ParametricOverrides());
+    const tp = await post("/api/optimization/target-profile", body);
+    if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (ladder || []).length) {
+      optv2AutoTargetProfile = tp.payoff;
+    }
+  } catch (e) { console.warn("target-profile fetch failed", e); }
+  const bookMtm = (optv2OptResult && optv2OptResult.status === "ok" && optv2OptResult.current_book_mtm != null)
+    ? optv2OptResult.current_book_mtm : (optv2Data.current_total_mtm || 0);
+  renderTargetShapeSummary("optv2-target-shape-summary", optv2AutoTargetProfile, ladder, optv2Data.eth_spot, bookMtm);
+  optv2UpdateTargetShapeReadouts();
+  optv2RenderProfileTable();
+}
+
+function optv2CurrentTargetPoints() {
+  const pts = [];
+  document.querySelectorAll("#optv2-profile-tbody .optv2-target-input").forEach(i => {
+    const x = Number(i.dataset.x), y = Number(i.value);
+    if (Number.isFinite(x) && Number.isFinite(y)) pts.push({ x, y });
+  });
+  return pts;
+}
+
+async function optv2SaveTargetProfile() {
+  const nameEl = document.getElementById("optv2-target-name");
+  const name = (nameEl && nameEl.value || "").trim();
+  if (!name) { alert("Enter a name for the new target profile."); return; }
+  const points = optv2CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+  try {
+    const res = await post("/api/optimization/target-profile/save", { asset: currentAsset, name, points });
+    if (nameEl) nameEl.value = "";
+    await optv2PopulateTargetProfiles();
+    const sel = document.getElementById("optv2-target-select");
+    if (sel && res && res.file) { sel.value = res.file; optv2TargetProfileFile = res.file; }
+    await optv2FetchTargetProfile();
+    optv2UpdateTargetStatus();
+  } catch (e) {
+    alert("Failed to save target profile.\n" + (e.message || e));
+  }
+}
+
+async function optv2DeleteTargetProfile() {
+  const sel = document.getElementById("optv2-target-select");
+  const file = sel && sel.value;
+  if (!file) { alert("Select a saved profile to delete."); return; }
+  const prof = optv2ProfilesList.find(p => p.file === file);
+  const label = prof ? prof.name : file;
+  if (!confirm(`Delete the saved target profile "${label}"? This can't be undone.`)) return;
+  try {
+    await post("/api/optimization/target-profile/delete", { asset: currentAsset, file });
+    optv2TargetProfileFile = "";
+    await optv2PopulateTargetProfiles();
+    await optv2FetchTargetProfile();
+    optv2UpdateTargetStatus();
+  } catch (e) {
+    alert("Couldn't delete this profile.\n" + (e.detail || e.message || e));
+  }
+}
+
+// Where the profile table/chart get their curves: a run result if present, else
+// the loaded book (so you can define a target before ever running).
+function optv2ProfileSource() {
+  if (optv2OptResult && optv2OptResult.status === "ok") {
+    const r = optv2OptResult;
+    const spots = r.spot_ladder || [];
+    const autoTarget = (optv2AutoTargetProfile && optv2AutoTargetProfile.length === spots.length)
+      ? optv2AutoTargetProfile : (r.target_payoff || null);
+    return {
+      spots,
+      S0: (r.spot != null ? r.spot : (optv2Data && optv2Data.eth_spot)) || 0,
+      before: r.before && r.before.payoff_by_horizon && r.before.payoff_by_horizon["0"],
+      after: r.after && r.after.payoff_by_horizon && r.after.payoff_by_horizon["0"],
+      autoTarget,
+    };
+  }
+  if (optv2Data && optv2Data.spot_ladder) {
+    const spots = optv2Data.spot_ladder;
+    const ps = optv2ActivePositions();
+    const before = spots.map((_, i) => ps.reduce((a, p) =>
+      a + ((p.payoff_by_horizon && p.payoff_by_horizon["0"] && p.payoff_by_horizon["0"][i]) || 0), 0));
+    const autoTarget = (optv2AutoTargetProfile && optv2AutoTargetProfile.length === spots.length)
+      ? optv2AutoTargetProfile : null;
+    return { spots, S0: optv2Data.eth_spot || 0, before, after: null, autoTarget };
+  }
+  return null;
+}
+
+// Finer control-point grid for the editable target table: ladder points nearest
+// each fixed price step (ETH $250 / FIL $0.25), instead of the coarse ~14-row
+// matrix thinning. Where the ladder itself is sparser than the step (deep
+// wings), it follows the ladder.
+function optv2TargetDisplayIdx(spots) {
+  if (!spots || !spots.length) return [];
+  const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const step = asset === "FIL" ? 0.25 : 250;
+  const lo = spots[0], hi = spots[spots.length - 1];
+  const idxs = new Set([0, spots.length - 1]);
+  for (let g = Math.ceil(lo / step) * step; g <= hi + 1e-9; g += step) {
+    idxs.add(optv2NearestIdx(spots, g));
+  }
+  return [...idxs].sort((a, b) => a - b);
+}
+
+// Auto target, anchored to $0 at current spot (matches the display convention).
+function optv2AutoTargetAnchored(src) {
+  if (!src.autoTarget) return null;
+  const at = src.autoTarget[optv2NearestIdx(src.spots, src.S0)] || 0;
+  return src.autoTarget.map(v => v - at);
+}
+
+// Linear-interpolate the manual control points onto a spot array (or null).
+function optv2ManualTargetInterp(spots) {
+  if (!optv2ManualTarget || optv2ManualTarget.length < 2) return null;
+  const pts = optv2ManualTarget;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  return spots.map(s => {
+    if (s <= xs[0]) return ys[0];
+    if (s >= xs[xs.length - 1]) return ys[ys.length - 1];
+    let i = 1; while (i < xs.length && xs[i] < s) i++;
+    const x0 = xs[i - 1], x1 = xs[i], y0 = ys[i - 1], y1 = ys[i];
+    return x1 === x0 ? y0 : y0 + (y1 - y0) * (s - x0) / (x1 - x0);
+  });
+}
+
+function optv2RenderProfileTable() {
+  const tbody = document.getElementById("optv2-profile-tbody");
+  const empty = document.getElementById("optv2-profile-empty");
+  const wrap = document.getElementById("optv2-profile-wrap");
+  const toolbar = document.getElementById("optv2-target-toolbar");
+  if (!tbody) return;
+  const src = optv2ProfileSource();
+  if (!src || !src.spots.length) {
+    tbody.innerHTML = ""; optv2ProfileState = null;
+    if (wrap) wrap.style.display = "none";
+    if (toolbar) toolbar.style.display = "none";
+    if (empty) { empty.style.display = ""; empty.textContent = "Load the risk profile to define a target."; }
+    optv2RenderProfileChart();
+    return;
+  }
+  if (empty) empty.style.display = "none";
+  // The per-spot table (Before/After/Target/residual) is kept populated under
+  // the hood — Smooth and Draw-on-chart both read/write its .optv2-target-input
+  // cells — but no longer shown; the chart plus the Target Shape controls above
+  // are the intended interaction surface now.
+  if (wrap) wrap.style.display = "none";
+  if (toolbar) toolbar.style.display = "";
+
+  const spots = src.spots, S0 = src.S0;
+  const spotIdx = optv2NearestIdx(spots, S0);
+  const displayIdx = optv2TargetDisplayIdx(spots);
+  const auto = optv2AutoTargetAnchored(src);
+  const manualMap = optv2ManualTarget ? new Map(optv2ManualTarget.map(p => [p.x, p.y])) : null;
+  optv2ProfileState = { spots, after: src.after, displayIdx };
+
+  const cell = v => {
+    if (v == null || isNaN(v)) return `<td class="num">—</td>`;
+    const c = v > 0 ? "#66bb6a" : v < 0 ? "#ef5350" : "";
+    return `<td class="num" style="color:${c}">${Math.round(v).toLocaleString()}</td>`;
+  };
+
+  tbody.innerHTML = displayIdx.map(si => {
+    const s = spots[si];
+    const b = src.before ? src.before[si] : null;
+    const a = src.after ? src.after[si] : null;
+    const tv = (manualMap && manualMap.has(s)) ? manualMap.get(s) : (auto ? auto[si] : 0);
+    const resid = (a != null) ? a - tv : null;
+    const hl = si === spotIdx ? ' class="row-highlight"' : '';
+    return `<tr${hl}>`
+      + `<td style="font-weight:600">$${optv2Fmt(s, optv2Dp())}</td>`
+      + `${cell(b)}${cell(a)}`
+      + `<td class="num"><input class="optv2-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
+      + `${cell(resid)}</tr>`;
+  }).join("");
+
+  tbody.querySelectorAll(".optv2-target-input").forEach(inp => inp.addEventListener("input", optv2OnTargetEdit));
+  optv2RenderProfileChart();
+  optv2UpdateTargetStatus();
+}
+
+function optv2OnTargetEdit() {
+  const inputs = document.querySelectorAll("#optv2-profile-tbody .optv2-target-input");
+  optv2ManualTarget = Array.from(inputs)
+    .map(i => ({ x: Number(i.dataset.x), y: Number(i.value) || 0 }))
+    .filter(p => Number.isFinite(p.x))
+    .sort((a, b) => a.x - b.x);
+  optv2RenderProfileChart();
+  optv2UpdateResiduals();
+  optv2UpdateTargetStatus();
+}
+
+function optv2UpdateResiduals() {
+  const st = optv2ProfileState; if (!st) return;
+  const rows = document.querySelectorAll("#optv2-profile-tbody tr");
+  rows.forEach((tr, k) => {
+    const si = st.displayIdx[k]; if (si == null) return;
+    const a = st.after ? st.after[si] : null;
+    const inp = tr.querySelector(".optv2-target-input");
+    const tds = tr.querySelectorAll("td");
+    const residTd = tds[tds.length - 1];
+    if (!residTd) return;
+    if (a == null || !inp) { residTd.textContent = "—"; residTd.style.color = ""; return; }
+    const r = a - (Number(inp.value) || 0);
+    residTd.textContent = Math.round(r).toLocaleString();
+    residTd.style.color = r > 0 ? "#66bb6a" : r < 0 ? "#ef5350" : "";
+  });
+}
+
+function optv2SmoothTarget() {
+  const st = optv2ProfileState; if (!st) return;
+  const inputs = document.querySelectorAll("#optv2-profile-tbody .optv2-target-input");
+  if (!inputs.length) return;
+  const vals = Array.from(inputs).map(i => Number(i.value) || 0);
+  const win = Math.max(1, Math.round(Number(document.getElementById("optv2-target-smooth-strength")?.value || 3)));
+  const sm = vals.map((_, i) => {
+    let s = 0, n = 0;
+    for (let j = i - win; j <= i + win; j++) if (j >= 0 && j < vals.length) { s += vals[j]; n++; }
+    return n ? s / n : vals[i];
+  });
+  optv2ManualTarget = Array.from(inputs)
+    .map((inp, k) => ({ x: Number(inp.dataset.x), y: sm[k] }))
+    .filter(p => Number.isFinite(p.x)).sort((a, b) => a.x - b.x);
+  optv2RenderProfileTable();
+}
+
+function optv2ResetTarget() {
+  optv2ManualTarget = null;
+  optv2FetchTargetProfile();
+}
+
+function optv2UpdateTargetStatus() {
+  const el = document.getElementById("optv2-target-status"); if (!el) return;
+  const n = optv2ManualTarget ? optv2ManualTarget.length : 0;
+  if (n >= 2) {
+    el.textContent = `Manual target active (${n} points) — click Apply & Re-run to optimize to it.`;
+    return;
+  }
+  const sel = document.getElementById("optv2-target-select");
+  const label = sel && sel.value ? (sel.options[sel.selectedIndex]?.text || "saved profile") : null;
+  el.textContent = label
+    ? `Fitting to saved profile "${label}". Edit any Target cell — or Smooth — to override.`
+    : "Using the parametric (auto) target. Pick a saved profile, or edit / Smooth the Target column.";
+}
+
+// Target-profile chart (Before / After / Target). Target = manual override if set.
+// Reuses optv3ChartColors/optv3ChartLayout — generic dark-theme chart chrome,
+// not v3-specific — so both tabs' charts stay visually consistent.
+function optv2RenderProfileChart() {
+  const el = document.getElementById("optv2-profile-chart");
+  if (!el) return;
+  const src = optv2ProfileSource();
+  if (!src || !src.spots.length) { el.style.display = "none"; return; }
+  el.style.display = "";
+  const spots = src.spots, S0 = src.S0;
+  const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const manual = optv2ManualTargetInterp(spots);
+  const auto = optv2AutoTargetAnchored(src);
+  const targetCurve = manual || auto;
+  const C = optv3ChartColors();
+  const HT = "%{fullData.name}: %{y:$,.0f}<extra></extra>";
+
+  const traces = [];
+  if (src.before) traces.push({ x: spots, y: src.before, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
+  if (src.after) traces.push({ x: spots, y: src.after, mode: "lines", name: "After (with trades)", hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+  if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", hovertemplate: HT, line: { color: C.target, width: 2.5, dash: "dot" } });
+
+  let yLo = 0, yHi = 0;
+  traces.forEach(t => t.y.forEach(v => { if (typeof v === "number" && isFinite(v)) { if (v < yLo) yLo = v; if (v > yHi) yHi = v; } }));
+  if (S0) traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
+
+  const layout = optv3ChartLayout({
+    title: manual ? "Target Profile — your manual target" : "Target Profile — Before vs After vs Target",
+    assetLabel, C,
+  });
+  layout.margin = { t: 40, b: 66, l: 78, r: 20 };
+  if (optv2DrawMode) layout.dragmode = false;
+  Plotly.newPlot("optv2-profile-chart", traces, layout, { responsive: true, displaylogo: false })
+    .then(optv2BindProfileChartClick);
+}
+
+// ── Draw-on-chart: click the target chart to set the payoff at the nearest
+// spot-ladder point, building a curve point-by-point. ───────────────────────
+let optv2DrawMode = false;
+let optv2ProfileChartClickBound = false;
+
+function optv2BindProfileChartClick() {
+  const gd = document.getElementById("optv2-profile-chart");
+  if (!gd || optv2ProfileChartClickBound) return;
+  optv2ProfileChartClickBound = true;
+  gd.addEventListener("click", (evt) => {
+    if (!optv2DrawMode || !gd._fullLayout) return;
+    const xa = gd._fullLayout.xaxis, ya = gd._fullLayout.yaxis;
+    if (!xa || !ya) return;
+    const bb = gd.getBoundingClientRect();
+    const px = evt.clientX - bb.left - xa._offset;
+    const py = evt.clientY - bb.top - ya._offset;
+    if (px < 0 || py < 0 || px > xa._length || py > ya._length) return;
+    const spot = xa.p2d(px);
+    const payoff = ya.p2d(py);
+    if (!isFinite(spot) || !isFinite(payoff)) return;
+    optv2SetTargetPointAtSpot(spot, payoff);
+  });
+}
+
+function optv2SetTargetPointAtSpot(spot, y) {
+  const src = optv2ProfileSource();
+  if (!src || !src.spots.length) return;
+  const spots = src.spots;
+  const displayIdx = optv2TargetDisplayIdx(spots);
+  const cur = new Map(optv2CurrentTargetPoints().map(p => [p.x, p.y]));
+  const auto = optv2AutoTargetAnchored(src);
+  let best = displayIdx[0], bd = Infinity;
+  displayIdx.forEach(si => { const d = Math.abs(spots[si] - spot); if (d < bd) { bd = d; best = si; } });
+  optv2ManualTarget = displayIdx.map(si => {
+    const s = spots[si];
+    let val = cur.has(s) ? cur.get(s) : (auto ? auto[si] : 0);
+    if (si === best) val = y;
+    return { x: s, y: val };
+  }).sort((a, b) => a.x - b.x);
+  optv2RenderProfileTable();
+}
+
+function optv2ToggleDrawMode() {
+  optv2DrawMode = !optv2DrawMode;
+  const btn = document.getElementById("btn-optv2-target-draw");
+  const gd = document.getElementById("optv2-profile-chart");
+  if (btn) {
+    btn.classList.toggle("btn-primary", optv2DrawMode);
+    btn.classList.toggle("btn-secondary", !optv2DrawMode);
+    btn.textContent = optv2DrawMode ? "✏ Drawing… (click chart)" : "✏ Draw on chart";
+  }
+  if (gd) { gd.style.cursor = optv2DrawMode ? "crosshair" : ""; Plotly.relayout(gd, { dragmode: optv2DrawMode ? false : "zoom" }); }
+}
+
+document.getElementById("optv2-target-select")?.addEventListener("change", (e) => {
+  optv2TargetProfileFile = e.target.value || "";
+  optv2SyncTargetControls();
+  optv2FetchTargetProfile();
+});
+// Re-shape the parametric (auto) preview live as any Target Shape knob
+// changes — mirrors the dropdown's own behavior (discards manual edits,
+// refetches auto). The $ readouts update on every keystroke ("input"); the
+// actual re-fetch (and any manual-edit reset) only on blur/commit ("change").
+["optv2-target-trough-payoff", "optv2-target-wing-pct",
+ "optv2-target-down-pct", "optv2-target-up-pct"].forEach(id => {
+  const el = document.getElementById(id);
+  el?.addEventListener("input", optv2UpdateTargetShapeReadouts);
+  el?.addEventListener("change", () => {
+    // Every breakeven-distance % field here only means what its label says
+    // inside its own declared min/max (see optv2ParametricOverrides, which
+    // clamps regardless) — snap the visible value back in range too on
+    // commit so the field never shows a number the app isn't actually using.
+    // trough-payoff has no min/max attribute, so this is a no-op for it.
+    if (el) {
+      const v = parseFloat(el.value);
+      const lo = parseFloat(el.min), hi = parseFloat(el.max);
+      if (Number.isFinite(v) && (Number.isFinite(lo) || Number.isFinite(hi))) {
+        el.value = Math.min(Number.isFinite(hi) ? hi : Infinity, Math.max(Number.isFinite(lo) ? lo : -Infinity, v));
+      }
+    }
+    if (!optv2TargetProfileFile) optv2FetchTargetProfile();
+  });
+});
+document.getElementById("optv2-target-asymmetric-toggle")?.addEventListener("change", () => {
+  optv2SyncAsymmetricFields();
+  if (!optv2TargetProfileFile) optv2FetchTargetProfile();
+});
+// Sync the symmetric/asymmetric field visibility to the checkbox's actual
+// (checked-by-default) state on page load — the "change" handler above only
+// fires on a later toggle, not the initial state.
+optv2SyncAsymmetricFields();
+document.getElementById("btn-optv2-target-smooth")?.addEventListener("click", optv2SmoothTarget);
+document.getElementById("btn-optv2-target-save")?.addEventListener("click", optv2SaveTargetProfile);
+document.getElementById("btn-optv2-target-delete")?.addEventListener("click", optv2DeleteTargetProfile);
+document.getElementById("btn-optv2-target-draw")?.addEventListener("click", optv2ToggleDrawMode);
+document.getElementById("btn-optv2-target-reset")?.addEventListener("click", optv2ResetTarget);
+document.getElementById("btn-optv2-target-apply")?.addEventListener("click", () => {
+  if (!document.getElementById("optv2-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
+  document.getElementById("btn-run-optv2")?.click();
+});
+
 /* ── Optimizer v2 — Saved Snapshots Browser ───────────────── */
 function optv2FmtSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -9279,6 +9875,14 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
       enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
       delta_band: parseFloat(document.getElementById("optv2-delta-band")?.value || "75"),
+      // User-edited target profile (Target Profile section). null = auto parametric.
+      manual_target: (optv2ManualTarget && optv2ManualTarget.length >= 2) ? optv2ManualTarget : null,
+      // Saved target profile selected in the dropdown (engine loads the CSV).
+      // Overridden by manual_target when the Target column has been edited.
+      target_profile_file: optv2TargetProfileFile || null,
+      // V-shape knobs for the built-in parametric target — ignored by the engine
+      // once target_profile_file or manual_target is set, so harmless to always send.
+      ...optv2ParametricOverrides(),
     });
     console.log("Optimizer v2 result:", data);
     optv2RenderResult(data);
@@ -9442,6 +10046,7 @@ function optv2RenderResult(data) {
   $section.style.display = "";
   optv2OptResult = data;
   optv2RenderPayoff();
+  optv2RenderProfileTable();
 
   document.getElementById("optv2-result-status").textContent =
     data.optimizer_converged ? "Converged" : "Did not converge";
@@ -10017,6 +10622,9 @@ async function optv3FetchTargetProfile() {
       optv3AutoTargetProfile = tp.payoff;
     }
   } catch (e) { console.warn("target-profile fetch failed", e); }
+  const bookMtm = (optv3OptResult && optv3OptResult.status === "ok" && optv3OptResult.current_book_mtm != null)
+    ? optv3OptResult.current_book_mtm : (optv3Data.current_total_mtm || 0);
+  renderTargetShapeSummary("optv3-target-shape-summary", optv3AutoTargetProfile, ladder, optv3Data.eth_spot, bookMtm);
   optv3RenderProfileTable();
 }
 
@@ -11533,6 +12141,9 @@ async function optv4FetchTargetProfile() {
       optv4AutoTargetProfile = tp.payoff;
     }
   } catch (e) { console.warn("target-profile fetch failed", e); }
+  const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
+    ? optv4OptResult.current_book_mtm : (optv4Data.current_total_mtm || 0);
+  renderTargetShapeSummary("optv4-target-shape-summary", optv4AutoTargetProfile, ladder, optv4Data.eth_spot, bookMtm);
   optv4RenderProfileTable();
 }
 

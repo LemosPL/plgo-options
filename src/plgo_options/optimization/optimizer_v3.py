@@ -1088,6 +1088,15 @@ class OptimizerV3(BaseOptimizer):
                  enforce_collateral_cap: bool = False,
                  enable_composite_unwind: bool = True,
                  atm_concentration: float = 0.0,
+                 # Parametric (auto) target-profile shape — see
+                 # misc_utils.build_parametric_target_profile_eth. None = engine
+                 # default for that one knob; only used when neither manual_target
+                 # nor target_profile_file is set (both override target_profile below).
+                 parametric_low_floor_ratio: float | None = None,
+                 parametric_low_floor_payoff: float | None = None,
+                 parametric_trough_payoff: float | None = None,
+                 parametric_high_plateau_ratio: float | None = None,
+                 parametric_high_plateau_payoff: float | None = None,
             ):
         if asset is not None:
             self.asset = asset.upper()
@@ -1108,8 +1117,17 @@ class OptimizerV3(BaseOptimizer):
         if box_fee_bps is None:
             box_fee_bps = DEFAULT_BOX_FEE_BPS_BY_ASSET.get(self.asset, {})
 
+        _parametric_overrides = {
+            k: v for k, v in {
+                "low_floor_ratio": parametric_low_floor_ratio,
+                "low_floor_payoff": parametric_low_floor_payoff,
+                "trough_payoff": parametric_trough_payoff,
+                "high_plateau_ratio": parametric_high_plateau_ratio,
+                "high_plateau_payoff": parametric_high_plateau_payoff,
+            }.items() if v is not None
+        }
         target_profile = build_parametric_target_profile(self.asset, spot_ladder=self.spot_ladder,
-                                                         current_spot=self.spot)
+                                                         current_spot=self.spot, **_parametric_overrides)
 
         held_positions = self.get_held_positions()
         roll_positions = self._get_roll_positions(

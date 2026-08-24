@@ -109,6 +109,14 @@ class OptimizationParams(BaseModel):
     # 0 (default) is an exact no-op; >0 concentrates fit pressure at the money;
     # <0 flattens it toward a uniform spread. See optimizer_v3.run_lp.
     atm_concentration: float = 0.0
+    # Parametric (auto) target-profile shape overrides — see
+    # misc_utils.build_parametric_target_profile_eth. None = engine default.
+    # Ignored once manual_target or target_profile_file is set.
+    parametric_low_floor_ratio: float | None = None
+    parametric_low_floor_payoff: float | None = None
+    parametric_trough_payoff: float | None = None
+    parametric_high_plateau_ratio: float | None = None
+    parametric_high_plateau_payoff: float | None = None
     # Per-counterparty hard loss cap: a counterparty's own (non-rolled book +
     # this run's trades for that CP) may never be worth more than this many
     # dollars less than it is today, at any spot on the ladder — the fleet-wide
@@ -262,6 +270,11 @@ async def run_optimizer(params: OptimizationParams):
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
         atm_concentration=params.atm_concentration,
+        parametric_low_floor_ratio=params.parametric_low_floor_ratio,
+        parametric_low_floor_payoff=params.parametric_low_floor_payoff,
+        parametric_trough_payoff=params.parametric_trough_payoff,
+        parametric_high_plateau_ratio=params.parametric_high_plateau_ratio,
+        parametric_high_plateau_payoff=params.parametric_high_plateau_payoff,
         max_cp_loss_usd=params.max_cp_loss_usd,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
@@ -350,6 +363,13 @@ class TargetProfileRequest(BaseModel):
     current_spot: float
     # Optional saved-profile filename (from /target-profiles). None = parametric.
     profile: str | None = None
+    # Parametric (auto) shape overrides — ignored when `profile` is set. See
+    # misc_utils.build_parametric_target_profile_eth. None = engine default.
+    parametric_low_floor_ratio: float | None = None
+    parametric_low_floor_payoff: float | None = None
+    parametric_trough_payoff: float | None = None
+    parametric_high_plateau_ratio: float | None = None
+    parametric_high_plateau_payoff: float | None = None
 
 
 @router.post("/target-profile")
@@ -370,8 +390,17 @@ async def target_profile(req: TargetProfileRequest):
         if req.profile:
             df = load_target_profile_file(req.profile, asset)
         else:
+            _overrides = {
+                k: v for k, v in {
+                    "low_floor_ratio": req.parametric_low_floor_ratio,
+                    "low_floor_payoff": req.parametric_low_floor_payoff,
+                    "trough_payoff": req.parametric_trough_payoff,
+                    "high_plateau_ratio": req.parametric_high_plateau_ratio,
+                    "high_plateau_payoff": req.parametric_high_plateau_payoff,
+                }.items() if v is not None
+            }
             df = build_parametric_target_profile(
-                asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot,
+                asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot, **_overrides,
             )
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
