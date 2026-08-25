@@ -173,6 +173,106 @@ def delete_target_profile(asset: str, filename: str) -> None:
     raise FileNotFoundError(f"Target profile not found: {filename}")
 
 
+def detect_profile_anchor(
+    target_profile: pd.DataFrame,
+    payoff_col: str = "Payoff($)",
+) -> tuple[float, str]:
+    """Best guess at the spot price a target curve's shape was drawn around, so a
+    stale curve can be re-centered on today's spot without the user having to
+    remember when they drew it.
+
+    These hedge targets are trough-shaped (a worst-case dip near the money, with
+    the payoff recovering into both wings), so the strike of the most negative
+    payoff is the shape's natural anchor. Returns (anchor_strike, kind) where kind
+    is:
+      "trough" — an interior minimum was found; a reliable anchor.
+      "peak"   — inverted (trough-less) curve; anchored on its interior maximum.
+      "mid"    — monotone curve with no interior extremum, so there is nothing to
+                 anchor on; falls back to the geometric middle of the strike range
+                 and the caller should treat it as a guess and let the user
+                 override it.
+    """
+    strikes = np.asarray(target_profile.index, dtype=float)
+    payoffs = np.asarray(target_profile[payoff_col], dtype=float)
+    if strikes.size < 2:
+        raise ValueError("Target profile needs at least 2 points to detect an anchor.")
+
+    for pos, kind in ((int(np.argmin(payoffs)), "trough"), (int(np.argmax(payoffs)), "peak")):
+        # An extremum sitting on either end is just the end of a monotone run,
+        # not a shape feature — it would anchor the curve on an arbitrary point.
+        if 0 < pos < strikes.size - 1:
+            return float(strikes[pos]), kind
+    return float(np.sqrt(strikes[0] * strikes[-1])) if strikes[0] > 0 \
+        else float((strikes[0] + strikes[-1]) / 2.0), "mid"
+
+
+def rescale_target_profile(
+    target_profile: pd.DataFrame,
+    from_spot: float,
+    to_spot: float,
+    mode: str = "moneyness",
+    scale_payoff: bool = False,
+    payoff_col: str = "Payoff($)",
+) -> pd.DataFrame:
+    """Move a target curve's *shape* along the strike axis to follow a spot move,
+    so a curve drawn when ETH was 1800 (or FIL 0.6) can be reused now without
+    redrawing it.
+
+    Only the strike axis moves — the shape is carried along rigidly:
+
+      mode="moneyness" (default): strikes are multiplied by to_spot/from_spot, so
+        every point keeps its *percentage* distance from spot. A trough that sat
+        at the money stays at the money and a wing that sat 40% out stays 40%
+        out. This is the right default: option risk is moneyness-relative, and
+        the curve was almost certainly shaped in those terms.
+
+      mode="parallel": strikes are shifted by to_spot - from_spot, so every point
+        keeps its *dollar* distance from spot. Use when the shape encodes
+        absolute price levels (e.g. a hard support level) rather than moneyness.
+
+    scale_payoff multiplies the payoffs by the same ratio (moneyness mode only).
+    Off by default: the payoff axis is a USD risk budget, and a desk's tolerance
+    for losing $19m does not grow just because spot rallied. Turn it on when the
+    curve represents a position whose notional scales with spot.
+
+    Returns a new DataFrame on the moved strike grid (the index changes, the
+    payoff column is unchanged unless scale_payoff). Callers wanting values on a
+    fixed spot ladder should interpolate onto it afterwards.
+    """
+    from_spot = float(from_spot)
+    to_spot = float(to_spot)
+    if not np.isfinite(from_spot) or not np.isfinite(to_spot):
+        raise ValueError("from_spot and to_spot must be finite numbers.")
+    if to_spot <= 0:
+        raise ValueError("to_spot must be positive.")
+    if mode not in ("moneyness", "parallel"):
+        raise ValueError(f"Unknown rescale mode: {mode!r} (expected 'moneyness' or 'parallel').")
+
+    shifted = target_profile.copy()
+    strikes = np.asarray(shifted.index, dtype=float)
+
+    if mode == "moneyness":
+        if from_spot <= 0:
+            raise ValueError("from_spot must be positive to rescale by moneyness.")
+        ratio = to_spot / from_spot
+        new_strikes = strikes * ratio
+        if scale_payoff:
+            shifted[payoff_col] = np.asarray(shifted[payoff_col], dtype=float) * ratio
+    else:
+        new_strikes = strikes + (to_spot - from_spot)
+        # A parallel shift down can push the low wing to/below zero, which is not
+        # a valid strike and breaks any later log-scale plotting or interpolation.
+        if new_strikes[0] <= 0:
+            raise ValueError(
+                f"A parallel shift of {to_spot - from_spot:,.4f} pushes the lowest "
+                f"strike to {new_strikes[0]:,.4f}, which is not a valid price. Use "
+                "mode='moneyness' for a move this large."
+            )
+
+    shifted.index = pd.Index(new_strikes, name=target_profile.index.name)
+    return shifted
+
+
 def shift_target_profile(
     target_profile: pd.DataFrame,
     current_spot: float,
@@ -193,11 +293,10 @@ def shift_target_profile(
     if min_strike <= 0:
         raise ValueError("Cannot homothetically shift target profile with non-positive minimum strike.")
 
-    scale = float(current_spot) / min_strike
-    shifted.index = shifted.index * scale
-    shifted.index.name = target_profile.index.name
-
-    return shifted
+    return rescale_target_profile(
+        shifted, from_spot=min_strike, to_spot=current_spot,
+        mode="moneyness", scale_payoff=False, payoff_col=payoff_col,
+    )
 
 
 def smooth_target_profile(target_profile, payoff_col="Payoff($)", smooth_factor=1e13):

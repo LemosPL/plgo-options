@@ -357,6 +357,129 @@ async def delete_target_profile_endpoint(req: DeleteTargetProfileRequest):
     return {"deleted": req.file}
 
 
+class ShiftTargetProfileRequest(BaseModel):
+    asset: str = "ETH"
+    spot_ladder: list[float]
+    current_spot: float
+    # What to shift. Exactly one source: `points` (the curve currently shown /
+    # edited in the UI, [{x, y}, ...]) wins; else `profile` (a saved CSV filename);
+    # else the built-in parametric target.
+    points: list[dict] | None = None
+    profile: str | None = None
+    # Spot the curve's shape was originally drawn around. None = auto-detect it
+    # from the curve's trough (see detect_profile_anchor).
+    from_spot: float | None = None
+    # Spot to move the shape onto. None = current_spot (the live mark).
+    to_spot: float | None = None
+    # "moneyness" (default) keeps each point's % distance from spot; "parallel"
+    # keeps its $ distance. See rescale_target_profile.
+    mode: str = "moneyness"
+    # Also scale the payoff axis by the same ratio. Off by default — the payoff
+    # axis is a USD risk budget, not a spot-linked notional.
+    scale_payoff: bool = False
+
+
+@router.post("/target-profile/shift")
+async def shift_target_profile_endpoint(req: ShiftTargetProfileRequest):
+    """Move a target curve's shape along the strike axis to follow a spot move,
+    returning it re-aligned to the caller's spot ladder.
+
+    Target profiles are drawn once and then go stale as the market moves — a curve
+    shaped when ETH was 1800 has its trough 60% below a 4500 spot, so the
+    optimizer fits to a shape that no longer sits where the risk is. This
+    re-centers the same shape on today's spot (or any chosen price) so it can be
+    reviewed, saved, and run against.
+
+    The returned payoff is index-aligned to ``spot_ladder``. Shifting moves the
+    curve's own strike grid off that ladder, so the tail that moves out of range
+    is flat-extrapolated from the curve's end value — expected, and why the
+    response reports the shifted domain in ``shifted_range``."""
+    import numpy as np
+    from plgo_options.optimization.misc_utils import (
+        build_parametric_target_profile, detect_profile_anchor,
+        load_target_profile_file, rescale_target_profile,
+    )
+    import pandas as pd
+
+    asset = (req.asset or "ETH").upper()
+    if not req.spot_ladder or req.current_spot <= 0:
+        raise HTTPException(400, "spot_ladder and a positive current_spot are required.")
+
+    # Resolve the curve to shift.
+    try:
+        if req.points:
+            rows = []
+            for pt in req.points:
+                try:
+                    x = float(pt.get("x")); y = float(pt.get("y"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if np.isfinite(x) and np.isfinite(y):
+                    rows.append((x, y))
+            rows.sort(key=lambda t: t[0])
+            if len(rows) < 2:
+                raise HTTPException(400, "Need at least 2 valid points to shift a curve.")
+            df = pd.DataFrame(
+                {"Payoff($)": [y for _, y in rows]},
+                index=pd.Index([x for x, _ in rows], name="Strike($)"),
+            )
+            df = df[~df.index.duplicated(keep="first")]
+        elif req.profile:
+            df = load_target_profile_file(req.profile, asset)
+        else:
+            df = build_parametric_target_profile(
+                asset, spot_ladder=req.spot_ladder, current_spot=req.current_spot,
+            )
+    except HTTPException:
+        raise
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to load the curve to shift: {e}")
+
+    # Reject a supplied-but-invalid price rather than silently falling back to the
+    # default, which would shift the curve by a ratio the caller never asked for.
+    if req.from_spot is not None and req.from_spot <= 0:
+        raise HTTPException(400, "from_spot must be positive (omit it to auto-detect the anchor).")
+    if req.to_spot is not None and req.to_spot <= 0:
+        raise HTTPException(400, "to_spot must be positive (omit it to use the current spot).")
+
+    # Anchor: caller-supplied, else auto-detected from the curve's own shape.
+    try:
+        if req.from_spot is not None:
+            from_spot, anchor_kind = float(req.from_spot), "given"
+        else:
+            from_spot, anchor_kind = detect_profile_anchor(df)
+        to_spot = float(req.to_spot) if req.to_spot is not None else float(req.current_spot)
+        shifted = rescale_target_profile(
+            df, from_spot=from_spot, to_spot=to_spot,
+            mode=req.mode, scale_payoff=req.scale_payoff,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Failed to shift target profile: {e}")
+
+    strikes = np.asarray(shifted.index, dtype=float)
+    payoff = np.asarray(shifted["Payoff($)"], dtype=float)
+    ladder = np.asarray(req.spot_ladder, dtype=float)
+    aligned = np.interp(ladder, strikes, payoff)
+    return {
+        "asset": asset,
+        "spot_ladder": [float(x) for x in ladder],
+        "payoff": [float(v) for v in aligned],
+        "from_spot": from_spot,
+        "to_spot": to_spot,
+        "ratio": (to_spot / from_spot) if from_spot else None,
+        "mode": req.mode,
+        "scale_payoff": req.scale_payoff,
+        "anchor_kind": anchor_kind,
+        # Domain the shifted curve actually covers; ladder points outside it are
+        # flat-extrapolated in `payoff` above.
+        "shifted_range": [float(strikes[0]), float(strikes[-1])],
+    }
+
+
 class TargetProfileRequest(BaseModel):
     asset: str = "ETH"
     spot_ladder: list[float]

@@ -13101,6 +13101,7 @@ function optv4RenderProfileTable() {
   tbody.querySelectorAll(".optv4-target-input").forEach(inp => inp.addEventListener("input", optv4OnTargetEdit));
   optv4RenderProfileChart();
   optv4UpdateTargetStatus();
+  optv4SyncShiftDefaults();
 }
 
 // Rebuild the manual target from the current inputs; refresh chart + residuals live.
@@ -13151,9 +13152,117 @@ function optv4SmoothTarget() {
   optv4RenderProfileTable();
 }
 
+// ── Re-center a stale target curve on a new spot ────────────────────────────
+// Target curves get drawn once and then go stale as the market moves: a shape
+// drawn when ETH was 1800 keeps its trough 60% below a 4500 spot, so the LP fits
+// to a curve whose features no longer sit where the risk is. These move the same
+// shape along the strike axis to follow the price move (see
+// misc_utils.rescale_target_profile — the math lives server-side).
+
+// Client-side mirror of misc_utils.detect_profile_anchor, so the "from" box can
+// be prefilled and overridden without a round-trip.
+function optv4DetectTargetAnchor(pts) {
+  if (!pts || pts.length < 3) return null;
+  const ys = pts.map(p => p.y);
+  for (const pos of [ys.indexOf(Math.min(...ys)), ys.indexOf(Math.max(...ys))]) {
+    // An extremum sitting on either end is just the end of a monotone run, not a
+    // shape feature — anchoring there would pick an arbitrary point.
+    if (pos > 0 && pos < pts.length - 1) return pts[pos].x;
+  }
+  return null;  // monotone curve: let the user say where the shape was centered
+}
+
+// Prefill the re-center boxes — "to" with the live spot, "from" with the curve's
+// own detected anchor. Only fills empty boxes, so a typed override survives the
+// table re-renders that editing the curve triggers.
+function optv4SyncShiftDefaults() {
+  const src = optv4ProfileSource(); if (!src) return;
+  const fromEl = document.getElementById("optv4-target-from");
+  const toEl = document.getElementById("optv4-target-to");
+  const dp = optv4Dp();
+  if (toEl && !toEl.value && src.S0) toEl.value = Number(src.S0).toFixed(dp);
+  if (fromEl && !fromEl.value) {
+    const a = optv4DetectTargetAnchor(optv4CurrentTargetPoints());
+    if (a != null) fromEl.value = Number(a).toFixed(dp);
+  }
+}
+
+async function optv4ShiftTarget() {
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) { alert("Load the risk profile first."); return; }
+  const points = optv4CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+  const fromRaw = Number(document.getElementById("optv4-target-from")?.value);
+  const toRaw = Number(document.getElementById("optv4-target-to")?.value);
+  const from_spot = fromRaw > 0 ? fromRaw : null;   // null = let the server detect it
+  const to_spot = toRaw > 0 ? toRaw : (src.S0 || null);
+  if (!to_spot) { alert("Enter the spot price to re-center the curve on."); return; }
+  // A monotone curve (the FIL targets are) has no trough to anchor on, so the
+  // server would fall back to the mid of the strike range and shift by a
+  // meaningless ratio. Refuse to guess — the anchor has to come from the user.
+  if (from_spot === null && optv4DetectTargetAnchor(points) === null) {
+    alert("This curve has no trough to anchor on (it only rises or only falls), so "
+      + "there's nothing to detect the original spot from.\n\nType the spot the curve "
+      + "was drawn around in the \"Re-center from\" box — e.g. 0.60 for a FIL curve "
+      + "shaped when FIL was 60c.");
+    const fromEl = document.getElementById("optv4-target-from");
+    if (fromEl) fromEl.focus();
+    return;
+  }
+  const mode = document.getElementById("optv4-target-shift-mode")?.value || "moneyness";
+  const scale_payoff = !!document.getElementById("optv4-target-shift-scale-y")?.checked;
+  const status = document.getElementById("optv4-target-status");
+  if (status) status.textContent = "Shifting…";
+  try {
+    const res = await post("/api/optimization/target-profile/shift", {
+      asset: currentAsset, spot_ladder: src.spots, current_spot: src.S0 || to_spot,
+      points, from_spot, to_spot, mode, scale_payoff,
+    });
+    const payoff = res && res.payoff;
+    if (!Array.isArray(payoff) || payoff.length !== src.spots.length) {
+      throw new Error("Unexpected response from the shift endpoint.");
+    }
+    // Re-anchor to $0 at the current spot. The whole pane (Before/After included)
+    // is P&L-from-today on that basis and the LP fits against it, so the shifted
+    // curve has to land in the same basis to be comparable. A vertical
+    // translation leaves the shape — the thing being moved — untouched, and it
+    // keeps save→reload idempotent, since the loader re-anchors too.
+    const at = payoff[optv2NearestIdx(src.spots, src.S0)] || 0;
+    optv4ManualTarget = optv4TargetDisplayIdx(src.spots)
+      .map(si => ({ x: src.spots[si], y: payoff[si] - at }))
+      .sort((a, b) => a.x - b.x);
+    optv4RenderProfileTable();   // re-renders the table + chart, and rewrites the status
+    if (status) {
+      const dp = optv4Dp();
+      const ratio = res.ratio ? `×${res.ratio.toFixed(3)}` : "";
+      const how = mode === "parallel" ? "parallel $" : `moneyness ${ratio}`;
+      const detected = res.anchor_kind && res.anchor_kind !== "given"
+        ? ` (anchor auto-detected: ${res.anchor_kind})` : "";
+      // Flag the flat-extrapolated tail: shifting moves the curve's own grid off
+      // the ladder, so one wing is held at its end value rather than being real.
+      const [lo, hi] = res.shifted_range || [];
+      const spots = src.spots;
+      const gap = (lo != null && lo > spots[0] + 1e-9) ? `below $${optv2Fmt(lo, dp)}`
+        : (hi != null && hi < spots[spots.length - 1] - 1e-9) ? `above $${optv2Fmt(hi, dp)}` : null;
+      status.textContent = `Shifted $${optv2Fmt(res.from_spot, dp)} → $${optv2Fmt(res.to_spot, dp)}`
+        + ` by ${how}${detected}${scale_payoff ? ", payoffs scaled" : ""}.`
+        + (gap ? ` Ladder ${gap} is flat-extrapolated from the curve's end.` : "")
+        + " Review it, then Apply & Re-run — or Save / Update to keep it.";
+    }
+  } catch (e) {
+    if (status) status.textContent = "";
+    alert("Couldn't shift the target curve.\n" + (e.detail || e.message || e));
+  }
+}
+
 function optv4ResetTarget() {
   // Back to the selected profile (or parametric): drop manual edits and reload it.
   optv4ManualTarget = null;
+  // Clear the re-center overrides so the boxes re-derive from the reloaded curve.
+  const fromEl = document.getElementById("optv4-target-from");
+  const toEl = document.getElementById("optv4-target-to");
+  if (fromEl) fromEl.value = "";
+  if (toEl) toEl.value = "";
   optv4FetchTargetProfile();
 }
 
@@ -13374,6 +13483,7 @@ document.getElementById("btn-optv4-target-smooth")?.addEventListener("click", op
 document.getElementById("btn-optv4-target-save")?.addEventListener("click", optv4SaveTargetProfile);
 document.getElementById("btn-optv4-target-delete")?.addEventListener("click", optv4DeleteTargetProfile);
 document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
+document.getElementById("btn-optv4-target-shift")?.addEventListener("click", optv4ShiftTarget);
 document.getElementById("btn-optv4-add-leg")?.addEventListener("click", optv4AddManualLeg);
 
 // Persistent, copyable optimizer-error panel.

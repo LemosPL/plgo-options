@@ -2642,6 +2642,21 @@
               </label>
               <button id="btn-optv4-target-draw" class="btn-secondary" style="width:auto" title="Toggle draw mode: click the chart to set the target payoff at the nearest spot-ladder point and build a curve point-by-point">✏ Draw on chart</button>
               <button id="btn-optv4-target-reset" class="btn-secondary" style="width:auto" title="Discard manual edits and use the built-in parametric target">Reset to auto</button>
+              <span style="width:1px;height:20px;background:var(--border);margin:0 .1rem"></span>
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.35rem" title="Spot the curve's shape was originally drawn around. Auto-filled from the curve's own trough — override it if the detected anchor is wrong.">Re-center from
+                <input id="optv4-target-from" type="number" step="any" min="0" placeholder="auto" style="width:5.5rem;font-size:.8rem">
+              </label>
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.35rem" title="Spot to move the shape onto. Auto-filled with the live spot.">to
+                <input id="optv4-target-to" type="number" step="any" min="0" placeholder="spot" style="width:5.5rem;font-size:.8rem">
+              </label>
+              <select id="optv4-target-shift-mode" style="width:auto;font-size:.8rem" title="Moneyness (default): strikes are multiplied by to/from, so every point keeps its % distance from spot — a trough at the money stays at the money. Parallel: strikes are shifted by to−from, so every point keeps its $ distance from spot; use when the shape encodes absolute price levels.">
+                <option value="moneyness">× moneyness</option>
+                <option value="parallel">+ parallel ($)</option>
+              </select>
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.3rem" title="Also scale the payoff axis by the same ratio. Off by default — the payoff axis is a USD risk budget, and tolerance for a $19m loss doesn't grow just because spot rallied. Turn on when the curve tracks a spot-linked notional.">
+                <input id="optv4-target-shift-scale-y" type="checkbox"> scale $
+              </label>
+              <button id="btn-optv4-target-shift" class="btn-secondary" style="width:auto;border-color:#f0883e;color:#f0883e" title="Move the current curve's shape along the strike axis to follow the price move, then review it and Apply &amp; Re-run (or Save / Update) it">↔ Shift curve</button>
               <button id="btn-optv4-target-apply" class="btn-primary" style="width:auto" title="Re-run the optimizer fitting to your edited target">Apply &amp; Re-run</button>
               <span style="width:1px;height:20px;background:var(--border);margin:0 .1rem"></span>
               <input id="optv4-target-name" type="text" placeholder="Profile name (new or existing)" style="width:11rem;font-size:.8rem">
@@ -3149,6 +3164,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=136"></script>
+<script src="/static/app.js?v=137"></script>
 </body>
 </html>
