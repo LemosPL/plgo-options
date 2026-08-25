@@ -260,13 +260,16 @@ def rescale_target_profile(
             shifted[payoff_col] = np.asarray(shifted[payoff_col], dtype=float) * ratio
     else:
         new_strikes = strikes + (to_spot - from_spot)
-        # A parallel shift down can push the low wing to/below zero, which is not
-        # a valid strike and breaks any later log-scale plotting or interpolation.
-        if new_strikes[0] <= 0:
+        # A parallel shift down can push the low wing below zero, which isn't a
+        # valid price. Zero itself is allowed: the shipped curves already start at
+        # strike 0, and the result is interpolated onto a ladder that starts well
+        # above it, so a 0 left edge is the status quo rather than a new problem.
+        # (Rejecting <= 0 here would also fail a no-op shift of those curves.)
+        if new_strikes[0] < 0:
             raise ValueError(
                 f"A parallel shift of {to_spot - from_spot:,.4f} pushes the lowest "
                 f"strike to {new_strikes[0]:,.4f}, which is not a valid price. Use "
-                "mode='moneyness' for a move this large."
+                "mode='moneyness' for a move this large, or raise the 'from' price."
             )
 
     shifted.index = pd.Index(new_strikes, name=target_profile.index.name)

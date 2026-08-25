@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 
@@ -2548,11 +2548,11 @@
               </ul>
             </details>
             <div id="optv4-payoff-empty" class="optv3-empty">Load the risk profile to see the payoff curve.</div>
-            <div id="optv4-horizon-bar" style="display:none;align-items:center;gap:.4rem;flex-wrap:wrap;margin:0 0 .5rem">
-              <span class="optv3-hint" style="margin:0" title="Which time horizons to draw. Before a run these are the current book at each horizon; after a run it's the After (proposed) book at each horizon, with Before and Target shown at Now.">Horizons</span>
-              <span id="optv4-horizon-chips" style="display:inline-flex;gap:.3rem;flex-wrap:wrap"></span>
-              <button type="button" id="btn-optv4-horizon-now" class="btn-secondary" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show only Now">Now only</button>
-              <button type="button" id="btn-optv4-horizon-all" class="btn-secondary" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show every horizon">All</button>
+            <div class="optv4-horizon-bar" style="display:none;align-items:center;gap:.4rem;flex-wrap:wrap;margin:0 0 .5rem">
+              <span class="optv3-hint" style="margin:0" title="Which time horizons to draw. Before a run these are the current book at each horizon; after a run it's the After (proposed) book at each horizon, with Before and Target shown at Now. The selection is shared with the Target Profile chart.">Horizons</span>
+              <span class="optv4-horizon-chips" style="display:inline-flex;gap:.3rem;flex-wrap:wrap"></span>
+              <button type="button" class="btn-secondary optv4-horizon-now" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show only Now">Now only</button>
+              <button type="button" class="btn-secondary optv4-horizon-all" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show every horizon">All</button>
             </div>
             <div id="optv4-payoff-chart" style="width:100%;height:460px"></div>
 
@@ -2635,88 +2635,123 @@
           <div id="subtab-optv4-profile" class="sub-tab-pane">
             <h3 style="margin:.2rem 0 .5rem">Target Profile <span class="optv3-muted" style="font-weight:400">— payoff at Now (editable)</span></h3>
             <p class="optv3-hint" style="margin:0 0 .6rem">The payoff the optimizer fits to (<b>Target</b>), with your <b>Before</b> and <b>After</b> books at the same spots — all at horizon 0, anchored to $0 at the current spot. <b>Edit the Target column</b> to draw your own target, <b>Smooth</b> to round it off, then <b>Apply &amp; Re-run</b> to optimize the book toward it.</p>
-            <div id="optv4-target-toolbar" style="display:none;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.8rem">
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Profile
-                <select id="optv4-target-select" title="Pick a saved target profile or the built-in parametric target; the optimizer fits to it on the next Run.">
-                  <option value="">Parametric (auto)</option>
-                </select>
-              </label>
-              <button id="btn-optv4-target-delete" class="btn-secondary" style="width:auto;padding:.15rem .6rem" title="Delete the selected saved profile (built-in profiles can't be deleted)" disabled>🗑 Delete</button>
-              <button id="btn-optv4-target-smooth" class="btn-secondary" style="width:auto" title="Moving-average smooth the Target column">Smooth</button>
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">strength
-                <input id="optv4-target-smooth-strength" type="range" min="1" max="8" value="3" style="width:90px">
-              </label>
-              <button id="btn-optv4-target-draw" class="btn-secondary" style="width:auto" title="Toggle draw mode: click the chart to set the target payoff at the nearest spot-ladder point and build a curve point-by-point">✏ Draw on chart</button>
-              <button id="btn-optv4-target-reset" class="btn-secondary" style="width:auto" title="Discard manual edits and use the built-in parametric target">Reset to auto</button>
-              <span style="width:1px;height:20px;background:var(--border);margin:0 .1rem"></span>
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.35rem" title="Spot the curve's shape was originally drawn around. Auto-filled from the curve's own trough — override it if the detected anchor is wrong.">Re-center from
-                <input id="optv4-target-from" type="number" step="any" min="0" placeholder="auto" style="width:5.5rem;font-size:.8rem">
-              </label>
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.35rem" title="Spot to move the shape onto. Auto-filled with the live spot.">to
-                <input id="optv4-target-to" type="number" step="any" min="0" placeholder="spot" style="width:5.5rem;font-size:.8rem">
-              </label>
-              <select id="optv4-target-shift-mode" style="width:auto;font-size:.8rem" title="Moneyness (default): strikes are multiplied by to/from, so every point keeps its % distance from spot — a trough at the money stays at the money. Parallel: strikes are shifted by to−from, so every point keeps its $ distance from spot; use when the shape encodes absolute price levels.">
-                <option value="moneyness">× moneyness</option>
-                <option value="parallel">+ parallel ($)</option>
-              </select>
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.3rem" title="Also scale the payoff axis by the same ratio. Off by default — the payoff axis is a USD risk budget, and tolerance for a $19m loss doesn't grow just because spot rallied. Turn on when the curve tracks a spot-linked notional.">
-                <input id="optv4-target-shift-scale-y" type="checkbox"> scale $
-              </label>
-              <button id="btn-optv4-target-shift" class="btn-secondary" style="width:auto;border-color:#f0883e;color:#f0883e" title="Move the current curve's shape along the strike axis to follow the price move, then review it and Apply &amp; Re-run (or Save / Update) it">↔ Shift curve</button>
-              <button id="btn-optv4-target-apply" class="btn-primary" style="width:auto" title="Re-run the optimizer fitting to your edited target">Apply &amp; Re-run</button>
-              <span style="width:1px;height:20px;background:var(--border);margin:0 .1rem"></span>
-              <input id="optv4-target-name" type="text" placeholder="Profile name (new or existing)" style="width:11rem;font-size:.8rem">
-              <button id="btn-optv4-target-save" class="btn-secondary" style="width:auto" title="Save the current curve under this name — creates a new profile, or updates (overwrites) the one you have selected/named">Save / Update</button>
-              <span id="optv4-target-status" class="optv3-hint" style="margin:0"></span>
-            </div>
-            <!-- Target shape: the V-shape knobs for the built-in parametric target.
-                 Hidden (via optv4SyncTargetControls) once a saved CSV profile is picked.
-                 Mirrors the v2 panel — same ids with an optv4- prefix. -->
-            <div id="optv4-target-parametric-controls" style="display:none;background:var(--surface-tile,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;margin-bottom:.9rem">
-              <div style="font-size:.75rem;font-weight:600;color:var(--muted);margin-bottom:.5rem">
-                TARGET SHAPE <span style="font-weight:400;text-transform:none">— an unbounded V centered on current spot: straight lines out from the max-loss trough, no flattening (client spec, 2026-08-24)</span>
+            <!-- Grouped control cards. The wrapper is a plain block; each card
+                 below lays its own controls out, so nothing wraps mid-cluster. -->
+            <div id="optv4-target-toolbar" style="display:none">
+
+              <!-- 1. Which curve are we fitting to -->
+              <div class="opt-card">
+                <div class="opt-card-title">Profile <span class="opt-card-note">— the curve the optimizer fits to on the next run</span></div>
+                <div class="opt-card-row">
+                  <select id="optv4-target-select" style="flex:1 1 18rem;min-width:12rem" title="Pick a saved target profile or the built-in parametric target; the optimizer fits to it on the next Run.">
+                    <option value="">Parametric (auto)</option>
+                  </select>
+                  <button id="btn-optv4-target-delete" class="btn-secondary" style="width:auto;padding:.25rem .7rem" title="Delete the selected saved profile (built-in profiles can't be deleted)" disabled>🗑 Delete</button>
+                </div>
               </div>
-              <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">
-                <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Max loss (at spot)
-                  <input id="optv4-target-trough-payoff" type="number" value="-20000000" step="500000" style="width:7.5rem" title="Target payoff ($) exactly at current spot — the bottom of the V. The line is exactly linear from here outward on each side, forever (no flat plateau).">
-                </label>
-              </div>
-              <div id="optv4-target-symmetric-row" style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
-                <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
-                  <input id="optv4-target-wing-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4rem" title="How far from spot (%), each side, before the target crosses $0 — the line keeps going linearly past that, it doesn't flatten.">%
-                </label>
-                <span id="optv4-target-wing-readout" class="optv3-hint" style="margin:0"></span>
-              </div>
-              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">
-                <input id="optv4-target-asymmetric-toggle" type="checkbox" checked>
-                Asymmetric (set downside/upside separately)
-              </label>
-              <div id="optv4-target-asymmetric-fields" style="display:none;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border)">
-                <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
-                  <div>
-                    <div style="font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:.35rem">DOWNSIDE</div>
-                    <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
-                      <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
-                        <input id="optv4-target-down-pct" type="number" value="90.91" step="5" min="1" max="100" style="width:4rem" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0.">%
-                      </label>
-                      <span id="optv4-target-down-wing-readout" class="optv3-hint" style="margin:0"></span>
+
+              <!-- 2. Shape knobs for the built-in parametric target. Hidden (via
+                      optv4SyncTargetControls) once a saved CSV profile is picked,
+                      where they're not in play. Mirrors the v2 panel — same ids
+                      with an optv4- prefix. -->
+              <div class="opt-card" id="optv4-target-parametric-controls" style="display:none">
+                <div class="opt-card-title">Target shape <span class="opt-card-note">— an unbounded V centered on current spot: straight lines out from the max-loss trough, no flattening (client spec, 2026-08-24)</span></div>
+                <div class="opt-card-row">
+                  <label class="opt-inline" title="Target payoff ($) exactly at current spot — the bottom of the V. The line is exactly linear from here outward on each side, forever (no flat plateau).">Max loss (at spot)
+                    <input id="optv4-target-trough-payoff" type="number" value="-20000000" step="500000" style="width:8rem">
+                  </label>
+                  <span class="opt-sep"></span>
+                  <label class="opt-inline">
+                    <input id="optv4-target-asymmetric-toggle" type="checkbox" checked> Asymmetric (set downside / upside separately)
+                  </label>
+                </div>
+                <div class="opt-card-row" id="optv4-target-symmetric-row">
+                  <label class="opt-inline" title="How far from spot (%), each side, before the target crosses $0 — the line keeps going linearly past that, it doesn't flatten.">Breakeven distance
+                    <input id="optv4-target-wing-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4.5rem">%
+                  </label>
+                  <span id="optv4-target-wing-readout" class="opt-inline" style="white-space:normal"></span>
+                </div>
+                <div id="optv4-target-asymmetric-fields" style="display:none;margin-top:.55rem;padding-top:.55rem;border-top:1px solid var(--border)">
+                  <div class="opt-card-row" style="gap:2rem;align-items:flex-start">
+                    <div>
+                      <div class="opt-card-title" style="margin-bottom:.4rem">Downside</div>
+                      <div class="opt-card-row">
+                        <label class="opt-inline" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0.">Breakeven distance
+                          <input id="optv4-target-down-pct" type="number" value="90.91" step="5" min="1" max="100" style="width:4.5rem">%
+                        </label>
+                        <span id="optv4-target-down-wing-readout" class="opt-inline" style="white-space:normal"></span>
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div style="font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:.35rem">UPSIDE</div>
-                    <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
-                      <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
-                        <input id="optv4-target-up-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4rem" title="How far above spot (%) the target crosses $0.">%
-                      </label>
-                      <span id="optv4-target-up-wing-readout" class="optv3-hint" style="margin:0"></span>
+                    <div>
+                      <div class="opt-card-title" style="margin-bottom:.4rem">Upside</div>
+                      <div class="opt-card-row">
+                        <label class="opt-inline" title="How far above spot (%) the target crosses $0.">Breakeven distance
+                          <input id="optv4-target-up-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4.5rem">%
+                        </label>
+                        <span id="optv4-target-up-wing-readout" class="opt-inline" style="white-space:normal"></span>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
 
-            <div id="optv4-target-shape-summary" class="optv3-hint" style="margin:0 0 .6rem;min-height:1.1em"></div>
-            <div id="optv4-profile-chart" style="width:100%;height:360px;display:none;margin-bottom:1rem"></div>
+              <!-- 3. Re-center a stale saved/hand-drawn curve onto a new spot.
+                      Hidden for the parametric target, which already rebuilds
+                      itself around current spot on every fetch. -->
+              <div class="opt-card" id="optv4-target-recenter" style="display:none">
+                <div class="opt-card-title">Re-center <span class="opt-card-note">— move this curve's shape along the price axis to follow a spot move</span></div>
+                <div class="opt-card-row">
+                  <label class="opt-inline" title="Spot the curve's shape was originally drawn around. Auto-filled from the curve's own trough — override it if the detected anchor is wrong, or if the curve has no trough to detect.">from
+                    <input id="optv4-target-from" type="number" step="any" min="0" placeholder="auto" style="width:6rem">
+                  </label>
+                  <span style="color:var(--muted)">→</span>
+                  <label class="opt-inline" title="Spot to move the shape onto. Auto-filled with the live spot.">to
+                    <input id="optv4-target-to" type="number" step="any" min="0" placeholder="spot" style="width:6rem">
+                  </label>
+                  <select id="optv4-target-shift-mode" style="width:auto;font-size:.8rem" title="Move left/right (default): every point slides the same number of dollars (to − from), so the shape is translated unchanged — its width and depth stay exactly as drawn. Stretch: strikes are multiplied by to/from, so each point keeps its % distance from spot; the shape widens as it moves, and any point sitting at strike 0 stays pinned there, which makes the curve appear to swing rather than slide.">
+                    <option value="parallel">→ move left / right</option>
+                    <option value="moneyness">× stretch (moneyness)</option>
+                  </select>
+                  <label class="opt-inline" title="Also scale the payoff axis by the same ratio. Off by default — the payoff axis is a USD risk budget, and tolerance for a $19m loss doesn't grow just because spot rallied. Turn on when the curve tracks a spot-linked notional.">
+                    <input id="optv4-target-shift-scale-y" type="checkbox"> scale $
+                  </label>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-target-shift" class="btn-secondary" style="width:auto;border-color:#f0883e;color:#f0883e" title="Move the current curve's shape along the strike axis to follow the price move, then review it and Apply &amp; Re-run (or Save / Update) it">↔ Shift curve</button>
+                </div>
+              </div>
+
+              <!-- 4. Reshape by hand -->
+              <div class="opt-card">
+                <div class="opt-card-title">Edit curve <span class="opt-card-note">— or type straight into the Target column of the table below</span></div>
+                <div class="opt-card-row">
+                  <button id="btn-optv4-target-draw" class="btn-secondary" style="width:auto" title="Toggle draw mode: click the chart to set the target payoff at the nearest spot-ladder point and build a curve point-by-point">✏ Draw on chart</button>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-target-smooth" class="btn-secondary" style="width:auto" title="Moving-average smooth the Target column">Smooth</button>
+                  <label class="opt-inline" title="Half-width of the moving-average window">strength
+                    <input id="optv4-target-smooth-strength" type="range" min="1" max="8" value="3" style="width:90px">
+                  </label>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-target-reset" class="btn-secondary" style="width:auto" title="Discard manual edits and reload the selected profile (or the parametric target)">↺ Reset to auto</button>
+                </div>
+              </div>
+
+              <!-- 5. Commit: run it, or keep it -->
+              <div class="opt-actionbar">
+                <button id="btn-optv4-target-apply" class="btn-primary" style="width:auto" title="Re-run the optimizer fitting to your edited target">Apply &amp; Re-run</button>
+                <span class="opt-actionbar-spacer"></span>
+                <input id="optv4-target-name" type="text" placeholder="Profile name (new or existing)" style="width:13rem;font-size:.8rem">
+                <button id="btn-optv4-target-save" class="btn-secondary" style="width:auto" title="Save the current curve under this name — creates a new profile, or updates (overwrites) the one you have selected/named">Save / Update</button>
+              </div>
+              <div id="optv4-target-status" class="opt-status"></div>
+            </div>
+            <div id="optv4-target-shape-summary" class="opt-status"></div>
+            <div class="optv4-horizon-bar" style="display:none;align-items:center;gap:.4rem;flex-wrap:wrap;margin:0 0 .5rem">
+              <span class="optv3-hint" style="margin:0" title="Which time horizons to draw alongside the target. Post-run these are the After (proposed) book at each horizon; pre-run they're the current book. Shared with the Payoff chart's own selector.">Horizons</span>
+              <span class="optv4-horizon-chips" style="display:inline-flex;gap:.3rem;flex-wrap:wrap"></span>
+              <button type="button" class="btn-secondary optv4-horizon-now" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show only Now">Now only</button>
+              <button type="button" class="btn-secondary optv4-horizon-all" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show every horizon">All</button>
+            </div>
+            <div id="optv4-profile-chart" style="width:100%;height:400px;display:none;margin-bottom:1rem"></div>
             <div id="optv4-profile-empty" class="optv3-empty">Load the risk profile to define a target.</div>
             <div id="optv4-profile-wrap" class="chain-wrapper" style="max-height:520px;display:none">
               <table class="pf-table">
@@ -3216,6 +3251,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=138"></script>
+<script src="/static/app.js?v=139"></script>
 </body>
 </html>
