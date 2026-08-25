@@ -2548,6 +2548,12 @@
               </ul>
             </details>
             <div id="optv4-payoff-empty" class="optv3-empty">Load the risk profile to see the payoff curve.</div>
+            <div id="optv4-horizon-bar" style="display:none;align-items:center;gap:.4rem;flex-wrap:wrap;margin:0 0 .5rem">
+              <span class="optv3-hint" style="margin:0" title="Which time horizons to draw. Before a run these are the current book at each horizon; after a run it's the After (proposed) book at each horizon, with Before and Target shown at Now.">Horizons</span>
+              <span id="optv4-horizon-chips" style="display:inline-flex;gap:.3rem;flex-wrap:wrap"></span>
+              <button type="button" id="btn-optv4-horizon-now" class="btn-secondary" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show only Now">Now only</button>
+              <button type="button" id="btn-optv4-horizon-all" class="btn-secondary" style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem" title="Show every horizon">All</button>
+            </div>
             <div id="optv4-payoff-chart" style="width:100%;height:460px"></div>
 
             <div id="optv4-trades-under-chart" class="optv3-trades-grid" style="display:none">
@@ -2663,6 +2669,52 @@
               <button id="btn-optv4-target-save" class="btn-secondary" style="width:auto" title="Save the current curve under this name — creates a new profile, or updates (overwrites) the one you have selected/named">Save / Update</button>
               <span id="optv4-target-status" class="optv3-hint" style="margin:0"></span>
             </div>
+            <!-- Target shape: the V-shape knobs for the built-in parametric target.
+                 Hidden (via optv4SyncTargetControls) once a saved CSV profile is picked.
+                 Mirrors the v2 panel — same ids with an optv4- prefix. -->
+            <div id="optv4-target-parametric-controls" style="display:none;background:var(--surface-tile,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:10px;padding:.7rem .9rem;margin-bottom:.9rem">
+              <div style="font-size:.75rem;font-weight:600;color:var(--muted);margin-bottom:.5rem">
+                TARGET SHAPE <span style="font-weight:400;text-transform:none">— an unbounded V centered on current spot: straight lines out from the max-loss trough, no flattening (client spec, 2026-08-24)</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">
+                <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Max loss (at spot)
+                  <input id="optv4-target-trough-payoff" type="number" value="-20000000" step="500000" style="width:7.5rem" title="Target payoff ($) exactly at current spot — the bottom of the V. The line is exactly linear from here outward on each side, forever (no flat plateau).">
+                </label>
+              </div>
+              <div id="optv4-target-symmetric-row" style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.4rem">
+                <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
+                  <input id="optv4-target-wing-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4rem" title="How far from spot (%), each side, before the target crosses $0 — the line keeps going linearly past that, it doesn't flatten.">%
+                </label>
+                <span id="optv4-target-wing-readout" class="optv3-hint" style="margin:0"></span>
+              </div>
+              <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">
+                <input id="optv4-target-asymmetric-toggle" type="checkbox" checked>
+                Asymmetric (set downside/upside separately)
+              </label>
+              <div id="optv4-target-asymmetric-fields" style="display:none;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border)">
+                <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
+                  <div>
+                    <div style="font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:.35rem">DOWNSIDE</div>
+                    <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
+                      <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
+                        <input id="optv4-target-down-pct" type="number" value="90.91" step="5" min="1" max="100" style="width:4rem" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0.">%
+                      </label>
+                      <span id="optv4-target-down-wing-readout" class="optv3-hint" style="margin:0"></span>
+                    </div>
+                  </div>
+                  <div>
+                    <div style="font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:.35rem">UPSIDE</div>
+                    <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
+                      <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
+                        <input id="optv4-target-up-pct" type="number" value="90.91" step="5" min="1" max="300" style="width:4rem" title="How far above spot (%) the target crosses $0.">%
+                      </label>
+                      <span id="optv4-target-up-wing-readout" class="optv3-hint" style="margin:0"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div id="optv4-target-shape-summary" class="optv3-hint" style="margin:0 0 .6rem;min-height:1.1em"></div>
             <div id="optv4-profile-chart" style="width:100%;height:360px;display:none;margin-bottom:1rem"></div>
             <div id="optv4-profile-empty" class="optv3-empty">Load the risk profile to define a target.</div>
@@ -3164,6 +3216,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=137"></script>
+<script src="/static/app.js?v=138"></script>
 </body>
 </html>

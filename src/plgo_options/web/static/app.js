@@ -1204,6 +1204,25 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     if ($optv2Up) $optv2Up.value = asset === "FIL" ? 175 : 90.91;
     if (typeof optv2UpdateTargetShapeReadouts === "function") optv2UpdateTargetShapeReadouts();
 
+    // v4 carries the same Target Shape knobs, so it needs the same asset-scaled
+    // reset — otherwise switching to FIL leaves v4 showing ETH's $20M/90.91%
+    // shape and the LP quietly fits to the wrong curve.
+    const $optv4Trough = document.getElementById("optv4-target-trough-payoff");
+    if ($optv4Trough) $optv4Trough.value = asset === "FIL" ? -15750000 : -20000000;
+    const $optv4Wing = document.getElementById("optv4-target-wing-pct");
+    if ($optv4Wing) $optv4Wing.value = asset === "FIL" ? 100 : 90.91;
+    const $optv4Down = document.getElementById("optv4-target-down-pct");
+    if ($optv4Down) $optv4Down.value = asset === "FIL" ? 100 : 90.91;
+    const $optv4Up = document.getElementById("optv4-target-up-pct");
+    if ($optv4Up) $optv4Up.value = asset === "FIL" ? 175 : 90.91;
+    if (typeof optv4UpdateTargetShapeReadouts === "function") optv4UpdateTargetShapeReadouts();
+
+    // v4's Max Qty / Delta Band are asset-scaled for the same reasons as v2's.
+    const $optv4MaxQty = document.getElementById("optv4-max-qty");
+    if ($optv4MaxQty) $optv4MaxQty.value = asset === "FIL" ? 5000000 : 5000;
+    const $optv4DeltaBand = document.getElementById("optv4-delta-band");
+    if ($optv4DeltaBand) $optv4DeltaBand.value = asset === "FIL" ? 75000 : 75;
+
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
     portfolioLoaded = false;
@@ -12122,18 +12141,87 @@ function optv4SyncTargetControls() {
   const sel = document.getElementById("optv4-target-select");
   const del = document.getElementById("btn-optv4-target-delete");
   const nameEl = document.getElementById("optv4-target-name");
+  const parametricControls = document.getElementById("optv4-target-parametric-controls");
   if (!sel) return;
   const file = sel.value;
   const prof = optv4ProfilesList.find(p => p.file === file);
   // Enable Delete for any selected saved profile (not "Parametric"); the backend
   // is the authority and refuses built-ins with a clear message.
   if (del) del.disabled = !file;
+  // The V-shape knobs only shape the built-in parametric target — hide them once
+  // a saved CSV profile is selected, where they're not in play.
+  if (parametricControls) parametricControls.style.display = file ? "none" : "";
   // Prefill the name with the selected profile's display name (strip "ASSET - ")
   if (nameEl && prof) {
     const display = prof.name.replace(new RegExp(`^${currentAsset}\\s*-\\s*`), "");
     nameEl.value = display;
   } else if (nameEl && !file) {
     nameEl.value = "";
+  }
+}
+
+// Show/hide the separate downside/upside fields based on the Asymmetric checkbox.
+function optv4SyncAsymmetricFields() {
+  const on = document.getElementById("optv4-target-asymmetric-toggle")?.checked || false;
+  const sym = document.getElementById("optv4-target-symmetric-row");
+  const asym = document.getElementById("optv4-target-asymmetric-fields");
+  if (sym) sym.style.display = on ? "none" : "";
+  if (asym) asym.style.display = on ? "" : "none";
+  optv4UpdateTargetShapeReadouts();
+}
+
+// Read the Target Shape knobs and convert to the ratios
+// build_parametric_target_profile_eth expects. Client-specified linear-V model
+// (2026-08-24): low_floor_ratio/high_plateau_ratio are the BREAKEVEN DISTANCE as
+// a fraction of spot (down 90.91% -> 0.9091, i.e. the $0 crossing sits 90.91% of
+// spot away) — a straight percent-to-fraction conversion. low_floor_payoff/
+// high_plateau_payoff no longer mean anything (no flat plateau to set the level
+// of), so they aren't sent. Same contract as optv2ParametricOverrides.
+function optv4ParametricOverrides() {
+  const num = (id, fallback) => {
+    const v = parseFloat(document.getElementById(id)?.value);
+    return Number.isFinite(v) ? v : fallback;
+  };
+  // A field's min/max attribute is display-only (it doesn't stop a value being
+  // typed or pasted out of range) — clamp to the field's own declared bounds
+  // rather than hardcoding them a second time.
+  const pctAttrClamped = (id, fallback) => {
+    const el = document.getElementById(id);
+    const v = num(id, fallback);
+    const lo = parseFloat(el?.min), hi = parseFloat(el?.max);
+    return Math.min(Number.isFinite(hi) ? hi : Infinity, Math.max(Number.isFinite(lo) ? lo : -Infinity, v));
+  };
+  const asymmetric = document.getElementById("optv4-target-asymmetric-toggle")?.checked || false;
+  const trough = num("optv4-target-trough-payoff", -20_000_000);
+  const downPct = asymmetric ? pctAttrClamped("optv4-target-down-pct", 90.91) : pctAttrClamped("optv4-target-wing-pct", 90.91);
+  const upPct = asymmetric ? pctAttrClamped("optv4-target-up-pct", 90.91) : pctAttrClamped("optv4-target-wing-pct", 90.91);
+  return {
+    parametric_low_floor_ratio: downPct / 100,
+    parametric_trough_payoff: trough,
+    parametric_high_plateau_ratio: upPct / 100,
+  };
+}
+
+// Live "= $X" readouts beside the % inputs, so a breakeven-distance % reads as an
+// actual spot price. Strike-at-breakeven = spot * (1 ∓ ratio) — the ratio is a
+// DISTANCE fraction, not the strike/spot ratio itself.
+function optv4UpdateTargetShapeReadouts() {
+  const spot = (optv4Data && optv4Data.eth_spot) || 0;
+  const dp = optv4Dp();
+  const fmtSpot = v => "$" + optv2Fmt(v, dp);
+  const o = optv4ParametricOverrides();
+  const asymmetric = document.getElementById("optv4-target-asymmetric-toggle")?.checked || false;
+  const downBreakeven = spot * (1 - o.parametric_low_floor_ratio);
+  const upBreakeven = spot * (1 + o.parametric_high_plateau_ratio);
+
+  if (!asymmetric) {
+    const wingEl = document.getElementById("optv4-target-wing-readout");
+    if (wingEl) wingEl.textContent = spot ? `→ breakeven below ${fmtSpot(downBreakeven)} / above ${fmtSpot(upBreakeven)}` : "";
+  } else {
+    const downWing = document.getElementById("optv4-target-down-wing-readout");
+    if (downWing) downWing.textContent = spot ? `→ breakeven at ${fmtSpot(downBreakeven)}` : "";
+    const upWing = document.getElementById("optv4-target-up-wing-readout");
+    if (upWing) upWing.textContent = spot ? `→ breakeven at ${fmtSpot(upBreakeven)}` : "";
   }
 }
 
@@ -12152,6 +12240,7 @@ async function optv4FetchTargetProfile() {
   try {
     const body = { asset: currentAsset, spot_ladder: ladder, current_spot: optv4Data.eth_spot };
     if (optv4TargetProfileFile) body.profile = optv4TargetProfileFile;
+    else Object.assign(body, optv4ParametricOverrides());
     const tp = await post("/api/optimization/target-profile", body);
     if (tp && Array.isArray(tp.payoff) && tp.payoff.length === (ladder || []).length) {
       optv4AutoTargetProfile = tp.payoff;
@@ -12160,6 +12249,7 @@ async function optv4FetchTargetProfile() {
   const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
     ? optv4OptResult.current_book_mtm : (optv4Data.current_total_mtm || 0);
   renderTargetShapeSummary("optv4-target-shape-summary", optv4AutoTargetProfile, ladder, optv4Data.eth_spot, bookMtm);
+  optv4UpdateTargetShapeReadouts();   // spot is known now, so the "= $X" readouts can resolve
   optv4RenderProfileTable();
 }
 
@@ -12303,11 +12393,61 @@ function optv4RenderKpi() {
 // Payoff chart — plots actual spot price on a LOG x-axis so it works at any
 // scale (ETH ~$1-14k, FIL ~$0.2-10). Plotly auto-generates price ticks, so no
 // asset-specific tick snapping is needed. Labels are asset-aware via currentAsset.
+// ── Payoff-chart horizon selection ─────────────────────────────────────────
+// Which T+ horizons the payoff chart draws. Pre-run this picks which
+// current-book curves to show; post-run it's the After (proposed) book at each
+// horizon, since a book that looks right today can still drift badly on theta
+// alone. Defaults to Now + the horizons the desk actually watches; the LP result
+// carries every horizon in OPTV2_HORIZONS, so this is purely a display filter.
+let optv4HorizonSel = new Set([0, 16, 60, 90]);
+
+function optv4HorizonLabel(h) { return h === 0 ? "Now" : `T+${h}d`; }
+
+function optv4RenderHorizonChips() {
+  const bar = document.getElementById("optv4-horizon-bar");
+  const wrap = document.getElementById("optv4-horizon-chips");
+  if (!bar || !wrap) return;
+  bar.style.display = optv4Data ? "flex" : "none";
+  const C = optv4ChartColors();
+  wrap.innerHTML = OPTV2_HORIZONS.map((h, k) => {
+    const on = optv4HorizonSel.has(h);
+    // Chip border carries the same ramp colour the curve gets, so the legend and
+    // the chips read as one control.
+    const col = C.ramp[k] || "#8b949e";
+    return `<button type="button" class="btn-secondary optv4-horizon-chip" data-h="${h}"`
+      + ` style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem;`
+      + `border-color:${on ? col : "var(--border)"};color:${on ? col : "var(--muted)"};`
+      + `opacity:${on ? 1 : .55}">${optv4HorizonLabel(h)}</button>`;
+  }).join("");
+  wrap.querySelectorAll(".optv4-horizon-chip").forEach(b => {
+    b.addEventListener("click", () => {
+      const h = Number(b.dataset.h);
+      if (optv4HorizonSel.has(h)) {
+        // Never leave the chart with nothing to draw.
+        if (optv4HorizonSel.size === 1) return;
+        optv4HorizonSel.delete(h);
+      } else {
+        optv4HorizonSel.add(h);
+      }
+      optv4RenderHorizonChips();
+      optv4RenderPayoff();
+    });
+  });
+}
+
+// Selected horizons in chart order, each with its stable ramp index (the index
+// within OPTV2_HORIZONS, so a curve keeps its colour as others are toggled).
+function optv4SelectedHorizons() {
+  const out = OPTV2_HORIZONS.map((h, k) => ({ h, k })).filter(o => optv4HorizonSel.has(o.h));
+  return out.length ? out : [{ h: 0, k: 0 }];
+}
+
 function optv4RenderPayoff() {
   const spots = optv4Data.spot_ladder;
   const positions = optv4ActivePositions();
   const S0 = optv4Data.eth_spot;  // /pnl uses "eth_spot" for the spot of any asset
   if (!positions.length || !spots || !spots.length) return;
+  optv4RenderHorizonChips();
 
   const assetLabel = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
   const fmtPrice = s => (s < 100 ? Number(s).toFixed(2) : Math.round(s).toLocaleString());
@@ -12321,13 +12461,30 @@ function optv4RenderPayoff() {
     const beforeCurve = optv4OptResult.before.payoff_by_horizon["0"];
     if (beforeCurve) traces.push({ x: optSpots, y: beforeCurve, mode: "lines", name: "Before (current book)", hovertemplate: HT, line: { color: C.before, width: 2, dash: "dash" } });
     // After reflects only the *selected* replacement trades (checkboxes below).
-    const afterCurve = optv4AfterSelectedCurve() || optv4OptResult.after.payoff_by_horizon["0"];
     const nTot = (optv4Replacements || []).length;
     const nSel = nTot - (optv4ReplDeselected ? optv4ReplDeselected.size : 0);
     const nLegs = (optv4ManualLegs || []).filter(l => l._on).length;
     let afterName = (nTot && nSel !== nTot) ? `After (selected ${nSel}/${nTot} trades)` : "After (with proposed trades)";
     if (nLegs) afterName += ` + ${nLegs} leg${nLegs === 1 ? "" : "s"}`;
-    if (afterCurve) traces.push({ x: optSpots, y: afterCurve, mode: "lines", name: afterName, hovertemplate: HT, line: { color: C.after, width: 3 }, fill: "tozeroy", fillcolor: C.afterFill });
+    // The After book at each selected horizon. Now stays the bold, filled
+    // primary; later horizons ride the cyan ramp thinner, so theta drift reads
+    // as the family of curves peeling away from it.
+    // optv4AfterSelectedAtHorizon honours the trade checkboxes and manual legs at
+    // any horizon, so every curve here reflects the same selection as Now.
+    optv4SelectedHorizons().forEach(({ h, k }) => {
+      const hKey = String(h);
+      const curve = optv4AfterSelectedAtHorizon(hKey)
+        || (optv4OptResult.after.payoff_by_horizon || {})[hKey];
+      if (!curve) return;   // horizon absent from this result — skip, don't fake it
+      const isNow = h === 0;
+      traces.push({
+        x: optSpots, y: curve, mode: "lines",
+        name: isNow ? afterName : `${afterName} — T+${h}d`,
+        hovertemplate: HT,
+        line: { color: isNow ? C.after : (C.ramp[k] || "#8b949e"), width: isNow ? 3 : 1.5 },
+        ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
+      });
+    });
     if (optv4OptResult.target_payoff) {
       const spotIdx = optv2NearestIdx(optSpots, S0);
       const targetAtSpot = optv4OptResult.target_payoff[spotIdx];
@@ -12337,7 +12494,7 @@ function optv4RenderPayoff() {
   } else {
     // Sequential ramp (bright = Now, fading into the future) — a proper time
     // encoding instead of a rainbow.
-    OPTV2_HORIZONS.forEach((h, k) => {
+    optv4SelectedHorizons().forEach(({ h, k }) => {
       const hKey = String(h);
       const totalPayoff = new Array(spots.length).fill(0);
       let hasData = false;
@@ -12377,8 +12534,12 @@ function optv4RenderPayoff() {
   traces.push({ x: [S0, S0], y: [yLo, yHi], mode: "lines", name: "Spot", line: { color: C.spot, width: 1.5, dash: "dot" }, showlegend: false, hoverinfo: "skip" });
   traces.push({ x: [S0], y: [0], mode: "markers", name: `${assetLabel} Spot`, hovertemplate: `${assetLabel} spot: $${fmtPrice(S0)}<extra></extra>`, marker: { color: C.spotDot, size: 9, symbol: "diamond" } });
 
+  const hz = optv4SelectedHorizons();
+  const hzLabel = hz.map(o => optv4HorizonLabel(o.h)).join(", ");
   const layout = optv4ChartLayout({
-    title: optv4OptResult ? "Payoff at Now — Before vs After vs Target" : `Portfolio payoff — current book across horizons`,
+    title: optv4OptResult
+      ? `Before vs After vs Target — After at ${hzLabel}`
+      : `Portfolio payoff — current book at ${hzLabel}`,
     assetLabel, C,
   });
   Plotly.newPlot("optv4-payoff-chart", traces, layout, { responsive: true, displaylogo: false });
@@ -13491,6 +13652,46 @@ document.getElementById("btn-optv4-target-save")?.addEventListener("click", optv
 document.getElementById("btn-optv4-target-delete")?.addEventListener("click", optv4DeleteTargetProfile);
 document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
 document.getElementById("btn-optv4-target-shift")?.addEventListener("click", optv4ShiftTarget);
+// Re-shape the parametric (auto) preview live as any Target Shape knob changes —
+// mirrors the dropdown's own behavior (discards manual edits, refetches auto).
+// The $ readouts update on every keystroke ("input"); the actual re-fetch (and
+// any manual-edit reset) only on blur/commit ("change").
+["optv4-target-trough-payoff", "optv4-target-wing-pct",
+ "optv4-target-down-pct", "optv4-target-up-pct"].forEach(id => {
+  const el = document.getElementById(id);
+  el?.addEventListener("input", optv4UpdateTargetShapeReadouts);
+  el?.addEventListener("change", () => {
+    // Each breakeven-distance % field only means what its label says inside its
+    // own declared min/max (optv4ParametricOverrides clamps regardless) — snap
+    // the visible value back in range on commit so the field never shows a
+    // number the app isn't actually using. trough-payoff has no min/max, so
+    // this is a no-op for it.
+    if (el) {
+      const v = parseFloat(el.value);
+      const lo = parseFloat(el.min), hi = parseFloat(el.max);
+      if (Number.isFinite(v) && (Number.isFinite(lo) || Number.isFinite(hi))) {
+        el.value = Math.min(Number.isFinite(hi) ? hi : Infinity, Math.max(Number.isFinite(lo) ? lo : -Infinity, v));
+      }
+    }
+    if (!optv4TargetProfileFile) optv4FetchTargetProfile();
+  });
+});
+document.getElementById("optv4-target-asymmetric-toggle")?.addEventListener("change", () => {
+  optv4SyncAsymmetricFields();
+  if (!optv4TargetProfileFile) optv4FetchTargetProfile();
+});
+// Sync the symmetric/asymmetric field visibility to the checkbox's actual
+// (checked-by-default) state on page load — the "change" handler above only
+// fires on a later toggle, not the initial state.
+optv4SyncAsymmetricFields();
+document.getElementById("btn-optv4-horizon-now")?.addEventListener("click", () => {
+  optv4HorizonSel = new Set([0]);
+  optv4RenderHorizonChips(); optv4RenderPayoff();
+});
+document.getElementById("btn-optv4-horizon-all")?.addEventListener("click", () => {
+  optv4HorizonSel = new Set(OPTV2_HORIZONS);
+  optv4RenderHorizonChips(); optv4RenderPayoff();
+});
 document.getElementById("btn-optv4-add-leg")?.addEventListener("click", optv4AddManualLeg);
 
 // Persistent, copyable optimizer-error panel.
@@ -13612,6 +13813,9 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv4TargetProfileFile || null,
+      // V-shape knobs for the built-in parametric target — ignored by the engine
+      // once target_profile_file or manual_target is set, so harmless to always send.
+      ...optv4ParametricOverrides(),
     });
     console.log("Optimizer v3 result:", data);
     optv4HideError();
