@@ -13232,6 +13232,13 @@ async function optv4ShiftTarget() {
       .map(si => ({ x: src.spots[si], y: payoff[si] - at }))
       .sort((a, b) => a.x - b.x);
     optv4RenderProfileTable();   // re-renders the table + chart, and rewrites the status
+    // Re-point the shape summary at the shifted curve. It normally describes the
+    // curve optv4FetchTargetProfile pulled down, which after a shift is no longer
+    // what's on screen — and where the trough now sits is the whole point here.
+    const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
+      ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
+    renderTargetShapeSummary("optv4-target-shape-summary",
+      optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
     if (status) {
       const dp = optv4Dp();
       const ratio = res.ratio ? `×${res.ratio.toFixed(3)}` : "";
