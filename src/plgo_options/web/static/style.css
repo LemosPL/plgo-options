@@ -1464,6 +1464,35 @@ select { margin-bottom: .5rem; }
 .optv3-hint { font-size: .7rem; color: var(--muted); margin: .3rem 0 0; line-height: 1.4; }
 .optv3-toggle { display: flex; align-items: center; gap: .45rem; font-size: .82rem; font-weight: 500; margin-bottom: .1rem; }
 
+/* ── Grouped control cards (Optimizer v4 Target Profile pane) ───────────────
+   That pane's controls were one long flex-wrap row — except the wrapper set
+   align-items/gap/flex-wrap without ever setting display:flex, so un-hiding it
+   produced a plain block and every control flowed inline like text, wrapping at
+   arbitrary points. These group each cluster into a labelled card instead. */
+.opt-card {
+  background: var(--surface-tile, rgba(255,255,255,0.03));
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: .7rem .9rem; margin-bottom: .75rem;
+}
+.opt-card-title {
+  font-size: .68rem; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 700; margin-bottom: .6rem;
+}
+.opt-card-note { font-weight: 400; text-transform: none; letter-spacing: 0; opacity: .85; }
+.opt-card-row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.opt-card-row + .opt-card-row { margin-top: .5rem; }
+/* Inline "label [input]" pair inside a card — kept on one line so a label never
+   detaches from the field it names. */
+.opt-inline {
+  display: flex; align-items: center; gap: .35rem; margin: 0;
+  font-size: .72rem; color: var(--muted); white-space: nowrap;
+}
+.opt-inline input[type="number"], .opt-inline input[type="text"] { font-size: .8rem; }
+.opt-actionbar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .55rem; }
+.opt-actionbar-spacer { flex: 1 1 auto; }
+.opt-status { font-size: .72rem; color: var(--muted); margin: 0 0 .7rem; min-height: 1.05em; line-height: 1.45; }
+.opt-sep { width: 1px; height: 20px; background: var(--border); }
+
 .optv3-main { display: flex; flex-direction: column; gap: 1.25rem; }
 .optv3-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: .9rem; }
 .optv3-muted { font-size: .8rem; color: var(--muted); }
