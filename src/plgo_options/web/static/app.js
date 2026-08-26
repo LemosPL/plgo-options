@@ -582,11 +582,15 @@ function getDefaultExpiry() {
 function addLeg(side = "buy", type = "C", strike = "", premium = "0", quantity = "1", expiry = null) {
   legs.push({ side, type, strike: String(strike), premium: String(premium), quantity: String(quantity), expiry: expiry || getDefaultExpiry() });
   renderLegs();
+  // Show/hide "Back to Optimizer v4" — it only applies to legs that came from
+  // there (tagged _srcOptv4 by the send-to-pricing handler).
+  if (typeof optv4SyncPricingBackButton === "function") optv4SyncPricingBackButton();
 }
 
 function removeLeg(idx) {
   legs.splice(idx, 1);
   renderLegs();
+  if (typeof optv4SyncPricingBackButton === "function") optv4SyncPricingBackButton();
 }
 
 function renderLegs() {
@@ -13068,20 +13072,23 @@ function optv4RenderResult(data) {
   // the "After (selected)" payoff line above. Default: all selected.
   optv4Replacements = replacements.map((t, i) => {
     t._idx = i;
-    t._qty0 = Number(t.qty) || 0;   // original signed qty from the optimizer
-    t._qty = t._qty0;               // current (editable) signed qty
+    t._qty0 = Number(t.qty) || 0;      // original signed qty from the optimizer
+    t._qty = t._qty0;                  // current (editable) signed qty
+    t._strike0 = Number(t.strike) || 0;  // original strike from the optimizer
+    t._strike = t._strike0;              // current (editable) strike
     return t;
   });
   optv4ReplDeselected = new Set();
   optv2RenderTradeTable("optv4-replacement-tbody", replacements, "optv4-replacement-count",
     (t) => [
       `<td><input type="checkbox" class="optv4-repl-cb" data-idx="${t._idx}" checked></td>`,
-      `<td>${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`, `<td class="num">${optv2Fmt(t.strike, optv4Dp())}</td>`,
+      `<td class="optv4-repl-instrument" data-idx="${t._idx}">${t.instrument}</td>`, `<td>${optv2ExpiryText(t)}</td>`,
+      `<td class="num"><input class="optv4-repl-strike" data-idx="${t._idx}" type="number" min="0" step="${optv4StrikeStep()}" value="${t.strike}" style="width:6rem;text-align:right" title="Move this trade's strike — the After curve, P&L matrix, Price and Value update live. Repriced at the trade's own IV (sticky vol: no smile shift), so re-run the optimizer for exact numbers."></td>`,
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td class="num"><input class="optv4-repl-qty" data-idx="${t._idx}" type="number" min="0" step="1" value="${Math.abs(t.qty)}" style="width:5rem;text-align:right" title="Adjust this trade's size — the After curve & P&L matrix update live"></td>`,
-      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
-      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
+      `<td class="num optv4-repl-price" data-idx="${t._idx}">${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
+      `<td class="num optv4-repl-value" data-idx="${t._idx}">${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 13, "No replacement or new trades proposed.");
@@ -13133,19 +13140,244 @@ function optv4WireReplCheckboxes() {
     const absQ = Math.abs(parseFloat(inp.value));
     const sign = (t._qty0 || 0) < 0 ? -1 : 1;   // preserve buy/sell direction
     t._qty = Number.isFinite(absQ) ? sign * absQ : 0;
+    // Deliberately not touching the Price/Value cells here: `notional` is
+    // |qty|*price for options but |qty|*spot for a perp, so recomputing it would
+    // disagree with what the row rendered. Qty editing behaves exactly as before.
+    optv4RenderPayoff();
+    optv4RenderAfterMatrix();
+  }));
+  // Editable strikes: move a suggested trade's strike → live After curve/matrix,
+  // and reprice the leg so Price/Value follow it too.
+  tb.querySelectorAll(".optv4-repl-strike").forEach(inp => inp.addEventListener("input", () => {
+    const t = (optv4Replacements || []).find(x => x._idx === Number(inp.dataset.idx));
+    if (!t) return;
+    const K = parseFloat(inp.value);
+    t._strike = (Number.isFinite(K) && K > 0) ? K : t._strike0;
+    // Flag a moved strike: the instrument code still carries the original one,
+    // so without this the row would silently disagree with its own label.
+    const moved = t._strike !== t._strike0;
+    inp.style.borderColor = moved ? "#f0883e" : "";
+    inp.title = moved
+      ? `Moved from ${optv2Fmt(t._strike0, optv4Dp())} — the instrument code above still shows the original strike. Re-run to get a real quote.`
+      : "Move this trade's strike — the After curve, P&L matrix, Price and Value update live.";
+    optv4UpdateReplRow(t);
     optv4RenderPayoff();
     optv4RenderAfterMatrix();
   }));
 }
 
+// ── Pricing → Optimizer v4 (the return leg of the round trip) ──────────────
+// Send-to-Pricing tags each leg with the v4 row it came from (_srcOptv4), so
+// changes made in Pricing can be pushed back onto the right trade even after its
+// strike was moved there. Show the button only once there's something to push.
+function optv4SyncPricingBackButton() {
+  const btn = document.getElementById("btn-pricing-to-optv4");
+  if (!btn) return;
+  const fromV4 = (legs || []).some(l => l && l._srcOptv4 != null);
+  btn.style.display = fromV4 ? "" : "none";
+}
+
+// Resolve an IV for a leg that Pricing created from scratch: its originating
+// trade's IV if it has one, else the expiry's ATM IV off the loaded surface —
+// the same fallback the v4 manual-leg builder uses.
+function optv4IvForExpiry(expiryCode, fallback) {
+  if (Number.isFinite(fallback) && fallback > 0) return fallback;
+  const vs = (optv4Data && optv4Data.vol_surface) || [];
+  const hit = vs.find(s => s.expiry_code === expiryCode);
+  const iv = hit && (hit.atm_iv != null ? hit.atm_iv : hit.iv);
+  return Number.isFinite(Number(iv)) && Number(iv) > 0 ? Number(iv) : 60;
+}
+
+function optv4ApplyPricingLegs() {
+  if (!optv4OptResult || optv4OptResult.status !== "ok" || !(optv4Replacements || []).length) {
+    alert("Run Optimizer v4 and send its trades to Pricing first — there's no trade table to push these legs back onto.");
+    return;
+  }
+  const S0 = (optv4OptResult.eth_spot != null ? optv4OptResult.eth_spot
+    : (optv4Data && optv4Data.eth_spot)) || 0;
+  let applied = 0, added = 0, bad = 0;
+  const seen = new Set();
+  const newManual = [];
+
+  (legs || []).forEach(l => {
+    const K = parseFloat(l.strike);
+    const absQ = Math.abs(parseFloat(l.quantity));
+    const opt = String(l.type || "").toUpperCase();
+    if (!Number.isFinite(K) || K <= 0 || !Number.isFinite(absQ) || (opt !== "C" && opt !== "P")) { bad++; return; }
+    const sell = String(l.side || "").toLowerCase().startsWith("s");
+    const t = (l._srcOptv4 != null)
+      ? (optv4Replacements || []).find(x => x._idx === l._srcOptv4) : null;
+    if (t) {
+      // Strike and size are what the v4 table itself can express, so they go back
+      // onto the row. Side isn't editable there, so a flipped side can't be
+      // represented — it comes back as a separate what-if leg below instead.
+      const sideFlipped = sell !== ((t._qty0 || 0) < 0);
+      if (sideFlipped) {
+        newManual.push({ l, K, absQ, opt, sell, dte: l._srcDte, iv: l._srcIv });
+        return;
+      }
+      t._strike = K;
+      t._qty = (sell ? -1 : 1) * absQ;
+      optv4ReplDeselected.delete(t._idx);   // present here = part of the book
+      seen.add(t._idx);
+      applied++;
+    } else {
+      newManual.push({ l, K, absQ, opt, sell, dte: l._srcDte, iv: l._srcIv });
+    }
+  });
+
+  // A row that was sent to Pricing but has no leg coming back was deleted there
+  // — untick it so the two views agree instead of silently diverging.
+  let untickedBack = 0;
+  (optv4Replacements || []).forEach(t => {
+    if (t._sentToPricing && !seen.has(t._idx) && !optv4ReplDeselected.has(t._idx)) {
+      optv4ReplDeselected.add(t._idx);
+      untickedBack++;
+    }
+  });
+
+  // Legs invented in Pricing (or side-flipped) become v4 what-if legs, which the
+  // After curve and P&L matrix already account for.
+  newManual.forEach(({ l, K, absQ, opt, sell, dte, iv }) => {
+    const d = Number.isFinite(Number(dte)) && Number(dte) > 0 ? Number(dte) : (_expiryCodeToDte(l.expiry) || 30);
+    const ivPct = optv4IvForExpiry(l.expiry, Number(iv));
+    const sigma = ivPct / 100, T = Math.max(d, 0) / 365.25;
+    const price = (T > 0 && sigma > 0) ? bsPrice(S0, K, T, 0, sigma, opt)
+      : (opt === "C" ? Math.max(S0 - K, 0) : Math.max(K - S0, 0));
+    optv4ManualLegs.push({
+      _mid: ++optv4LegSeq, _on: true,
+      side: sell ? "Sell" : "Buy", opt, strike: K, qty: (sell ? -1 : 1) * absQ,
+      dte: d, iv_pct: ivPct, expiry_code: l.expiry, bs_price_usd: price,
+    });
+    added++;
+  });
+
+  // Re-render the trade table so the strike/qty inputs show the pushed values,
+  // then refresh every view that depends on them.
+  const tb = document.getElementById("optv4-replacement-tbody");
+  if (tb) {
+    (optv4Replacements || []).forEach(t => {
+      const sInp = tb.querySelector(`.optv4-repl-strike[data-idx="${t._idx}"]`);
+      const qInp = tb.querySelector(`.optv4-repl-qty[data-idx="${t._idx}"]`);
+      const cb = tb.querySelector(`.optv4-repl-cb[data-idx="${t._idx}"]`);
+      if (sInp) {
+        sInp.value = (t._strike != null ? t._strike : t._strike0);
+        sInp.style.borderColor = (t._strike !== t._strike0) ? "#f0883e" : "";
+      }
+      if (qInp) qInp.value = Math.abs((t._qty != null ? t._qty : t._qty0) || 0);
+      if (cb) cb.checked = !optv4ReplDeselected.has(t._idx);
+      optv4UpdateReplRow(t);
+    });
+    const all = document.getElementById("optv4-repl-all");
+    if (all) all.checked = optv4ReplDeselected.size === 0;
+  }
+  optv4RenderManualLegs();
+  optv4RenderPayoff();
+  optv4RenderAfterMatrix();
+  optv4RenderProfileTable();   // residuals vs the target move with the After book
+
+  const bits = [`${applied} trade${applied === 1 ? "" : "s"} updated`];
+  if (added) bits.push(`${added} new leg${added === 1 ? "" : "s"} carried over as what-if`);
+  if (untickedBack) bits.push(`${untickedBack} removed here → unticked there`);
+  if (bad) bits.push(`${bad} leg${bad === 1 ? "" : "s"} skipped (not a priceable option)`);
+  const nav = document.querySelector('.nav-item[data-page="optv4"]');
+  if (nav) nav.click();
+  console.log("pricing → optv4:", bits.join("; "));
+  const status = document.getElementById("optv4-pricing-back-status");
+  if (status) {
+    status.textContent = bits.join(" · ") + ". Cost ($) and the KPI tiles still show the last run — re-run to refresh those.";
+    status.style.display = "";
+  }
+}
+
+document.getElementById("btn-pricing-to-optv4")?.addEventListener("click", optv4ApplyPricingLegs);
+
+// Strike increment for the editable strike inputs — FIL trades in cents.
+function optv4StrikeStep() {
+  return (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 0.05 : 50;
+}
+
+// Reprice a proposed leg at strike K on the MID-vol basis, i.e. the same basis as
+// bs_price_usd, which is what the engine's After curve is netted against. The
+// curve delta in optv4AfterSelectedAtHorizon must stay on one basis — mixing a
+// counterparty quote into it would shift the whole curve by the bid/ask, not by
+// the strike move being previewed.
+// Sticky vol: the leg keeps its own IV rather than re-reading a smile (the
+// frontend has no per-strike smile), so this is a what-if, not a quote.
+function optv4MidPriceAtStrike(t, K, S0) {
+  const opt = String(t.opt || "").toUpperCase();
+  if (opt === "F" || opt === "PERP") return Number(t.bs_price_usd) || 0;
+  const sigma = (Number(t.iv_pct) || Number(t.mark_iv) || 0) / 100;
+  const T = Math.max(Number(t.dte) || 0, 0) / 365.25;
+  if (T <= 0 || sigma <= 0) return opt === "C" ? Math.max(S0 - K, 0) : Math.max(K - S0, 0);
+  return bsPrice(S0, K, T, 0, sigma, opt);
+}
+
+// Price for the row's *display* columns. A leg the engine priced off a calibrated
+// counterparty quote keeps that methodology (applyCptyPricing takes the strike
+// directly), so the Price column stays comparable with what it showed before the
+// edit; everything else falls back to mid.
+function optv4DisplayPriceAtStrike(t, K, S0) {
+  const opt = String(t.opt || "").toUpperCase();
+  if (t.cpty_price_usd != null && opt !== "F" && opt !== "PERP") {
+    try {
+      const method = getCptyMethod(t.counterparty, currentAsset);
+      const T = Math.max(Number(t.dte) || 0, 0) / 365.25;
+      const q = applyCptyPricing(method, {
+        spot: S0, K, T, type: opt, side: String(t.side || "").toLowerCase(),
+      });
+      if (q && Number.isFinite(q.prem)) return q.prem;
+    } catch (e) { /* fall through to mid */ }
+  }
+  return optv4MidPriceAtStrike(t, K, S0);
+}
+
+// Refresh one row's Price / Value cells after a STRIKE edit, and restore the
+// optimizer's own numbers when the strike is put back. The KPI tiles, the totals
+// row and Cost ($) still show what the run produced — those come from the
+// optimizer, so a re-run is what updates them.
+function optv4UpdateReplRow(t) {
+  const tb = document.getElementById("optv4-replacement-tbody");
+  if (!tb || !t) return;
+  const r = optv4OptResult;
+  const S0 = (r && r.eth_spot != null ? r.eth_spot : (optv4Data && optv4Data.eth_spot)) || 0;
+  const K = (t._strike != null ? t._strike : t._strike0) || 0;
+  const qty = Math.abs((t._qty != null ? t._qty : t._qty0) || 0);
+  const moved = K !== t._strike0;
+  const priceCell = tb.querySelector(`.optv4-repl-price[data-idx="${t._idx}"]`);
+  const valueCell = tb.querySelector(`.optv4-repl-value[data-idx="${t._idx}"]`);
+  // Back at the original strike: restore exactly what the run rendered, rather
+  // than a recomputed lookalike (notional is |qty|*spot for a perp, not a premium).
+  const price = moved ? optv4DisplayPriceAtStrike(t, K, S0)
+                      : (t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd);
+  const value = moved ? qty * (Number(price) || 0)
+                      : (t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional);
+  if (priceCell) {
+    priceCell.textContent = optv2Fmt(price, 2);
+    priceCell.style.color = moved ? "#f0883e" : "";
+  }
+  if (valueCell) {
+    valueCell.textContent = optv2Fmt(value, 0);
+    valueCell.style.color = moved ? "#f0883e" : "";
+  }
+  // The instrument code still carries the original strike, so dim it once the
+  // row no longer matches its own label.
+  const instCell = tb.querySelector(`.optv4-repl-instrument[data-idx="${t._idx}"]`);
+  if (instCell) instCell.style.opacity = moved ? .55 : "";
+}
+
 // One trade's P&L-from-today curve across `spots` at horizon `h` days (0 at S0) —
 // matches the engine's After-curve basis (raw BS value minus the trade's premium).
 // Time decays by h days; perps are horizon-independent.
-function optv4TradePnlNow(t, spots, S0, h = 0, qtyOverride) {
+function optv4TradePnlNow(t, spots, S0, h = 0, qtyOverride, strikeOverride) {
   const qty = (qtyOverride != null ? Number(qtyOverride) : Number(t.qty)) || 0;  // signed
-  const K = Number(t.strike) || 0;
+  const moved = strikeOverride != null && Number(strikeOverride) > 0;
+  const K = moved ? Number(strikeOverride) : (Number(t.strike) || 0);
   const opt = String(t.opt || "").toUpperCase();
-  const price = Number(t.bs_price_usd) || 0;
+  // The premium has to move with the strike: this curve is BS value minus the
+  // premium paid, so keeping the original premium at a new strike would offset
+  // the whole curve by the premium difference instead of just reshaping it.
+  const price = moved ? optv4MidPriceAtStrike(t, K, S0) : (Number(t.bs_price_usd) || 0);
   if (opt === "F" || opt === "PERP") return spots.map(s => qty * (s - S0));
   const sigma = (Number(t.iv_pct) || Number(t.mark_iv) || 0) / 100;
   const T = Math.max((Number(t.dte) || 0) - (Number(h) || 0), 0) / 365.25;
@@ -13169,13 +13401,19 @@ function optv4AfterSelectedAtHorizon(hKey) {
   const out = base.slice();
   const h = Number(hKey) || 0;
   // For each optimizer replacement, `after_full` already contains it at its
-  // ORIGINAL qty; apply the delta to its EFFECTIVE qty (0 if deselected, else the
-  // possibly-edited size).
+  // ORIGINAL qty and strike; swap in its EFFECTIVE leg (qty 0 if deselected, else
+  // the possibly-edited size, at the possibly-moved strike) by adding the
+  // difference between the two.
   (optv4Replacements || []).forEach(t => {
     const q0 = (t._qty0 != null ? t._qty0 : Number(t.qty)) || 0;
     const qEff = optv4ReplDeselected.has(t._idx) ? 0 : ((t._qty != null ? t._qty : q0) || 0);
-    if (qEff === q0) return;
-    const cEff = optv4TradePnlNow(t, spots, S0, h, qEff);
+    const k0 = (t._strike0 != null ? t._strike0 : Number(t.strike)) || 0;
+    const kEff = (t._strike != null ? t._strike : k0) || k0;
+    if (qEff === q0 && kEff === k0) return;
+    // Pass the strike override only when it actually moved, so an untouched (or
+    // qty-only) leg still nets against the engine's own bs_price_usd exactly and
+    // this stays a no-op for the pre-existing behaviour.
+    const cEff = optv4TradePnlNow(t, spots, S0, h, qEff, kEff !== k0 ? kEff : undefined);
     const c0 = optv4TradePnlNow(t, spots, S0, h, q0);
     for (let i = 0; i < out.length && i < c0.length; i++) out[i] += cEff[i] - c0[i];
   });
@@ -13836,30 +14074,55 @@ document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", 
   if (!source.length) { alert("No optimizer trades to send. Run the optimizer first."); return; }
 
   legs.length = 0;  // clear existing Pricing legs
-  let sent = 0, skipped = 0;
+  let sent = 0, skipped = 0, unticked = 0;
   const usedCodes = new Set();
   const usedCpties = new Set();
+  const _S0 = (res.eth_spot != null ? res.eth_spot : (optv4Data && optv4Data.eth_spot)) || 0;
   for (const t of source) {
     const opt = String(t.opt || "").toUpperCase();
+    t._sentToPricing = false;
     if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures
-    const qty = Math.abs(Number(t.qty) || 0);
-    if (!qty) { skipped++; continue; }
+    // Respect the table's own state: an unticked row isn't part of the proposed
+    // book, so sending it would misrepresent what's actually being done.
+    if (typeof optv4ReplDeselected !== "undefined" && optv4ReplDeselected.has(t._idx)) {
+      unticked++; continue;
+    }
+    // Send what the table currently SHOWS, not what the run first proposed — the
+    // strike and qty columns are editable (see optv4WireReplCheckboxes).
+    const K = (t._strike != null ? t._strike : Number(t.strike)) || 0;
+    const qty = Math.abs((t._qty != null ? t._qty : Number(t.qty)) || 0);
+    if (!qty || !K) { skipped++; continue; }
     const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
     // cpty_price_usd (when set) is the counterparty's own calibrated quote for
     // this exact leg/side (see optimizer_v3._attach_cpty_prices) — prefer it
     // over the symmetric mid-vol bs_price_usd so a trade sent here already
     // matches what Pricing shows once you pick the same counterparty there,
     // instead of only agreeing when Pricing is left on "mid vol surface".
-    const cptyOrMidPrice = t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd;
+    // A moved strike invalidates the stored quote, so reprice that leg on its own
+    // methodology at the strike actually being sent.
+    const moved = t._strike0 != null && K !== t._strike0;
+    const cptyOrMidPrice = moved
+      ? optv4DisplayPriceAtStrike(t, K, _S0)
+      : (t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd);
     const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
-    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    addLeg(side, opt, String(K), premium, String(qty), expCode);
+    // Tag the leg with the row it came from so "Back to Optimizer v4" can apply
+    // changes to the right trade even after its strike was moved here.
+    const justAdded = legs[legs.length - 1];
+    if (justAdded) {
+      justAdded._srcOptv4 = t._idx;
+      justAdded._srcDte = Number(t.dte) || null;
+      justAdded._srcIv = Number(t.iv_pct) || Number(t.mark_iv) || null;
+    }
+    t._sentToPricing = true;
     if (expCode) usedCodes.add(expCode);
     if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
   }
   if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+  if (unticked) console.log(`send-to-pricing: skipped ${unticked} unticked row(s)`);
   syncPricingCptySelector(usedCpties);
 
   const existing = new Set([...$expSel.options].map(o => o.value));

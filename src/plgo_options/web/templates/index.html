@@ -640,6 +640,8 @@
             <tbody id="legs-body"></tbody>
           </table>
           <button id="btn-add-leg" class="btn-secondary" style="margin-top:.5rem">+ Add Leg</button>
+          <button id="btn-pricing-to-optv4" class="btn-secondary" style="margin-top:.5rem;width:auto;border-color:#f0883e;color:#f0883e;display:none"
+                  title="Push these legs back to the Optimizer v4 trades table: strikes and sizes are applied to the rows they came from, the After curve and P&amp;L matrix update, legs you added here become v4 what-if legs, and legs you deleted here get unticked there.">&#8592; Back to Optimizer v4</button>
           <div style="margin-top:.5rem;display:flex;align-items:center;gap:.75rem;font-size:.75rem">
             <span class="proxy-info-icon" title="OTC options don't trade at mid vol. Market makers quote a bid/ask spread around the mid IV.&#10;&#10;Buy = mid + spread (you pay more)&#10;Sell = mid - spread (you receive less)&#10;&#10;FIL: no liquid listed market, spreads are wide (3-5 pts typical).&#10;ETH: Deribit listed, tighter spreads (1-2 pts).&#10;&#10;Set to 0 for theoretical mid pricing."
               style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(88,166,255,0.3);color:#58a6ff;font-size:.6rem;font-weight:700;cursor:help;flex-shrink:0">i</span>
@@ -2590,13 +2592,14 @@
                 </div>
               </div>
               <div>
-                <h3 style="margin:.2rem 0 .5rem" title="Tick / untick a trade to include or exclude it from the 'After (selected)' payoff line on the chart above.">Replacement / New Trades <span class="optv3-muted" id="optv4-replacement-count"></span></h3>
+                <h3 style="margin:.2rem 0 .5rem" title="Tick / untick a trade to include or exclude it from the 'After (selected)' payoff line on the chart above. Strike and Qty are editable — both feed the After curve and the P&amp;L matrix live.">Replacement / New Trades <span class="optv3-muted" id="optv4-replacement-count"></span></h3>
+                <div id="optv4-pricing-back-status" class="opt-status" style="display:none;color:#f0883e"></div>
                 <div class="chain-wrapper" style="max-height:360px">
                   <table class="pf-table">
                     <thead><tr>
                       <th><input type="checkbox" id="optv4-repl-all" title="Select / deselect all" checked></th>
-                      <th>Instrument</th><th>Expiry</th><th class="num">Strike</th><th>Type</th>
-                      <th>Side</th><th class="num">Qty</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th class="num" title="Assumed round-trip bid-ask cost of executing this trade (per-counterparty pricing). Already netted into the after-execution MTM; NOT netted into the payoff curves.">Cost ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
+                      <th>Instrument</th><th>Expiry</th><th class="num" title="Editable — move a strike and the After curve, P&amp;L matrix, Price and Value all update live. Repriced at the leg's own IV (sticky vol), so re-run for exact numbers.">Strike ✎</th><th>Type</th>
+                      <th>Side</th><th class="num" title="Editable — change a size and the After curve & P&amp;L matrix update live.">Qty ✎</th><th class="num">Price ($)</th><th class="num">Value ($)</th><th class="num" title="Assumed round-trip bid-ask cost of executing this trade (per-counterparty pricing). Already netted into the after-execution MTM; NOT netted into the payoff curves.">Cost ($)</th><th>Strategy</th><th>Counterparty</th><th>Comment</th>
                     </tr></thead>
                     <tbody id="optv4-replacement-tbody"></tbody>
                   </table>
@@ -3270,6 +3273,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=145"></script>
+<script src="/static/app.js?v=146"></script>
 </body>
 </html>
