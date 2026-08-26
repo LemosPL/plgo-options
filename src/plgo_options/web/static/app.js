@@ -278,6 +278,26 @@ function getCptyMethod(cptyKey, asset) {
   return m ? { name: cp.name, ...m } : { name: cp.name, uncalibrated: true };
 }
 
+// Auto-select the Pricing tab's counterparty-methodology dropdown to match a
+// batch of optimizer trades just sent there. Without this, replicateStrategy()
+// reads the dropdown's CURRENT value (usually "" = mid vol surface) — the
+// auto-triggered Replicate click right after Send-to-Pricing would silently
+// overwrite each leg's already-correct cpty_price_usd-seeded premium with a
+// mid-vol recompute, which is exactly the mismatch this whole feature exists
+// to fix. Only auto-selects when every sent trade shares ONE counterparty; a
+// mixed-counterparty batch has no single right methodology, so it's left on
+// mid vol surface (today's behavior) rather than guessing.
+function syncPricingCptySelector(counterparties) {
+  const sel = document.getElementById("cpty-pricing-select");
+  if (!sel) return;
+  const uniq = [...new Set([...counterparties].filter(Boolean))];
+  const value = uniq.length === 1 ? uniq[0].toLowerCase() : "";
+  if (sel.value !== value) {
+    sel.value = value;
+    sel.dispatchEvent(new Event("change"));
+  }
+}
+
 // Apply a calibrated counterparty methodology to one leg.
 // Returns { prem, ivShown, mode } or null if it can't be applied.
 function applyCptyPricing(method, { spot, K, T, type, side }) {
@@ -9998,21 +10018,30 @@ document.getElementById("btn-optv2-send-to-pricing")?.addEventListener("click", 
   legs.length = 0;  // clear existing Pricing legs
   let sent = 0, skipped = 0;
   const usedCodes = new Set();
+  const usedCpties = new Set();
   for (const t of source) {
     const opt = String(t.opt || "").toUpperCase();
     if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures — no option premium to price
     const qty = Math.abs(Number(t.qty) || 0);
     if (!qty) { skipped++; continue; }
     const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
-    const premium = t.bs_price_usd ? String(Math.round(t.bs_price_usd * 100) / 100) : "0";
+    // cpty_price_usd (when set) is the counterparty's own calibrated quote for
+    // this exact leg/side (see optimizer_v3._attach_cpty_prices) — prefer it
+    // over the symmetric mid-vol bs_price_usd so a trade sent here already
+    // matches what Pricing shows once you pick the same counterparty there,
+    // instead of only agreeing when Pricing is left on "mid vol surface".
+    const cptyOrMidPrice = t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd;
+    const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     // Use the trade's Deribit expiry code; a bare date can't be a pricing expiry.
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
     addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
     if (expCode) usedCodes.add(expCode);
+    if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
   }
   if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+  syncPricingCptySelector(usedCpties);
 
   // Add any non-standard expiries to the Pricing dropdown (interpolated).
   const existing = new Set([...$expSel.options].map(o => o.value));
@@ -10250,8 +10279,8 @@ function optv2RenderResult(data) {
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td>${Math.abs(t.qty)}</td>`,
-      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`,
       `<td>${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${t.counterparty || "—"}</td>`,
     ], 10,
@@ -10268,8 +10297,8 @@ function optv2RenderResult(data) {
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td>${Math.abs(t.qty)}</td>`,
-      `<td>${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td>${optv2Fmt(t.notional, 0)}</td>`,
+      `<td>${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
+      `<td>${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`,
       `<td>${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`,
@@ -10549,11 +10578,14 @@ function optBoxFeeDict(listId) {
 
 // Default per-counterparty netting credit (%) for multi-leg structures —
 // mirrors the engine's DEFAULT_NETTING_PCT_BY_CPTY. 100% = today's full
-// net-exposure structure pricing; Keyrock defaults lower since their
-// calibrated FIL quotes (CPTY_PRICING.keyrock, twoSidedVol) show a flat vol
-// per side regardless of strike — evidence they're not pricing off one net-
-// risk book, so a spread with them likely gets little real netting credit.
-const OPT_DEFAULT_NETTING_PCT = { KeyRock: 25 };
+// net-exposure structure pricing.
+//
+// Keyrock at 100 (2026-08-26): this knob is now moot for any Keyrock FIL leg
+// (VOLpts is zeroed entirely once a leg has a calibrated cpty_pricing price —
+// see optimizer_v3._structure_leg_costs_usd — so netting_pct never even gets
+// applied there); only matters for an uncalibrated Keyrock/asset pair (ETH,
+// as of writing).
+const OPT_DEFAULT_NETTING_PCT = { KeyRock: 100 };
 function optDefaultNettingPct(cpty) {
   return OPT_DEFAULT_NETTING_PCT[cpty] != null ? OPT_DEFAULT_NETTING_PCT[cpty] : 100;
 }
@@ -11266,8 +11298,8 @@ function optv3RenderResult(data) {
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td class="num"><input class="optv3-repl-qty" data-idx="${t._idx}" type="number" min="0" step="1" value="${Math.abs(t.qty)}" style="width:5rem;text-align:right" title="Adjust this trade's size — the After curve & P&L matrix update live"></td>`,
-      `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
+      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
+      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 13, "No replacement or new trades proposed.");
@@ -11858,20 +11890,29 @@ document.getElementById("btn-optv3-send-to-pricing")?.addEventListener("click", 
   legs.length = 0;  // clear existing Pricing legs
   let sent = 0, skipped = 0;
   const usedCodes = new Set();
+  const usedCpties = new Set();
   for (const t of source) {
     const opt = String(t.opt || "").toUpperCase();
     if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures
     const qty = Math.abs(Number(t.qty) || 0);
     if (!qty) { skipped++; continue; }
     const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
-    const premium = t.bs_price_usd ? String(Math.round(t.bs_price_usd * 100) / 100) : "0";
+    // cpty_price_usd (when set) is the counterparty's own calibrated quote for
+    // this exact leg/side (see optimizer_v3._attach_cpty_prices) — prefer it
+    // over the symmetric mid-vol bs_price_usd so a trade sent here already
+    // matches what Pricing shows once you pick the same counterparty there,
+    // instead of only agreeing when Pricing is left on "mid vol surface".
+    const cptyOrMidPrice = t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd;
+    const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
     addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
     if (expCode) usedCodes.add(expCode);
+    if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
   }
   if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+  syncPricingCptySelector(usedCpties);
 
   const existing = new Set([...$expSel.options].map(o => o.value));
   for (const ec of usedCodes) {
@@ -12984,8 +13025,8 @@ function optv4RenderResult(data) {
       `<td>${optv2OptType(t.opt)}</td>`,
       `<td style="color:${t.side === "Buy" ? "var(--green)" : "var(--red)"}">${t.side}</td>`,
       `<td class="num"><input class="optv4-repl-qty" data-idx="${t._idx}" type="number" min="0" step="1" value="${Math.abs(t.qty)}" style="width:5rem;text-align:right" title="Adjust this trade's size — the After curve & P&L matrix update live"></td>`,
-      `<td class="num">${optv2Fmt(t.bs_price_usd, 2)}</td>`,
-      `<td class="num">${optv2Fmt(t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
+      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd, 2)}</td>`,
+      `<td class="num">${optv2Fmt(t.cpty_price_usd != null ? Math.abs(t.qty) * t.cpty_price_usd : t.notional, 0)}</td>`, `<td class="num">${optv2Fmt(t.cost_usd, 0)}</td>`,
       `<td>${optv2StrategyLabel(t.strategy)}</td>`,
       `<td>${t.counterparty || "—"}</td>`, `<td>${t.rolled_from ? "rolled from " + t.rolled_from : ""}</td>`,
     ], 13, "No replacement or new trades proposed.");
@@ -13742,20 +13783,29 @@ document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", 
   legs.length = 0;  // clear existing Pricing legs
   let sent = 0, skipped = 0;
   const usedCodes = new Set();
+  const usedCpties = new Set();
   for (const t of source) {
     const opt = String(t.opt || "").toUpperCase();
     if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures
     const qty = Math.abs(Number(t.qty) || 0);
     if (!qty) { skipped++; continue; }
     const side = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
-    const premium = t.bs_price_usd ? String(Math.round(t.bs_price_usd * 100) / 100) : "0";
+    // cpty_price_usd (when set) is the counterparty's own calibrated quote for
+    // this exact leg/side (see optimizer_v3._attach_cpty_prices) — prefer it
+    // over the symmetric mid-vol bs_price_usd so a trade sent here already
+    // matches what Pricing shows once you pick the same counterparty there,
+    // instead of only agreeing when Pricing is left on "mid vol surface".
+    const cptyOrMidPrice = t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd;
+    const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
     addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
     if (expCode) usedCodes.add(expCode);
+    if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
   }
   if (!sent) { alert("No priceable option legs in the optimizer result (perps/zero-qty only)."); return; }
+  syncPricingCptySelector(usedCpties);
 
   const existing = new Set([...$expSel.options].map(o => o.value));
   for (const ec of usedCodes) {

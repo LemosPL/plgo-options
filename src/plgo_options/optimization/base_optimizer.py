@@ -30,6 +30,7 @@ from .math_utils import bs_price, bs_vec, bs_greeks
 from .option_smile import OptionSmile
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num
+from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 
 #from .portfolio import load_positions
 
@@ -607,6 +608,16 @@ class BaseOptimizer:
         delta, gamma, theta, vega, price = bs_greeks(
             S, strike, dte/365.25, r, sigma, opt
         )
+        # Counterparty-specific directional prices (pricing.cpty_pricing) — if
+        # this counterparty/asset has a calibrated real-quote methodology (e.g.
+        # Keyrock FIL's two-sided vol), use it for what the LP actually pays/
+        # receives instead of the symmetric mid-vol `price` above. bs_price_usd
+        # itself is left as the mid-vol reference (still used for risk/exposure
+        # sizing, unaffected by this) — buy_price_usd/sell_price_usd are None
+        # (falls back to bs_price_usd everywhere they're used) when uncalibrated.
+        T = dte / 365.25
+        buy_resolved = resolve_cpty_price(counterparty, self.asset, S, strike, T, opt, "buy")
+        sell_resolved = resolve_cpty_price(counterparty, self.asset, S, strike, T, opt, "sell")
         return Candidate(
             expiry_code=expiry_code,
             expiry_date=expiry_date,
@@ -620,6 +631,8 @@ class BaseOptimizer:
             theta=theta,
             vega=vega,
             bs_price_usd=price,
+            buy_price_usd=buy_resolved[0] if buy_resolved else None,
+            sell_price_usd=sell_resolved[0] if sell_resolved else None,
         )
 
     def get_held_positions(self):

@@ -57,6 +57,14 @@ class Candidate:
     bs_price_usd: float
     existing_qty: float = 0.0
     unwind_only: bool = False
+    # Counterparty-specific directional prices (pricing.cpty_pricing), used for
+    # actual cash-flow terms in the LP when this counterparty/asset has a
+    # calibrated methodology — real two-sided quotes (e.g. Keyrock FIL: ~116%
+    # bid / ~163-185% ask) can't be captured by one symmetric bs_price_usd.
+    # None = uncalibrated; every cash-flow usage falls back to bs_price_usd
+    # (the mid-vol price), same behavior as before this field existed.
+    buy_price_usd: float | None = None
+    sell_price_usd: float | None = None
 
 @dataclass(frozen=True)
 class SpreadCandidate:

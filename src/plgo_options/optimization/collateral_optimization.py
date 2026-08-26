@@ -171,6 +171,30 @@ class CollateralOptimization:
             prob += abs_net_pos_vars[j] >= -net_pos_j, f"abs_net_pos_neg_{j}"
 
         c_prices = np.array([max(float(getattr(c, "bs_price_usd", 0.0) or 0.0), 1e-8) for c in candidates])
+        # Counterparty-specific directional prices (models.Candidate.buy/sell_
+        # price_usd, set by base_optimizer.create_candidate from pricing.
+        # cpty_pricing) — what the LP actually pays to buy / receives to sell a
+        # calibrated counterparty's leg, instead of the single symmetric
+        # bs_price_usd above. None (uncalibrated counterparty, or ETH — not
+        # calibrated for anyone yet) falls back to bs_price_usd, so this is a
+        # no-op everywhere it's used unless the leg's counterparty is
+        # calibrated for this asset. c_prices itself is left untouched and
+        # still drives every SIZE/exposure measure below (notional caps,
+        # collateral cost basis, box-fee notional) — a reference fair value is
+        # the right basis for risk sizing regardless of which side trades;
+        # only real cash-flow terms (this counterparty's net cash, and the
+        # final reported cash_by_counterparty) use the directional prices.
+        c_buy_prices = np.array([
+            float(bp) if (bp := getattr(c, "buy_price_usd", None)) is not None
+            else float(getattr(c, "bs_price_usd", 0.0) or 0.0)
+            for c in candidates
+        ])
+        c_sell_prices = np.array([
+            float(sp) if (sp := getattr(c, "sell_price_usd", None)) is not None
+            else float(getattr(c, "bs_price_usd", 0.0) or 0.0)
+            for c in candidates
+        ])
+        c_has_cpty_price = np.array([getattr(c, "buy_price_usd", None) is not None for c in candidates])
         # Transaction cost per contract, modelled in VOL POINTS:
         #   cost = |vega| × VOLpts
         # vega is USD per 1 vol-point per contract; VOLpts is a per-counterparty
@@ -184,6 +208,10 @@ class CollateralOptimization:
             self._resolve(bid_ask_vol_pts, getattr(c, "counterparty", ""), default=0.75)
             for c in candidates
         ])
+        # A calibrated counterparty's buy/sell prices already embed their real
+        # bid-ask spread (e.g. Keyrock FIL: ~116% bid / ~163-185% ask) — charging
+        # VOLpts on top would double-count that spread as a separate friction.
+        c_vol_pts = np.where(c_has_cpty_price, 0.0, c_vol_pts)
         # A perp carries zero vega by construction, so the vol-points formula
         # above would price it as free to trade. Cost it instead as bps of
         # notional (price x qty) — the convention already used for perps
@@ -341,7 +369,8 @@ class CollateralOptimization:
             indices = cp_indices.get(cp, [])
             forced_cash_cp = float((forced_cash_by_counterparty or {}).get(cp, 0.0))
             net_cash_cp = forced_cash_cp + pulp.lpSum(
-                (buy_vars[j] - sell_vars[j]) * float(c_prices[j]) for j in indices
+                buy_vars[j] * float(c_buy_prices[j]) - sell_vars[j] * float(c_sell_prices[j])
+                for j in indices
             )
             imbalance = pulp.LpVariable(f"cash_imbalance_{cp}", lowBound=0, cat="Continuous")
             prob += imbalance >= net_cash_cp, f"cash_imbalance_pos_{cp}"
@@ -479,7 +508,7 @@ class CollateralOptimization:
         cash_by_counterparty = {
             cp: (
                 float((forced_cash_by_counterparty or {}).get(cp, 0.0))
-                + float(np.sum(buy_qty[indices] * c_prices[indices]) - np.sum(sell_qty[indices] * c_prices[indices]))
+                + float(np.sum(buy_qty[indices] * c_buy_prices[indices]) - np.sum(sell_qty[indices] * c_sell_prices[indices]))
             )
             for cp, indices in ((cp, cp_indices.get(cp, [])) for cp in cash_cps)
         }

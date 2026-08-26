@@ -20,6 +20,7 @@ from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
 from .misc_utils import build_parametric_target_profile, load_target_profile_file
+from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 
 import matplotlib.pyplot as plt
 
@@ -72,20 +73,60 @@ _PERP_COST_BPS_FALLBACK = 2.0
 # (see _structure_leg_costs_usd): 1.0 = charge VOLpts on the structure's net
 # vega exposure only (a dealer pricing the whole package off combined risk —
 # today's/legacy behavior); 0.0 = charge every leg independently at full
-# VOLpts (no risk-netting credit at all). Keyrock defaults low: their
-# calibrated FIL quotes (web/static/app.js CPTY_PRICING.keyrock, twoSidedVol)
-# show a flat vol per side regardless of strike, which no single net-risk book
-# can produce — evidence they aren't giving real netting credit on a spread.
-# Manually entered per counterparty from the GUI; this is the fallback default
-# for a counterparty with no explicit entry. PLACEHOLDER — tune as spreads
-# trade and the real vs. modelled cost gap narrows or doesn't.
+# VOLpts (no risk-netting credit at all). Manually entered per counterparty
+# from the GUI; this is the fallback default for a counterparty with no
+# explicit entry.
+#
+# Keyrock at 1.0 (2026-08-26): this knob is now moot for any Keyrock leg with
+# a calibrated cpty_pricing methodology (currently FIL) regardless of its
+# value, since _structure_leg_costs_usd zeroes VOLpts entirely there (the
+# counterparty's own price already embeds their real spread — see that
+# function's docstring) before netting_pct ever gets applied. Only matters
+# for an uncalibrated Keyrock/asset pair (ETH, as of writing), where it still
+# behaves as documented above.
 DEFAULT_NETTING_PCT_BY_CPTY: dict[str, float] = {
-    "KeyRock": 0.25,
+    "KeyRock": 1.0,
 }
 
 # Fallback netting credit for a counterparty absent from the resolved dict —
 # preserves today's full-netting behavior for anyone not explicitly tuned.
 _NETTING_PCT_FALLBACK = 1.0
+
+
+def _attach_cpty_prices(trades, spot, asset):
+    """Annotate each option trade dict with cpty_price_usd: the counterparty's
+    own directional quote (pricing.cpty_pricing) for that exact leg, given
+    which side THIS trade actually is (its qty sign) — so a trade sent to the
+    Pricing tab (or read anywhere else) shows the same number the LP itself
+    used to decide, not the symmetric mid-vol bs_price_usd every trade dict
+    already carries. Left unset (falls back to bs_price_usd wherever read)
+    when the counterparty/asset isn't calibrated, or for a perp leg (opt=="F"
+    has no option premium to reprice this way). Mutates and returns `trades`
+    in place, so callers that only hold a filtered view of the same dicts
+    (roll_unwind_output/replacement_output are filters, not copies) see it too.
+    """
+    for t in trades:
+        opt = t.get("opt")
+        if opt not in ("C", "P"):
+            continue
+        qty = float(t.get("qty", 0.0) or 0.0)
+        dte = t.get("dte")
+        if qty == 0 or dte is None:
+            continue
+        side = "buy" if qty > 0 else "sell"
+        T = max(float(dte), 0.0) / 365.25
+        resolved = resolve_cpty_price(
+            t.get("counterparty", ""), asset, spot, float(t.get("strike", 0.0) or 0.0), T, opt, side,
+        )
+        if resolved is not None:
+            # Full precision, NOT rounded to cents here — this feeds Value ($)
+            # (qty x price) downstream in both the trade table and the Send-to-
+            # Pricing handoff, and qty runs into the millions, so even a
+            # half-cent rounding here would show up as a multi-thousand-dollar
+            # gap once multiplied through. Round only for display (the price
+            # column itself), never before this multiplication.
+            t["cpty_price_usd"] = float(resolved[0])
+    return trades
 
 
 def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
@@ -149,6 +190,18 @@ def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None, netting_
         net_exposure = sum(exposures)
         counterparty = option_legs[0][0].counterparty
         vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
+        # A calibrated counterparty's own price (buy_price_usd/sell_price_usd,
+        # set by base_optimizer.create_candidate) already embeds their real
+        # bid-ask spread (e.g. Keyrock FIL ask vol ~163-185% vs whatever the
+        # mid vol surface says) — charging VOLpts on top here double-counts
+        # that spread as a second, separate friction. Same fix as
+        # CollateralOptimization.optimize's c_vol_pts zeroing, applied here so
+        # the REPORTED structure cost matches what the LP actually optimized
+        # against instead of re-adding a cost the LP itself no longer sees.
+        # All legs in a group share one counterparty (see docstring), so the
+        # first leg's calibration state applies to the whole group.
+        if getattr(option_legs[0][0], "buy_price_usd", None) is not None:
+            vp = 0.0
         total_abs_exposure = sum(abs(x) for x in exposures)
         np_ = CollateralOptimization._resolve(netting_pct, counterparty, default=_NETTING_PCT_FALLBACK)
         np_ = min(1.0, max(0.0, float(np_)))
@@ -542,14 +595,21 @@ class OptimizerV3(BaseOptimizer):
             if trade.get("opt") in ("C", "P")
         ]
 
+        # cpty_price_usd (set by _attach_cpty_prices) is the counterparty's own
+        # calibrated quote for this exact leg/side when available — falls back
+        # to the symmetric mid-vol bs_price_usd otherwise, same as before.
+        def _price(trade):
+            cpty_price = trade.get("cpty_price_usd")
+            return float(cpty_price) if cpty_price is not None else float(trade.get("bs_price_usd", 0.0) or 0.0)
+
         gross_premium_bought = sum(
-            float(trade.get("qty", 0.0) or 0.0) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            float(trade.get("qty", 0.0) or 0.0) * _price(trade)
             for trade in option_trades
             if float(trade.get("qty", 0.0) or 0.0) > 0
         )
 
         gross_premium_sold = sum(
-            abs(float(trade.get("qty", 0.0) or 0.0)) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            abs(float(trade.get("qty", 0.0) or 0.0)) * _price(trade)
             for trade in option_trades
             if float(trade.get("qty", 0.0) or 0.0) < 0
         )
@@ -568,14 +628,21 @@ class OptimizerV3(BaseOptimizer):
             if trade.get("opt") in ("C", "P")
         ]
 
+        # cpty_price_usd (set by _attach_cpty_prices) is the counterparty's own
+        # calibrated quote for this exact leg/side when available — falls back
+        # to the symmetric mid-vol bs_price_usd otherwise, same as before.
+        def _price(trade):
+            cpty_price = trade.get("cpty_price_usd")
+            return float(cpty_price) if cpty_price is not None else float(trade.get("bs_price_usd", 0.0) or 0.0)
+
         gross_premium_bought = sum(
-            float(trade.get("qty", 0.0) or 0.0) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            float(trade.get("qty", 0.0) or 0.0) * _price(trade)
             for trade in option_trades
             if float(trade.get("qty", 0.0) or 0.0) > 0
         )
 
         gross_premium_sold = sum(
-            abs(float(trade.get("qty", 0.0) or 0.0)) * float(trade.get("bs_price_usd", 0.0) or 0.0)
+            abs(float(trade.get("qty", 0.0) or 0.0)) * _price(trade)
             for trade in option_trades
             if float(trade.get("qty", 0.0) or 0.0) < 0
         )
@@ -1739,6 +1806,7 @@ class OptimizerV3(BaseOptimizer):
             if cp not in cash_by_counterparty:
                 cash_by_counterparty[cp] = {"outlay": 0.0, "collection": 0.0, "net": 0.0, "cost": round(cost, 2)}
 
+        _attach_cpty_prices(trades, self.spot, self.asset)
         premium_summary = self._trade_premium_summary(trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
