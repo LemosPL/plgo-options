@@ -151,6 +151,15 @@ class OptimizationParams(BaseModel):
     # set, cost = |vega| × VOLpts per executed leg, replacing the %-of-price model.
     # {counterparty: vol_pts} dict (or a flat scalar). None = per-asset default.
     bid_ask_vol_pts: float | dict[str, float] | None = None
+    # Netting credit for a multi-leg structure's transaction cost, per
+    # counterparty (0-1, or a flat scalar): 1.0 = VOLpts charged on the
+    # structure's net vega exposure (a dealer pricing the package off
+    # combined risk); 0.0 = every leg priced independently at full VOLpts.
+    # None = per-counterparty engine default (see
+    # optimizer_v3.DEFAULT_NETTING_PCT_BY_CPTY). Doesn't apply to the box
+    # neutralizer — its net-zero vega is a put-call-parity fact, not a
+    # netting assumption, and is priced separately via box_fee_bps below.
+    netting_pct: float | dict[str, float] | None = None
     # Real execution cost, in basis points of notional, for the box cash
     # neutralizer, per counterparty (or a flat scalar). A box's vega-based
     # cost is provably ~0 (put-call parity), so without this the neutralizer
@@ -281,6 +290,7 @@ async def run_optimizer(params: OptimizationParams):
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,
+        netting_pct=params.netting_pct,
         box_fee_bps=params.box_fee_bps,
         perp_cost_bps=params.perp_cost_bps,
         target_profile_file=params.target_profile_file,

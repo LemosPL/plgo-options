@@ -132,6 +132,14 @@ class OptimizerRunParams:
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None
+    # Netting credit for a multi-leg structure's transaction cost, per
+    # counterparty (0-1, or a flat scalar): 1.0 = today's/legacy behavior
+    # (VOLpts charged on the structure's net vega exposure); 0.0 = every leg
+    # priced independently at full VOLpts. None = engine default (per-
+    # counterparty; see optimizer_v3.DEFAULT_NETTING_PCT_BY_CPTY). Doesn't
+    # apply to the box neutralizer — its net-zero vega is a put-call-parity
+    # fact, not a netting assumption.
+    netting_pct: float | dict[str, float] | None = None
     box_fee_bps: float | dict[str, float] | None = None
     # Perp/future trading cost, in bps of notional (price × qty), per
     # counterparty (or a flat scalar). A perp carries zero vega so the

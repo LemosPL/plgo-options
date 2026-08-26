@@ -68,6 +68,25 @@ _BOX_FEE_BPS_FALLBACK = 0.0
 # legacy OptimizerV2.compute_costs convention.
 _PERP_COST_BPS_FALLBACK = 2.0
 
+# Netting credit for a multi-leg structure's transaction cost, per counterparty
+# (see _structure_leg_costs_usd): 1.0 = charge VOLpts on the structure's net
+# vega exposure only (a dealer pricing the whole package off combined risk —
+# today's/legacy behavior); 0.0 = charge every leg independently at full
+# VOLpts (no risk-netting credit at all). Keyrock defaults low: their
+# calibrated FIL quotes (web/static/app.js CPTY_PRICING.keyrock, twoSidedVol)
+# show a flat vol per side regardless of strike, which no single net-risk book
+# can produce — evidence they aren't giving real netting credit on a spread.
+# Manually entered per counterparty from the GUI; this is the fallback default
+# for a counterparty with no explicit entry. PLACEHOLDER — tune as spreads
+# trade and the real vs. modelled cost gap narrows or doesn't.
+DEFAULT_NETTING_PCT_BY_CPTY: dict[str, float] = {
+    "KeyRock": 0.25,
+}
+
+# Fallback netting credit for a counterparty absent from the resolved dict —
+# preserves today's full-netting behavior for anyone not explicitly tuned.
+_NETTING_PCT_FALLBACK = 1.0
+
 
 def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
     """One execution's transaction cost (USD) for a trade leg, modelled in vol
@@ -80,7 +99,7 @@ def _bid_ask_cost_usd(qty, vega, counterparty, bid_ask_vol_pts):
     return abs(float(qty)) * abs(float(vega or 0.0)) * float(vp)
 
 
-def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None):
+def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None, netting_pct=None):
     """Allocate one structure's (naked/spread/straddle/box/...) transaction
     cost across its legs, based on the structure's NET vega exposure rather
     than summing each leg's own |vega| independently. A dealer prices a
@@ -92,6 +111,20 @@ def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None):
     vega). A single-leg "structure" (a naked trade, or a roll-unwind) reduces
     to exactly the old per-leg |qty x vega| formula, so this generalizes
     _bid_ask_cost_usd without changing behavior for the single-leg case.
+
+    That full-netting assumption is a real dealer behavior, not a law of
+    physics though — some counterparties quote each leg off their own flat
+    bid/ask rather than pricing a package off combined risk (see Keyrock's
+    calibrated FIL quotes: a flat vol per side regardless of strike, which no
+    single net-risk book could produce). ``netting_pct`` (per-counterparty
+    dict/scalar, default DEFAULT_NETTING_PCT_BY_CPTY/_NETTING_PCT_FALLBACK)
+    blends between full netting (1.0, priced on |net exposure|, today's/
+    legacy behavior) and none (0.0, priced on the sum of each leg's own
+    |exposure| — i.e. _bid_ask_cost_usd applied independently per leg).
+    Callers that don't want this — the box neutralizer, whose net-zero vega
+    is a put-call-parity FACT rather than a netting assumption, and is
+    already priced separately via its own real bps-of-notional fee — simply
+    don't pass netting_pct, leaving it at full netting.
 
     ``legs`` is [(leg, leg_qty), ...] — all legs must share one counterparty
     (true for every structure built in this module: spreads/straddles/boxes
@@ -116,8 +149,10 @@ def _structure_leg_costs_usd(legs, bid_ask_vol_pts, perp_cost_bps=None):
         net_exposure = sum(exposures)
         counterparty = option_legs[0][0].counterparty
         vp = CollateralOptimization._resolve(bid_ask_vol_pts, counterparty, default=_VOL_PTS_FALLBACK)
-        structure_cost = abs(net_exposure) * float(vp)
         total_abs_exposure = sum(abs(x) for x in exposures)
+        np_ = CollateralOptimization._resolve(netting_pct, counterparty, default=_NETTING_PCT_FALLBACK)
+        np_ = min(1.0, max(0.0, float(np_)))
+        structure_cost = (np_ * abs(net_exposure) + (1.0 - np_) * total_abs_exposure) * float(vp)
         if total_abs_exposure <= 1e-12:
             per_leg = [structure_cost / len(option_legs)] * len(option_legs)
         else:
@@ -1057,6 +1092,7 @@ class OptimizerV3(BaseOptimizer):
                  bid_ask_atm_pct: "dict[str, float] | float | None" = None,
                  bid_ask_min_delta: float = 0.05,
                  bid_ask_vol_pts: "dict[str, float] | float | None" = None,
+                 netting_pct: "dict[str, float] | float | None" = None,
                  box_fee_bps: "dict[str, float] | float | None" = None,
                  perp_cost_bps: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
@@ -1114,6 +1150,8 @@ class OptimizerV3(BaseOptimizer):
         # longer drives cost, so it needs no default here.)
         if bid_ask_vol_pts is None:
             bid_ask_vol_pts = DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {})
+        if netting_pct is None:
+            netting_pct = DEFAULT_NETTING_PCT_BY_CPTY
         if box_fee_bps is None:
             box_fee_bps = DEFAULT_BOX_FEE_BPS_BY_ASSET.get(self.asset, {})
 
@@ -1518,7 +1556,7 @@ class OptimizerV3(BaseOptimizer):
             for j, (qty, c) in enumerate(zip(net_qty, candidates))
             if int(np.round(qty)) != 0
         ]
-        leg_group_costs = self._leg_group_costs(traded_candidates, bid_ask_vol_pts, perp_cost_bps)
+        leg_group_costs = self._leg_group_costs(traded_candidates, bid_ask_vol_pts, perp_cost_bps, netting_pct)
 
         for j, rounded_qty, c in traded_candidates:
             est_cost = self._estimate_candidate_cash_outlay(
@@ -2960,6 +2998,7 @@ class OptimizerV3(BaseOptimizer):
             traded_candidates: list[tuple[int, int, object]],
             bid_ask_vol_pts: "dict[str, float] | float | None",
             perp_cost_bps: "dict[str, float] | float | None" = None,
+            netting_pct: "dict[str, float] | float | None" = None,
     ) -> dict[tuple, tuple[float, float]]:
         """Price each real (counterparty, expiry, strike, opt) leg off the TRUE
         combined net exposure of every candidate that trades it, not the sum of
@@ -3021,7 +3060,7 @@ class OptimizerV3(BaseOptimizer):
 
             keys = [k for k, m in merged.items() if m["qty"] != 0]
             leg_costs = _structure_leg_costs_usd(
-                [(merged[k]["leg"], merged[k]["qty"]) for k in keys], bid_ask_vol_pts, perp_cost_bps,
+                [(merged[k]["leg"], merged[k]["qty"]) for k in keys], bid_ask_vol_pts, perp_cost_bps, netting_pct,
             )
             for k, cost in zip(keys, leg_costs):
                 result[k] = (merged[k]["qty"], cost)

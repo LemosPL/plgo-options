@@ -208,7 +208,12 @@ class BaseOptimizer:
                         candidates.append(c)
 
             expiry = datetime.strptime(expiry_code, "%d%b%y")
-            while list(held_keys_by_expiry.keys())[tt] <= expiry and tt < len(held_keys_by_expiry.keys())-1:
+            # Bounds check must come first: `and` short-circuits left-to-right, so
+            # checking the indexed access before the length guard let `tt` run past
+            # the end of the list and throw IndexError instead of just stopping the
+            # loop (the `-1` here was also wrong — it excluded the very last held
+            # expiry, since tt could never reach its valid index len-1).
+            while tt < len(held_keys_by_expiry.keys()) and list(held_keys_by_expiry.keys())[tt] <= expiry:
                 held_option_keys = list(held_keys_by_expiry.values())[tt]
                 for option_key in held_option_keys:
                     if option_key[0] == expiry_code or (tt < 1 and target_expiry is None):
@@ -227,7 +232,7 @@ class BaseOptimizer:
                         c = self.create_candidate(S, strike, 0., sigma, opt, exp_code, expiry, dte, counterparty)
                         candidate_by_key[(c.expiry_code, c.strike, c.opt, c.counterparty)] = c
                         candidates.append(c)
-                tt += 1
+                tt += 1  # was `+= 11` — walk held_keys_by_expiry one entry at a time, not 11
         # Perpetual future: delta=1, no gamma/theta/vega. A perp is a standing
         # instrument, not tied to any options expiry, so it's always in the
         # candidate universe (unlike option legs, which are scoped to

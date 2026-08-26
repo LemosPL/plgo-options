@@ -8869,6 +8869,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
     optv2Data = await get(`/api/portfolio/pnl?asset=${currentAsset}`);
     optv2PopulateCounterparties();
     optRenderVolPts("optv2-volpts-list", optv2Data);
+    optRenderNettingPct("optv2-nettingpct-list", optv2Data);
     optRenderBoxFee("optv2-boxfee-list", optv2Data);
     optRenderPerpCost("optv2-perpcost-list", optv2Data);
     // Hint the live spot as the placeholder — blank still means "use live
@@ -9884,6 +9885,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       base_trade_ids: optv2BaseIds(),
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv2-volpts-list"),
+      // Per-counterparty netting credit for multi-leg structures (entered in %, sent as a 0-1 fraction).
+      netting_pct: optNettingPctDict("optv2-nettingpct-list"),
       // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv2-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
@@ -10525,6 +10528,46 @@ function optBoxFeeDict(listId) {
   return Object.keys(d).length ? d : null;
 }
 
+// Default per-counterparty netting credit (%) for multi-leg structures —
+// mirrors the engine's DEFAULT_NETTING_PCT_BY_CPTY. 100% = today's full
+// net-exposure structure pricing; Keyrock defaults lower since their
+// calibrated FIL quotes (CPTY_PRICING.keyrock, twoSidedVol) show a flat vol
+// per side regardless of strike — evidence they're not pricing off one net-
+// risk book, so a spread with them likely gets little real netting credit.
+const OPT_DEFAULT_NETTING_PCT = { KeyRock: 25 };
+function optDefaultNettingPct(cpty) {
+  return OPT_DEFAULT_NETTING_PCT[cpty] != null ? OPT_DEFAULT_NETTING_PCT[cpty] : 100;
+}
+
+// Render one editable netting-credit input per counterparty in the loaded
+// book, preserving any value the user already typed. Mirrors optRenderVolPts.
+function optRenderNettingPct(listId, data) {
+  const box = document.getElementById(listId);
+  if (!box || !data) return;
+  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const prev = {};
+  box.querySelectorAll(".opt-nettingpct-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  box.innerHTML = cps.length ? cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : optDefaultNettingPct(cp);
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-nettingpct-input" data-cpty="${cp}" value="${v}" step="5" min="0" max="100" style="width:5rem"></label></div>`;
+  }).join("") : '<p class="optv3-hint" style="margin:0">No counterparties in the loaded book.</p>';
+}
+
+// Collect {counterparty: netting fraction 0-1} from the inputs (entered in %,
+// so /100 to reach the engine's fraction unit; clamped since the input's own
+// min/max attributes don't stop an out-of-range typed/pasted value), or null
+// if none set.
+function optNettingPctDict(listId) {
+  const box = document.getElementById(listId);
+  if (!box) return null;
+  const d = {};
+  box.querySelectorAll(".opt-nettingpct-input").forEach(i => {
+    const v = parseFloat(i.value);
+    if (i.dataset.cpty && Number.isFinite(v)) d[i.dataset.cpty] = Math.min(100, Math.max(0, v)) / 100;
+  });
+  return Object.keys(d).length ? d : null;
+}
+
 async function optv3Load() {
   const $btn = document.getElementById("btn-load-optv3");
   $btn.classList.add("loading"); $btn.textContent = "Loading…";
@@ -10533,6 +10576,7 @@ async function optv3Load() {
     optv3OptResult = null;
     optv3PopulateCounterparties();
     optRenderVolPts("optv3-volpts-list", optv3Data);
+    optRenderNettingPct("optv3-nettingpct-list", optv3Data);
     optv3RenderDteList();
     optv3PopulateLegExpiries();
     optv3RenderManualLegs();
@@ -11965,6 +12009,8 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       manual_target: (optv3ManualTarget && optv3ManualTarget.length >= 2) ? optv3ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv3-volpts-list"),
+      // Per-counterparty netting credit for multi-leg structures (entered in %, sent as a 0-1 fraction).
+      netting_pct: optNettingPctDict("optv3-nettingpct-list"),
       // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv3-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
@@ -12052,6 +12098,7 @@ async function optv4Load() {
     optv4OptResult = null;
     optv4PopulateCounterparties();
     optRenderVolPts("optv4-volpts-list", optv4Data);
+    optRenderNettingPct("optv4-nettingpct-list", optv4Data);
     optv4RenderDteList();
     optv4PopulateLegExpiries();
     optv4RenderManualLegs();
@@ -13602,6 +13649,8 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       manual_target: (optv4ManualTarget && optv4ManualTarget.length >= 2) ? optv4ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
       bid_ask_vol_pts: optVolPtsDict("optv4-volpts-list"),
+      // Per-counterparty netting credit for multi-leg structures (entered in %, sent as a 0-1 fraction).
+      netting_pct: optNettingPctDict("optv4-nettingpct-list"),
       // Per-counterparty box-neutralizer execution fee (entered in %, sent as bps).
       box_fee_bps: optBoxFeeDict("optv4-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
