@@ -10924,7 +10924,7 @@ function optv3RenderPayoff() {
         x: spots, y: totalPayoff, mode: "lines",
         name: isNow ? "Now (current book)" : `T+${h}d`,
         hovertemplate: HT,
-        line: { color: C.ramp[k] || "#8b949e", width: isNow ? 3 : 1.5 },
+        line: { color: C.horizon[h] || "#8b949e", width: isNow ? 3 : 1.5 },
         ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
       });
     });
@@ -12489,7 +12489,39 @@ function optv4RenderKpi() {
 // looks right today can still drift badly on theta alone. Defaults to every
 // horizon the desk watches; the LP result carries all of OPTV2_HORIZONS, so this
 // is purely a display filter.
-let optv4HorizonSel = new Set(OPTV2_HORIZONS);
+//
+// The horizon curves are ONE ordered family (Now → T+150), so they take an
+// ordinal ramp — one hue, monotone lightness — rather than a hue per horizon; a
+// rainbow across time re-encodes order as identity and reads as unrelated
+// series. Steps are 100-600 of the documented blue ramp, keyed by HORIZON (never
+// by position in the selection) so toggling a chip never repaints the survivors.
+//
+// The previous ramp was seven hand-picked cyans stepping toward near-black,
+// invisible on this near-black plot surface: measured against #0d1117 its last
+// two steps came in at 1.99:1 and 1.48:1, below the 2:1 floor — so "different
+// shades of blue" genuinely were indistinguishable at the far end. Validating
+// the replacement (scripts/diag_chart_palette.py, which drives the dataviz
+// skill's own validator) forced two changes:
+//   * Six slots, not seven. Documented steps sit ΔL≈0.047 apart, so a legal gap
+//     must skip one (0.094), and the 2:1 contrast floor caps the dark end at
+//     step 600 — eleven usable steps at two-step spacing is six. T+16 is
+//     therefore not drawn on the v4 charts; it remains in the P&L matrix.
+//   * Now takes the ramp's bright end instead of the old separate cyan, since
+//     it's t=0 of this same family. That cyan sat only ΔE 7.3 from the ramp —
+//     the collision that made a blue ramp unusable while it existed.
+const OPTV4_HORIZON_COLOR = {
+  0:   "#cde2fb",   // Now    — blue 100
+  30:  "#9ec5f4",   // T+30d  — blue 200
+  60:  "#6da7ec",   // T+60d  — blue 300
+  90:  "#3987e5",   // T+90d  — blue 400
+  120: "#256abf",   // T+120d — blue 500
+  150: "#184f95",   // T+150d — blue 600 (2.34:1 on #0d1117)
+};
+// Deliberately not OPTV2_HORIZONS: that includes 16, and a 7th ramp step can't
+// clear the gates. The P&L matrix still uses OPTV2_HORIZONS for its columns.
+const OPTV4_CHART_HORIZONS = [0, 30, 60, 90, 120, 150];
+
+let optv4HorizonSel = new Set(OPTV4_CHART_HORIZONS);
 
 // Re-centering only means something for a curve with a fixed shape: a saved CSV
 // or one the user has edited by hand. The parametric target rebuilds itself
@@ -12513,11 +12545,11 @@ function optv4RenderHorizonChips() {
   if (!bars.length) return;
   bars.forEach(bar => { bar.style.display = optv4Data ? "flex" : "none"; });
   const C = optv4ChartColors();
-  const html = OPTV2_HORIZONS.map((h, k) => {
+  const html = OPTV4_CHART_HORIZONS.map(h => {
     const on = optv4HorizonSel.has(h);
     // Chip border carries the same ramp colour the curve gets, so the chips and
     // the chart legend read as one control.
-    const col = C.ramp[k] || "#8b949e";
+    const col = C.horizon[h] || "#8b949e";
     return `<button type="button" class="btn-secondary optv4-horizon-chip" data-h="${h}"`
       + ` style="width:auto;margin:0;padding:.15rem .5rem;font-size:.7rem;`
       + `border-color:${on ? col : "var(--border)"};color:${on ? col : "var(--muted)"};`
@@ -12549,16 +12581,16 @@ document.addEventListener("click", (e) => {
     optv4HorizonSel = new Set([0]);
     optv4RedrawHorizonCharts();
   } else if (e.target.closest?.(".optv4-horizon-all")) {
-    optv4HorizonSel = new Set(OPTV2_HORIZONS);
+    optv4HorizonSel = new Set(OPTV4_CHART_HORIZONS);
     optv4RedrawHorizonCharts();
   }
 });
 
-// Selected horizons in chart order, each with its stable ramp index (the index
-// within OPTV2_HORIZONS, so a curve keeps its colour as others are toggled).
+// Selected horizons in chart order. Colour comes from OPTV4_HORIZON_COLOR keyed
+// by the horizon itself, so a curve keeps its colour as others are toggled.
 function optv4SelectedHorizons() {
-  const out = OPTV2_HORIZONS.map((h, k) => ({ h, k })).filter(o => optv4HorizonSel.has(o.h));
-  return out.length ? out : [{ h: 0, k: 0 }];
+  const out = OPTV4_CHART_HORIZONS.filter(h => optv4HorizonSel.has(h)).map(h => ({ h }));
+  return out.length ? out : [{ h: 0 }];
 }
 
 // The book's payoff curve at horizon h, on `spots`: the After (proposed) book
@@ -12613,7 +12645,7 @@ function optv4RenderPayoff() {
     // as the family of curves peeling away from it.
     // optv4AfterSelectedAtHorizon honours the trade checkboxes and manual legs at
     // any horizon, so every curve here reflects the same selection as Now.
-    optv4SelectedHorizons().forEach(({ h, k }) => {
+    optv4SelectedHorizons().forEach(({ h }) => {
       const hKey = String(h);
       const curve = optv4AfterSelectedAtHorizon(hKey)
         || (optv4OptResult.after.payoff_by_horizon || {})[hKey];
@@ -12623,7 +12655,7 @@ function optv4RenderPayoff() {
         x: optSpots, y: curve, mode: "lines",
         name: isNow ? afterName : `${afterName} — T+${h}d`,
         hovertemplate: HT,
-        line: { color: isNow ? C.after : (C.ramp[k] || "#8b949e"), width: isNow ? 3 : 1.5 },
+        line: { color: C.horizon[h] || "#8b949e", width: isNow ? 3 : 1.5 },
         ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
       });
     });
@@ -12636,7 +12668,7 @@ function optv4RenderPayoff() {
   } else {
     // Sequential ramp (bright = Now, fading into the future) — a proper time
     // encoding instead of a rainbow.
-    optv4SelectedHorizons().forEach(({ h, k }) => {
+    optv4SelectedHorizons().forEach(({ h }) => {
       const hKey = String(h);
       const totalPayoff = new Array(spots.length).fill(0);
       let hasData = false;
@@ -12647,7 +12679,7 @@ function optv4RenderPayoff() {
         x: spots, y: totalPayoff, mode: "lines",
         name: isNow ? "Now (current book)" : `T+${h}d`,
         hovertemplate: HT,
-        line: { color: C.ramp[k] || "#8b949e", width: isNow ? 3 : 1.5 },
+        line: { color: C.horizon[h] || "#8b949e", width: isNow ? 3 : 1.5 },
         ...(isNow ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
       });
     });
@@ -12687,20 +12719,43 @@ function optv4RenderPayoff() {
   Plotly.newPlot("optv4-payoff-chart", traces, layout, { responsive: true, displaylogo: false });
 }
 
-// Shared chart palette (coherent, semi-transparent) + layout for the v3 charts.
+// ── v4 chart palette ───────────────────────────────────────────────────────
+// The horizon curves are ONE ordered family (Now → T+150), so they take an
+// ordinal ramp — one hue, monotone lightness — not a hue per horizon; a rainbow
+// across time re-encodes order as identity and reads as unrelated series.
+//
+// The old ramp was seven hand-picked cyans stepping toward near-black, which is
+// invisible on this near-black plot surface: measured against #0d1117 its last
+// two steps came in at 1.99:1 and 1.48:1, under the 2:1 floor, so "different
+// shades of blue" really were indistinguishable at the far end.
+//
+// Replaced with steps 100-600 of the documented blue ramp. Two consequences fell
+// out of validating it (scripts/diag_chart_palette.py, which runs the dataviz
+// skill's own validator):
+//   * Six slots, not seven. Documented steps sit ΔL≈0.047 apart so a legal gap
+//     must skip one (0.094), and the 2:1 contrast floor caps the dark end at
+//     step 600 — eleven usable steps at two-step spacing is six. T+16 is
+//     therefore not drawn on the v4 charts (it stays in the P&L matrix); the
+//     desk's horizons are Now/30/60/90/120/150.
+//   * Now is t=0 of this same family, so it takes the ramp's bright end instead
+//     of the old separate cyan. That cyan measured only ΔE 7.3 from the ramp —
+//     the collision that made blue unusable while it existed.
+// The ramp itself is OPTV4_HORIZON_COLOR, declared with the horizon selection
+// above (it has to exist before optv4HorizonSel initialises off it).
 function optv4ChartColors() {
   return {
-    before: "#e5737e",                       // current book — soft red, dashed
-    after:  "#4fc3f7",                       // resulting book — cyan
-    afterFill: "rgba(79,195,247,0.08)",      // faint area under the primary curve
-    target: "#ffca28",                       // target — amber, dotted
-    excl:   "#b388ff",                       // what-if excl. unwinds — violet
+    before: "#e5737e",                       // current book — soft red, dashed (ΔE 22.9 from the ramp)
+    after:  OPTV4_HORIZON_COLOR[0],          // resulting book at Now = the ramp's bright end
+    afterFill: "rgba(205,226,251,0.08)",     // faint area under the primary curve
+    target: "#ffca28",                       // target — amber, dotted (ΔE 21.2 from the ramp)
+    // What-if excl. unwinds. Was violet, which sat only ΔE 12.1 from the blue
+    // ramp; aqua clears it at 20.0 and reads better on this surface (5.56:1).
+    excl:   "#199e70",
     spot:   "rgba(255,202,40,0.45)",         // spot rule — faint amber
     spotDot: "#ffca28",
     zero:   "rgba(230,237,243,0.18)",        // break-even — faint
     grid:   "rgba(139,148,158,0.12)",        // recessive grid
-    // sequential cyan ramp: Now (bright) → T+90 (dim)
-    ramp: ["#8fe1ff", "#4fc3f7", "#35a3d6", "#2a80ac", "#1f5f83", "#164a68", "#0e3550"],
+    horizon: OPTV4_HORIZON_COLOR,
   };
 }
 
@@ -13651,13 +13706,13 @@ function optv4RenderProfileChart() {
   // The same book at each selected future horizon, so you can see whether a
   // curve sitting on the target today still does once theta has run. Post-run
   // that's the After book; pre-run it's the current book (the only one there is).
-  optv4SelectedHorizons().forEach(({ h, k }) => {
+  optv4SelectedHorizons().forEach(({ h }) => {
     if (h === 0) return;                        // Now is already drawn above
     const curve = optv4BookCurveAtHorizon(spots, h);
     if (!curve) return;                         // horizon absent here — skip, don't fake it
     traces.push({
       x: spots, y: curve, mode: "lines", name: `T+${h}d`, hovertemplate: HT,
-      line: { color: C.ramp[k] || "#8b949e", width: 1.5 },
+      line: { color: C.horizon[h] || "#8b949e", width: 1.5 },
     });
   });
   if (targetCurve) traces.push({ x: spots, y: targetCurve, mode: "lines", name: manual ? "Target (manual)" : "Target", hovertemplate: HT, line: { color: C.target, width: 2.5, dash: "dot" } });
