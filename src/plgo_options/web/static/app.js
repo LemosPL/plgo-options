@@ -13221,6 +13221,7 @@ function optv4ApplyPricingLegs() {
   let applied = 0, added = 0, bad = 0;
   const seen = new Set();
   const newManual = [];
+  const cptyDiverged = [];
 
   (legs || []).forEach(l => {
     const K = parseFloat(l.strike);
@@ -13244,6 +13245,15 @@ function optv4ApplyPricingLegs() {
       optv4ReplDeselected.delete(t._idx);   // present here = part of the book
       seen.add(t._idx);
       applied++;
+      // Pricing legs carry a per-leg counterparty override (see addLeg). The v4
+      // table's Counterparty column is the LP's own assignment and isn't
+      // editable, so a leg re-pointed at a different counterparty in Pricing
+      // can't be applied here — and this row's Price would keep repricing off
+      // the ORIGINAL counterparty's methodology. Report it rather than let the
+      // two views disagree silently.
+      const legCp = String(l.counterparty || "").trim().toLowerCase();
+      const rowCp = String(t.counterparty || "").trim().toLowerCase();
+      if (legCp && rowCp && legCp !== rowCp) cptyDiverged.push(`${t.instrument || "leg"}: ${rowCp} → ${legCp}`);
     } else {
       newManual.push({ l, K, absQ, opt, sell, dte: l._srcDte, iv: l._srcIv });
     }
@@ -13303,6 +13313,11 @@ function optv4ApplyPricingLegs() {
   if (added) bits.push(`${added} new leg${added === 1 ? "" : "s"} carried over as what-if`);
   if (untickedBack) bits.push(`${untickedBack} removed here → unticked there`);
   if (bad) bits.push(`${bad} leg${bad === 1 ? "" : "s"} skipped (not a priceable option)`);
+  if (cptyDiverged.length) {
+    bits.push(`${cptyDiverged.length} counterparty change${cptyDiverged.length === 1 ? "" : "s"} NOT applied `
+      + `(${cptyDiverged.slice(0, 3).join(", ")}${cptyDiverged.length > 3 ? ", …" : ""}) — `
+      + `the optimizer assigns the counterparty, so re-run to move a leg`);
+  }
   const nav = document.querySelector('.nav-item[data-page="optv4"]');
   if (nav) nav.click();
   console.log("pricing → optv4:", bits.join("; "));
