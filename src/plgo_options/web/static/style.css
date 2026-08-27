@@ -392,6 +392,7 @@ select { margin-bottom: .5rem; }
 #legs-table col.col-side-type, #sb-legs-table col.col-side-type { width: 150px; }
 #legs-table col.col-strike, #sb-legs-table col.col-strike { width: 75px; }
 #legs-table col.col-qty, #sb-legs-table col.col-qty { width: 70px; }
+#legs-table col.col-cpty { width: 84px; }
 #legs-table col.col-remove, #sb-legs-table col.col-remove { width: 28px; }
 
 #legs-table th, #sb-legs-table th { text-align: left; padding: .3rem .25rem; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); }

@@ -579,8 +579,14 @@ function getDefaultExpiry() {
   return $expSel.value || (volSurface && volSurface.smiles.length > 0 ? volSurface.smiles[0].expiry_code : "");
 }
 
-function addLeg(side = "buy", type = "C", strike = "", premium = "0", quantity = "1", expiry = null) {
-  legs.push({ side, type, strike: String(strike), premium: String(premium), quantity: String(quantity), expiry: expiry || getDefaultExpiry() });
+// counterparty: "" (default) = price this leg off the global dropdown above
+// the leg table, same as before per-leg counterparties existed. A specific
+// value (from CPTY_PRICING's lowercase keys — "flowdesk", "keyrock", ...)
+// overrides that for THIS leg only, so a mixed-counterparty batch sent from
+// the optimizer can price each leg via its own real methodology instead of
+// all falling back to one shared selection (see replicateStrategy).
+function addLeg(side = "buy", type = "C", strike = "", premium = "0", quantity = "1", expiry = null, counterparty = "") {
+  legs.push({ side, type, strike: String(strike), premium: String(premium), quantity: String(quantity), expiry: expiry || getDefaultExpiry(), counterparty: counterparty || "" });
   renderLegs();
 }
 
@@ -621,6 +627,14 @@ function renderLegs() {
       </td>
       <td><input type="number" data-i="${i}" data-field="strike" value="${leg.strike}" step="10" ${leg.type === "PERP" ? 'title="Entry price"' : ""}></td>
       <td><input type="number" data-i="${i}" data-field="quantity" value="${leg.quantity}" step="1" min="1"></td>
+      <td>
+        <select data-i="${i}" data-field="counterparty" style="font-size:.72rem" title="Overrides the counterparty dropdown above for THIS leg only — leave on Default to use whatever's selected there. Lets a mixed-counterparty batch (e.g. sent from the optimizer) price each leg via its own real methodology.">
+          <option value="" ${!leg.counterparty ? "selected" : ""}>Default</option>
+          ${Object.entries(CPTY_PRICING).map(([key, cp]) =>
+            `<option value="${key}" ${leg.counterparty === key ? "selected" : ""}>${cp.name}</option>`
+          ).join("")}
+        </select>
+      </td>
       <td><button class="btn-remove" data-i="${i}">✕</button></td>
     `;
     $legsBody.appendChild(tr);
@@ -841,12 +855,21 @@ function replicateStrategy() {
     // on the mid, half-width = local vega × spread (a bid/ask quoted in vol,
     // converted to a premium spread). Applying ±spread to IV and repricing was
     // convex — it inflated buy premiums and collapsed OTM sell premiums to 0.
+    // Per-leg counterparty override (see addLeg) beats the global dropdown for
+    // THIS leg only — a blank leg.counterparty falls through to the same
+    // cptyMethod/cptyCalibrated the whole batch would otherwise use, so a
+    // single-counterparty send (or manually-built legs) behaves exactly as
+    // before per-leg overrides existed.
+    const legCptyKey = (l.counterparty && l.counterparty.trim()) ? l.counterparty : cptyKey;
+    const legCptyMethod = legCptyKey === cptyKey ? cptyMethod : getCptyMethod(legCptyKey, currentAsset);
+    const legCptyCalibrated = !!(legCptyMethod && !legCptyMethod.uncalibrated);
+
     let prem = premMid;
     let ivDisplay = ivPct;   // IV shown in the per-leg table
     let cpMode = null;       // "otm" | "itm" when a counterparty methodology applied
-    if (cptyCalibrated) {
+    if (legCptyCalibrated) {
       // Counterparty marks replace both the mid vol-spread and the reported IV.
-      const cpRes = applyCptyPricing(cptyMethod, { spot, K, T, type: l.type, side: l.side });
+      const cpRes = applyCptyPricing(legCptyMethod, { spot, K, T, type: l.type, side: l.side });
       if (cpRes) { prem = cpRes.prem; ivDisplay = cpRes.ivShown; cpMode = cpRes.mode; }
     } else if (volSpreadPts > 0) {
       const vegaPt = Math.abs(pricerBs(spot, K, T, 0, (ivPct + 1) / 100, l.type)
@@ -863,7 +886,7 @@ function replicateStrategy() {
     // Cost basis for the payoff curves. With a counterparty selected the
     // breakevens must reflect what you actually transact at (their premium).
     // On mid fair value we keep the clean MID premium (unbiased by bid/ask).
-    const costBasis = cptyCalibrated ? prem : premMid;
+    const costBasis = legCptyCalibrated ? prem : premMid;
 
     for (let i = 0; i < nPts; i++) {
       const intrinsic = l.type === "C" ? Math.max(spots[i] - K, 0) : Math.max(K - spots[i], 0);
@@ -891,7 +914,7 @@ function replicateStrategy() {
       expiry: l.expiry, dte, strike: K, type: l.type, side: l.side, quantity: qty,
       iv_pct: ivPct, iv_display: ivDisplay, sigma, bs_premium_usd: prem, bs_premium_eth: premEth,
       delta_per: deltaPer, position_delta: posDelta,
-      _synthetic: isSynthetic, cp_mode: cpMode,
+      _synthetic: isSynthetic, cp_mode: cpMode, cp_name: legCptyMethod ? legCptyMethod.name : null,
     });
   }
 
@@ -975,7 +998,7 @@ function replicateStrategy() {
     const typeColor = d.type === "C" ? "var(--green)" : "var(--red)";
     let srcLabel;
     if (d.cp_mode) {
-      const cpName = cptyMethod.name;
+      const cpName = d.cp_name || cptyMethod.name;
       const CP_MODE_LABEL = {
         otm: ["flat vol", `${cpName} marks OTM legs at a flat wing vol`],
         itm: ["intrinsic", `${cpName} marks ITM legs at intrinsic, forward shaded against you`],
@@ -10035,7 +10058,7 @@ document.getElementById("btn-optv2-send-to-pricing")?.addEventListener("click", 
     // Use the trade's Deribit expiry code; a bare date can't be a pricing expiry.
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
-    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    addLeg(side, opt, String(t.strike), premium, String(qty), expCode, t.counterparty ? String(t.counterparty).toLowerCase() : "");
     if (expCode) usedCodes.add(expCode);
     if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
@@ -11906,7 +11929,7 @@ document.getElementById("btn-optv3-send-to-pricing")?.addEventListener("click", 
     const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
-    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    addLeg(side, opt, String(t.strike), premium, String(qty), expCode, t.counterparty ? String(t.counterparty).toLowerCase() : "");
     if (expCode) usedCodes.add(expCode);
     if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
@@ -13799,7 +13822,7 @@ document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", 
     const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
-    addLeg(side, opt, String(t.strike), premium, String(qty), expCode);
+    addLeg(side, opt, String(t.strike), premium, String(qty), expCode, t.counterparty ? String(t.counterparty).toLowerCase() : "");
     if (expCode) usedCodes.add(expCode);
     if (t.counterparty) usedCpties.add(t.counterparty);
     sent++;
