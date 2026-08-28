@@ -13344,7 +13344,12 @@ function optv4DisplayPriceAtStrike(t, K, S0) {
   const opt = String(t.opt || "").toUpperCase();
   if (t.cpty_price_usd != null && opt !== "F" && opt !== "PERP") {
     try {
-      const method = getCptyMethod(t.counterparty, currentAsset);
+      // CPTY_PRICING's keys are lowercase ("keyrock", "flowdesk", ...); t.counterparty
+      // is the backend's display-cased value ("KeyRock", "Flowdesk"). Every other
+      // getCptyMethod call site already lowercases before calling — this one didn't,
+      // so it silently found no match and fell through to mid vol on every strike
+      // edit, regardless of the leg's real (and often much wider) counterparty quote.
+      const method = getCptyMethod(String(t.counterparty || "").toLowerCase(), currentAsset);
       const T = Math.max(Number(t.dte) || 0, 0) / 365.25;
       const q = applyCptyPricing(method, {
         spot: S0, K, T, type: opt, side: String(t.side || "").toLowerCase(),
