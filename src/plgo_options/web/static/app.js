@@ -10380,7 +10380,14 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
       return `<span style="white-space:nowrap"><span style="color:${c}">${l.side} ${Math.abs(l.qty)}</span> `
         + `${optv2OptType(l.opt)} ${optv2Fmt(l.strike, optv3Dp())}</span>`;
     }).join('<span style="opacity:.4"> · </span>');
-    const net = g.legs.reduce((s, l) => s + (l.qty * (l.bs_price_usd || 0)), 0);
+    // cpty_price_usd (when set — see optimizer_v3._attach_cpty_prices) is the
+    // counterparty's own calibrated quote for this leg/side; prefer it over
+    // the symmetric mid-vol bs_price_usd so this card's credit/debit matches
+    // what Pricing shows for the same legs. Missing before: this summary
+    // computed net purely off bs_price_usd, off by ~10% on a real Flowdesk/
+    // Wave/Keyrock box (2026-08-28) even though the detailed trade table
+    // (fixed earlier) already used the counterparty-aware price correctly.
+    const net = g.legs.reduce((s, l) => s + (l.qty * ((l.cpty_price_usd != null ? l.cpty_price_usd : l.bs_price_usd) || 0)), 0);
     const netLabel = (net <= 0 ? "credit +$" : "debit -$") + optv2Fmt(Math.abs(net), 0);
     card.innerHTML =
       `<div style="display:flex;justify-content:space-between;gap:1rem;align-items:baseline">`
