@@ -159,6 +159,76 @@ CREATE TABLE IF NOT EXISTS counterparty_margin (
 );
 """
 
+# Daily ATM implied-vol term structure, one row per (date, asset, tenor).
+# portfolio_mtm_history already gives a daily spot + greeks series, but nothing
+# ever recorded implied vol — so "is front vol rich right now?" has no history to
+# compare against. This log is written by POST /api/signals/snapshot-iv; the
+# primary key makes a same-day re-run overwrite rather than duplicate.
+IV_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS iv_surface_history (
+    snapshot_date TEXT NOT NULL,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    tenor_days INTEGER NOT NULL,
+    spot REAL NOT NULL DEFAULT 0,
+    atm_iv_pct REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (snapshot_date, asset, tenor_days)
+);
+"""
+
+
+# Every Action Radar signal that was ever delivered, with the market state at
+# the time and what was ultimately done about it. Two jobs: (1) tell us whether
+# the thresholds are any good, which is the whole point of the experimentation
+# phase, and (2) give "spot at the last action on this deal" a home, so advice
+# stops repeating once it has been acted on.
+SIGNAL_JOURNAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS signal_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+    asset TEXT NOT NULL COLLATE NOCASE,
+    signal_key TEXT NOT NULL,
+    deal_id TEXT,
+    counterparty TEXT,
+    strategy TEXT,
+    expiry TEXT,
+    kind TEXT NOT NULL,
+    subject TEXT,
+    state TEXT NOT NULL,
+    band TEXT,
+    channel TEXT NOT NULL DEFAULT 'brief',
+    spot REAL,
+    trigger_spot REAL,
+    distance_pct REAL,
+    net_cash REAL,
+    d_margin REAL,
+    d_max_loss REAL,
+    d_prob_profit REAL,
+    atm_iv_pct REAL,
+    outcome TEXT NOT NULL DEFAULT 'open',
+    outcome_at TEXT,
+    outcome_spot REAL,
+    outcome_note TEXT,
+    package_json TEXT
+);
+"""
+
+# Latch state for the proximity alerts. One row per (asset, signal, band) that
+# has already fired, so a spot oscillating around a band edge can't re-ping.
+# Bands only escalate (approaching -> imminent -> live); re-arming happens by
+# deleting rows once spot has retreated past the band edge plus a buffer.
+SIGNAL_ALERT_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS signal_alert_state (
+    asset TEXT NOT NULL COLLATE NOCASE,
+    signal_key TEXT NOT NULL,
+    band TEXT NOT NULL,
+    fired_at TEXT NOT NULL DEFAULT (datetime('now')),
+    spot_at_fire REAL,
+    trigger_spot REAL,
+    PRIMARY KEY (asset, signal_key, band)
+);
+"""
+
 
 async def get_db() -> aiosqlite.Connection:
     global _db
@@ -187,6 +257,9 @@ async def init_db():
     await db.execute(COLLATERAL_ALLOCATION_SCHEMA)
     await db.execute(MARGIN_SCHEMA)
     await db.execute(RECON_HISTORY_SCHEMA)
+    await db.execute(IV_HISTORY_SCHEMA)
+    await db.execute(SIGNAL_JOURNAL_SCHEMA)
+    await db.execute(SIGNAL_ALERT_STATE_SCHEMA)
     await db.commit()
 
     # One-time seed of the ETH-book collateral allocation from the values that

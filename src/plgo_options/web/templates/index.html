@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=11">
+  <link rel="stylesheet" href="/static/style.css?v=13">
 </head>
 <body>
 
@@ -548,6 +548,41 @@
         overlay them. Select a single deal to see its payoff profile, probability distribution, and which
         legs you could close at ~zero cost to improve it.
       </p>
+    </section>
+
+    <!-- ── Action Radar: per-deal trigger map ─────────────────────────── -->
+    <section class="card" id="radar-card">
+      <div class="pf-toolbar">
+        <h2 style="margin:0">Action Radar</h2>
+        <div class="pf-toolbar-spacer"></div>
+        <span id="radar-meta" class="risk-sub-item" style="color:var(--muted)"></span>
+        <label class="toggle-label" style="margin:0" title="Also show actions that fail the economic gate, with the reason — useful for tuning thresholds.">
+          <input type="checkbox" id="radar-show-rejected"> Show rejected
+        </label>
+        <button id="btn-radar-thresholds" class="btn-secondary" style="width:auto">Thresholds</button>
+        <button id="btn-radar-brief" class="btn-secondary" style="width:auto">Preview brief</button>
+        <button id="btn-radar-journal" class="btn-secondary" style="width:auto">Journal</button>
+        <button id="btn-radar-scan" class="btn-primary" style="width:auto">Scan</button>
+      </div>
+      <p style="margin:.5rem 0 0; font-size:.8rem; color:var(--muted)">
+        For every deal, the spot levels at which an action switches on — and the exact paired
+        close/open trade, costed after bid/ask. Closes are never suggested alone. Anything shown has
+        already cleared the economic gate, so it is worth the spread. Prices assume today's DTE and
+        sticky-strike vol: these are <b>price</b> triggers, not forecasts.
+      </p>
+
+      <!-- Threshold tuning panel (hidden by default) -->
+      <div id="radar-thresholds" class="radar-thresholds" style="display:none"></div>
+
+      <!-- 09:00 brief preview / Slack delivery -->
+      <div id="radar-brief" class="radar-panel" style="display:none"></div>
+
+      <!-- Signal journal: what was delivered, and what was done about it -->
+      <div id="radar-journal" class="radar-panel" style="display:none"></div>
+
+      <div id="radar-body">
+        <div class="deals-empty">Hit <b>Scan</b> to build the trigger map.</div>
+      </div>
     </section>
 
     <div class="deals-layout">
@@ -3275,6 +3310,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=150"></script>
+<script src="/static/app.js?v=152"></script>
 </body>
 </html>

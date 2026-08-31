@@ -1565,3 +1565,139 @@ select { margin-bottom: .5rem; }
   color: var(--text);
 }
 .optv2-base-pill-text b { color: var(--accent, #58a6ff); }
+
+/* ── Action Radar (Deals / Risk trigger map) ───────────────────────────── */
+.radar-thresholds {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: .5rem .9rem; margin-top: .8rem; padding: .8rem;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  background: var(--surface);
+}
+.radar-thresholds .rt-group {
+  grid-column: 1 / -1; font-size: .7rem; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); margin-top: .4rem;
+  border-bottom: 1px solid var(--row-border); padding-bottom: .2rem;
+}
+.radar-thresholds label {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: .5rem; font-size: .76rem; color: var(--muted);
+}
+.radar-thresholds input {
+  width: 84px; padding: .25rem .35rem; font-size: .76rem; text-align: right;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.radar-actions { grid-column: 1 / -1; display: flex; gap: .5rem; margin-top: .5rem; }
+
+/* Summary strip */
+.radar-summary { display: flex; flex-wrap: wrap; gap: .5rem; margin: .8rem 0; }
+.radar-pill {
+  font-size: .75rem; padding: .3rem .6rem; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); background: var(--surface);
+}
+.radar-pill b { color: var(--text); }
+.radar-pill.live   { border-color: rgba(248,81,73,.55);  color: var(--red); }
+.radar-pill.imminent { border-color: rgba(210,153,34,.55); color: var(--orange); }
+.radar-pill.approaching { border-color: rgba(88,166,255,.45); color: var(--accent); }
+
+/* Ladder: trigger levels stacked above / below spot */
+.radar-ladder {
+  margin: .9rem 0; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); overflow: hidden;
+}
+.radar-rung {
+  display: grid; grid-template-columns: 92px 68px 1fr auto;
+  gap: .6rem; align-items: center; padding: .35rem .7rem;
+  font-size: .78rem; border-bottom: 1px solid var(--row-border); cursor: pointer;
+}
+.radar-rung:last-child { border-bottom: none; }
+.radar-rung:hover { background: var(--hover-bg); }
+.radar-rung .rr-level { font-variant-numeric: tabular-nums; font-weight: 600; }
+.radar-rung .rr-dist { font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.radar-rung .rr-num { font-variant-numeric: tabular-nums; text-align: right; }
+.radar-rung.up   .rr-level { color: var(--green); }
+.radar-rung.down .rr-level { color: var(--red); }
+.radar-spot {
+  display: grid; grid-template-columns: 92px 1fr; gap: .6rem; align-items: center;
+  padding: .45rem .7rem; font-size: .8rem; font-weight: 600;
+  background: rgba(88,166,255,.10);
+  border-top: 1px solid rgba(88,166,255,.35); border-bottom: 1px solid rgba(88,166,255,.35);
+}
+.radar-spot .rs-label { color: var(--accent); font-variant-numeric: tabular-nums; }
+
+/* Signal kind badges */
+.radar-kind {
+  display: inline-block; font-size: .65rem; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; padding: .12rem .4rem; border-radius: 4px;
+  border: 1px solid currentColor;
+}
+.radar-kind.recycle  { color: var(--green); }
+.radar-kind.tighten  { color: var(--accent); }
+.radar-kind.increase { color: #a371f7; }
+.radar-kind.reduce   { color: var(--orange); }
+.radar-kind.rejected { color: var(--muted); }
+
+/* Signal table */
+.radar-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+.radar-table th {
+  text-align: left; font-size: .68rem; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--muted); font-weight: 600; padding: .4rem .5rem;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.radar-table td {
+  padding: .42rem .5rem; border-bottom: 1px solid var(--row-border);
+  vertical-align: top;
+}
+.radar-table tr.sig-row { cursor: pointer; }
+.radar-table tr.sig-row:hover { background: var(--hover-bg); }
+.radar-table tr.sig-rejected { opacity: .55; }
+.radar-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.radar-state {
+  font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+}
+.radar-state.live { color: var(--red); }
+.radar-state.imminent { color: var(--orange); }
+.radar-state.approaching { color: var(--accent); }
+.radar-state.watch { color: var(--muted); }
+.radar-legs { font-size: .72rem; color: var(--muted); margin-top: .15rem; line-height: 1.5; }
+.radar-legs .lg-close { color: var(--red); font-weight: 600; }
+.radar-legs .lg-open  { color: var(--green); font-weight: 600; }
+.radar-why { font-size: .72rem; color: var(--muted); margin-top: .2rem; font-style: italic; }
+
+/* Action Radar: brief preview + journal panels */
+.radar-panel {
+  margin-top: .8rem; padding: .8rem;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  background: var(--surface);
+}
+.radar-panel-head {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  margin-bottom: .6rem; font-size: .78rem; color: var(--muted);
+}
+.radar-panel-head .rp-spacer { flex: 1 1 auto; }
+.radar-brief-text {
+  margin: 0; padding: .8rem; max-height: 480px; overflow: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .74rem; line-height: 1.65; white-space: pre-wrap;
+  color: var(--text);
+}
+.radar-ai-note {
+  font-size: .72rem; padding: .35rem .55rem; border-radius: 4px; margin-bottom: .5rem;
+}
+.radar-ai-note.ok   { background: rgba(63,185,80,.10);  border: 1px solid rgba(63,185,80,.35); }
+.radar-ai-note.off  { background: rgba(210,153,34,.10); border: 1px solid rgba(210,153,34,.35); }
+.radar-jrn-outcome { display: flex; gap: .3rem; }
+.radar-jrn-outcome button {
+  font-size: .66rem; padding: .15rem .4rem; width: auto;
+  border-radius: 4px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--muted); cursor: pointer;
+}
+.radar-jrn-outcome button:hover { border-color: var(--accent); color: var(--text); }
+.radar-jrn-tag {
+  font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+}
+.radar-jrn-tag.executed  { color: var(--green); }
+.radar-jrn-tag.dismissed { color: var(--muted); }
+.radar-jrn-tag.expired   { color: var(--orange); }
+.radar-jrn-tag.open      { color: var(--accent); }

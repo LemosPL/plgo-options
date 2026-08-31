@@ -141,6 +141,22 @@ async def list_deals_post(req: DealsRequest):
 
 async def _assemble(asset: str, include_expired: bool,
                     overrides: dict[str, dict[str, str]] | None):
+    payload, _ctx = await build_deals_payload(asset, include_expired, overrides)
+    return payload
+
+
+async def build_deals_payload(
+    asset: str, include_expired: bool,
+    overrides: dict[str, dict[str, str]] | None = None,
+) -> tuple[dict, dict]:
+    """Assemble the deals payload AND return the market context alongside it.
+
+    The signal engine (``web.signal_engine``) needs both: the grouped deals with
+    their payoff grid, and the same ``build_market_context`` result so it can
+    reprice legs at hypothetical spot levels without a second Deribit round trip
+    (and without any risk of pricing against a different surface than the page
+    the user is looking at).
+    """
     asset = asset.upper()
     overrides = overrides or {}
 
@@ -202,7 +218,7 @@ async def _assemble(asset: str, include_expired: bool,
         all_strikes.append(strike)
 
     if not all_strikes:
-        return {"asset": asset, "spot": spot, "grid": [], "deals": []}
+        return {"asset": asset, "spot": spot, "grid": [], "deals": []}, ctx
 
     # 4. Build a shared spot grid spanning the strike range and current spot.
     lo_ref = min(all_strikes + ([spot] if spot > 0 else []))
@@ -230,7 +246,7 @@ async def _assemble(asset: str, include_expired: bool,
         "spot": spot,
         "grid": [round(float(x), 6) for x in grid],
         "deals": deals,
-    }
+    }, ctx
 
 
 def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,

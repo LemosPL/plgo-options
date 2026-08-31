@@ -22,6 +22,7 @@ from plgo_options.web.routes import holistic
 from plgo_options.web.routes import collateral
 from plgo_options.web.routes import reconciliation
 from plgo_options.web.routes import deals
+from plgo_options.web.routes import signals
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(collateral.router, prefix="/api/collateral", tags=["collateral"])
     app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["reconciliation"])
     app.include_router(deals.router, prefix="/api/deals", tags=["deals"])
+    app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():

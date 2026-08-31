@@ -16451,3 +16451,554 @@ function drawDealsChart(deals, single, base, wi) {
   };
   Plotly.newPlot(el, traces, layout, { responsive: true, displayModeBar: false });
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ACTION RADAR — per-deal trigger map (Deals / Risk)
+ *
+ * Answers "when do I act, and what exactly do I do?" without waiting for the
+ * move: /api/signals/deals scans a spot ladder and returns, per deal, the
+ * levels at which an action switches on plus the fully-costed paired trade.
+ * Everything shown has cleared the economic gate, so it is worth the spread.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+let radarData = null;          // last /api/signals/deals response
+let radarDefaults = null;      // server-side default thresholds
+let radarCfg = null;           // effective (user-tuned) thresholds
+let radarKinds = null;         // Set of enabled signal kinds
+let radarScanning = false;
+
+const RADAR_CFG_KEY = "plgo_radar_cfg";
+
+// Threshold panel layout: [group, [[field, label, step]]]
+const RADAR_FIELD_GROUPS = [
+  ["Recycle — worthless short → fresh short near spot", [
+    ["recycle_decay_pct", "Cost to close &le; % of premium", 1],
+    ["recycle_delta_max", "Max |delta| to call it dead", 0.01],
+    ["recycle_min_dte", "Min days left (else let it expire)", 1],
+    ["reopen_target_delta", "Replacement short |delta|", 0.01],
+    ["recycle_max_risk_ratio", "Max added tail risk per $ (0 = off)", 1],
+  ]],
+  ["Tighten — deep-ITM vertical → narrower width", [
+    ["tighten_itm_pct", "Both strikes ITM by &ge; % of spot", 1],
+    ["tighten_width_keep_pct", "Keep % of original width", 5],
+    ["tighten_min_dte", "Min days left", 1],
+    ["tighten_min_efficiency", "Min benefit per $ spent", 0.5],
+  ]],
+  ["Increase — working deal → add size", [
+    ["increase_unreal_pct", "Unrealised &ge; % of premium", 5],
+    ["increase_size_pct", "Add % of existing qty", 5],
+    ["increase_min_dte", "Min days left", 1],
+  ]],
+  ["Reduce — underwater deal → de-risking re-strike", [
+    ["reduce_loss_pct", "Exit cost &ge; % of premium", 10],
+    ["reduce_size_pct", "Re-strike % of the short", 5],
+    ["reduce_reopen_delta", "Safer strike |delta|", 0.01],
+    ["reduce_min_efficiency", "Min risk cut per $ spent", 0.5],
+  ]],
+  ["Execution economics", [
+    ["bid_ask_atm_pct", "ATM half-spread %", 0.25],
+    ["min_spread_delta", "Delta floor for spread scaling", 0.01],
+    ["min_net_usd", "Min net $ for premium actions", 250],
+  ]],
+  ["Scan &amp; proximity bands", [
+    ["ladder_pct", "Scan spot &plusmn;%", 5],
+    ["ladder_steps", "Ladder points", 10],
+    ["approach_pct", "Approaching within %", 1],
+    ["imminent_pct", "Imminent within %", 1],
+  ]],
+];
+
+const RADAR_KIND_LABEL = {
+  recycle: "Recycle", tighten: "Tighten", increase: "Increase", reduce: "Reduce",
+};
+
+// Signed cash: + is money in, - is money out. fmtUsd alone renders "$-1.2k".
+function radarCash(v) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const s = Number(v) >= 0 ? "+" : "−";
+  return s + fmtUsd(Math.abs(Number(v)));
+}
+function radarSignColor(v, goodWhenPositive = true) {
+  if (!isFinite(v) || v === 0) return "var(--muted)";
+  const good = goodWhenPositive ? v > 0 : v < 0;
+  return good ? "var(--green)" : "var(--red)";
+}
+
+async function radarLoadDefaults() {
+  if (radarDefaults) return radarDefaults;
+  const r = await get("/api/signals/config");
+  radarDefaults = r.config;
+  if (!radarKinds) radarKinds = new Set(r.kinds);
+  return radarDefaults;
+}
+
+function radarLoadCfg() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RADAR_CFG_KEY) || "null");
+    if (saved && saved.config) {
+      radarCfg = { ...radarDefaults, ...saved.config };
+      if (Array.isArray(saved.kinds) && saved.kinds.length) radarKinds = new Set(saved.kinds);
+      return;
+    }
+  } catch {}
+  radarCfg = { ...radarDefaults };
+}
+
+function radarSaveCfg() {
+  try {
+    localStorage.setItem(RADAR_CFG_KEY, JSON.stringify({
+      config: radarCfg, kinds: [...(radarKinds || [])],
+    }));
+  } catch {}
+}
+
+// ── Threshold panel ───────────────────────────────────────────────────────
+function radarRenderThresholds() {
+  const host = document.getElementById("radar-thresholds");
+  if (!host || !radarCfg) return;
+  const kindRow = `
+    <div class="rt-group">Signal kinds to scan</div>
+    <div style="grid-column:1/-1; display:flex; flex-wrap:wrap; gap:.9rem">
+      ${Object.keys(RADAR_KIND_LABEL).map(k => `
+        <label class="toggle-label" style="margin:0">
+          <input type="checkbox" data-radar-kind="${k}" ${radarKinds && radarKinds.has(k) ? "checked" : ""}>
+          ${RADAR_KIND_LABEL[k]}
+        </label>`).join("")}
+    </div>`;
+
+  host.innerHTML = kindRow + RADAR_FIELD_GROUPS.map(([group, fields]) => `
+    <div class="rt-group">${group}</div>
+    ${fields.map(([f, label, step]) => `
+      <label title="${f}">
+        <span>${label}</span>
+        <input type="number" step="${step}" data-radar-field="${f}" value="${radarCfg[f]}">
+      </label>`).join("")}
+  `).join("") + `
+    <div class="radar-actions">
+      <button id="btn-radar-apply" class="btn-primary" style="width:auto">Apply &amp; rescan</button>
+      <button id="btn-radar-reset" class="btn-secondary" style="width:auto">Reset to defaults</button>
+    </div>`;
+
+  host.querySelector("#btn-radar-apply").addEventListener("click", () => {
+    host.querySelectorAll("[data-radar-field]").forEach(inp => {
+      const v = parseFloat(inp.value);
+      if (isFinite(v)) radarCfg[inp.dataset.radarField] = v;
+    });
+    radarKinds = new Set([...host.querySelectorAll("[data-radar-kind]")]
+      .filter(c => c.checked).map(c => c.dataset.radarKind));
+    radarSaveCfg();
+    radarScan();
+  });
+  host.querySelector("#btn-radar-reset").addEventListener("click", () => {
+    radarCfg = { ...radarDefaults };
+    radarKinds = new Set(Object.keys(RADAR_KIND_LABEL));
+    radarSaveCfg();
+    radarRenderThresholds();
+    radarScan();
+  });
+}
+
+// ── Scan ──────────────────────────────────────────────────────────────────
+async function radarScan() {
+  const body = document.getElementById("radar-body");
+  const meta = document.getElementById("radar-meta");
+  if (!body || radarScanning) return;
+  radarScanning = true;
+  body.innerHTML = `<div class="deals-empty">Scanning the book across the spot ladder…</div>`;
+  if (meta) meta.textContent = "";
+
+  try {
+    await radarLoadDefaults();
+    if (!radarCfg) radarLoadCfg();
+    loadOverrides();
+    radarData = await post("/api/signals/deals", {
+      asset: dealAsset(),
+      include_expired: !!document.getElementById("deals-include-expired")?.checked,
+      overrides: dealsOverrides,
+      config: radarCfg,
+      kinds: [...(radarKinds || [])],
+      include_rejected: !!document.getElementById("radar-show-rejected")?.checked,
+    });
+  } catch (e) {
+    body.innerHTML = `<div class="deals-empty">Scan failed: ${e.message}</div>`;
+    radarScanning = false;
+    return;
+  }
+  radarScanning = false;
+  radarRender();
+}
+
+function radarRender() {
+  const body = document.getElementById("radar-body");
+  const meta = document.getElementById("radar-meta");
+  if (!body || !radarData) return;
+  const d = radarData;
+
+  if (meta) {
+    meta.textContent = `${d.deals_scanned} deal${d.deals_scanned === 1 ? "" : "s"} scanned · `
+      + `spot ${fmtStrike(d.spot)} · ladder ±${d.config.ladder_pct}%`;
+  }
+  if (d.warning) {
+    body.innerHTML = `<div class="deals-empty">${d.warning}</div>`;
+    return;
+  }
+
+  const sigs = d.signals || [];
+  const c = d.counts || {};
+  const nRejected = sigs.filter(s => !s.package.passes_gate).length;
+
+  const pills = `
+    <div class="radar-summary">
+      <span class="radar-pill live"><b>${c.live || 0}</b> live now</span>
+      <span class="radar-pill imminent"><b>${c.imminent || 0}</b> imminent (&le;${d.config.imminent_pct}%)</span>
+      <span class="radar-pill approaching"><b>${c.approaching || 0}</b> approaching (&le;${d.config.approach_pct}%)</span>
+      <span class="radar-pill"><b>${c.watch || 0}</b> further out</span>
+      ${nRejected ? `<span class="radar-pill"><b>${nRejected}</b> rejected by gate</span>` : ""}
+    </div>`;
+
+  if (!sigs.length) {
+    body.innerHTML = pills + `<div class="deals-empty">
+      Nothing actionable across &plusmn;${d.config.ladder_pct}% of spot. No deal is decayed enough to
+      recycle, pinned deep enough ITM to tighten, or stressed enough to reduce — and no add clears
+      the ${fmtUsd(d.config.min_net_usd)} net-premium floor. Widen the ladder or loosen the
+      thresholds to see near-misses.</div>`;
+    return;
+  }
+
+  body.innerHTML = pills + radarLadderHtml(sigs, d) + radarTableHtml(sigs);
+
+  body.querySelectorAll("[data-sig-deal]").forEach(el => {
+    el.addEventListener("click", () => radarFocusDeal(el.dataset.sigDeal));
+  });
+}
+
+// Trigger levels stacked around spot — the "when" at a glance.
+function radarLadderHtml(sigs, d) {
+  const pending = sigs.filter(s => s.trigger_spot !== null && s.package.passes_gate);
+  if (!pending.length) return "";
+  const ups = pending.filter(s => s.direction === "up").sort((a, b) => b.trigger_spot - a.trigger_spot);
+  const downs = pending.filter(s => s.direction === "down").sort((a, b) => b.trigger_spot - a.trigger_spot);
+
+  const rung = (s) => `
+    <div class="radar-rung ${s.direction}" data-sig-deal="${s.deal_id}"
+         title="${String(s.package.rationale).replace(/"/g, "&quot;")}">
+      <span class="rr-level">${s.direction === "up" ? "▲" : "▼"} ${fmtStrike(s.trigger_spot)}</span>
+      <span class="rr-dist">${s.distance_pct}%</span>
+      <span>
+        <span class="radar-kind ${s.kind}">${s.kind}</span>
+        <span style="margin-left:.4rem">${s.counterparty} · ${s.subject}</span>
+      </span>
+      <span class="rr-num" style="color:${radarSignColor(s.package.net_cash)}">${radarCash(s.package.net_cash)}</span>
+    </div>`;
+
+  return `<div class="radar-ladder">
+    ${ups.map(rung).join("")}
+    <div class="radar-spot">
+      <span class="rs-label">${fmtStrike(d.spot)}</span>
+      <span style="font-weight:400;color:var(--muted);font-size:.76rem">spot now — ${d.asset}</span>
+    </div>
+    ${downs.map(rung).join("")}
+  </div>`;
+}
+
+function radarTableHtml(sigs) {
+  const legLine = (pkg) => {
+    const parts = [];
+    pkg.close.forEach(l => parts.push(
+      `<span class="lg-close">CLOSE</span> ${l.qty}× ${l.side} ${l.opt} ${fmtStrike(l.strike)} ${l.expiry} @ ${fmtUsd(l.price)}`));
+    pkg.open.forEach(l => parts.push(
+      `<span class="lg-open">OPEN</span> ${l.qty}× ${l.side} ${l.opt} ${fmtStrike(l.strike)} ${l.expiry} @ ${fmtUsd(l.price)} (${l.iv_pct}% IV)`));
+    return parts.join("<br>");
+  };
+
+  const row = (s) => {
+    const p = s.package;
+    const when = s.trigger_spot === null
+      ? `<b>now</b>`
+      : `${s.direction === "up" ? "▲" : "▼"} ${fmtStrike(s.trigger_spot)}<br><span class="rr-dist">${s.distance_pct}% away</span>`;
+    return `
+      <tr class="sig-row ${p.passes_gate ? "" : "sig-rejected"}" data-sig-deal="${s.deal_id}">
+        <td><span class="radar-state ${s.state}">${p.passes_gate ? s.state : "rejected"}</span></td>
+        <td>${when}</td>
+        <td><span class="radar-kind ${p.passes_gate ? s.kind : "rejected"}">${s.kind}</span></td>
+        <td>
+          <div><b>${s.counterparty}</b> · ${s.strategy || "—"} <span style="color:var(--muted)">exp ${s.expiry} (${s.days_to_expiry}d)</span></div>
+          <div class="radar-legs">${legLine(p)}</div>
+          <div class="radar-why">${p.rationale}${p.passes_gate ? "" : ` — <b>rejected:</b> ${p.gate_reason}`}</div>
+        </td>
+        <td class="num" style="color:${radarSignColor(p.net_cash)}">${radarCash(p.net_cash)}
+          <div class="rr-dist">spread ${fmtUsd(p.spread_cost)}</div></td>
+        <td class="num" style="color:${radarSignColor(p.d_margin, false)}">${radarCash(-p.d_margin)}</td>
+        <td class="num" style="color:${radarSignColor(p.d_max_loss)}">${radarCash(p.d_max_loss)}</td>
+        <td class="num">${p.d_prob_profit === null ? "—" :
+            `<span style="color:${radarSignColor(p.d_prob_profit)}">${(p.d_prob_profit * 100).toFixed(1)}pp</span>`}</td>
+      </tr>`;
+  };
+
+  return `<table class="radar-table">
+    <thead><tr>
+      <th>State</th><th>Trigger</th><th>Action</th><th>Deal &amp; paired trade</th>
+      <th style="text-align:right" title="Net cash after bid/ask. + = money in.">Net cash</th>
+      <th style="text-align:right" title="Collateral freed (sum of negative MTM proxy). + = frees margin.">Margin freed</th>
+      <th style="text-align:right" title="Change in worst-case payoff at expiry. + = less downside.">&Delta; max loss</th>
+      <th style="text-align:right" title="Change in probability of profit at the trigger spot.">&Delta; P(profit)</th>
+    </tr></thead>
+    <tbody>${sigs.map(row).join("")}</tbody>
+  </table>`;
+}
+
+// Clicking a signal pulls its deal up in the list below, so the payoff and
+// probability views are one click from the recommendation.
+function radarFocusDeal(dealId) {
+  if (!dealsData || !dealsData.deals.some(d => d.id === dealId)) return;
+  resetDealsFilter();
+  dealsSelectedIds = new Set([dealId]);
+  dealsClosed = new Set();
+  renderDealFilters();
+  renderDealList();
+  renderDealsView();
+  document.getElementById("deals-detail")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── Wiring ────────────────────────────────────────────────────────────────
+function radarWire() {
+  const scan = document.getElementById("btn-radar-scan");
+  if (!scan || scan._wired) return;
+  scan._wired = true;
+  scan.addEventListener("click", () => radarScan());
+  document.getElementById("radar-show-rejected")
+    ?.addEventListener("change", () => { if (radarData) radarScan(); });
+  document.getElementById("btn-radar-thresholds")?.addEventListener("click", async () => {
+    const host = document.getElementById("radar-thresholds");
+    if (!host) return;
+    if (host.style.display !== "none") { host.style.display = "none"; return; }
+    await radarLoadDefaults();
+    if (!radarCfg) radarLoadCfg();
+    radarRenderThresholds();
+    host.style.display = "grid";
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", radarWire);
+} else {
+  radarWire();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ACTION RADAR — brief preview + signal journal
+ *
+ * The brief is previewed here BEFORE it is ever sent to Slack: unproven alerts
+ * arriving in a channel is the fastest way to learn to ignore that channel.
+ * The journal is the record the thresholds get tuned against — and marking one
+ * "executed" is what anchors a deal's last-action spot, so advice for it stops
+ * repeating.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+const RADAR_TOKEN_KEY = "plgo_signals_token";
+
+// SIGNALS_TOKEN guards the delivery endpoints (a Cloud Run URL is public, and
+// nobody wants a stranger able to make the desk channel say things). Empty on
+// the server = no check, so this only ever prompts if the token is actually set.
+function radarToken() {
+  try { return localStorage.getItem(RADAR_TOKEN_KEY) || ""; } catch { return ""; }
+}
+async function radarPostAuthed(path, body) {
+  const send = (tok) => fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(tok ? { "X-Signals-Token": tok } : {}) },
+    body: JSON.stringify(body),
+  });
+  let res = await send(radarToken());
+  if (res.status === 401) {
+    const tok = prompt("This server requires a signals token (SIGNALS_TOKEN) to deliver to Slack:");
+    if (!tok) throw new Error("Delivery cancelled — no token provided.");
+    try { localStorage.setItem(RADAR_TOKEN_KEY, tok); } catch {}
+    res = await send(tok);
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ── Brief ─────────────────────────────────────────────────────────────────
+let radarBriefData = null;
+
+async function radarLoadBrief(useAi = true) {
+  const host = document.getElementById("radar-brief");
+  if (!host) return;
+  host.innerHTML = `<div class="deals-empty">Building the brief${useAi ? " (asking Claude for the analyst read)" : ""}…</div>`;
+  try {
+    radarBriefData = await post("/api/signals/brief", {
+      assets: [dealAsset()],
+      use_ai: useAi,
+      deliver: false,
+      config: radarCfg || undefined,
+      overrides: dealsOverrides,
+    });
+  } catch (e) {
+    host.innerHTML = `<div class="deals-empty">Brief failed: ${e.message}</div>`;
+    return;
+  }
+  radarRenderBrief();
+}
+
+function radarRenderBrief() {
+  const host = document.getElementById("radar-brief");
+  if (!host || !radarBriefData) return;
+  const d = radarBriefData;
+  const n = d.narrative || {};
+
+  let note;
+  if (n.used_ai) {
+    note = `<div class="radar-ai-note ok">Analyst read by <b>${n.model}</b>. All numbers come from the
+      engine — the model ranks and explains, it never computes.</div>`;
+  } else {
+    note = `<div class="radar-ai-note off">Deterministic brief only — no analyst read
+      (${n.error || "AI disabled"}). The numbers and the trigger ladder are unaffected.</div>`;
+  }
+
+  const slack = d.slack_configured
+    ? `<button id="btn-radar-send" class="btn-primary" style="width:auto">Send to Slack now</button>`
+    : `<span style="color:var(--orange)">SLACK_WEBHOOK_URL not configured — preview only</span>`;
+
+  host.innerHTML = `
+    <div class="radar-panel-head">
+      <b style="color:var(--text)">09:00 brief preview</b>
+      <span>${(d.books || []).map(b => `${b.asset}: ${b.live} live, ${b.pending} pending`).join(" · ")}</span>
+      <span class="rp-spacer"></span>
+      <label class="toggle-label" style="margin:0">
+        <input type="checkbox" id="radar-brief-ai" ${n.used_ai ? "checked" : ""}> Analyst read
+      </label>
+      <button id="btn-radar-brief-refresh" class="btn-secondary" style="width:auto">Rebuild</button>
+      ${slack}
+    </div>
+    ${note}
+    <pre class="radar-brief-text">${(d.text || "").replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]))}</pre>`;
+
+  host.querySelector("#btn-radar-brief-refresh").addEventListener("click", () =>
+    radarLoadBrief(!!document.getElementById("radar-brief-ai")?.checked));
+
+  host.querySelector("#btn-radar-send")?.addEventListener("click", async (ev) => {
+    if (!confirm("Post this brief to the Slack channel now?")) return;
+    const btn = ev.currentTarget;
+    btn.disabled = true; btn.textContent = "Sending…";
+    try {
+      const r = await radarPostAuthed("/api/signals/brief", {
+        assets: [dealAsset()],
+        use_ai: !!document.getElementById("radar-brief-ai")?.checked,
+        deliver: true,
+        config: radarCfg || undefined,
+        overrides: dealsOverrides,
+      });
+      alert(r.delivery?.delivered
+        ? `Sent. ${r.journaled} signal(s) journalled.`
+        : `Not delivered: ${r.delivery?.detail}`);
+    } catch (e) {
+      alert(`Send failed: ${e.message}`);
+    } finally {
+      btn.disabled = false; btn.textContent = "Send to Slack now";
+    }
+  });
+}
+
+// ── Journal ───────────────────────────────────────────────────────────────
+async function radarLoadJournal() {
+  const host = document.getElementById("radar-journal");
+  if (!host) return;
+  host.innerHTML = `<div class="deals-empty">Loading journal…</div>`;
+  let data;
+  try {
+    data = await get(`/api/signals/journal?asset=${encodeURIComponent(dealAsset())}&limit=200`);
+  } catch (e) {
+    host.innerHTML = `<div class="deals-empty">Journal failed: ${e.message}</div>`;
+    return;
+  }
+
+  const rows = data.rows || [];
+  if (!rows.length) {
+    host.innerHTML = `<div class="radar-panel-head"><b style="color:var(--text)">Signal journal</b></div>
+      <div class="deals-empty">Nothing delivered yet. Entries appear once a brief is sent or a
+      proximity alert fires — then marking them executed / dismissed is what tells you whether the
+      thresholds are any good.</div>`;
+    return;
+  }
+
+  const totals = Object.entries(data.totals || {}).map(([k, v]) => `${k}: ${v}`).join(" · ");
+  host.innerHTML = `
+    <div class="radar-panel-head">
+      <b style="color:var(--text)">Signal journal</b>
+      <span>${totals}</span>
+      <span class="rp-spacer"></span>
+      <button id="btn-radar-journal-refresh" class="btn-secondary" style="width:auto">Refresh</button>
+    </div>
+    <table class="radar-table">
+      <thead><tr>
+        <th>Fired</th><th>Via</th><th>Action</th><th>Deal</th>
+        <th style="text-align:right">Spot</th><th style="text-align:right">Net cash</th>
+        <th>Outcome</th>
+      </tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td>${(r.fired_at || "").replace("T", " ").slice(0, 16)}</td>
+          <td>${r.channel}${r.band && r.band !== r.state ? ` · ${r.band}` : ""}</td>
+          <td><span class="radar-kind ${r.kind}">${r.kind}</span></td>
+          <td>${r.counterparty} · ${r.subject}<br>
+              <span class="rr-dist">${r.strategy || ""} exp ${r.expiry || "—"}</span></td>
+          <td class="num">${fmtStrike(r.spot)}</td>
+          <td class="num" style="color:${radarSignColor(r.net_cash)}">${radarCash(r.net_cash)}</td>
+          <td>${r.outcome === "open" ? `
+            <div class="radar-jrn-outcome">
+              <button data-jrn="${r.id}" data-outcome="executed">executed</button>
+              <button data-jrn="${r.id}" data-outcome="dismissed">dismiss</button>
+            </div>` : `
+            <span class="radar-jrn-tag ${r.outcome}">${r.outcome}</span>
+            ${r.outcome_spot ? `<br><span class="rr-dist">@ ${fmtStrike(r.outcome_spot)}</span>` : ""}`}
+          </td>
+        </tr>`).join("")}</tbody>
+    </table>`;
+
+  host.querySelector("#btn-radar-journal-refresh").addEventListener("click", radarLoadJournal);
+  host.querySelectorAll("[data-jrn]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const outcome = btn.dataset.outcome;
+      // "executed" stamps the current spot — that becomes the deal's
+      // last-action anchor, which is what stops the advice repeating.
+      try {
+        await post(`/api/signals/journal/${btn.dataset.jrn}/outcome`, {
+          outcome,
+          spot: outcome === "executed" ? (radarData?.spot ?? dealsData?.spot ?? null) : null,
+        });
+        radarLoadJournal();
+      } catch (e) {
+        alert(`Could not record outcome: ${e.message}`);
+      }
+    });
+  });
+}
+
+// ── Wiring (extends radarWire) ────────────────────────────────────────────
+function radarWirePanels() {
+  const toggle = (id, onOpen) => {
+    const btn = document.getElementById(id);
+    const host = document.getElementById(id.replace("btn-", ""));
+    if (!btn || btn._wired || !host) return;
+    btn._wired = true;
+    btn.addEventListener("click", () => {
+      if (host.style.display !== "none") { host.style.display = "none"; return; }
+      host.style.display = "block";
+      onOpen();
+    });
+  };
+  toggle("btn-radar-brief", () => radarLoadBrief(true));
+  toggle("btn-radar-journal", radarLoadJournal);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", radarWirePanels);
+} else {
+  radarWirePanels();
+}
