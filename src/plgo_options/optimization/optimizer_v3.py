@@ -1422,6 +1422,30 @@ class OptimizerV3(BaseOptimizer):
                 option_smile=option_smile,
                 target_expiry=target_expiry,
             )
+        elif cone_mode and cone_expiries:
+            # Cone mode has no single target_expiry, but the fit still needs
+            # to know which spot-ladder points matter most — falling back to
+            # uniform weighting here (as the legacy ALL-expiries mode does)
+            # was a mistake: it silently swaps the whole fit objective from
+            # "concentrate near the money" to "spread evenly across the
+            # entire ladder, tails included", which turned out to dominate
+            # Cone's divergence from picking the same expiry directly far
+            # more than the strike-band width does. Use the nearest-dated
+            # cone expiry's own smile as the reference density instead — when
+            # the cone resolves to exactly one expiry this makes the fit
+            # weighting identical to picking that expiry directly; for a
+            # true multi-expiry cone it's a single-representative
+            # approximation (nearest = most liquid/informative), not a
+            # cross-expiry blend.
+            _reference_expiry = min(
+                cone_expiries,
+                key=lambda ec: next(s["dte"] for s in self.vol_surface if s["expiry_code"] == ec),
+            )
+            spot_weights = self._risk_neutral_spot_weights(
+                spot_arr=spot_arr,
+                option_smile=option_smile,
+                target_expiry=_reference_expiry,
+            )
         else:
             spot_weights = np.ones_like(spot_arr, dtype=float)
         spot_weights /= np.sum(spot_weights)
