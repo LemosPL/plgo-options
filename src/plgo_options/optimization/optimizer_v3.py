@@ -1164,6 +1164,15 @@ class OptimizerV3(BaseOptimizer):
                  perp_cost_bps: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
+                 # Cone mode: instead of one target_expiry, let the LP reach across
+                 # every listed expiry in [cone_min_dte, cone_max_dte], with each
+                 # expiry's eligible new-candidate strikes scoped to a band that
+                 # widens with sqrt(time-to-expiry) — see the cone_strike_bounds
+                 # computation below. None/None (default) = unchanged single-expiry
+                 # or legacy ALL-expiries behavior via target_expiry above.
+                 cone_min_dte: int | None = None,
+                 cone_max_dte: int | None = None,
+                 cone_width_sigma: float | None = None,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
@@ -1241,7 +1250,47 @@ class OptimizerV3(BaseOptimizer):
         )
         roll_position_ids = {id(p) for p in roll_positions}
 
-        option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
+        # Cone mode: resolve the widened multi-expiry candidate universe. Every
+        # listed expiry with dte in [cone_min_dte, cone_max_dte] becomes eligible,
+        # each with its own new-candidate strike band scaled by that expiry's own
+        # ATM vol: spot * (1 +/- cone_width_sigma * sigma_atm(T) * sqrt(T)). This
+        # only widens the *candidate universe* the LP can pick new legs from — the
+        # target profile curve and the objective's leg valuation (already priced
+        # per-leg via BS to each leg's own maturity, see bs_value_for_position /
+        # _candidate_curve) are unchanged. target_expiry itself is left as given
+        # (None, sent by the frontend for Cone mode) so every downstream use of it
+        # — spread/straddle/iron-condor candidate scoping, RND spot-weighting —
+        # already falls back to its existing "no single-expiry restriction"
+        # behavior with no further changes needed.
+        cone_mode = cone_min_dte is not None and cone_max_dte is not None
+        cone_expiries: list[str] = []
+        cone_strike_bounds: dict[str, tuple[float, float]] = {}
+        if cone_mode:
+            _cone_width = cone_width_sigma if cone_width_sigma is not None else 1.5
+            _cone_smile = self._build_option_smile()
+            for smile in self.vol_surface:
+                dte = smile.get("dte", 0)
+                if dte <= 0 or not (cone_min_dte <= dte <= cone_max_dte):
+                    continue
+                expiry_code = smile["expiry_code"]
+                cone_expiries.append(expiry_code)
+                if _cone_smile is None:
+                    continue
+                expiry_dt = datetime.strptime(smile["expiry_date"], "%Y-%m-%d")
+                sigma_atm = _cone_smile.compute_vol(expiry_dt, self.spot)
+                T = dte / 365.25
+                half_width = _cone_width * float(sigma_atm) * math.sqrt(T)
+                cone_strike_bounds[expiry_code] = (
+                    self.spot * max(1.0 - half_width, 0.01),
+                    self.spot * (1.0 + half_width),
+                )
+            if not cone_expiries:
+                return {"status": "no_smile", "message": "No expiries with a live smile fall inside the Cone's DTE range."}
+
+        option_legs = self._build_candidates(
+            target_expiry=target_expiry, include_itm=False, counterparties=counterparties,
+            target_expiries=cone_expiries or None, cone_strike_bounds=cone_strike_bounds or None,
+        )
         # Spreads are built from target_expiry vanilla legs only (before unwind injection),
         # so they're always new positions (existing_qty=0, unwind_only=False via getattr defaults).
         # SpreadCandidate is frozen so we concatenate after the existing_qty stamp loop below.
@@ -1907,6 +1956,8 @@ class OptimizerV3(BaseOptimizer):
             "message": message,
             "asset": self.asset,
             "target_expiry": target_expiry,
+            "cone_expiries": cone_expiries if cone_mode else None,
+            "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             "optimizer_converged": True,
             "spot": round(float(self.spot), 2),
             "cash_shift": round(float(cash_shift), 2),

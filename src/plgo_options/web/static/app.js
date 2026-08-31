@@ -8957,7 +8957,7 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
     // Populate expiry dropdown from vol surface
     const $expiry = document.getElementById("optv2-target-expiry");
-    $expiry.innerHTML = '<option value="">Select maturity…</option>';
+    $expiry.innerHTML = '<option value="">Select maturity…</option><option value="__CONE__">Cone (multi-expiry)</option>';
     if (optv2Data.vol_surface) {
       const smiles = optv2Data.vol_surface
         .filter(s => s.dte > 0)
@@ -8968,6 +8968,13 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
         opt.textContent = `${s.expiry_code} (${s.dte}d)`;
         $expiry.appendChild(opt);
       });
+      // Seed the Cone DTE bounds with the full available range as a sane default.
+      if (smiles.length) {
+        const $min = document.getElementById("optv2-cone-min-dte");
+        const $max = document.getElementById("optv2-cone-max-dte");
+        if ($min && !$min.value) $min.value = smiles[0].dte;
+        if ($max && !$max.value) $max.value = smiles[smiles.length - 1].dte;
+      }
     }
 
     // A maturity must be chosen before running — Run stays disabled until then.
@@ -9844,7 +9851,7 @@ document.getElementById("btn-optv2-target-delete")?.addEventListener("click", op
 document.getElementById("btn-optv2-target-draw")?.addEventListener("click", optv2ToggleDrawMode);
 document.getElementById("btn-optv2-target-reset")?.addEventListener("click", optv2ResetTarget);
 document.getElementById("btn-optv2-target-apply")?.addEventListener("click", () => {
-  if (!document.getElementById("optv2-target-expiry")?.value) { alert("Choose a target maturity before running."); return; }
+  if (!optv2HasValidTarget()) { alert("Choose a target maturity (or a valid Cone DTE range) before running."); return; }
   document.getElementById("btn-run-optv2")?.click();
 });
 
@@ -9855,26 +9862,44 @@ function optv2FmtSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/* ── Run gating: require a portfolio loaded AND a maturity chosen ──── */
+/* ── Run gating: require a portfolio loaded AND a maturity (or a valid Cone
+   DTE range) chosen ──── */
+function optv2IsConeMode() {
+  return document.getElementById("optv2-target-expiry")?.value === "__CONE__";
+}
+function optv2HasValidTarget() {
+  if (optv2IsConeMode()) {
+    const min = Number(document.getElementById("optv2-cone-min-dte")?.value);
+    const max = Number(document.getElementById("optv2-cone-max-dte")?.value);
+    return Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max > min;
+  }
+  return !!(document.getElementById("optv2-target-expiry")?.value);
+}
 function optv2SyncRunEnabled() {
   const runBtn = document.getElementById("btn-run-optv2");
+  const $coneControls = document.getElementById("optv2-cone-controls");
+  if ($coneControls) $coneControls.style.display = optv2IsConeMode() ? "flex" : "none";
   if (!runBtn) return;
-  const hasExpiry = !!(document.getElementById("optv2-target-expiry")?.value);
+  const hasExpiry = optv2HasValidTarget();
   const loaded = !!optv2Data;
   runBtn.disabled = !(loaded && hasExpiry);
   runBtn.title = (loaded && !hasExpiry)
-    ? "Choose a target maturity before running"
+    ? (optv2IsConeMode() ? "Enter a valid Cone Min/Max DTE range before running" : "Choose a target maturity before running")
     : "";
 }
 document.getElementById("optv2-target-expiry")?.addEventListener("change", optv2SyncRunEnabled);
+document.getElementById("optv2-cone-min-dte")?.addEventListener("input", optv2SyncRunEnabled);
+document.getElementById("optv2-cone-max-dte")?.addEventListener("input", optv2SyncRunEnabled);
 
 /* ── Run Optimizer ──────────────────────────────────────────── */
 document.getElementById("btn-run-optv2").addEventListener("click", async () => {
   console.log("[OPT-FE] btn-run-optv2 clicked");
   const $btn = document.getElementById("btn-run-optv2");
-  // Guard: a maturity must be selected.
-  if (!document.getElementById("optv2-target-expiry")?.value) {
-    alert("Choose a target maturity before running the optimizer.");
+  // Guard: a maturity (or a valid Cone DTE range) must be selected.
+  if (!optv2HasValidTarget()) {
+    alert(optv2IsConeMode()
+      ? "Enter a valid Cone Min/Max DTE range before running the optimizer."
+      : "Choose a target maturity before running the optimizer.");
     return;
   }
   $btn.classList.add("loading");
@@ -9928,7 +9953,12 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       max_cp_loss_usd: maxCpLoss,
       use_collateral_cap: useCollateralCap,
-      target_expiry: document.getElementById("optv2-target-expiry").value || null,
+      // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
+      // The three cone_* fields drive the multi-expiry candidate universe instead.
+      target_expiry: optv2IsConeMode() ? null : (document.getElementById("optv2-target-expiry").value || null),
+      cone_min_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-min-dte")?.value, 10) : null,
+      cone_max_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-max-dte")?.value, 10) : null,
+      cone_width_sigma: optv2IsConeMode() ? parseFloat(document.getElementById("optv2-cone-width-sigma")?.value || "1.5") : null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
@@ -10184,7 +10214,8 @@ function optv2RenderResult(data) {
   document.getElementById("optv2-candidates").textContent = data.candidates_evaluated ?? "—";
   document.getElementById("optv2-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv2-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
-  document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry || "All";
+  document.getElementById("optv2-sum-target-expiry").textContent = data.target_expiry
+    || (data.cone_expiries ? `Cone (${data.cone_expiries.length} expiries)` : "All");
 
   // Cash flow by counterparty — premium paid (outlay) vs. collected across
   // every proposed trade, including forced/DTE rolls. Net far from 0 means
