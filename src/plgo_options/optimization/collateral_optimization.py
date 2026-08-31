@@ -12,6 +12,31 @@ import numpy as np
 # just happen to be partially hedged.
 _BOX_LIKE_DISCOUNT_THRESHOLD = 0.05
 
+# Safety ceiling on any single candidate's own buy/sell quantity, used only
+# when max_qty itself isn't set (see optimize()'s buy_vars/sell_vars upBound
+# below). Without SOME finite individual bound, a genuinely tradeable
+# candidate's variable is upBound=None (infinite) — fine on its own, but if
+# two different candidates happen to touch the same underlying leg (e.g. a
+# naked leg and that same leg embedded in a spread) with a net-zero effect on
+# cost and every other constraint, the LP has a mathematically flat direction
+# along which both variables can scale to infinity together. max_qty's own
+# cap only checks their SIGNED SUM (see leg_groups below), which stays ~0 the
+# whole way up, so it never trips — the solver was free to return an
+# arbitrary huge-but-finite quantity (observed: ~1e14, a wash trade netting
+# to ~0 real risk) instead of a sane, boundable size. 100k is well above any
+# realistic single-candidate trade size on this book (existing positions top
+# out in the tens of thousands of contracts) so it never binds a genuine
+# solution — it only forecloses this degenerate blow-up direction. This is
+# a safety net, not a real business constraint: when max_qty is actually set
+# (recommended), it's the tighter, preferred bound — see new_candidate_qty_bound
+# below. This fallback only matters when max_qty is left unset, and even then
+# it doesn't fix the underlying zero-cost degeneracy between certain candidate
+# pairs (some combination still has no marginal cost/effect in the LP, so the
+# solver will still push to whatever bound is available) — it only keeps the
+# result bounded and economically implausible-looking rather than literally
+# unbounded. Setting max_qty is what actually keeps results sane in practice.
+_UNBOUNDED_CANDIDATE_QTY_SAFETY_CAP = 100_000.0
+
 
 class CollateralOptimization:
     def __init__(self, asset, counterparties):
@@ -89,6 +114,13 @@ class CollateralOptimization:
 
         prob = pulp.LpProblem("CollateralOptimization", pulp.LpMinimize)
 
+        # A genuinely new (not unwind-only, no existing position) candidate's
+        # own individual size still needs SOME finite bound — see
+        # _UNBOUNDED_CANDIDATE_QTY_SAFETY_CAP above for why upBound=None there
+        # is exploitable. max_qty is tighter and preferred when the caller set
+        # one; the safety cap is only the fallback ceiling otherwise.
+        new_candidate_qty_bound = float(max_qty) if max_qty is not None else _UNBOUNDED_CANDIDATE_QTY_SAFETY_CAP
+
         buy_vars = [
             pulp.LpVariable(
                 f"buy_qty_{j}",
@@ -97,7 +129,7 @@ class CollateralOptimization:
                     0.0 if not tradeable[j]                              # below liquidity threshold
                     else 0.0 if (unwind_only[j] and existing_qty[j] >= 0)   # long unwind-only: no new buying
                     else float(-existing_qty[j]) if existing_qty[j] < 0  # short: cover only
-                    else None
+                    else new_candidate_qty_bound
                 ),
                 cat="Continuous",
             )
@@ -111,7 +143,7 @@ class CollateralOptimization:
                     0.0 if not tradeable[j]                              # below liquidity threshold
                     else float(existing_qty[j]) if existing_qty[j] > 0  # long: unwind only
                     else 0.0 if (unwind_only[j] and existing_qty[j] <= 0)  # short unwind-only: no new shorting
-                    else None
+                    else new_candidate_qty_bound
                 ),
                 cat="Continuous",
             )
