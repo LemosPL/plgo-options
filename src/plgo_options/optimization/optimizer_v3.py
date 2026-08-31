@@ -1788,15 +1788,33 @@ class OptimizerV3(BaseOptimizer):
         # there and a box — which needs both at two different strikes — can
         # never form from it.
         if enable_box_neutralizer:
+            # Cone mode: scope the box's own candidate universe to the cone's
+            # expiries (not every listed expiry — target_expiry=None here
+            # would otherwise fall through to _build_candidates' unrestricted
+            # ALL-expiries mode). Strikes are deliberately left unrestricted
+            # (no cone_strike_bounds) — a box needs a wide ~50%-of-spot strike
+            # width by construction, wider than the fit-candidates' band.
             box_candidate_legs = self._build_candidates(
                 target_expiry=target_expiry, include_itm=True, counterparties=counterparties,
+                target_expiries=cone_expiries or None,
             )
+            # _build_box_cash_neutralizer_trades needs ONE concrete expiry (a
+            # box is a same-expiry structure) — target_expiry is None
+            # throughout cone mode (see above), so try each of the cone's
+            # expiries in turn and use the first that actually forms a valid
+            # box for that counterparty's imbalance. Plain/single-expiry mode
+            # keeps trying just the one target_expiry, unchanged.
+            box_expiry_candidates = cone_expiries if cone_mode else [target_expiry]
             for cp, v in _cash_by_counterparty(trades).items():
-                box_legs = self._build_box_cash_neutralizer_trades(
-                    self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
-                    bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
-                    bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
-                )
+                box_legs = []
+                for box_expiry in box_expiry_candidates:
+                    box_legs = self._build_box_cash_neutralizer_trades(
+                        self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, box_expiry,
+                        bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
+                        bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
+                    )
+                    if box_legs:
+                        break
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)
 
