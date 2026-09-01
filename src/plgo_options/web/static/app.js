@@ -10439,6 +10439,10 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const ethSpot = data.eth_spot;
   const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
   const payoff = data[side].payoff_by_horizon;
+  // Cone mode only: per-column (horizon-day) eligible-strike band, evaluated
+  // with the same widening formula the optimizer actually traded on. Absent
+  // for every non-Cone run (and always for v3/v4), so this is a no-op there.
+  const coneBounds = data.cone_matrix_bounds || null;
 
   const $thead = document.getElementById(theadId);
   $thead.innerHTML = "";
@@ -10477,6 +10481,8 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
       td.style.textAlign = "right";
       if (cellVal > 0) td.style.color = "#66bb6a";
       if (cellVal < 0) td.style.color = "#ef5350";
+      const band = coneBounds && coneBounds[String(h)];
+      if (band && s >= band[0] && s <= band[1]) td.classList.add("cone-band-cell");
       tr.appendChild(td);
     });
 

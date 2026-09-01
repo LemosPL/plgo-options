@@ -1535,6 +1535,11 @@ select { margin-bottom: .5rem; }
 #page-optv4 .pf-table tbody tr.row-highlight { background: var(--hover-bg); font-weight: 600; }
 #page-optv3 .pf-table tbody tr.row-highlight td,
 #page-optv4 .pf-table tbody tr.row-highlight td { border-top: 1px solid var(--border); }
+/* Cone mode's P&L Matrix overlay: shades the spot rows that fall inside that
+   column's (horizon-day's) eligible-strike band, so the band visibly widens
+   left-to-right across the table. Only ever applied when a Cone run's
+   response includes cone_matrix_bounds — see optv2RenderCompareMatrix. */
+.pf-table td.cone-band-cell { background: rgba(88, 166, 255, .15); }
 #page-optv3 .pf-table th.num, #page-optv3 .pf-table td.num,
 #page-optv4 .pf-table th.num, #page-optv4 .pf-table td.num {
   text-align: right; font-variant-numeric: tabular-nums;

@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from matplotlib import figure
 from scipy.ndimage import gaussian_filter1d
@@ -1271,6 +1271,7 @@ class OptimizerV3(BaseOptimizer):
         cone_mode = cone_min_dte is not None and cone_max_dte is not None
         cone_expiries: list[str] = []
         cone_strike_bounds: dict[str, tuple[float, float]] = {}
+        cone_matrix_bounds: dict[str, tuple[float, float]] = {}
         if cone_mode:
             _cone_width = cone_width_sigma if cone_width_sigma is not None else 1.5
             _cone_smile = self._build_option_smile()
@@ -1299,6 +1300,27 @@ class OptimizerV3(BaseOptimizer):
                     "No expiries with a live smile fall inside the Cone's DTE range."
                 )
                 return {"status": "no_smile", "message": message}
+
+            # Same widening-band math as cone_strike_bounds above, but evaluated
+            # at each of the Before/After P&L Matrix's own fixed calendar-day
+            # columns (self.chart_horizons) rather than at actual listed
+            # expiries — so the UI can shade, per column, which spot rows fall
+            # inside the Cone's eligible-strike band at that day count and show
+            # the band visibly widening left-to-right across the matrix. Capped
+            # at cone_max_dte: beyond that the optimizer has no candidates at
+            # all, so there's nothing honest to shade.
+            if _cone_smile is not None:
+                for h in self.chart_horizons:
+                    if h < 0 or h > cone_max_dte:
+                        continue
+                    maturity = datetime.combine(self.today + timedelta(days=h), datetime.min.time())
+                    sigma_atm_h = _cone_smile.compute_vol(maturity, self.spot)
+                    T_h = h / 365.25
+                    half_width_h = _cone_width * float(sigma_atm_h) * math.sqrt(T_h)
+                    cone_matrix_bounds[str(h)] = (
+                        self.spot * max(1.0 - half_width_h, 0.01),
+                        self.spot * (1.0 + half_width_h),
+                    )
 
         option_legs = self._build_candidates(
             target_expiry=target_expiry, include_itm=False, counterparties=counterparties,
@@ -2013,6 +2035,11 @@ class OptimizerV3(BaseOptimizer):
             "target_expiry": target_expiry,
             "cone_expiries": cone_expiries if cone_mode else None,
             "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
+            # Same band, evaluated at the P&L Matrix's own calendar-day columns
+            # (self.chart_horizons) rather than at actual expiries — lets the UI
+            # shade which spot rows fall inside the Cone's eligible-strike band
+            # per column. Keyed by horizon day (as a string, JSON object key).
+            "cone_matrix_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_matrix_bounds.items()} if cone_mode else None,
             "optimizer_converged": True,
             "spot": round(float(self.spot), 2),
             "cash_shift": round(float(cash_shift), 2),
