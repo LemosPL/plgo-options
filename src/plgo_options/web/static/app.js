@@ -9959,6 +9959,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       cone_min_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-min-dte")?.value, 10) : null,
       cone_max_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-max-dte")?.value, 10) : null,
       cone_width_sigma: optv2IsConeMode() ? parseFloat(document.getElementById("optv2-cone-width-sigma")?.value || "1.5") : null,
+      cone_quarterly_only: optv2IsConeMode() ? (document.getElementById("optv2-cone-quarterly-only")?.checked ?? true) : null,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,

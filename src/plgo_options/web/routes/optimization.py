@@ -80,6 +80,9 @@ class OptimizationParams(BaseModel):
     cone_min_dte: int | None = None
     cone_max_dte: int | None = None
     cone_width_sigma: float | None = 1.5
+    # Restrict the resolved Cone expiry set to standard exchange quarterlies
+    # (last Friday of Mar/Jun/Sep/Dec) only. True by default.
+    cone_quarterly_only: bool = True
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
@@ -271,6 +274,7 @@ async def run_optimizer(params: OptimizationParams):
         cone_min_dte=params.cone_min_dte,
         cone_max_dte=params.cone_max_dte,
         cone_width_sigma=params.cone_width_sigma,
+        cone_quarterly_only=params.cone_quarterly_only,
         unwind_discount=params.unwind_discount,
         new_position_penalty=params.new_position_penalty,
         roll_dte_threshold=params.roll_dte_threshold,

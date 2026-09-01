@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 
 def _safe_int(v, default: int = 0) -> int:
@@ -39,6 +39,19 @@ def expiry_sort_key(expiry_code: str) -> tuple[int, str]:
         return (expiry_date.toordinal(), expiry_code)
     except ValueError:
         return (10**9, expiry_code)
+
+def is_quarterly_expiry(expiry_date_value: date) -> bool:
+    """True for a standard exchange quarterly expiry: the last Friday of
+    March, June, September, or December — as opposed to a weekly/monthly
+    that just happens to land in one of those months. Listed option
+    expiries are always Fridays already, so "lands in the last 7 days of
+    the month" is equivalent to "last Friday of the month" without needing
+    a separate weekday check.
+    """
+    if expiry_date_value.month not in (3, 6, 9, 12):
+        return False
+    return (expiry_date_value + timedelta(days=7)).month != expiry_date_value.month
+
 
 def get_expiry_code(expiry_str) -> str:
     if isinstance(expiry_str, datetime):

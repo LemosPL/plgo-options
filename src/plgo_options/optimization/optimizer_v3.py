@@ -18,7 +18,7 @@ from .math_utils import bs_vec
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
-from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
+from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code, is_quarterly_expiry
 from .misc_utils import build_parametric_target_profile, load_target_profile_file
 from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 
@@ -1173,6 +1173,12 @@ class OptimizerV3(BaseOptimizer):
                  cone_min_dte: int | None = None,
                  cone_max_dte: int | None = None,
                  cone_width_sigma: float | None = None,
+                 # Cone mode: restrict the resolved expiry set to standard
+                 # exchange quarterlies (last Friday of Mar/Jun/Sep/Dec) only,
+                 # skipping any weekly/monthly that falls inside the DTE
+                 # range. True by default — quarterlies are the standard
+                 # liquid maturities for this kind of multi-expiry structuring.
+                 cone_quarterly_only: bool = True,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
@@ -1272,11 +1278,13 @@ class OptimizerV3(BaseOptimizer):
                 dte = smile.get("dte", 0)
                 if dte <= 0 or not (cone_min_dte <= dte <= cone_max_dte):
                     continue
+                expiry_dt = datetime.strptime(smile["expiry_date"], "%Y-%m-%d")
+                if cone_quarterly_only and not is_quarterly_expiry(expiry_dt.date()):
+                    continue
                 expiry_code = smile["expiry_code"]
                 cone_expiries.append(expiry_code)
                 if _cone_smile is None:
                     continue
-                expiry_dt = datetime.strptime(smile["expiry_date"], "%Y-%m-%d")
                 sigma_atm = _cone_smile.compute_vol(expiry_dt, self.spot)
                 T = dte / 365.25
                 half_width = _cone_width * float(sigma_atm) * math.sqrt(T)
@@ -1285,7 +1293,12 @@ class OptimizerV3(BaseOptimizer):
                     self.spot * (1.0 + half_width),
                 )
             if not cone_expiries:
-                return {"status": "no_smile", "message": "No expiries with a live smile fall inside the Cone's DTE range."}
+                message = (
+                    "No quarterly expiries fall inside the Cone's DTE range."
+                    if cone_quarterly_only else
+                    "No expiries with a live smile fall inside the Cone's DTE range."
+                )
+                return {"status": "no_smile", "message": message}
 
         option_legs = self._build_candidates(
             target_expiry=target_expiry, include_itm=False, counterparties=counterparties,
