@@ -111,6 +111,8 @@ class BaseOptimizer:
         target_expiry: str | None = None,
         include_itm: bool = False,
         counterparties: list[str] | None = None,
+        target_expiries: list[str] | None = None,
+        cone_strike_bounds: dict[str, tuple[float, float]] | None = None,
     ) -> list[Candidate]:
         selected_counterparties = {
             c.strip()
@@ -123,9 +125,18 @@ class BaseOptimizer:
         ----------
         target_expiry : optional expiry code to restrict to (e.g. "29MAY26").
                         If None, uses ALL available expiries.
+        target_expiries : optional set of expiry codes to restrict to (Cone mode) —
+                        takes priority over `target_expiry` when given. Unlike the
+                        legacy ALL-expiries fallback below, every listed expiry in
+                        the set is included regardless of whether we already hold a
+                        position there.
+        cone_strike_bounds : optional {expiry_code: (lo, hi)} strike window used in
+                        place of the global 0.25x-4x-spot filter for that expiry
+                        (Cone mode's per-expiry, time-scaled eligible-strike band).
         """
         S = self.spot
         candidates = []
+        cone_mode = bool(target_expiries)
 
         # Build a lookup of currently held option positions so that in ALL-maturities
         # mode we only consider instruments we already have a position in.
@@ -141,10 +152,14 @@ class BaseOptimizer:
 
         # Filter smiles
         matching_smiles = []
+        target_expiries_set = set(target_expiries or [])
         for smile in self.vol_surface:
             if smile["dte"] <= 0:
                 continue
-            if target_expiry:
+            if cone_mode:
+                if smile["expiry_code"] in target_expiries_set:
+                    matching_smiles.append(smile)
+            elif target_expiry:
                 if smile["expiry_code"] == target_expiry:
                     matching_smiles.append(smile)
             else:
@@ -185,8 +200,17 @@ class BaseOptimizer:
             strikes = smile["strikes"]
             ivs = smile["ivs"]
 
+            # Cone mode: this expiry's own time-scaled eligible-strike band takes
+            # over from the global 0.25x-4x-spot filter, so new candidates for a
+            # far-dated expiry aren't limited to the same narrow window as a
+            # near-dated one.
+            exp_strike_lo, exp_strike_hi = (
+                cone_strike_bounds.get(expiry_code, (strike_lo, strike_hi))
+                if cone_strike_bounds else (strike_lo, strike_hi)
+            )
+
             for strike, iv_pct in zip(strikes, ivs):
-                if strike < strike_lo or strike > strike_hi:
+                if strike < exp_strike_lo or strike > exp_strike_hi:
                     continue
                 sigma = iv_pct / 100.0
                 if sigma <= 0 or strike <= 0:
@@ -194,9 +218,9 @@ class BaseOptimizer:
 
                 for opt in ("C", "P"):
                     if not include_itm:
-                        if opt == "C" and (strike < S or strike > strike_hi):
+                        if opt == "C" and (strike < S or strike > exp_strike_hi):
                             continue
-                        elif opt == "P" and (strike > S or strike < strike_lo):
+                        elif opt == "P" and (strike > S or strike < exp_strike_lo):
                             continue
 
                     for counterparty in counterparties:
@@ -217,7 +241,7 @@ class BaseOptimizer:
             while tt < len(held_keys_by_expiry.keys()) and list(held_keys_by_expiry.keys())[tt] <= expiry:
                 held_option_keys = list(held_keys_by_expiry.values())[tt]
                 for option_key in held_option_keys:
-                    if option_key[0] == expiry_code or (tt < 1 and target_expiry is None):
+                    if option_key[0] == expiry_code or (tt < 1 and target_expiry is None and not cone_mode):
                         exp_code = option_key[0]
                         expiry = datetime.strptime(exp_code, "%d%b%y")
                         strike = option_key[1]

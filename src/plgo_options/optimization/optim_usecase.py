@@ -79,6 +79,17 @@ class OptimizerRunParams:
     lam_factor: float = 0.2
     mu_factor: float = 0.0
     target_expiry: str | None = "31JUL26"
+    # Cone mode (Optimizer v2 only): when both are set, target_expiry above is
+    # ignored/sent as None and the LP instead draws new candidates from every
+    # listed expiry with dte in [cone_min_dte, cone_max_dte], each scoped to a
+    # strike band that widens with that expiry's own ATM vol * sqrt(T). See
+    # optimizer_v3.run_lp. None/None (default) = unchanged single-expiry behavior.
+    cone_min_dte: int | None = None
+    cone_max_dte: int | None = None
+    cone_width_sigma: float | None = None
+    # Cone mode: restrict the resolved expiry set to standard exchange
+    # quarterlies (last Friday of Mar/Jun/Sep/Dec) only. True by default.
+    cone_quarterly_only: bool = True
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None

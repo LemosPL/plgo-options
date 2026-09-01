@@ -1572,8 +1572,28 @@
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
             <option value="">Select maturity…</option>
+            <option value="__CONE__">Cone (multi-expiry)</option>
           </select>
         </label>
+        <span id="optv2-cone-controls" style="display:none;gap:.75rem;align-items:flex-end">
+          <label class="pf-filter-label">Cone Min DTE
+            <input type="number" id="optv2-cone-min-dte" step="1" min="0" style="width:5.5rem"
+              title="Nearest days-to-expiry included in the Cone. Every listed expiry with a live smile between Min and Max DTE becomes eligible for new trades.">
+          </label>
+          <label class="pf-filter-label">Cone Max DTE
+            <input type="number" id="optv2-cone-max-dte" step="1" min="0" style="width:5.5rem"
+              title="Furthest days-to-expiry included in the Cone.">
+          </label>
+          <label class="pf-filter-label">Cone Width (σ)
+            <input type="number" id="optv2-cone-width-sigma" value="1.5" step="0.25" min="0" style="width:5rem"
+              title="How wide the eligible-strike band is around spot for each expiry in the Cone, in standard deviations of THAT expiry's own ATM implied vol scaled by √(time-to-expiry): spot × (1 ± σ × IV_ATM × √T). A near-dated expiry gets a tight band; a far-dated one widens naturally with its own vol and time.">
+          </label>
+          <label class="toggle-label" style="margin:0"
+            title="Only include standard exchange quarterly expiries (last Friday of Mar/Jun/Sep/Dec) within the DTE range — skips any weekly/monthly that falls inside it. On by default: quarterlies are the standard liquid maturities for this kind of multi-expiry structuring.">
+            <input type="checkbox" id="optv2-cone-quarterly-only" checked>
+            Quarterly Expiries Only
+          </label>
+        </span>
         <label class="pf-filter-label">Custom Spot
           <input type="number" id="optv2-custom-spot" step="1" min="0" style="width:6.5rem"
             title="Run the whole optimization as if spot were this price instead of the live mark — candidate strikes, greeks, the target profile anchor, and the payoff ladder all re-center on it (existing positions are repriced sticky-strike, same as the payoff chart). Useful for anticipating what you'd trade if spot gapped to a given level. Blank = live spot (default, unchanged from before this existed).">

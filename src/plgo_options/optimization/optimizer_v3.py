@@ -18,7 +18,7 @@ from .math_utils import bs_vec
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
-from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code
+from .optimizer_utils import expiry_sort_key, safe_num, get_expiry_code, is_quarterly_expiry
 from .misc_utils import build_parametric_target_profile, load_target_profile_file
 from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 
@@ -1164,6 +1164,21 @@ class OptimizerV3(BaseOptimizer):
                  perp_cost_bps: "dict[str, float] | float | None" = None,
                  min_trade_delta: float = 0.10,
                  target_expiry: str | None = None,
+                 # Cone mode: instead of one target_expiry, let the LP reach across
+                 # every listed expiry in [cone_min_dte, cone_max_dte], with each
+                 # expiry's eligible new-candidate strikes scoped to a band that
+                 # widens with sqrt(time-to-expiry) — see the cone_strike_bounds
+                 # computation below. None/None (default) = unchanged single-expiry
+                 # or legacy ALL-expiries behavior via target_expiry above.
+                 cone_min_dte: int | None = None,
+                 cone_max_dte: int | None = None,
+                 cone_width_sigma: float | None = None,
+                 # Cone mode: restrict the resolved expiry set to standard
+                 # exchange quarterlies (last Friday of Mar/Jun/Sep/Dec) only,
+                 # skipping any weekly/monthly that falls inside the DTE
+                 # range. True by default — quarterlies are the standard
+                 # liquid maturities for this kind of multi-expiry structuring.
+                 cone_quarterly_only: bool = True,
                  unwind_discount: float = 0.2,
                  new_position_penalty: float = 0.04,
                  is_replay: bool = False,
@@ -1241,7 +1256,54 @@ class OptimizerV3(BaseOptimizer):
         )
         roll_position_ids = {id(p) for p in roll_positions}
 
-        option_legs = self._build_candidates(target_expiry=target_expiry, include_itm=False, counterparties=counterparties)
+        # Cone mode: resolve the widened multi-expiry candidate universe. Every
+        # listed expiry with dte in [cone_min_dte, cone_max_dte] becomes eligible,
+        # each with its own new-candidate strike band scaled by that expiry's own
+        # ATM vol: spot * (1 +/- cone_width_sigma * sigma_atm(T) * sqrt(T)). This
+        # only widens the *candidate universe* the LP can pick new legs from — the
+        # target profile curve and the objective's leg valuation (already priced
+        # per-leg via BS to each leg's own maturity, see bs_value_for_position /
+        # _candidate_curve) are unchanged. target_expiry itself is left as given
+        # (None, sent by the frontend for Cone mode) so every downstream use of it
+        # — spread/straddle/iron-condor candidate scoping, RND spot-weighting —
+        # already falls back to its existing "no single-expiry restriction"
+        # behavior with no further changes needed.
+        cone_mode = cone_min_dte is not None and cone_max_dte is not None
+        cone_expiries: list[str] = []
+        cone_strike_bounds: dict[str, tuple[float, float]] = {}
+        if cone_mode:
+            _cone_width = cone_width_sigma if cone_width_sigma is not None else 1.5
+            _cone_smile = self._build_option_smile()
+            for smile in self.vol_surface:
+                dte = smile.get("dte", 0)
+                if dte <= 0 or not (cone_min_dte <= dte <= cone_max_dte):
+                    continue
+                expiry_dt = datetime.strptime(smile["expiry_date"], "%Y-%m-%d")
+                if cone_quarterly_only and not is_quarterly_expiry(expiry_dt.date()):
+                    continue
+                expiry_code = smile["expiry_code"]
+                cone_expiries.append(expiry_code)
+                if _cone_smile is None:
+                    continue
+                sigma_atm = _cone_smile.compute_vol(expiry_dt, self.spot)
+                T = dte / 365.25
+                half_width = _cone_width * float(sigma_atm) * math.sqrt(T)
+                cone_strike_bounds[expiry_code] = (
+                    self.spot * max(1.0 - half_width, 0.01),
+                    self.spot * (1.0 + half_width),
+                )
+            if not cone_expiries:
+                message = (
+                    "No quarterly expiries fall inside the Cone's DTE range."
+                    if cone_quarterly_only else
+                    "No expiries with a live smile fall inside the Cone's DTE range."
+                )
+                return {"status": "no_smile", "message": message}
+
+        option_legs = self._build_candidates(
+            target_expiry=target_expiry, include_itm=False, counterparties=counterparties,
+            target_expiries=cone_expiries or None, cone_strike_bounds=cone_strike_bounds or None,
+        )
         # Spreads are built from target_expiry vanilla legs only (before unwind injection),
         # so they're always new positions (existing_qty=0, unwind_only=False via getattr defaults).
         # SpreadCandidate is frozen so we concatenate after the existing_qty stamp loop below.
@@ -1372,6 +1434,30 @@ class OptimizerV3(BaseOptimizer):
                 spot_arr=spot_arr,
                 option_smile=option_smile,
                 target_expiry=target_expiry,
+            )
+        elif cone_mode and cone_expiries:
+            # Cone mode has no single target_expiry, but the fit still needs
+            # to know which spot-ladder points matter most — falling back to
+            # uniform weighting here (as the legacy ALL-expiries mode does)
+            # was a mistake: it silently swaps the whole fit objective from
+            # "concentrate near the money" to "spread evenly across the
+            # entire ladder, tails included", which turned out to dominate
+            # Cone's divergence from picking the same expiry directly far
+            # more than the strike-band width does. Use the nearest-dated
+            # cone expiry's own smile as the reference density instead — when
+            # the cone resolves to exactly one expiry this makes the fit
+            # weighting identical to picking that expiry directly; for a
+            # true multi-expiry cone it's a single-representative
+            # approximation (nearest = most liquid/informative), not a
+            # cross-expiry blend.
+            _reference_expiry = min(
+                cone_expiries,
+                key=lambda ec: next(s["dte"] for s in self.vol_surface if s["expiry_code"] == ec),
+            )
+            spot_weights = self._risk_neutral_spot_weights(
+                spot_arr=spot_arr,
+                option_smile=option_smile,
+                target_expiry=_reference_expiry,
             )
         else:
             spot_weights = np.ones_like(spot_arr, dtype=float)
@@ -1739,15 +1825,33 @@ class OptimizerV3(BaseOptimizer):
         # there and a box — which needs both at two different strikes — can
         # never form from it.
         if enable_box_neutralizer:
+            # Cone mode: scope the box's own candidate universe to the cone's
+            # expiries (not every listed expiry — target_expiry=None here
+            # would otherwise fall through to _build_candidates' unrestricted
+            # ALL-expiries mode). Strikes are deliberately left unrestricted
+            # (no cone_strike_bounds) — a box needs a wide ~50%-of-spot strike
+            # width by construction, wider than the fit-candidates' band.
             box_candidate_legs = self._build_candidates(
                 target_expiry=target_expiry, include_itm=True, counterparties=counterparties,
+                target_expiries=cone_expiries or None,
             )
+            # _build_box_cash_neutralizer_trades needs ONE concrete expiry (a
+            # box is a same-expiry structure) — target_expiry is None
+            # throughout cone mode (see above), so try each of the cone's
+            # expiries in turn and use the first that actually forms a valid
+            # box for that counterparty's imbalance. Plain/single-expiry mode
+            # keeps trying just the one target_expiry, unchanged.
+            box_expiry_candidates = cone_expiries if cone_mode else [target_expiry]
             for cp, v in _cash_by_counterparty(trades).items():
-                box_legs = self._build_box_cash_neutralizer_trades(
-                    self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, target_expiry,
-                    bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
-                    bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
-                )
+                box_legs = []
+                for box_expiry in box_expiry_candidates:
+                    box_legs = self._build_box_cash_neutralizer_trades(
+                        self.asset, cp, v["outlay"] - v["collection"], box_candidate_legs, box_expiry,
+                        bid_ask_atm_pct=bid_ask_atm_pct, bid_ask_min_delta=bid_ask_min_delta,
+                        bid_ask_vol_pts=bid_ask_vol_pts, box_fee_bps=box_fee_bps,
+                    )
+                    if box_legs:
+                        break
                 trades.extend(box_legs)
             trades = self._aggregate_trade_legs(trades)
 
@@ -1907,6 +2011,8 @@ class OptimizerV3(BaseOptimizer):
             "message": message,
             "asset": self.asset,
             "target_expiry": target_expiry,
+            "cone_expiries": cone_expiries if cone_mode else None,
+            "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             "optimizer_converged": True,
             "spot": round(float(self.spot), 2),
             "cash_shift": round(float(cash_shift), 2),
