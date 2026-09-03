@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from plgo_options.web.routes.portfolio import portfolio_pnl
 from plgo_options.optimization.optim_usecase import (
@@ -82,7 +83,18 @@ class OptimizationParams(BaseModel):
     cone_width_sigma: float | None = 1.5
     # Restrict the resolved Cone expiry set to standard exchange quarterlies
     # (last Friday of Mar/Jun/Sep/Dec) only. True by default.
-    cone_quarterly_only: bool = True
+    #
+    # Accepts None so a null can't 422 the whole run: the optimizer pages send
+    # every cone_* field as null when cone mode is off, and a plain `bool` here
+    # rejected that, breaking EVERY non-cone run with an opaque validation
+    # error. None is normalised back to the default below rather than passed
+    # through, since the engine treats a falsy value as "include weeklies too".
+    cone_quarterly_only: bool | None = True
+
+    @field_validator("cone_quarterly_only", mode="after")
+    @classmethod
+    def _default_quarterly_only(cls, v: bool | None) -> bool:
+        return True if v is None else v
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
@@ -324,7 +336,17 @@ async def run_optimizer(params: OptimizationParams):
             print(f"Saved usecase snapshot (with result) to {save_path}")
     except Exception as e:
         tb = traceback.format_exc()
-        print(tb)
+        # Print defensively: the optimizer's own messages contain symbols like
+        # "≠" and "σ", and a Windows console is cp1252, so a plain print(tb)
+        # raises UnicodeEncodeError *inside the error handler*. That replaced
+        # the real failure with a bare 500 and no detail at all, making every
+        # local optimizer error unreadable. Encode-and-replace instead so the
+        # traceback always reaches the log, whatever the console encoding.
+        try:
+            print(tb)
+        except UnicodeEncodeError:
+            enc = sys.stdout.encoding or "utf-8"
+            print(tb.encode(enc, "replace").decode(enc, "replace"))
         raise HTTPException(
             status_code=500,
             detail=f"Optimization failed: {e}\n\n{tb}",

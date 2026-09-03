@@ -286,7 +286,17 @@ const CPTY_PRICING = {
 // counterparty exists but we haven't calibrated it for this asset yet.
 function getCptyMethod(cptyKey, asset) {
   if (!cptyKey) return null;
-  const cp = CPTY_PRICING[cptyKey];
+  // Normalize here, not at each call site. CPTY_PRICING's keys are lowercase,
+  // but the counterparty name travels through the app in two cases: dropdown
+  // values / per-leg overrides are already lowercase, while a trade's
+  // `counterparty` is the backend's display-cased "KeyRock" / "Flowdesk". A
+  // raw CPTY_PRICING[cptyKey] lookup silently returns null on the display-cased
+  // form, and every caller treats null as "uncalibrated, use mid vol" — so the
+  // failure mode is a wrong price with no error. That shipped to prod once
+  // (optv4DisplayPriceAtStrike, fixed at its call site in 15cf512); doing it
+  // here means the next caller can't reintroduce it. No-op for the lowercase
+  // callers that were already correct.
+  const cp = CPTY_PRICING[String(cptyKey).trim().toLowerCase()];
   if (!cp) return null;
   const m = cp.byAsset[asset];
   return m ? { name: cp.name, ...m } : { name: cp.name, uncalibrated: true };

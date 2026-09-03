@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import asynccontextmanager
+
+# Force UTF-8 on the process's own log streams before anything can write to
+# them. The optimizer routinely prints diagnostics containing mathematical
+# symbols ("existing_qty≠0", "σ", "Δ"), and on Windows stdout defaults to
+# cp1252 — so a plain print() inside run_lp raised UnicodeEncodeError and took
+# down the entire optimizer request with a bare 500. Log formatting must never
+# be able to fail a run; errors="replace" guarantees it can't. No-op on Cloud
+# Run, which is already UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass  # a stream that refuses reconfiguration is not worth failing over
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
