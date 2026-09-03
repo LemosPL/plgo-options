@@ -2403,7 +2403,21 @@
           <div class="optv3-field optv3-field-full">
             <label for="optv4-target-expiry">Target Maturity</label>
             <select id="optv4-target-expiry"><option value="">Select maturity…</option></select>
-            <p class="optv3-hint">The expiry the optimizer rolls/rebuilds the book into. Required.</p>
+            <p class="optv3-hint">The expiry the optimizer rolls/rebuilds the book into, or <b>Cone</b> for a multi-expiry candidate universe. Required.</p>
+          </div>
+
+          <!-- Cone (multi-expiry) mode — ported from Optimizer v2. Shown only
+               when Target Maturity is set to the "__CONE__" sentinel. -->
+          <div class="optv3-field optv3-field-full" id="optv4-cone-controls" style="display:none">
+            <div style="font-size:.7rem;color:var(--muted);font-weight:600;margin-bottom:.35rem">Cone (multi-expiry)</div>
+            <label for="optv4-cone-min-dte">Cone min DTE <input type="number" id="optv4-cone-min-dte" step="1" min="0"></label>
+            <p class="optv3-hint">Nearest days-to-expiry included in the Cone. Every listed expiry with a live smile between min and max DTE becomes eligible for new trades.</p>
+            <label for="optv4-cone-max-dte">Cone max DTE <input type="number" id="optv4-cone-max-dte" step="1" min="0"></label>
+            <p class="optv3-hint">Furthest days-to-expiry included in the Cone.</p>
+            <label for="optv4-cone-width-sigma">Cone width (σ) <input type="number" id="optv4-cone-width-sigma" value="1.5" step="0.25" min="0"></label>
+            <p class="optv3-hint">Width of the eligible-strike band around spot for each expiry in the Cone, in standard deviations of <i>that</i> expiry's own ATM implied vol scaled by √T: spot × (1 ± σ × IV<sub>ATM</sub> × √T). A near-dated expiry gets a tight band; a far-dated one widens naturally with its own vol and time.</p>
+            <label class="optv3-toggle"><input type="checkbox" id="optv4-cone-quarterly-only" checked> Quarterly expiries only</label>
+            <p class="optv3-hint">Only include standard exchange quarterlies (last Friday of Mar/Jun/Sep/Dec) inside the DTE range, skipping any weekly/monthly that falls within it. On by default — quarterlies are the liquid maturities for this kind of multi-expiry structuring.</p>
           </div>
           <div class="optv3-field optv3-field-full">
             <label for="optv4-counterparties">Counterparties</label>
@@ -3375,6 +3389,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=153"></script>
+<script src="/static/app.js?v=154"></script>
 </body>
 </html>

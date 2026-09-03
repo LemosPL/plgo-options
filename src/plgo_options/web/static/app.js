@@ -12186,13 +12186,33 @@ function optv4ActivePositions() {
   return all.filter(p => set.has(Number(p.id)));
 }
 
+// Cone mode is a UI-only sentinel in the maturity dropdown, not a real expiry.
+function optv4IsConeMode() {
+  return document.getElementById("optv4-target-expiry")?.value === "__CONE__";
+}
+function optv4HasValidTarget() {
+  if (optv4IsConeMode()) {
+    const min = Number(document.getElementById("optv4-cone-min-dte")?.value);
+    const max = Number(document.getElementById("optv4-cone-max-dte")?.value);
+    return Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max > min;
+  }
+  return !!(document.getElementById("optv4-target-expiry")?.value);
+}
 function optv4SyncRunEnabled() {
   const runBtn = document.getElementById("btn-run-optv4");
+  const $coneControls = document.getElementById("optv4-cone-controls");
+  if ($coneControls) $coneControls.style.display = optv4IsConeMode() ? "" : "none";
   if (!runBtn) return;
-  const hasExpiry = !!(document.getElementById("optv4-target-expiry")?.value);
+  const hasExpiry = optv4HasValidTarget();
   runBtn.disabled = !(!!optv4Data && hasExpiry);
-  runBtn.title = (optv4Data && !hasExpiry) ? "Choose a target maturity before running" : "";
+  runBtn.title = (optv4Data && !hasExpiry)
+    ? (optv4IsConeMode() ? "Enter a valid Cone min/max DTE range before running"
+                         : "Choose a target maturity before running")
+    : "";
 }
+document.getElementById("optv4-target-expiry")?.addEventListener("change", optv4SyncRunEnabled);
+document.getElementById("optv4-cone-min-dte")?.addEventListener("input", optv4SyncRunEnabled);
+document.getElementById("optv4-cone-max-dte")?.addEventListener("input", optv4SyncRunEnabled);
 
 function optv4RenderBasePill() {
   const el = document.getElementById("optv4-base-pill");
@@ -12236,13 +12256,22 @@ async function optv4Load() {
     optRenderPerpCost("optv4-perpcost-list", optv4Data);
 
     const $expiry = document.getElementById("optv4-target-expiry");
-    $expiry.innerHTML = '<option value="">Select maturity…</option>';
+    $expiry.innerHTML = '<option value="">Select maturity…</option>'
+      + '<option value="__CONE__">Cone (multi-expiry)</option>';
     if (optv4Data.vol_surface) {
-      optv4Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte).forEach(s => {
+      const smiles = optv4Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte);
+      smiles.forEach(s => {
         const o = document.createElement("option");
         o.value = s.expiry_code; o.textContent = `${s.expiry_code} (${s.dte}d)`;
         $expiry.appendChild(o);
       });
+      // Seed the Cone DTE bounds with the full available range as a sane default.
+      if (smiles.length) {
+        const $cmin = document.getElementById("optv4-cone-min-dte");
+        const $cmax = document.getElementById("optv4-cone-max-dte");
+        if ($cmin && !$cmin.value) $cmin.value = smiles[0].dte;
+        if ($cmax && !$cmax.value) $cmax.value = smiles[smiles.length - 1].dte;
+      }
     }
 
     document.getElementById("optv4-kpi-section").style.display = "";
@@ -13064,7 +13093,8 @@ function optv4RenderResult(data) {
   document.getElementById("optv4-candidates").textContent = data.candidates_evaluated ?? "—";
   document.getElementById("optv4-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv4-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
-  document.getElementById("optv4-sum-target-expiry").textContent = data.target_expiry || "All";
+  document.getElementById("optv4-sum-target-expiry").textContent = data.target_expiry
+    || (data.cone_expiries ? `Cone (${data.cone_expiries.length} expiries)` : "All");
   // Per-counterparty transaction cost + after-execution MTM (net of cost) —
   // same figures the v2 screen shows; the pricing itself is applied by the
   // shared engine on every v3 run.
@@ -14370,8 +14400,13 @@ document.getElementById("btn-optv4-target-apply")?.addEventListener("click", () 
 
 document.getElementById("btn-run-optv4")?.addEventListener("click", async () => {
   const $btn = document.getElementById("btn-run-optv4");
-  if (!document.getElementById("optv4-target-expiry")?.value) {
-    alert("Choose a target maturity before running the optimizer."); return;
+  // In Cone mode the dropdown holds a sentinel, so a non-empty value is not
+  // enough — the DTE range has to be valid too.
+  if (!optv4HasValidTarget()) {
+    alert(optv4IsConeMode()
+      ? "Enter a valid Cone min/max DTE range before running the optimizer."
+      : "Choose a target maturity before running the optimizer.");
+    return;
   }
   $btn.classList.add("loading"); $btn.textContent = "Running…"; $btn.disabled = true;
   try {
@@ -14426,7 +14461,15 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       atm_concentration: parseFloat(document.getElementById("optv4-atm-concentration")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv4-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv4-cash-neutrality-factor")?.value || "0"),
-      target_expiry: document.getElementById("optv4-target-expiry").value || null,
+      // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
+      // The four cone_* fields drive the multi-expiry candidate universe instead;
+      // the engine treats cone as active only when BOTH min and max DTE are set
+      // (optimizer_v3: cone_mode = cone_min_dte is not None and cone_max_dte is not None).
+      target_expiry: optv4IsConeMode() ? null : (document.getElementById("optv4-target-expiry").value || null),
+      cone_min_dte: optv4IsConeMode() ? parseInt(document.getElementById("optv4-cone-min-dte")?.value, 10) : null,
+      cone_max_dte: optv4IsConeMode() ? parseInt(document.getElementById("optv4-cone-max-dte")?.value, 10) : null,
+      cone_width_sigma: optv4IsConeMode() ? parseFloat(document.getElementById("optv4-cone-width-sigma")?.value || "1.5") : null,
+      cone_quarterly_only: optv4IsConeMode() ? (document.getElementById("optv4-cone-quarterly-only")?.checked ?? true) : null,
       unwind_discount: parseFloat(document.getElementById("optv4-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv4-new-position-penalty")?.value || "0.04"),
       roll_dte_threshold: rollThresholdParam,
