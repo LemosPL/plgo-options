@@ -12118,13 +12118,17 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      // v3 IS FROZEN on its pre-2026-08-05 behaviour so its runs stay comparable
-      // with what production has been producing. Pinned rather than read from a
-      // control: the server default is now true, so omitting it would silently
-      // opt v3 into composite unwinding (and the box cost floor that rides along
-      // with it). Use Optimizer v4 for the new behaviour.
-      enable_composite_unwind: false,
-      composite_overrides: null,
+      // v3 is pinned to pre-2026-08-05 composite UNWIND behaviour so its runs stay
+      // comparable with what production has been producing: pinned rather than read
+      // from a control, because the server default is now true and omitting it would
+      // silently opt v3 into composite unwinding (and the box cost floor that rides
+      // along with it). Use Optimizer v4 for the new behaviour.
+      // NOTE: composite_overrides is deliberately NOT pinned. A `composite_overrides:
+      // null` line used to sit here above the real assignment, which read as if the
+      // overrides were frozen too - but a repeated key in a JS object literal keeps
+      // the LAST one, so the live overrides always won and the null was dead code.
+      // Removed rather than honoured: v3 has been sending the trader's Deals-screen
+      // grouping all along, and freezing it now would change v3's actual output.
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
@@ -13091,6 +13095,49 @@ function optv4RenderResult(data) {
   } else {
     $cashBody.innerHTML = "";
     if ($cashEmpty) $cashEmpty.style.display = "";
+  }
+
+  // Worst-case stress P&L by counterparty. Ported from optv2RenderResult: the
+  // engine returns cp_worst_case_stress / cp_worst_case_net on EVERY run
+  // (independent of use_collateral_cap, which only decides whether that floor
+  // also constrains the LP), so v4 was receiving this and discarding it.
+  //
+  // Independent of the fleet-wide fit shown above: a counterparty can be left
+  // with a large standalone loss here even when the aggregate summary looks
+  // fine, if another counterparty's gain nets it out — which that counterparty
+  // cannot see and would not accept. cp_worst_case_net is a separate metric on
+  // the same book, netted against haircut-adjusted posted collateral at the
+  // same stress spot and framed as cushion remaining; it exists only for
+  // counterparties with collateral data and can peak at a different spot than
+  // the P&L-only worst case.
+  const $stressBody = document.getElementById("optv4-cp-stress-tbody");
+  const $stressEmpty = document.getElementById("optv4-stress-empty");
+  const cpStress = data.cp_worst_case_stress || {};
+  const cpNet = data.cp_worst_case_net || {};
+  if ($stressBody) {
+    const stressCps = Object.keys(cpStress);
+    if (stressCps.length) {
+      if ($stressEmpty) $stressEmpty.style.display = "none";
+      $stressBody.innerHTML = stressCps
+        .sort((a, b) => (cpStress[a].pnl || 0) - (cpStress[b].pnl || 0))  // worst first
+        .map(cp => {
+          const v = cpStress[cp];
+          const pnl = v.pnl || 0;
+          const n = cpNet[cp];
+          const netCells = n
+            ? `<td class="num" style="color:${n.net >= 0 ? "var(--green)" : "var(--red)"}">`
+              + `${n.net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(n.net), 0)}</td>`
+              + `<td class="num">${optv2Fmt(n.spot, optv4Dp())}</td>`
+            : `<td class="num">—</td><td class="num">—</td>`;
+          return `<tr><td>${cp}</td>`
+            + `<td class="num" style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">`
+            + `${pnl >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(pnl), 0)}</td>`
+            + `<td class="num">${optv2Fmt(v.spot, optv4Dp())}</td>${netCells}</tr>`;
+        }).join("");
+    } else {
+      $stressBody.innerHTML = "";
+      if ($stressEmpty) $stressEmpty.style.display = "";
+    }
   }
 
   // Matrix note + before/after matrices (reuse the shared renderer)
@@ -14342,6 +14389,16 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     const maxTradesRaw = document.getElementById("optv4-max-trades")?.value;
     const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
 
+    // Ported from Optimizer v2: v4 descends from v3, which never had these, so
+    // they silently defaulted server-side (max_cp_loss_usd=None,
+    // use_collateral_cap=false, custom_spot=None) and a v2 run with any of them
+    // set could not be reproduced here at all.
+    const maxCpLossRaw = document.getElementById("optv4-max-cp-loss")?.value;
+    const maxCpLoss = maxCpLossRaw === "" || maxCpLossRaw === undefined ? null : parseFloat(maxCpLossRaw);
+    const useCollateralCap = document.getElementById("optv4-use-collateral-cap")?.checked || false;
+    const customSpotRaw = document.getElementById("optv4-custom-spot")?.value;
+    const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
+
     // When there are roll candidates, the tick-to-unwind panel is authoritative:
     // force exactly the ticked set (roll_dte_threshold = -1 → manual mode). With
     // no candidates, fall back to the threshold / ITM-only inputs.
@@ -14378,14 +14435,21 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      // THE difference between v4 and v3. v4 opts into composite unwinding (and
-      // the box cost floor inside it); v3 pins it false. Hardcoded because v4's
-      // UI is a pure copy of v3's, which has no checkbox for it — the pages look
-      // identical and diverge only here. composite_overrides carries the manual
-      // grouping from the Deals screen — without it v4 would enable composite
-      // unwinding but ignore any regrouping a trader did there.
-      enable_composite_unwind: true,
-      composite_overrides: currentCompositeOverrides(),
+      // Ported from Optimizer v2 (v4 descends from v3, which never had these).
+      max_cp_loss_usd: maxCpLoss,
+      use_collateral_cap: useCollateralCap,
+      // Blank = live spot. Set = run the whole optimization (candidates, greeks,
+      // target anchor, payoff ladder) as if spot were this price instead.
+      custom_spot: customSpot,
+      // Composite unwinding was the original v4-vs-v3 difference and used to be
+      // hardcoded true here, with no way to switch it off - so a v4 run could not
+      // be compared against a v2 or v3 one on equal terms. Now a checkbox,
+      // defaulting on, so existing behaviour is unchanged.
+      // composite_overrides carries the manual grouping from the Deals screen;
+      // without it v4 would enable composite unwinding but ignore any regrouping
+      // a trader did there. (It was also duplicated on the next line - a no-op,
+      // since JS object literals silently keep the last of a repeated key.)
+      enable_composite_unwind: document.getElementById("optv4-enable-composite-unwind")?.checked ?? true,
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,

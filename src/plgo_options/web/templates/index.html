@@ -2461,13 +2461,21 @@
             <p class="optv3-hint">Hard per-counterparty cap on gross collateral change (0 = no increase, 0.05 = +5%, -0.1 = force −10%). Clear to disable.</p>
           </div>
           <div class="optv3-field">
-            <label for="optv4-max-qty">Max qty <input type="number" id="optv4-max-qty" value="10000" step="1000" min="0"></label>
+            <label for="optv4-max-qty">Max qty <input type="number" id="optv4-max-qty" value="5000" step="1000" min="0"></label>
             <p class="optv3-hint">Hard cap on any single candidate's size (contracts) — stops the LP proposing unrealistically large single lines. Clear to disable.</p>
           </div>
           <div class="optv3-field">
             <label for="optv4-max-trades">Max trades <input type="number" id="optv4-max-trades" value="15" step="1" min="1"></label>
             <p class="optv3-hint">Cap on Replacement/New line items shown (unwinds &amp; box legs always kept). Top-N by notional after solving. Clear to disable.</p>
           </div>
+          <div class="optv3-field">
+            <label for="optv4-max-cp-loss">Max CP loss ($) <input type="number" id="optv4-max-cp-loss" step="100000" min="0"></label>
+            <p class="optv3-hint">Hard cap: no single counterparty's own book (its non-rolled existing positions plus its own trades from this run) may be worth more than this many dollars less than it is today, at any spot on the stress ladder. The λ/κ profile fit is fleet-wide, so a large loss at one counterparty can be invisible to it when another's gain nets it out — that counterparty only sees its own book and would still object. Blank = no cap (default). Unlike the soft weights, this is a <b>hard</b> constraint: set too tight, the run comes back infeasible rather than just fitting worse.</p>
+          </div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-use-collateral-cap"> Cap to posted collateral</label>
+          <p class="optv3-hint">Also derive each counterparty's loss floor from its actual posted collateral (Collateral tab) — USD/USDC plus this run's own asset only. Native-asset collateral is marked down at the same stress spot as the loss, capturing the case where a counterparty's cushion shrinks in the same move that hurts it. Off (default) = Max CP loss above is the only floor. With both on, the tighter applies at each spot.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-composite-unwind" checked> Unwind whole composites</label>
+          <p class="optv3-hint">When a counterparty's legs form a multi-leg deal (spread, straddle, risk reversal, condor…), force the LP to unwind the whole deal together and proportionally, priced off the deal's net vega, instead of cherry-picking legs. This is the setting that originally distinguished v4 from v3; uncheck it to reproduce a v3-style run.</p>
         </div>
 
         <!-- Rolls -->
@@ -2482,8 +2490,8 @@
             <p class="optv3-hint" style="margin:0 0 .45rem">Roll each counterparty's trades with DTE ≤ its value; the ticked candidates below are exactly what the optimizer rolls. Clear a counterparty to exclude it.</p>
             <div id="optv4-dte-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
           </div>
-          <label class="optv3-toggle"><input type="checkbox" id="optv4-roll-itm-only" checked> ITM-only rolls</label>
-          <p class="optv3-hint">When rolling, only touch in-the-money positions.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-roll-itm-only"> ITM-only rolls</label>
+          <p class="optv3-hint">When rolling, only touch in-the-money positions. Off by default, matching Optimizer v2 — this flag changes <i>which positions are unwound at all</i>, so the LP starts from a different book and the whole result set shifts.</p>
         </div>
 
         <!-- Transaction cost (VOL pts, per counterparty) -->
@@ -2519,9 +2527,13 @@
           <div class="optv3-group-title">Output</div>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
-          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
-          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
+          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
           <div class="optv3-field"><label>Delta band<input type="number" id="optv4-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
+          <div class="optv3-field">
+            <label for="optv4-custom-spot">Custom spot <input type="number" id="optv4-custom-spot" step="1" min="0" style="width:6.5rem"></label>
+            <p class="optv3-hint">Run the whole optimization as if spot were this price instead of the live mark — candidate strikes, greeks, the target-profile anchor and the payoff ladder all re-center on it (existing positions repriced sticky-strike). Useful for deciding what you'd trade if spot gapped. Blank = live spot.</p>
+          </div>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-save-usecase"> Save run snapshot</label>
           <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
         </div>
@@ -2595,6 +2607,7 @@
             <button class="sub-tab-btn" data-subtab="optv4-profile">Target Profile</button>
             <button class="sub-tab-btn" data-subtab="optv4-structures">Structures</button>
             <button class="sub-tab-btn" data-subtab="optv4-cash">Cash Flow</button>
+            <button class="sub-tab-btn" data-subtab="optv4-stress">CP Stress</button>
           </div>
 
           <!-- Positions (current book — the loaded risk profile) -->
@@ -2857,6 +2870,38 @@
               </table>
             </div>
             <div id="optv4-cash-empty" class="optv3-empty">Run the optimizer to see cash flow.</div>
+          </div>
+
+          <!-- CP Stress — the server returns cp_worst_case_stress / cp_worst_case_net
+               on every run regardless of the collateral flag; v4 used to receive
+               this and throw it away. Ported from Optimizer v2. -->
+          <div id="subtab-optv4-stress" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Worst-Case Stress P&amp;L by Counterparty</h3>
+            <p class="optv3-hint" style="margin:0 0 .6rem">
+              Per-counterparty view of the same stress ladder used elsewhere: each counterparty's own book
+              (existing non-rolled positions + its own trades from this run) at the worst spot <i>for it</i>,
+              relative to today. A large loss here can be masked in the fleet-wide summary by an offsetting
+              gain at another counterparty — which that counterparty cannot see and would not accept.
+              &ldquo;Min collateral headroom&rdquo; is the cushion left (P&amp;L + haircut-adjusted posted
+              collateral) at that counterparty's single worst point; because native-asset collateral moves
+              with the stress, its worst point can differ from the P&amp;L-only one.
+              Big/green = comfortable, small or negative/red = at risk.
+            </p>
+            <div class="chain-wrapper" style="max-height:420px">
+              <table class="pf-table" style="max-width:780px">
+                <thead>
+                  <tr>
+                    <th>Counterparty</th>
+                    <th class="num">Worst P&amp;L ($)</th>
+                    <th class="num">At spot</th>
+                    <th class="num" title="Cushion left (P&L + haircut-adjusted posted collateral) at this counterparty's worst point across the ladder. '--' when no collateral data exists for it.">Min collateral headroom ($)</th>
+                    <th class="num" title="Spot price this headroom figure occurs at — a price level, not a dollar amount.">At spot</th>
+                  </tr>
+                </thead>
+                <tbody id="optv4-cp-stress-tbody"></tbody>
+              </table>
+            </div>
+            <div id="optv4-stress-empty" class="optv3-empty">Run the optimizer to see per-counterparty stress.</div>
           </div>
         </section>
 
@@ -3330,6 +3375,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=152"></script>
+<script src="/static/app.js?v=153"></script>
 </body>
 </html>
