@@ -13816,6 +13816,22 @@ function optv4TargetGrid(spots) {
   return out;
 }
 
+// The x values the editable target actually lives on.
+//
+// Once a manual curve exists it OWNS its x grid, and every editor has to work
+// on those same values rather than re-deriving the fixed step grid. Snapping a
+// manual curve back onto OPTV4_TARGET_STEP re-samples it, and for a shift
+// smaller than one step that is destructive: with FIL's 0.10 step a 0.05 shift
+// had its trough snapped a full step and its shape smeared. Before any manual
+// edit the two are identical (the first edit is read off the step grid), so
+// this changes nothing for the ordinary path.
+function optv4EditGrid(spots) {
+  if (optv4ManualTarget && optv4ManualTarget.length >= 2) {
+    return optv4ManualTarget.map(p => p.x);
+  }
+  return optv4TargetGrid(spots);
+}
+
 // Linear interpolation of a ladder-indexed series at an arbitrary price, with
 // flat extrapolation past either end (same convention as the chart).
 function optv4InterpAt(spots, series, x) {
@@ -13873,7 +13889,7 @@ function optv4RenderProfileTable() {
   if (toolbar) toolbar.style.display = "";
 
   const spots = src.spots, S0 = src.S0;
-  const grid = optv4TargetGrid(spots);
+  const grid = optv4EditGrid(spots);
   const auto = optv4AutoTargetAnchored(src);
   const manualMap = optv4ManualTarget ? new Map(optv4ManualTarget.map(p => [p.x, p.y])) : null;
   // The grid row nearest spot gets the highlight — spot rarely lands exactly on
@@ -14000,12 +14016,12 @@ async function optv4ShiftTarget() {
   if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
   const fromRaw = Number(document.getElementById("optv4-target-from")?.value);
   const toRaw = Number(document.getElementById("optv4-target-to")?.value);
-  const from_spot = fromRaw > 0 ? fromRaw : null;   // null = let the server detect it
+  const from_spot = fromRaw > 0 ? fromRaw : null;   // null = detect from the trough
   const to_spot = toRaw > 0 ? toRaw : (src.S0 || null);
   if (!to_spot) { alert("Enter the spot price to re-center the curve on."); return; }
-  // A monotone curve (the FIL targets are) has no trough to anchor on, so the
-  // server would fall back to the mid of the strike range and shift by a
-  // meaningless ratio. Refuse to guess — the anchor has to come from the user.
+  // A monotone curve (the FIL targets are) has no trough to anchor on, and
+  // guessing one would shift by a meaningless amount. Refuse — the anchor has
+  // to come from the user.
   if (from_spot === null && optv4DetectTargetAnchor(points) === null) {
     alert("This curve has no trough to anchor on (it only rises or only falls), so "
       + "there's nothing to detect the original spot from.\n\nType the spot the curve "
@@ -14022,56 +14038,67 @@ async function optv4ShiftTarget() {
   const mode = document.getElementById("optv4-target-shift-mode")?.value || "parallel";
   const scale_payoff = !!document.getElementById("optv4-target-shift-scale-y")?.checked;
   const status = document.getElementById("optv4-target-status");
-  if (status) status.textContent = "Shifting…";
   try {
-    const res = await post("/api/optimization/target-profile/shift", {
-      asset: currentAsset, spot_ladder: src.spots, current_spot: src.S0 || to_spot,
-      points, from_spot, to_spot, mode, scale_payoff,
-    });
-    const payoff = res && res.payoff;
-    if (!Array.isArray(payoff) || payoff.length !== src.spots.length) {
-      throw new Error("Unexpected response from the shift endpoint.");
-    }
-    // Re-anchor to $0 at the current spot. The whole pane (Before/After included)
-    // is P&L-from-today on that basis and the LP fits against it, so the shifted
-    // curve has to land in the same basis to be comparable. A vertical
-    // translation leaves the shape — the thing being moved — untouched, and it
-    // keeps save→reload idempotent, since the loader re-anchors too.
-    const at = payoff[optv2NearestIdx(src.spots, src.S0)] || 0;
-    optv4ManualTarget = optv4TargetGrid(src.spots)
-      .map(s => ({ x: s, y: (optv4InterpAt(src.spots, payoff, s) || 0) - at }))
+    // Done locally and exactly, NOT through /target-profile/shift. A shift is a
+    // RIGID translation along the spot axis: every x moves by the same amount
+    // and every y is carried across verbatim, so inclination, width and depth
+    // come out bit-for-bit unchanged. That is the entire contract.
+    //
+    // The old path ran points -> server -> optimizer ladder -> back onto the
+    // fixed step grid, then subtracted the shifted curve's value at spot from
+    // every point. Three lossy steps applied to a transform that is supposed to
+    // preserve the shape exactly. Measured on a FIL curve shifted 0.70 -> 0.75
+    // (step 0.10, so half a grid cell): the trough landed at 0.80 instead of
+    // 0.75, its depth collapsed from -15.5m to -0.4m, and the whole curve was
+    // translated +14.4m vertically by the re-anchor. Interpolation belongs at
+    // the point of USE - the chart, and the engine's own ladder - never inside
+    // a rigid transform.
+    const anchor = from_spot !== null ? from_spot : optv4DetectTargetAnchor(points);
+    if (!(anchor > 0)) throw new Error("Could not determine the price this curve was drawn around.");
+    const dp = optv4Dp();
+    const delta = to_spot - anchor;
+    const ratio = to_spot / anchor;
+
+    const shifted = points
+      .map(pt => ({
+        x: mode === "parallel" ? pt.x + delta : pt.x * ratio,
+        // scale_payoff is opt-in and is the only thing allowed to touch y.
+        y: (scale_payoff && mode !== "parallel") ? pt.y * ratio : pt.y,
+      }))
+      .filter(pt => Number.isFinite(pt.x) && pt.x > 0 && Number.isFinite(pt.y))
       .sort((a, b) => a.x - b.x);
-    optv4RenderProfileTable();   // re-renders the table + chart, and rewrites the status
-    // Re-point the shape summary at the shifted curve. It normally describes the
-    // curve optv4FetchTargetProfile pulled down, which after a shift is no longer
-    // what's on screen — and where the trough now sits is the whole point here.
+    if (shifted.length < 2) throw new Error("The shift left fewer than 2 valid points.");
+
+    optv4ManualTarget = shifted;
+    optv4RenderProfileTable();   // re-renders table + chart on the shifted x grid
+
+    // Re-point the shape summary at the shifted curve: it otherwise describes
+    // the curve optv4FetchTargetProfile pulled down, and where the trough now
+    // sits is the whole point of doing this.
     const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
       ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
     renderTargetShapeSummary("optv4-target-shape-summary",
       optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
+
     if (status) {
-      const dp = optv4Dp();
-      const ratio = res.ratio ? `×${res.ratio.toFixed(3)}` : "";
-      const delta = (res.to_spot != null && res.from_spot != null) ? (res.to_spot - res.from_spot) : null;
       const how = mode === "parallel"
         ? `moving every point ${delta >= 0 ? "right" : "left"} $${optv2Fmt(Math.abs(delta), dp)}`
-        : `stretching strikes ${ratio}`;
-      const detected = res.anchor_kind && res.anchor_kind !== "given"
-        ? ` (anchor auto-detected: ${res.anchor_kind})` : "";
-      // Flag the flat-extrapolated tail: shifting moves the curve's own grid off
-      // the ladder, so one wing is held at its end value rather than being real.
-      const [lo, hi] = res.shifted_range || [];
+        : `stretching strikes ×${ratio.toFixed(3)}`;
+      const lo = shifted[0].x, hi = shifted[shifted.length - 1].x;
       const spots = src.spots;
-      const gap = (lo != null && lo > spots[0] + 1e-9) ? `below $${optv2Fmt(lo, dp)}`
-        : (hi != null && hi < spots[spots.length - 1] - 1e-9) ? `above $${optv2Fmt(hi, dp)}` : null;
-      status.textContent = `Shifted $${optv2Fmt(res.from_spot, dp)} → $${optv2Fmt(res.to_spot, dp)}`
-        + ` by ${how}${detected}${scale_payoff ? ", payoffs scaled" : ""}.`
-        + (gap ? ` Ladder ${gap} is flat-extrapolated from the curve's end.` : "")
+      const gap = (lo > spots[0] + 1e-9) ? `below $${optv2Fmt(lo, dp)}`
+        : (hi < spots[spots.length - 1] - 1e-9) ? `above $${optv2Fmt(hi, dp)}` : null;
+      status.textContent = `Shifted $${optv2Fmt(anchor, dp)} → $${optv2Fmt(to_spot, dp)}`
+        + ` by ${how}${from_spot === null ? " (anchor auto-detected from the trough)" : ""}`
+        + `${(scale_payoff && mode !== "parallel") ? ", payoffs scaled" : ""}.`
+        + " Shape carried across unchanged."
+        + (gap ? ` The chart holds the ladder ${gap} flat at the curve's end value.` : "")
         + " Review it, then Apply & Re-run — or Save / Update to keep it.";
     }
   } catch (e) {
     if (status) status.textContent = "";
-    alert("Couldn't shift the target curve.\n" + (e.detail || e.message || e));
+    alert("Couldn't shift the target curve.
+" + (e.detail || e.message || e));
   }
 }
 
@@ -14176,7 +14203,9 @@ function optv4SetTargetPointAtSpot(spot, y) {
   const src = optv4ProfileSource();
   if (!src || !src.spots.length) return;
   const spots = src.spots;
-  const grid = optv4TargetGrid(spots);
+  // Must be the manual curve's own grid: rebuilding on the fixed step grid
+  // would silently undo a sub-step shift the moment a point is dragged.
+  const grid = optv4EditGrid(spots);
   const cur = new Map(optv4CurrentTargetPoints().map(p => [p.x, p.y]));
   const auto = optv4AutoTargetAnchored(src);
   const best = optv2NearestIdx(grid, spot);
