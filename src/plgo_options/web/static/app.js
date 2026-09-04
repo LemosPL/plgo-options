@@ -14097,8 +14097,7 @@ async function optv4ShiftTarget() {
     }
   } catch (e) {
     if (status) status.textContent = "";
-    alert("Couldn't shift the target curve.
-" + (e.detail || e.message || e));
+    alert("Couldn't shift the target curve.\n" + (e.detail || e.message || e));
   }
 }
 

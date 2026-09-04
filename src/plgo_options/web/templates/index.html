@@ -7,6 +7,82 @@
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
   <link rel="stylesheet" href="/static/style.css?v=13">
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       Startup error overlay. MUST stay inline and MUST stay above app.js.
+
+       A SyntaxError in app.js means app.js never executes, so nothing inside
+       it can report the failure: the page just comes up dead with a single
+       line in a console nobody has open. That happened, and it cost a
+       debugging session. This handler is registered before app.js parses, so
+       it catches that error and puts it on the screen with file and line.
+       ══════════════════════════════════════════════════════════════════ -->
+  <script>
+  (function () {
+    var shown = false;
+    function show(title, detail) {
+      if (shown) return;            // first error is the useful one
+      shown = true;
+      var box = document.createElement("div");
+      box.setAttribute("data-startup-error", "1");
+      box.style.cssText = [
+        "position:fixed", "inset:0", "z-index:2147483647",
+        "background:rgba(13,17,23,.97)", "color:#e6edf3", "padding:2.5rem",
+        "font:13px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace",
+        "overflow:auto"
+      ].join(";");
+      box.innerHTML =
+        '<div style="max-width:1000px;margin:0 auto">'
+        + '<div style="color:#f85149;font-size:1.15rem;font-weight:700;margin-bottom:.4rem">'
+        + "⚠ " + title + "</div>"
+        + '<div style="color:#8b949e;margin-bottom:1.2rem">The app did not start. '
+        + "Everything below is the actual error — copy it verbatim.</div>"
+        + '<pre style="white-space:pre-wrap;background:#161b22;border:1px solid #30363d;'
+        + 'border-radius:6px;padding:1rem;margin:0">' + detail + "</pre>"
+        + '<div style="color:#8b949e;margin-top:1.2rem">'
+        + "A syntax error here means the whole script failed to load, so no feature works. "
+        + "A hard reload (Ctrl+Shift+R) rules out a stale cached copy."
+        + "</div></div>";
+      (document.body || document.documentElement).appendChild(box);
+    }
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // Script parse/eval failures arrive here, including app.js failing to parse.
+    window.addEventListener("error", function (ev) {
+      var where = ev.filename
+        ? esc(ev.filename.replace(/^.*\/static\//, "static/"))
+            + ":" + ev.lineno + (ev.colno ? ":" + ev.colno : "")
+        : "(unknown location)";
+      var msg = ev.error && ev.error.stack ? ev.error.stack : ev.message;
+      show("JavaScript failed to load", where + "\n\n" + esc(msg));
+    }, true);
+
+    window.addEventListener("unhandledrejection", function (ev) {
+      var r = ev.reason;
+      show("Unhandled promise rejection",
+           esc((r && (r.stack || r.message)) || r));
+    });
+
+    // Belt and braces: a script can also fail without firing "error" (e.g. a
+    // blocked or truncated response). If app.js never defined its API helper,
+    // say so instead of leaving a page that merely looks frozen.
+    window.addEventListener("load", function () {
+      setTimeout(function () {
+        if (typeof window.api !== "function" && !shown) {
+          show("app.js did not initialise",
+               "static/app.js loaded but defined no api() helper.\n\n"
+               + "Usually a syntax error earlier in the file, or the response "
+               + "was truncated. Check the Network tab for app.js and the "
+               + "Console for the first red error.");
+        }
+      }, 1200);
+    });
+  })();
+  </script>
 </head>
 <body>
 
@@ -3389,6 +3465,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=156"></script>
+<script src="/static/app.js?v=157"></script>
 </body>
 </html>
