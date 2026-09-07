@@ -2900,6 +2900,20 @@
                   <span class="opt-sep"></span>
                   <button id="btn-optv4-target-shift" class="btn-secondary" style="width:auto;border-color:#f0883e;color:#f0883e" title="Move the current curve's shape along the strike axis to follow the price move, then review it and Apply &amp; Re-run (or Save / Update) it">↔ Shift curve</button>
                 </div>
+
+                <!-- Vertical translation. Deliberately its own row and its own
+                     button: moving the curve up/down needs no anchor price, so
+                     coupling it to the horizontal shift would demand a "from"
+                     the user has no reason to supply. Compose them by clicking
+                     one then the other. -->
+                <div class="opt-card-row" style="margin-top:.45rem">
+                  <label class="opt-inline" title="Dollars to add to every payoff on the curve. Positive moves the whole curve up, negative moves it down. The shape is untouched — same width, same inclination, same depth relative to itself; only its level against the payoff axis changes. Note the curve will no longer read $0 at spot, which is intended: a vertical offset says 'I want the book worth this much more (or less) at every price'.">up / down $
+                    <input id="optv4-target-shift-dy" type="number" step="100000" placeholder="0" style="width:8rem">
+                  </label>
+                  <span class="opt-card-note" style="color:var(--muted);font-size:.72rem">+ up &nbsp;·&nbsp; − down</span>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-target-shift-y" class="btn-secondary" style="width:auto;border-color:#f0883e;color:#f0883e" title="Move the whole curve up or down by the dollar amount, leaving its shape exactly as drawn, then review it and Apply &amp; Re-run (or Save / Update) it">↕ Shift up / down</button>
+                </div>
               </div>
 
               <!-- 4. Reshape by hand -->
@@ -3465,6 +3479,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=157"></script>
+<script src="/static/app.js?v=158"></script>
 </body>
 </html>

@@ -14101,6 +14101,61 @@ async function optv4ShiftTarget() {
   }
 }
 
+// Vertical counterpart of optv4ShiftTarget: add a constant to every payoff.
+//
+// Kept separate from the horizontal shift because it needs no anchor price —
+// there is nothing to detect and nothing to divide by, so demanding a "from"
+// would be friction for no reason. The two compose: shift sideways, then up.
+//
+// Same contract as the horizontal shift, on the other axis: x is untouched and
+// every y moves by exactly the same amount, so width, inclination and depth
+// relative to itself are unchanged. Only the curve's level moves.
+function optv4ShiftTargetY() {
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) { alert("Load the risk profile first."); return; }
+  const points = optv4CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+
+  const raw = Number(document.getElementById("optv4-target-shift-dy")?.value);
+  const dy = Number.isFinite(raw) ? raw : 0;
+  if (!dy) {
+    alert("Enter the dollar amount to move the curve by — positive to move it "
+      + "up, negative to move it down.");
+    document.getElementById("optv4-target-shift-dy")?.focus();
+    return;
+  }
+
+  const status = document.getElementById("optv4-target-status");
+  try {
+    optv4ManualTarget = points
+      .map(pt => ({ x: pt.x, y: pt.y + dy }))
+      .filter(pt => Number.isFinite(pt.x) && Number.isFinite(pt.y))
+      .sort((a, b) => a.x - b.x);
+    if (optv4ManualTarget.length < 2) throw new Error("The shift left fewer than 2 valid points.");
+
+    optv4RenderProfileTable();
+    const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
+      ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
+    renderTargetShapeSummary("optv4-target-shape-summary",
+      optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
+
+    if (status) {
+      // Flag the consequence rather than silently "fixing" it: the pane is
+      // P&L-from-today, so a curve moved off zero at spot is asking the LP for
+      // a uniformly better (or worse) book, which is a real instruction and
+      // not the same as re-shaping it.
+      const atSpot = optv4InterpAt(src.spots, optv4ManualTargetInterp(src.spots), src.S0);
+      status.textContent = `Moved the curve ${dy >= 0 ? "up" : "down"} `
+        + `$${optv2Fmt(Math.abs(dy), 0)}. Shape unchanged`
+        + (atSpot != null ? `; it now reads $${optv2Fmt(atSpot, 0)} at spot.` : ".")
+        + " Review it, then Apply & Re-run — or Save / Update to keep it.";
+    }
+  } catch (e) {
+    if (status) status.textContent = "";
+    alert("Couldn't move the target curve.\n" + (e.detail || e.message || e));
+  }
+}
+
 function optv4ResetTarget() {
   // Back to the selected profile (or parametric): drop manual edits and reload it.
   optv4ManualTarget = null;
@@ -14376,6 +14431,7 @@ document.getElementById("btn-optv4-target-save")?.addEventListener("click", optv
 document.getElementById("btn-optv4-target-delete")?.addEventListener("click", optv4DeleteTargetProfile);
 document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
 document.getElementById("btn-optv4-target-shift")?.addEventListener("click", optv4ShiftTarget);
+document.getElementById("btn-optv4-target-shift-y")?.addEventListener("click", optv4ShiftTargetY);
 // Re-shape the parametric (auto) preview live as any Target Shape knob changes —
 // mirrors the dropdown's own behavior (discards manual edits, refetches auto).
 // The $ readouts update on every keystroke ("input"); the actual re-fetch (and
