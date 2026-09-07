@@ -9221,6 +9221,45 @@ function optv2MatrixDisplayIdx(spots, targetRows = 14) {
   return [...new Set(idxs)];
 }
 
+/* ── Uniform-% (geometric) matrix rows ─────────────────────────────────────
+   The ladders /pnl serves are LINEAR in dollars — ETH range(500, 7100, 100),
+   FIL 0.20→3.00 by 0.10 — and optv2MatrixDisplayIdx thins them by index, so
+   the rows come out equally spaced in dollars. (A comment near the matrices
+   claimed the ladder was log-moneyness spaced. It never was.)
+
+   Equal dollar steps make the matrix unreadable at the wings: with ETH near
+   2,440 the bottom rows are −80%, −59%, −38% moves while the top rows are
+   +25%, +43% — so most of the table is spent on moves that will never happen
+   and the region that matters gets a couple of rows.
+
+   Constant RATIO steps instead, so every row is the same percentage move and
+   both wings carry equal information. Spans the same domain as before, and
+   the row nearest spot is pinned to spot exactly so the highlighted row is
+   the real mark rather than a level a step away from it.
+
+   Returns PRICE LEVELS, not ladder indices: the levels won't sit on a linear
+   ladder, so callers interpolate the payoff curves onto them. */
+function optvGeometricRows(spots, spot, targetRows = 14) {
+  if (!spots || spots.length < 2) return (spots || []).slice();
+  const lo = Math.max(spots[0], 1e-9);
+  const hi = spots[spots.length - 1];
+  if (!(hi > lo)) return spots.slice();
+
+  const n = Math.max(3, targetRows);
+  const step = Math.log(hi / lo) / (n - 1);
+  const rows = [];
+  for (let i = 0; i < n; i++) rows.push(lo * Math.exp(step * i));
+
+  if (spot > lo && spot < hi) {
+    let best = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if (Math.abs(Math.log(rows[i] / spot)) < Math.abs(Math.log(rows[best] / spot))) best = i;
+    }
+    rows[best] = spot;
+  }
+  return rows;
+}
+
 /* ── Scenario matrix: spot (rows) × horizon (columns) ──────── */
 function optv2RenderMatrix() {
   const spots    = optv2Data.spot_ladder;
@@ -10452,16 +10491,23 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
 
 /* ── Before/After payoff comparison charts ──────────────────── */
 /* ── Before/After P&L matrix ───────────────────────────────── */
-function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
+// opts.geometric — render uniform-% rows (interpolated onto geometric price
+// levels) plus a "% move" column, instead of the equal-dollar ladder rows.
+// Opt-in per call site so v2 and v3 keep their existing tables unchanged;
+// only v4 asks for it. opts.dp sets price decimals (FIL needs 2).
+function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
   const spots = data.spot_ladder;
   const ethSpot = data.eth_spot;
   const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
   const payoff = data[side].payoff_by_horizon;
+  const geometric = !!opts.geometric;
+  const dp = opts.dp != null ? opts.dp : 0;
+  const label = opts.assetLabel || "ETH";
 
   const $thead = document.getElementById(theadId);
   $thead.innerHTML = "";
   const headRow = document.createElement("tr");
-  headRow.innerHTML = "<th>ETH Spot</th>";
+  headRow.innerHTML = `<th>${label} Spot</th>` + (geometric ? "<th>% move</th>" : "");
   horizons.forEach(h => {
     const th = document.createElement("th");
     th.textContent = h === 0 ? "Now" : `${h}d`;
@@ -10472,24 +10518,43 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const $tbody = document.getElementById(tbodyId);
   $tbody.innerHTML = "";
 
-  // Ladder is log-moneyness spaced (dense near ATM, sparse in the wings) and
-  // kept dense for LP fit resolution — thin it to a handful of display rows
-  // here rather than filtering by dollar value.
-  const nearestIdx = optv2NearestIdx(spots, ethSpot);
-  const displayIdx = optv2MatrixDisplayIdx(spots);
-  displayIdx.forEach((si) => {
-    const s = spots[si];
+  // Equal-% rows read evenly on both wings; the equal-dollar ladder does not.
+  // See optvGeometricRows. Levels don't land on the linear ladder, so the
+  // curves are interpolated onto them.
+  const rows = geometric
+    ? optvGeometricRows(spots, ethSpot)
+    : optv2MatrixDisplayIdx(spots).map(si => spots[si]);
+
+  rows.forEach((s) => {
     const tr = document.createElement("tr");
-    if (si === nearestIdx) tr.classList.add("row-highlight");
+    if (Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9)) {
+      tr.classList.add("row-highlight");
+    } else if (!geometric && optv2NearestIdx(spots, ethSpot) === optv2NearestIdx(spots, s)) {
+      tr.classList.add("row-highlight");
+    }
 
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + s.toLocaleString();
+    tdSpot.textContent = "$" + optv2Fmt(s, dp);
     tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
 
+    if (geometric) {
+      const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
+      const tdPct = document.createElement("td");
+      tdPct.textContent = pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+      tdPct.style.textAlign = "right";
+      tdPct.style.color = "var(--muted)";
+      tr.appendChild(tdPct);
+    }
+
     horizons.forEach(h => {
       const curve = payoff[String(h)];
-      const cellVal = (curve && curve[si] !== undefined) ? curve[si] : 0;
+      let cellVal = 0;
+      if (curve) {
+        cellVal = geometric
+          ? (optv4InterpAt(spots, curve, s) || 0)
+          : (curve[optv2NearestIdx(spots, s)] !== undefined ? curve[optv2NearestIdx(spots, s)] : 0);
+      }
       const td = document.createElement("td");
       td.textContent = Math.round(cellVal).toLocaleString();
       td.style.textAlign = "right";
@@ -12900,28 +12965,54 @@ function optv4RenderMatrix() {
   const ethSpot = optv4Data.eth_spot;
   if (!positions.length) return;
 
+  const dp = optv4Dp();
+  const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
+  const rows = optvGeometricRows(spots, ethSpot);
+
   const $thead = document.getElementById("optv4-matrix-thead");
   $thead.innerHTML = "";
   const headRow = document.createElement("tr");
-  headRow.innerHTML = "<th>ETH Spot</th>";
+  headRow.innerHTML = `<th>${label} Spot</th><th>% move</th>`;
   OPTV2_HORIZONS.forEach(h => { const th = document.createElement("th"); th.textContent = h === 0 ? "Now" : `${h}d`; headRow.appendChild(th); });
   $thead.appendChild(headRow);
 
+  // Sum the book once per horizon across the WHOLE ladder, then interpolate
+  // that total onto the display rows. Summing after interpolation would give
+  // the same answer (both are linear) but this is one pass per horizon rather
+  // than one per position per row.
+  const totals = {};
+  OPTV2_HORIZONS.forEach(h => {
+    const hKey = String(h);
+    const tot = new Array(spots.length).fill(0);
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon[hKey];
+      if (!curve) return;
+      for (let i = 0; i < spots.length; i++) tot[i] += (curve[i] || 0);
+    });
+    totals[hKey] = tot;
+  });
+
   const $tbody = document.getElementById("optv4-matrix-tbody");
   $tbody.innerHTML = "";
-  const nearestIdx = optv2NearestIdx(spots, ethSpot);
-  const displayIdx = optv2MatrixDisplayIdx(spots);
-  displayIdx.forEach((si) => {
-    const s = spots[si];
+  rows.forEach((s) => {
     const tr = document.createElement("tr");
-    if (si === nearestIdx) tr.classList.add("row-highlight");
+    if (Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9)) {
+      tr.classList.add("row-highlight");
+    }
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + optv2Fmt(s, optv4Dp()); tdSpot.style.fontWeight = "600";
+    tdSpot.textContent = "$" + optv2Fmt(s, dp); tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
+
+    const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
+    const tdPct = document.createElement("td");
+    tdPct.textContent = pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+    tdPct.style.textAlign = "right";
+    tdPct.style.color = "var(--muted)";
+    tr.appendChild(tdPct);
+
     OPTV2_HORIZONS.forEach(h => {
-      const hKey = String(h);
-      let cellVal = 0;
-      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve && curve[si] !== undefined) cellVal += curve[si]; });
+      const cellVal = optv4InterpAt(spots, totals[String(h)], s) || 0;
       const td = document.createElement("td");
       td.textContent = Math.round(cellVal).toLocaleString(); td.style.textAlign = "right";
       if (cellVal > 0) td.style.color = "#66bb6a";
@@ -13718,7 +13809,12 @@ function optv4RenderAfterMatrix() {
   const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
   $afterPanel.style.display = "";
   $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead", "optv4-matrix-after-main-tbody");
+  // Same uniform-% rows as the "before" matrix above, so the two tables line
+  // up row for row and can be read side by side.
+  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead",
+    "optv4-matrix-after-main-tbody",
+    { geometric: true, dp: optv4Dp(),
+      assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH" });
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
