@@ -1,17 +1,57 @@
-"""Crude JS structural smoke test for app.js.
+"""Syntax check for app.js: a real parse when possible, balance as a fallback.
 
-There is no node/JS runtime in this environment, so this is the cheapest way to
-catch the failure mode a hand edit actually causes: an unclosed block. It strips
-comments, strings and template literals, then checks that braces, parens and
-brackets balance. It is NOT a parser -- balanced delimiters do not prove the file
-is valid JS, only that no block was left hanging.
+The balance check alone is NOT sufficient and has already let a real bug ship:
+a hand edit put a literal newline inside a double-quoted string, which balances
+perfectly but is a hard SyntaxError, so app.js never executed and the whole page
+came up dead with only a console message to show for it.
+
+So: if node is available, run `node --check`, which is an actual parse and the
+only thing that proves the file loads. Balance counting stays as a fallback for
+environments without node, and still usefully localises an unclosed block.
+
+Node is looked up on PATH and then in the usual Windows install locations, since
+it is frequently installed but not exported to a Git Bash PATH.
 
 Run:  .venv\\Scripts\\python.exe scripts/diag_js_balance.py
 """
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 TARGET = Path(__file__).resolve().parents[1] / "src/plgo_options/web/static/app.js"
+
+NODE_CANDIDATES = (
+    r"C:\Program Files\nodejs\node.exe",
+    r"C:\Program Files (x86)\nodejs\node.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Programs\nodejs\node.exe"),
+)
+
+
+def find_node() -> str | None:
+    found = shutil.which("node")
+    if found:
+        return found
+    for cand in NODE_CANDIDATES:
+        if Path(cand).is_file():
+            return cand
+    return None
+
+
+def node_check(node: str, target: Path) -> bool:
+    """True when node parses the file. Prints node's own error if it doesn't."""
+    proc = subprocess.run(
+        [node, "--check", str(target)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    if proc.returncode == 0:
+        print("  node --check   PARSE OK")
+        return True
+    print("  node --check   SYNTAX ERROR")
+    for line in (proc.stderr or proc.stdout or "").splitlines()[:12]:
+        print(f"    {line}")
+    return False
 
 
 def strip_literals(src: str) -> str:
@@ -76,6 +116,14 @@ def main() -> int:
             bad = True
         print(f"  {name:9s} open={o:5d} close={c:5d} delta={o - c:+d}  {status}")
     print(f"  lines={src.count(chr(10)) + 1}  bytes={len(src.encode('utf-8'))}")
+
+    node = find_node()
+    if node:
+        if not node_check(node, TARGET):
+            bad = True
+    else:
+        print("  node --check   SKIPPED (node not found) -- balance only, which "
+              "does NOT prove the file parses")
     return 1 if bad else 0
 
 

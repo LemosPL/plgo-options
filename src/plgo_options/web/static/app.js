@@ -66,6 +66,20 @@ async function api(method, path, body) {
       const txt = await res.text();
       try { detail = JSON.parse(txt).detail ?? txt; } catch { detail = txt; }
     } catch { /* ignore */ }
+    // A 422 from FastAPI puts an ARRAY of {loc, msg, type} objects in `detail`,
+    // not a string. Interpolating that into a template literal renders the
+    // useless "[object Object]" — which is exactly what hid a payload
+    // validation error behind an unreadable message. Flatten it to
+    // "field: message" lines; fall back to JSON for any other object shape.
+    if (detail && typeof detail !== "string") {
+      if (Array.isArray(detail) && detail.every(d => d && d.loc && d.msg)) {
+        detail = detail
+          .map(d => `${d.loc.filter(x => x !== "body").join(".")}: ${d.msg}`)
+          .join("\n");
+      } else {
+        try { detail = JSON.stringify(detail, null, 2); } catch { detail = String(detail); }
+      }
+    }
     const err = new Error(`${res.status} ${res.statusText}${detail ? "\n" + detail : ""}`);
     err.status = res.status;
     err.detail = detail;
@@ -9207,6 +9221,45 @@ function optv2MatrixDisplayIdx(spots, targetRows = 14) {
   return [...new Set(idxs)];
 }
 
+/* ── Uniform-% (geometric) matrix rows ─────────────────────────────────────
+   The ladders /pnl serves are LINEAR in dollars — ETH range(500, 7100, 100),
+   FIL 0.20→3.00 by 0.10 — and optv2MatrixDisplayIdx thins them by index, so
+   the rows come out equally spaced in dollars. (A comment near the matrices
+   claimed the ladder was log-moneyness spaced. It never was.)
+
+   Equal dollar steps make the matrix unreadable at the wings: with ETH near
+   2,440 the bottom rows are −80%, −59%, −38% moves while the top rows are
+   +25%, +43% — so most of the table is spent on moves that will never happen
+   and the region that matters gets a couple of rows.
+
+   Constant RATIO steps instead, so every row is the same percentage move and
+   both wings carry equal information. Spans the same domain as before, and
+   the row nearest spot is pinned to spot exactly so the highlighted row is
+   the real mark rather than a level a step away from it.
+
+   Returns PRICE LEVELS, not ladder indices: the levels won't sit on a linear
+   ladder, so callers interpolate the payoff curves onto them. */
+function optvGeometricRows(spots, spot, targetRows = 14) {
+  if (!spots || spots.length < 2) return (spots || []).slice();
+  const lo = Math.max(spots[0], 1e-9);
+  const hi = spots[spots.length - 1];
+  if (!(hi > lo)) return spots.slice();
+
+  const n = Math.max(3, targetRows);
+  const step = Math.log(hi / lo) / (n - 1);
+  const rows = [];
+  for (let i = 0; i < n; i++) rows.push(lo * Math.exp(step * i));
+
+  if (spot > lo && spot < hi) {
+    let best = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if (Math.abs(Math.log(rows[i] / spot)) < Math.abs(Math.log(rows[best] / spot))) best = i;
+    }
+    rows[best] = spot;
+  }
+  return rows;
+}
+
 /* ── Scenario matrix: spot (rows) × horizon (columns) ──────── */
 function optv2RenderMatrix() {
   const spots    = optv2Data.spot_ladder;
@@ -9959,7 +10012,11 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       cone_min_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-min-dte")?.value, 10) : null,
       cone_max_dte: optv2IsConeMode() ? parseInt(document.getElementById("optv2-cone-max-dte")?.value, 10) : null,
       cone_width_sigma: optv2IsConeMode() ? parseFloat(document.getElementById("optv2-cone-width-sigma")?.value || "1.5") : null,
-      cone_quarterly_only: optv2IsConeMode() ? (document.getElementById("optv2-cone-quarterly-only")?.checked ?? true) : null,
+      // Always a real boolean: the server types this as a plain `bool`, so the
+      // null this used to send when cone mode was off 422'd every non-cone run.
+      // Harmless outside cone mode - the engine only reads it when both
+      // cone_min_dte and cone_max_dte are set.
+      cone_quarterly_only: document.getElementById("optv2-cone-quarterly-only")?.checked ?? true,
       unwind_discount: parseFloat(document.getElementById("optv2-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv2-new-position-penalty")?.value || "0.04"),
       roll_dte_threshold: Number.isNaN(rollDteThreshold) ? null : rollDteThreshold,
@@ -10434,11 +10491,18 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
 
 /* ── Before/After payoff comparison charts ──────────────────── */
 /* ── Before/After P&L matrix ───────────────────────────────── */
-function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
+// opts.geometric — render uniform-% rows (interpolated onto geometric price
+// levels) plus a "% move" column, instead of the equal-dollar ladder rows.
+// Opt-in per call site so v2 and v3 keep their existing tables unchanged;
+// only v4 asks for it. opts.dp sets price decimals (FIL needs 2).
+function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
   const spots = data.spot_ladder;
   const ethSpot = data.eth_spot;
   const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
   const payoff = data[side].payoff_by_horizon;
+  const geometric = !!opts.geometric;
+  const dp = opts.dp != null ? opts.dp : 0;
+  const label = opts.assetLabel || "ETH";
   // Cone mode only: per-column (horizon-day) eligible-strike band, evaluated
   // with the same widening formula the optimizer actually traded on. Absent
   // for every non-Cone run (and always for v3/v4), so this is a no-op there.
@@ -10447,7 +10511,7 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const $thead = document.getElementById(theadId);
   $thead.innerHTML = "";
   const headRow = document.createElement("tr");
-  headRow.innerHTML = "<th>ETH Spot</th>";
+  headRow.innerHTML = `<th>${label} Spot</th>` + (geometric ? "<th>% move</th>" : "");
   horizons.forEach(h => {
     const th = document.createElement("th");
     th.textContent = h === 0 ? "Now" : `${h}d`;
@@ -10458,24 +10522,43 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId) {
   const $tbody = document.getElementById(tbodyId);
   $tbody.innerHTML = "";
 
-  // Ladder is log-moneyness spaced (dense near ATM, sparse in the wings) and
-  // kept dense for LP fit resolution — thin it to a handful of display rows
-  // here rather than filtering by dollar value.
-  const nearestIdx = optv2NearestIdx(spots, ethSpot);
-  const displayIdx = optv2MatrixDisplayIdx(spots);
-  displayIdx.forEach((si) => {
-    const s = spots[si];
+  // Equal-% rows read evenly on both wings; the equal-dollar ladder does not.
+  // See optvGeometricRows. Levels don't land on the linear ladder, so the
+  // curves are interpolated onto them.
+  const rows = geometric
+    ? optvGeometricRows(spots, ethSpot)
+    : optv2MatrixDisplayIdx(spots).map(si => spots[si]);
+
+  rows.forEach((s) => {
     const tr = document.createElement("tr");
-    if (si === nearestIdx) tr.classList.add("row-highlight");
+    if (Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9)) {
+      tr.classList.add("row-highlight");
+    } else if (!geometric && optv2NearestIdx(spots, ethSpot) === optv2NearestIdx(spots, s)) {
+      tr.classList.add("row-highlight");
+    }
 
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + s.toLocaleString();
+    tdSpot.textContent = "$" + optv2Fmt(s, dp);
     tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
 
+    if (geometric) {
+      const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
+      const tdPct = document.createElement("td");
+      tdPct.textContent = pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+      tdPct.style.textAlign = "right";
+      tdPct.style.color = "var(--muted)";
+      tr.appendChild(tdPct);
+    }
+
     horizons.forEach(h => {
       const curve = payoff[String(h)];
-      const cellVal = (curve && curve[si] !== undefined) ? curve[si] : 0;
+      let cellVal = 0;
+      if (curve) {
+        cellVal = geometric
+          ? (optv4InterpAt(spots, curve, s) || 0)
+          : (curve[optv2NearestIdx(spots, s)] !== undefined ? curve[optv2NearestIdx(spots, s)] : 0);
+      }
       const td = document.createElement("td");
       td.textContent = Math.round(cellVal).toLocaleString();
       td.style.textAlign = "right";
@@ -12124,13 +12207,17 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      // v3 IS FROZEN on its pre-2026-08-05 behaviour so its runs stay comparable
-      // with what production has been producing. Pinned rather than read from a
-      // control: the server default is now true, so omitting it would silently
-      // opt v3 into composite unwinding (and the box cost floor that rides along
-      // with it). Use Optimizer v4 for the new behaviour.
-      enable_composite_unwind: false,
-      composite_overrides: null,
+      // v3 is pinned to pre-2026-08-05 composite UNWIND behaviour so its runs stay
+      // comparable with what production has been producing: pinned rather than read
+      // from a control, because the server default is now true and omitting it would
+      // silently opt v3 into composite unwinding (and the box cost floor that rides
+      // along with it). Use Optimizer v4 for the new behaviour.
+      // NOTE: composite_overrides is deliberately NOT pinned. A `composite_overrides:
+      // null` line used to sit here above the real assignment, which read as if the
+      // overrides were frozen too - but a repeated key in a JS object literal keeps
+      // the LAST one, so the live overrides always won and the null was dead code.
+      // Removed rather than honoured: v3 has been sending the trader's Deals-screen
+      // grouping all along, and freezing it now would change v3's actual output.
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
@@ -12188,13 +12275,33 @@ function optv4ActivePositions() {
   return all.filter(p => set.has(Number(p.id)));
 }
 
+// Cone mode is a UI-only sentinel in the maturity dropdown, not a real expiry.
+function optv4IsConeMode() {
+  return document.getElementById("optv4-target-expiry")?.value === "__CONE__";
+}
+function optv4HasValidTarget() {
+  if (optv4IsConeMode()) {
+    const min = Number(document.getElementById("optv4-cone-min-dte")?.value);
+    const max = Number(document.getElementById("optv4-cone-max-dte")?.value);
+    return Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max > min;
+  }
+  return !!(document.getElementById("optv4-target-expiry")?.value);
+}
 function optv4SyncRunEnabled() {
   const runBtn = document.getElementById("btn-run-optv4");
+  const $coneControls = document.getElementById("optv4-cone-controls");
+  if ($coneControls) $coneControls.style.display = optv4IsConeMode() ? "" : "none";
   if (!runBtn) return;
-  const hasExpiry = !!(document.getElementById("optv4-target-expiry")?.value);
+  const hasExpiry = optv4HasValidTarget();
   runBtn.disabled = !(!!optv4Data && hasExpiry);
-  runBtn.title = (optv4Data && !hasExpiry) ? "Choose a target maturity before running" : "";
+  runBtn.title = (optv4Data && !hasExpiry)
+    ? (optv4IsConeMode() ? "Enter a valid Cone min/max DTE range before running"
+                         : "Choose a target maturity before running")
+    : "";
 }
+document.getElementById("optv4-target-expiry")?.addEventListener("change", optv4SyncRunEnabled);
+document.getElementById("optv4-cone-min-dte")?.addEventListener("input", optv4SyncRunEnabled);
+document.getElementById("optv4-cone-max-dte")?.addEventListener("input", optv4SyncRunEnabled);
 
 function optv4RenderBasePill() {
   const el = document.getElementById("optv4-base-pill");
@@ -12238,13 +12345,22 @@ async function optv4Load() {
     optRenderPerpCost("optv4-perpcost-list", optv4Data);
 
     const $expiry = document.getElementById("optv4-target-expiry");
-    $expiry.innerHTML = '<option value="">Select maturity…</option>';
+    $expiry.innerHTML = '<option value="">Select maturity…</option>'
+      + '<option value="__CONE__">Cone (multi-expiry)</option>';
     if (optv4Data.vol_surface) {
-      optv4Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte).forEach(s => {
+      const smiles = optv4Data.vol_surface.filter(s => s.dte > 0).sort((a, b) => a.dte - b.dte);
+      smiles.forEach(s => {
         const o = document.createElement("option");
         o.value = s.expiry_code; o.textContent = `${s.expiry_code} (${s.dte}d)`;
         $expiry.appendChild(o);
       });
+      // Seed the Cone DTE bounds with the full available range as a sane default.
+      if (smiles.length) {
+        const $cmin = document.getElementById("optv4-cone-min-dte");
+        const $cmax = document.getElementById("optv4-cone-max-dte");
+        if ($cmin && !$cmin.value) $cmin.value = smiles[0].dte;
+        if ($cmax && !$cmax.value) $cmax.value = smiles[smiles.length - 1].dte;
+      }
     }
 
     document.getElementById("optv4-kpi-section").style.display = "";
@@ -12855,28 +12971,54 @@ function optv4RenderMatrix() {
   const ethSpot = optv4Data.eth_spot;
   if (!positions.length) return;
 
+  const dp = optv4Dp();
+  const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
+  const rows = optvGeometricRows(spots, ethSpot);
+
   const $thead = document.getElementById("optv4-matrix-thead");
   $thead.innerHTML = "";
   const headRow = document.createElement("tr");
-  headRow.innerHTML = "<th>ETH Spot</th>";
+  headRow.innerHTML = `<th>${label} Spot</th><th>% move</th>`;
   OPTV2_HORIZONS.forEach(h => { const th = document.createElement("th"); th.textContent = h === 0 ? "Now" : `${h}d`; headRow.appendChild(th); });
   $thead.appendChild(headRow);
 
+  // Sum the book once per horizon across the WHOLE ladder, then interpolate
+  // that total onto the display rows. Summing after interpolation would give
+  // the same answer (both are linear) but this is one pass per horizon rather
+  // than one per position per row.
+  const totals = {};
+  OPTV2_HORIZONS.forEach(h => {
+    const hKey = String(h);
+    const tot = new Array(spots.length).fill(0);
+    positions.forEach(p => {
+      const curve = p.payoff_by_horizon[hKey];
+      if (!curve) return;
+      for (let i = 0; i < spots.length; i++) tot[i] += (curve[i] || 0);
+    });
+    totals[hKey] = tot;
+  });
+
   const $tbody = document.getElementById("optv4-matrix-tbody");
   $tbody.innerHTML = "";
-  const nearestIdx = optv2NearestIdx(spots, ethSpot);
-  const displayIdx = optv2MatrixDisplayIdx(spots);
-  displayIdx.forEach((si) => {
-    const s = spots[si];
+  rows.forEach((s) => {
     const tr = document.createElement("tr");
-    if (si === nearestIdx) tr.classList.add("row-highlight");
+    if (Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9)) {
+      tr.classList.add("row-highlight");
+    }
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + optv2Fmt(s, optv4Dp()); tdSpot.style.fontWeight = "600";
+    tdSpot.textContent = "$" + optv2Fmt(s, dp); tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
+
+    const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
+    const tdPct = document.createElement("td");
+    tdPct.textContent = pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+    tdPct.style.textAlign = "right";
+    tdPct.style.color = "var(--muted)";
+    tr.appendChild(tdPct);
+
     OPTV2_HORIZONS.forEach(h => {
-      const hKey = String(h);
-      let cellVal = 0;
-      positions.forEach(p => { const curve = p.payoff_by_horizon[hKey]; if (curve && curve[si] !== undefined) cellVal += curve[si]; });
+      const cellVal = optv4InterpAt(spots, totals[String(h)], s) || 0;
       const td = document.createElement("td");
       td.textContent = Math.round(cellVal).toLocaleString(); td.style.textAlign = "right";
       if (cellVal > 0) td.style.color = "#66bb6a";
@@ -13066,7 +13208,8 @@ function optv4RenderResult(data) {
   document.getElementById("optv4-candidates").textContent = data.candidates_evaluated ?? "—";
   document.getElementById("optv4-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv4-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
-  document.getElementById("optv4-sum-target-expiry").textContent = data.target_expiry || "All";
+  document.getElementById("optv4-sum-target-expiry").textContent = data.target_expiry
+    || (data.cone_expiries ? `Cone (${data.cone_expiries.length} expiries)` : "All");
   // Per-counterparty transaction cost + after-execution MTM (net of cost) —
   // same figures the v2 screen shows; the pricing itself is applied by the
   // shared engine on every v3 run.
@@ -13097,6 +13240,49 @@ function optv4RenderResult(data) {
   } else {
     $cashBody.innerHTML = "";
     if ($cashEmpty) $cashEmpty.style.display = "";
+  }
+
+  // Worst-case stress P&L by counterparty. Ported from optv2RenderResult: the
+  // engine returns cp_worst_case_stress / cp_worst_case_net on EVERY run
+  // (independent of use_collateral_cap, which only decides whether that floor
+  // also constrains the LP), so v4 was receiving this and discarding it.
+  //
+  // Independent of the fleet-wide fit shown above: a counterparty can be left
+  // with a large standalone loss here even when the aggregate summary looks
+  // fine, if another counterparty's gain nets it out — which that counterparty
+  // cannot see and would not accept. cp_worst_case_net is a separate metric on
+  // the same book, netted against haircut-adjusted posted collateral at the
+  // same stress spot and framed as cushion remaining; it exists only for
+  // counterparties with collateral data and can peak at a different spot than
+  // the P&L-only worst case.
+  const $stressBody = document.getElementById("optv4-cp-stress-tbody");
+  const $stressEmpty = document.getElementById("optv4-stress-empty");
+  const cpStress = data.cp_worst_case_stress || {};
+  const cpNet = data.cp_worst_case_net || {};
+  if ($stressBody) {
+    const stressCps = Object.keys(cpStress);
+    if (stressCps.length) {
+      if ($stressEmpty) $stressEmpty.style.display = "none";
+      $stressBody.innerHTML = stressCps
+        .sort((a, b) => (cpStress[a].pnl || 0) - (cpStress[b].pnl || 0))  // worst first
+        .map(cp => {
+          const v = cpStress[cp];
+          const pnl = v.pnl || 0;
+          const n = cpNet[cp];
+          const netCells = n
+            ? `<td class="num" style="color:${n.net >= 0 ? "var(--green)" : "var(--red)"}">`
+              + `${n.net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(n.net), 0)}</td>`
+              + `<td class="num">${optv2Fmt(n.spot, optv4Dp())}</td>`
+            : `<td class="num">—</td><td class="num">—</td>`;
+          return `<tr><td>${cp}</td>`
+            + `<td class="num" style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">`
+            + `${pnl >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(pnl), 0)}</td>`
+            + `<td class="num">${optv2Fmt(v.spot, optv4Dp())}</td>${netCells}</tr>`;
+        }).join("");
+    } else {
+      $stressBody.innerHTML = "";
+      if ($stressEmpty) $stressEmpty.style.display = "";
+    }
   }
 
   // Matrix note + before/after matrices (reuse the shared renderer)
@@ -13629,7 +13815,12 @@ function optv4RenderAfterMatrix() {
   const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
   $afterPanel.style.display = "";
   $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead", "optv4-matrix-after-main-tbody");
+  // Same uniform-% rows as the "before" matrix above, so the two tables line
+  // up row for row and can be read side by side.
+  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead",
+    "optv4-matrix-after-main-tbody",
+    { geometric: true, dp: optv4Dp(),
+      assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH" });
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
@@ -13727,6 +13918,22 @@ function optv4TargetGrid(spots) {
   return out;
 }
 
+// The x values the editable target actually lives on.
+//
+// Once a manual curve exists it OWNS its x grid, and every editor has to work
+// on those same values rather than re-deriving the fixed step grid. Snapping a
+// manual curve back onto OPTV4_TARGET_STEP re-samples it, and for a shift
+// smaller than one step that is destructive: with FIL's 0.10 step a 0.05 shift
+// had its trough snapped a full step and its shape smeared. Before any manual
+// edit the two are identical (the first edit is read off the step grid), so
+// this changes nothing for the ordinary path.
+function optv4EditGrid(spots) {
+  if (optv4ManualTarget && optv4ManualTarget.length >= 2) {
+    return optv4ManualTarget.map(p => p.x);
+  }
+  return optv4TargetGrid(spots);
+}
+
 // Linear interpolation of a ladder-indexed series at an arbitrary price, with
 // flat extrapolation past either end (same convention as the chart).
 function optv4InterpAt(spots, series, x) {
@@ -13784,7 +13991,7 @@ function optv4RenderProfileTable() {
   if (toolbar) toolbar.style.display = "";
 
   const spots = src.spots, S0 = src.S0;
-  const grid = optv4TargetGrid(spots);
+  const grid = optv4EditGrid(spots);
   const auto = optv4AutoTargetAnchored(src);
   const manualMap = optv4ManualTarget ? new Map(optv4ManualTarget.map(p => [p.x, p.y])) : null;
   // The grid row nearest spot gets the highlight — spot rarely lands exactly on
@@ -13911,12 +14118,12 @@ async function optv4ShiftTarget() {
   if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
   const fromRaw = Number(document.getElementById("optv4-target-from")?.value);
   const toRaw = Number(document.getElementById("optv4-target-to")?.value);
-  const from_spot = fromRaw > 0 ? fromRaw : null;   // null = let the server detect it
+  const from_spot = fromRaw > 0 ? fromRaw : null;   // null = detect from the trough
   const to_spot = toRaw > 0 ? toRaw : (src.S0 || null);
   if (!to_spot) { alert("Enter the spot price to re-center the curve on."); return; }
-  // A monotone curve (the FIL targets are) has no trough to anchor on, so the
-  // server would fall back to the mid of the strike range and shift by a
-  // meaningless ratio. Refuse to guess — the anchor has to come from the user.
+  // A monotone curve (the FIL targets are) has no trough to anchor on, and
+  // guessing one would shift by a meaningless amount. Refuse — the anchor has
+  // to come from the user.
   if (from_spot === null && optv4DetectTargetAnchor(points) === null) {
     alert("This curve has no trough to anchor on (it only rises or only falls), so "
       + "there's nothing to detect the original spot from.\n\nType the spot the curve "
@@ -13933,56 +14140,121 @@ async function optv4ShiftTarget() {
   const mode = document.getElementById("optv4-target-shift-mode")?.value || "parallel";
   const scale_payoff = !!document.getElementById("optv4-target-shift-scale-y")?.checked;
   const status = document.getElementById("optv4-target-status");
-  if (status) status.textContent = "Shifting…";
   try {
-    const res = await post("/api/optimization/target-profile/shift", {
-      asset: currentAsset, spot_ladder: src.spots, current_spot: src.S0 || to_spot,
-      points, from_spot, to_spot, mode, scale_payoff,
-    });
-    const payoff = res && res.payoff;
-    if (!Array.isArray(payoff) || payoff.length !== src.spots.length) {
-      throw new Error("Unexpected response from the shift endpoint.");
-    }
-    // Re-anchor to $0 at the current spot. The whole pane (Before/After included)
-    // is P&L-from-today on that basis and the LP fits against it, so the shifted
-    // curve has to land in the same basis to be comparable. A vertical
-    // translation leaves the shape — the thing being moved — untouched, and it
-    // keeps save→reload idempotent, since the loader re-anchors too.
-    const at = payoff[optv2NearestIdx(src.spots, src.S0)] || 0;
-    optv4ManualTarget = optv4TargetGrid(src.spots)
-      .map(s => ({ x: s, y: (optv4InterpAt(src.spots, payoff, s) || 0) - at }))
+    // Done locally and exactly, NOT through /target-profile/shift. A shift is a
+    // RIGID translation along the spot axis: every x moves by the same amount
+    // and every y is carried across verbatim, so inclination, width and depth
+    // come out bit-for-bit unchanged. That is the entire contract.
+    //
+    // The old path ran points -> server -> optimizer ladder -> back onto the
+    // fixed step grid, then subtracted the shifted curve's value at spot from
+    // every point. Three lossy steps applied to a transform that is supposed to
+    // preserve the shape exactly. Measured on a FIL curve shifted 0.70 -> 0.75
+    // (step 0.10, so half a grid cell): the trough landed at 0.80 instead of
+    // 0.75, its depth collapsed from -15.5m to -0.4m, and the whole curve was
+    // translated +14.4m vertically by the re-anchor. Interpolation belongs at
+    // the point of USE - the chart, and the engine's own ladder - never inside
+    // a rigid transform.
+    const anchor = from_spot !== null ? from_spot : optv4DetectTargetAnchor(points);
+    if (!(anchor > 0)) throw new Error("Could not determine the price this curve was drawn around.");
+    const dp = optv4Dp();
+    const delta = to_spot - anchor;
+    const ratio = to_spot / anchor;
+
+    const shifted = points
+      .map(pt => ({
+        x: mode === "parallel" ? pt.x + delta : pt.x * ratio,
+        // scale_payoff is opt-in and is the only thing allowed to touch y.
+        y: (scale_payoff && mode !== "parallel") ? pt.y * ratio : pt.y,
+      }))
+      .filter(pt => Number.isFinite(pt.x) && pt.x > 0 && Number.isFinite(pt.y))
       .sort((a, b) => a.x - b.x);
-    optv4RenderProfileTable();   // re-renders the table + chart, and rewrites the status
-    // Re-point the shape summary at the shifted curve. It normally describes the
-    // curve optv4FetchTargetProfile pulled down, which after a shift is no longer
-    // what's on screen — and where the trough now sits is the whole point here.
+    if (shifted.length < 2) throw new Error("The shift left fewer than 2 valid points.");
+
+    optv4ManualTarget = shifted;
+    optv4RenderProfileTable();   // re-renders table + chart on the shifted x grid
+
+    // Re-point the shape summary at the shifted curve: it otherwise describes
+    // the curve optv4FetchTargetProfile pulled down, and where the trough now
+    // sits is the whole point of doing this.
     const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
       ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
     renderTargetShapeSummary("optv4-target-shape-summary",
       optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
+
     if (status) {
-      const dp = optv4Dp();
-      const ratio = res.ratio ? `×${res.ratio.toFixed(3)}` : "";
-      const delta = (res.to_spot != null && res.from_spot != null) ? (res.to_spot - res.from_spot) : null;
       const how = mode === "parallel"
         ? `moving every point ${delta >= 0 ? "right" : "left"} $${optv2Fmt(Math.abs(delta), dp)}`
-        : `stretching strikes ${ratio}`;
-      const detected = res.anchor_kind && res.anchor_kind !== "given"
-        ? ` (anchor auto-detected: ${res.anchor_kind})` : "";
-      // Flag the flat-extrapolated tail: shifting moves the curve's own grid off
-      // the ladder, so one wing is held at its end value rather than being real.
-      const [lo, hi] = res.shifted_range || [];
+        : `stretching strikes ×${ratio.toFixed(3)}`;
+      const lo = shifted[0].x, hi = shifted[shifted.length - 1].x;
       const spots = src.spots;
-      const gap = (lo != null && lo > spots[0] + 1e-9) ? `below $${optv2Fmt(lo, dp)}`
-        : (hi != null && hi < spots[spots.length - 1] - 1e-9) ? `above $${optv2Fmt(hi, dp)}` : null;
-      status.textContent = `Shifted $${optv2Fmt(res.from_spot, dp)} → $${optv2Fmt(res.to_spot, dp)}`
-        + ` by ${how}${detected}${scale_payoff ? ", payoffs scaled" : ""}.`
-        + (gap ? ` Ladder ${gap} is flat-extrapolated from the curve's end.` : "")
+      const gap = (lo > spots[0] + 1e-9) ? `below $${optv2Fmt(lo, dp)}`
+        : (hi < spots[spots.length - 1] - 1e-9) ? `above $${optv2Fmt(hi, dp)}` : null;
+      status.textContent = `Shifted $${optv2Fmt(anchor, dp)} → $${optv2Fmt(to_spot, dp)}`
+        + ` by ${how}${from_spot === null ? " (anchor auto-detected from the trough)" : ""}`
+        + `${(scale_payoff && mode !== "parallel") ? ", payoffs scaled" : ""}.`
+        + " Shape carried across unchanged."
+        + (gap ? ` The chart holds the ladder ${gap} flat at the curve's end value.` : "")
         + " Review it, then Apply & Re-run — or Save / Update to keep it.";
     }
   } catch (e) {
     if (status) status.textContent = "";
     alert("Couldn't shift the target curve.\n" + (e.detail || e.message || e));
+  }
+}
+
+// Vertical counterpart of optv4ShiftTarget: add a constant to every payoff.
+//
+// Kept separate from the horizontal shift because it needs no anchor price —
+// there is nothing to detect and nothing to divide by, so demanding a "from"
+// would be friction for no reason. The two compose: shift sideways, then up.
+//
+// Same contract as the horizontal shift, on the other axis: x is untouched and
+// every y moves by exactly the same amount, so width, inclination and depth
+// relative to itself are unchanged. Only the curve's level moves.
+function optv4ShiftTargetY() {
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) { alert("Load the risk profile first."); return; }
+  const points = optv4CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+
+  const raw = Number(document.getElementById("optv4-target-shift-dy")?.value);
+  const dy = Number.isFinite(raw) ? raw : 0;
+  if (!dy) {
+    alert("Enter the dollar amount to move the curve by — positive to move it "
+      + "up, negative to move it down.");
+    document.getElementById("optv4-target-shift-dy")?.focus();
+    return;
+  }
+
+  const status = document.getElementById("optv4-target-status");
+  try {
+    optv4ManualTarget = points
+      .map(pt => ({ x: pt.x, y: pt.y + dy }))
+      .filter(pt => Number.isFinite(pt.x) && Number.isFinite(pt.y))
+      .sort((a, b) => a.x - b.x);
+    if (optv4ManualTarget.length < 2) throw new Error("The shift left fewer than 2 valid points.");
+
+    optv4RenderProfileTable();
+    const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
+      ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
+    renderTargetShapeSummary("optv4-target-shape-summary",
+      optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
+
+    if (status) {
+      // Flag the consequence rather than silently "fixing" it: the pane is
+      // P&L-from-today, so a curve moved off zero at spot is asking the LP for
+      // a uniformly better (or worse) book, which is a real instruction and
+      // not the same as re-shaping it.
+      const atSpot = optv4InterpAt(src.spots, optv4ManualTargetInterp(src.spots), src.S0);
+      status.textContent = `Moved the curve ${dy >= 0 ? "up" : "down"} `
+        + `$${optv2Fmt(Math.abs(dy), 0)}. Shape unchanged`
+        + (atSpot != null ? `; it now reads $${optv2Fmt(atSpot, 0)} at spot.` : ".")
+        + " Review it, then Apply & Re-run — or Save / Update to keep it.";
+    }
+  } catch (e) {
+    if (status) status.textContent = "";
+    alert("Couldn't move the target curve.\n" + (e.detail || e.message || e));
   }
 }
 
@@ -14087,7 +14359,9 @@ function optv4SetTargetPointAtSpot(spot, y) {
   const src = optv4ProfileSource();
   if (!src || !src.spots.length) return;
   const spots = src.spots;
-  const grid = optv4TargetGrid(spots);
+  // Must be the manual curve's own grid: rebuilding on the fixed step grid
+  // would silently undo a sub-step shift the moment a point is dragged.
+  const grid = optv4EditGrid(spots);
   const cur = new Map(optv4CurrentTargetPoints().map(p => [p.x, p.y]));
   const auto = optv4AutoTargetAnchored(src);
   const best = optv2NearestIdx(grid, spot);
@@ -14259,6 +14533,7 @@ document.getElementById("btn-optv4-target-save")?.addEventListener("click", optv
 document.getElementById("btn-optv4-target-delete")?.addEventListener("click", optv4DeleteTargetProfile);
 document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
 document.getElementById("btn-optv4-target-shift")?.addEventListener("click", optv4ShiftTarget);
+document.getElementById("btn-optv4-target-shift-y")?.addEventListener("click", optv4ShiftTargetY);
 // Re-shape the parametric (auto) preview live as any Target Shape knob changes —
 // mirrors the dropdown's own behavior (discards manual edits, refetches auto).
 // The $ readouts update on every keystroke ("input"); the actual re-fetch (and
@@ -14299,7 +14574,7 @@ function optv4ShowError(e) {
   const pre = document.getElementById("optv4-error-text");
   if (!box || !pre) { alert("Optimization failed.\n" + (e && (e.detail || e.message) || e)); return; }
   const msg = (e && (e.detail || e.message)) ? (e.detail || e.message) : String(e);
-  pre.textContent = `[${new Date().toISOString()}] Optimizer v3 run failed\n\n${msg}`;
+  pre.textContent = `[${new Date().toISOString()}] Optimizer v4 run failed\n\n${msg}`;
   box.style.display = "";
   box.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -14329,8 +14604,13 @@ document.getElementById("btn-optv4-target-apply")?.addEventListener("click", () 
 
 document.getElementById("btn-run-optv4")?.addEventListener("click", async () => {
   const $btn = document.getElementById("btn-run-optv4");
-  if (!document.getElementById("optv4-target-expiry")?.value) {
-    alert("Choose a target maturity before running the optimizer."); return;
+  // In Cone mode the dropdown holds a sentinel, so a non-empty value is not
+  // enough — the DTE range has to be valid too.
+  if (!optv4HasValidTarget()) {
+    alert(optv4IsConeMode()
+      ? "Enter a valid Cone min/max DTE range before running the optimizer."
+      : "Choose a target maturity before running the optimizer.");
+    return;
   }
   $btn.classList.add("loading"); $btn.textContent = "Running…"; $btn.disabled = true;
   try {
@@ -14347,6 +14627,16 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     const maxQty = maxQtyRaw === "" || maxQtyRaw === undefined ? null : parseFloat(maxQtyRaw);
     const maxTradesRaw = document.getElementById("optv4-max-trades")?.value;
     const maxTrades = maxTradesRaw === "" || maxTradesRaw === undefined ? null : parseInt(maxTradesRaw, 10);
+
+    // Ported from Optimizer v2: v4 descends from v3, which never had these, so
+    // they silently defaulted server-side (max_cp_loss_usd=None,
+    // use_collateral_cap=false, custom_spot=None) and a v2 run with any of them
+    // set could not be reproduced here at all.
+    const maxCpLossRaw = document.getElementById("optv4-max-cp-loss")?.value;
+    const maxCpLoss = maxCpLossRaw === "" || maxCpLossRaw === undefined ? null : parseFloat(maxCpLossRaw);
+    const useCollateralCap = document.getElementById("optv4-use-collateral-cap")?.checked || false;
+    const customSpotRaw = document.getElementById("optv4-custom-spot")?.value;
+    const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
 
     // When there are roll candidates, the tick-to-unwind panel is authoritative:
     // force exactly the ticked set (roll_dte_threshold = -1 → manual mode). With
@@ -14375,7 +14665,19 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       atm_concentration: parseFloat(document.getElementById("optv4-atm-concentration")?.value || "0"),
       mu_factor: parseFloat(document.getElementById("optv4-mu-factor")?.value || "0"),
       cash_neutrality_factor: parseFloat(document.getElementById("optv4-cash-neutrality-factor")?.value || "0"),
-      target_expiry: document.getElementById("optv4-target-expiry").value || null,
+      // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
+      // The four cone_* fields drive the multi-expiry candidate universe instead;
+      // the engine treats cone as active only when BOTH min and max DTE are set
+      // (optimizer_v3: cone_mode = cone_min_dte is not None and cone_max_dte is not None).
+      target_expiry: optv4IsConeMode() ? null : (document.getElementById("optv4-target-expiry").value || null),
+      cone_min_dte: optv4IsConeMode() ? parseInt(document.getElementById("optv4-cone-min-dte")?.value, 10) : null,
+      cone_max_dte: optv4IsConeMode() ? parseInt(document.getElementById("optv4-cone-max-dte")?.value, 10) : null,
+      cone_width_sigma: optv4IsConeMode() ? parseFloat(document.getElementById("optv4-cone-width-sigma")?.value || "1.5") : null,
+      // Always a real boolean: the server types this as a plain `bool`, so the
+      // null this used to send when cone mode was off 422'd every non-cone run.
+      // Harmless outside cone mode - the engine only reads it when both
+      // cone_min_dte and cone_max_dte are set.
+      cone_quarterly_only: document.getElementById("optv4-cone-quarterly-only")?.checked ?? true,
       unwind_discount: parseFloat(document.getElementById("optv4-unwind-discount")?.value || "0.2"),
       new_position_penalty: parseFloat(document.getElementById("optv4-new-position-penalty")?.value || "0.04"),
       roll_dte_threshold: rollThresholdParam,
@@ -14384,14 +14686,21 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       max_qty: maxQty,
       max_trades: maxTrades,
       enable_box_neutralizer: enableBoxNeutralizer,
-      // THE difference between v4 and v3. v4 opts into composite unwinding (and
-      // the box cost floor inside it); v3 pins it false. Hardcoded because v4's
-      // UI is a pure copy of v3's, which has no checkbox for it — the pages look
-      // identical and diverge only here. composite_overrides carries the manual
-      // grouping from the Deals screen — without it v4 would enable composite
-      // unwinding but ignore any regrouping a trader did there.
-      enable_composite_unwind: true,
-      composite_overrides: currentCompositeOverrides(),
+      // Ported from Optimizer v2 (v4 descends from v3, which never had these).
+      max_cp_loss_usd: maxCpLoss,
+      use_collateral_cap: useCollateralCap,
+      // Blank = live spot. Set = run the whole optimization (candidates, greeks,
+      // target anchor, payoff ladder) as if spot were this price instead.
+      custom_spot: customSpot,
+      // Composite unwinding was the original v4-vs-v3 difference and used to be
+      // hardcoded true here, with no way to switch it off - so a v4 run could not
+      // be compared against a v2 or v3 one on equal terms. Now a checkbox,
+      // defaulting on, so existing behaviour is unchanged.
+      // composite_overrides carries the manual grouping from the Deals screen;
+      // without it v4 would enable composite unwinding but ignore any regrouping
+      // a trader did there. (It was also duplicated on the next line - a no-op,
+      // since JS object literals silently keep the last of a repeated key.)
+      enable_composite_unwind: document.getElementById("optv4-enable-composite-unwind")?.checked ?? true,
       composite_overrides: currentCompositeOverrides(),
       save_usecase_snapshot: saveRequested,
       is_replay: false,
@@ -14418,12 +14727,12 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       // once target_profile_file or manual_target is set, so harmless to always send.
       ...optv4ParametricOverrides(),
     });
-    console.log("Optimizer v3 result:", data);
+    console.log("Optimizer v4 result:", data);
     optv4HideError();
     optv4RenderResult(data);
     if (saveRequested) { await optv4LoadSnapshots(); }
   } catch (e) {
-    console.error("Optimizer v3 run failed:", e);
+    console.error("Optimizer v4 run failed:", e);
     optv4ShowError(e);
   } finally {
     $btn.classList.remove("loading"); $btn.textContent = "Run Optimizer"; $btn.disabled = false;
