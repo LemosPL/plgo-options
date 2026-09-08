@@ -81,8 +81,11 @@ class OptimizationParams(BaseModel):
     cone_max_dte: int | None = None
     cone_width_sigma: float | None = 1.5
     # Restrict the resolved Cone expiry set to standard exchange quarterlies
-    # (last Friday of Mar/Jun/Sep/Dec) only. True by default.
-    cone_quarterly_only: bool = True
+    # (last Friday of Mar/Jun/Sep/Dec) only. True by default. Only meaningful
+    # in Cone mode — the frontend sends null on every non-Cone run, so this
+    # must accept None rather than reject it (it's inert either way once
+    # cone_min_dte/cone_max_dte are None).
+    cone_quarterly_only: bool | None = True
     unwind_discount: float = 0.2
     new_position_penalty: float = 0.04
     roll_dte_threshold: int | None = None
