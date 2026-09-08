@@ -12965,14 +12965,26 @@ function optv4ChartLayout({ title, assetLabel, C, height }) {
 }
 
 // Preview P&L matrix (before) — faithful copy of optv2RenderMatrix on v3 ids.
+// One source of truth for how v4 renders a P&L matrix. Three different calls
+// draw these tables (this one from the loaded book, plus the shared
+// before/after renderer after a run) and they must agree, or a run silently
+// replaces a correct table with a differently-formatted one — which is exactly
+// how a FIL run ended up showing an "ETH Spot" header and 0.80 rounded to "1".
+function optv4MatrixOpts() {
+  return {
+    geometric: true,
+    dp: optv4Dp(),
+    assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH",
+  };
+}
+
 function optv4RenderMatrix() {
   const spots = optv4Data.spot_ladder;
   const positions = optv4ActivePositions();
   const ethSpot = optv4Data.eth_spot;
   if (!positions.length) return;
 
-  const dp = optv4Dp();
-  const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  const { dp, assetLabel: label } = optv4MatrixOpts();
   // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
   const rows = optvGeometricRows(spots, ethSpot);
 
@@ -13306,7 +13318,12 @@ function optv4RenderResult(data) {
     } else { $mtmNote.textContent = ""; }
   }
   if (data.before && data.before.payoff_by_horizon) {
-    optv2RenderCompareMatrix(data, "before", "optv4-matrix-thead", "optv4-matrix-tbody");
+    // Must pass the same options as the "after" table. This call re-renders the
+    // BEFORE matrix after a run, over the one optv4RenderMatrix drew from the
+    // loaded book — so without them a FIL run replaced a correct table with an
+    // "ETH Spot" header and dp=0 prices, turning 0.80 into "1".
+    optv2RenderCompareMatrix(data, "before", "optv4-matrix-thead",
+      "optv4-matrix-tbody", optv4MatrixOpts());
   }
   optv4RenderAfterMatrix();
 
@@ -13818,9 +13835,7 @@ function optv4RenderAfterMatrix() {
   // Same uniform-% rows as the "before" matrix above, so the two tables line
   // up row for row and can be read side by side.
   optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead",
-    "optv4-matrix-after-main-tbody",
-    { geometric: true, dp: optv4Dp(),
-      assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH" });
+    "optv4-matrix-after-main-tbody", optv4MatrixOpts());
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
