@@ -14,7 +14,7 @@ from .collateral_optimization import CollateralOptimization
 from .delta_hedger import check_rehedge, perp_trade_cost
 from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
-from .math_utils import bs_vec
+from .math_utils import bs_vec, bs_vec_bridge
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
@@ -2837,11 +2837,13 @@ class OptimizerV3(BaseOptimizer):
                     # Perpetual / future: linear mark-to-market
                     curve = signed_qty * (spot_arr - strike)
                 else:
-                    # Option curve at horizon h
-                    dte_at_h = max(dte - h, 0)
-                    T_h = dte_at_h / 365.25
+                    # Option curve at horizon h. Bridge-adjusted once the
+                    # option's own expiry falls before the pillar — see
+                    # bs_vec_bridge for why a plain intrinsic-at-spot_arr
+                    # snap there is inconsistent with the pillar's own spot
+                    # conditioning.
                     sigma = iv_pct / 100.0
-                    curve = signed_qty * bs_vec(spot_arr, strike, T_h, 0.0, sigma, opt)
+                    curve = signed_qty * bs_vec_bridge(self.spot, spot_arr, strike, dte, h, sigma, opt)
 
                 p.payoff_by_horizon[h_key] = np.round(curve, 2).tolist()
 
@@ -2869,10 +2871,8 @@ class OptimizerV3(BaseOptimizer):
                     # Perpetual future: value = qty * (spot - entry)
                     vals = spot_arr - trade["strike"]
                 else:
-                    dte_at_h = max(trade["dte"] - h, 0)
-                    T_h = dte_at_h / 365.25
                     sigma = trade["iv_pct"] / 100.0
-                    vals = bs_vec(spot_arr, trade["strike"], T_h, 0.0, sigma, trade["opt"])
+                    vals = bs_vec_bridge(self.spot, spot_arr, trade["strike"], trade["dte"], h, sigma, trade["opt"])
                 total += trade["qty"] * vals
             trade_payoff_delta[h_key] = np.round(total, 2).tolist()
 
