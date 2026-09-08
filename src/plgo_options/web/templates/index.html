@@ -2881,7 +2881,33 @@
                       Hidden for the parametric target, which already rebuilds
                       itself around current spot on every fetch. -->
               <div class="opt-card" id="optv4-target-recenter" style="display:none">
-                <div class="opt-card-title">Re-center <span class="opt-card-note">— move this curve's shape along the price axis to follow a spot move</span></div>
+                <!-- Nudge: the primary way to move a curve. Click a direction
+                     repeatedly to walk the shape across, one step per click.
+                     Needs no anchor price, which matters because "from spot A
+                     to spot B" is unanswerable for a monotone curve (there is
+                     no trough to anchor on) and is the wrong question when you
+                     just want to slide the thing a little. -->
+                <div class="opt-card-title">Nudge <span class="opt-card-note">— walk the whole curve around, one step per click; shape never changes</span></div>
+                <div class="opt-card-row">
+                  <label class="opt-inline" title="Price-axis step per click of the left/right buttons. Prefilled with 1% of spot; type any amount.">price step
+                    <input id="optv4-nudge-step-x" type="number" step="any" min="0" style="width:7rem">
+                  </label>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-nudge-left" class="btn-secondary" style="width:auto;font-size:1rem;padding:.15rem .6rem" title="Move the whole curve LEFT by one price step (every point's price decreases by the same amount). Click repeatedly to keep going.">◀</button>
+                  <button id="btn-optv4-nudge-right" class="btn-secondary" style="width:auto;font-size:1rem;padding:.15rem .6rem" title="Move the whole curve RIGHT by one price step. Click repeatedly to keep going.">▶</button>
+                  <span class="opt-sep"></span>
+                  <label class="opt-inline" title="Payoff-axis step per click of the up/down buttons. Prefilled from the curve's own vertical span; type any amount.">$ step
+                    <input id="optv4-nudge-step-y" type="number" step="any" min="0" style="width:8rem">
+                  </label>
+                  <span class="opt-sep"></span>
+                  <button id="btn-optv4-nudge-up" class="btn-secondary" style="width:auto;font-size:1rem;padding:.15rem .6rem" title="Move the whole curve UP by one $ step. Click repeatedly to keep going.">▲</button>
+                  <button id="btn-optv4-nudge-down" class="btn-secondary" style="width:auto;font-size:1rem;padding:.15rem .6rem" title="Move the whole curve DOWN by one $ step. Click repeatedly to keep going.">▼</button>
+                  <span class="opt-sep"></span>
+                  <span id="optv4-nudge-total" class="opt-card-note" style="color:var(--muted);font-size:.72rem"></span>
+                  <button id="btn-optv4-nudge-undo" class="btn-secondary" style="width:auto;font-size:.72rem;padding:.15rem .5rem" title="Undo the last nudge.">undo</button>
+                </div>
+
+                <div class="opt-card-title" style="margin-top:.8rem">Re-center <span class="opt-card-note">— jump the shape from one spot to another in a single move (needs both prices)</span></div>
                 <div class="opt-card-row">
                   <label class="opt-inline" title="Spot the curve's shape was originally drawn around. Auto-filled from the curve's own trough — override it if the detected anchor is wrong, or if the curve has no trough to detect.">from
                     <input id="optv4-target-from" type="number" step="any" min="0" placeholder="auto" style="width:6rem">
@@ -3479,6 +3505,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=159"></script>
+<script src="/static/app.js?v=160"></script>
 </body>
 </html>

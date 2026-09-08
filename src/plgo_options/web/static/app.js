@@ -14025,6 +14025,8 @@ function optv4RenderProfileTable() {
   optv4RenderHorizonChips();   // this pane has its own copy of the horizon bar
   optv4UpdateTargetStatus();
   optv4SyncShiftDefaults();
+  optv4SyncNudgeDefaults();
+  optv4RenderNudgeTotal();
   optv4SyncRecenterCard();   // editing by hand makes re-centering meaningful
 }
 
@@ -14266,7 +14268,151 @@ function optv4ResetTarget() {
   const toEl = document.getElementById("optv4-target-to");
   if (fromEl) fromEl.value = "";
   if (toEl) toEl.value = "";
+  optv4NudgeReset();
   optv4FetchTargetProfile();
+}
+
+/* ── Nudge: walk the curve around one step at a time ───────────────────────
+   The from/to re-center answers "move the shape from spot A onto spot B",
+   which is the wrong question when you just want to slide the curve a little
+   — and it is unanswerable for a monotone curve, since there is no trough to
+   anchor on and nothing to detect. So: a step size and four directions,
+   applied to whatever is currently on screen, repeatable.
+
+   Every nudge is the same rigid translation the shift buttons perform — x or y
+   moves by a constant, the other axis is untouched, so width, inclination and
+   depth never change no matter how many times it is clicked. Because each
+   click acts on the current curve, nudges compose exactly: ten clicks right is
+   one move of ten steps, with no accumulated resampling error (nothing is ever
+   resampled — see optv4EditGrid). ── */
+let optv4NudgeAcc = { dx: 0, dy: 0 };
+let optv4NudgeLast = null;   // {dx, dy} of the most recent nudge, for undo
+
+function optv4NudgeReset() {
+  optv4NudgeAcc = { dx: 0, dy: 0 };
+  optv4NudgeLast = null;
+  optv4RenderNudgeTotal();
+}
+
+function optv4RenderNudgeTotal() {
+  const el = document.getElementById("optv4-nudge-total");
+  if (!el) return;
+  const { dx, dy } = optv4NudgeAcc;
+  if (!dx && !dy) { el.textContent = ""; return; }
+  const dp = optv4Dp();
+  const bits = [];
+  if (dx) bits.push(`${dx > 0 ? "right" : "left"} $${optv2Fmt(Math.abs(dx), dp)}`);
+  if (dy) bits.push(`${dy > 0 ? "up" : "down"} $${optv2Fmt(Math.abs(dy), 0)}`);
+  el.textContent = "moved " + bits.join(" · ");
+}
+
+// Price step per click, per asset — the desk's own increments: 5 cents on FIL,
+// $100 on ETH. A constant rather than a % of spot, because these are the units
+// the book is actually quoted and thought about in.
+const OPTV4_NUDGE_STEP_X = { FIL: 0.05, ETH: 100 };
+
+// Prefill the step sizes. Price step from OPTV4_NUDGE_STEP_X; $ step from the
+// curve's own vertical span (1%, rounded to something clickable), since a
+// sensible payoff step depends entirely on how deep the curve is. Only fills
+// empty boxes, so a typed value survives the re-renders that editing triggers.
+function optv4SyncNudgeDefaults() {
+  const src = optv4ProfileSource();
+  if (!src) return;
+  const dp = optv4Dp();
+  const $x = document.getElementById("optv4-nudge-step-x");
+  if ($x && !$x.value) {
+    const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+    $x.value = String(OPTV4_NUDGE_STEP_X[asset] ?? OPTV4_NUDGE_STEP_X.ETH);
+  }
+  const $y = document.getElementById("optv4-nudge-step-y");
+  if ($y && !$y.value) {
+    const pts = optv4CurrentTargetPoints();
+    let step = 250000;
+    if (pts.length >= 2) {
+      const ys = pts.map(p => p.y);
+      const span = Math.max(...ys) - Math.min(...ys);
+      if (span > 0) step = span * 0.01;
+    }
+    // Round to something clickable rather than 153,847.
+    const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(Math.abs(step))) - 1));
+    $y.value = String(Math.max(mag, Math.round(step / mag) * mag));
+  }
+}
+
+function optv4NudgeTarget(dirX, dirY) {
+  const src = optv4ProfileSource();
+  if (!src || !src.spots.length) { alert("Load the risk profile first."); return; }
+  const points = optv4CurrentTargetPoints();
+  if (points.length < 2) { alert("Load or shape a target curve first (need at least 2 points)."); return; }
+
+  const stepX = Math.abs(Number(document.getElementById("optv4-nudge-step-x")?.value)) || 0;
+  const stepY = Math.abs(Number(document.getElementById("optv4-nudge-step-y")?.value)) || 0;
+  const dx = dirX * stepX;
+  const dy = dirY * stepY;
+  if (!dx && !dy) {
+    alert(dirX ? "Set a price step first." : "Set a $ step first.");
+    document.getElementById(dirX ? "optv4-nudge-step-x" : "optv4-nudge-step-y")?.focus();
+    return;
+  }
+  optv4ApplyNudge(dx, dy);
+}
+
+function optv4ApplyNudge(dx, dy) {
+  const src = optv4ProfileSource();
+  const points = optv4CurrentTargetPoints();
+  // Binary floating point makes 0.2 + 0.05 come out as 0.25000000000000006, and
+  // twenty clicks of that turns clean 5-cent stops into a column of noise. The
+  // table keys rows off these exact values, so the drift is visible and ugly.
+  // Snap to two decimals finer than the asset displays: enough to erase the
+  // dust, never enough to move a real value (ladder endpoints included).
+  const q = Math.pow(10, optv4Dp() + 2);
+  const snap = v => Math.round(v * q) / q;
+  const moved = points
+    .map(pt => ({ x: snap(pt.x + dx), y: pt.y + dy }))
+    // A point pushed to or below zero price is not a price. Dropping it would
+    // silently eat the left wing, so refuse the move instead and say why.
+    .filter(pt => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+  if (moved.some(pt => pt.x <= 0)) {
+    alert("That would push part of the curve to a price of zero or below. "
+      + "Use a smaller price step, or nudge the other way.");
+    return;
+  }
+  if (moved.length < 2) { alert("The nudge left fewer than 2 valid points."); return; }
+
+  optv4ManualTarget = moved.sort((a, b) => a.x - b.x);
+  optv4NudgeAcc = { dx: optv4NudgeAcc.dx + dx, dy: optv4NudgeAcc.dy + dy };
+  optv4NudgeLast = { dx, dy };
+
+  optv4RenderProfileTable();
+  optv4RenderNudgeTotal();
+  const bookMtm = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.current_book_mtm != null)
+    ? optv4OptResult.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0);
+  renderTargetShapeSummary("optv4-target-shape-summary",
+    optv4ManualTargetInterp(src.spots), src.spots, src.S0, bookMtm);
+
+  const status = document.getElementById("optv4-target-status");
+  if (status) {
+    const dp = optv4Dp();
+    const what = dx
+      ? `${dx > 0 ? "Right" : "Left"} $${optv2Fmt(Math.abs(dx), dp)}`
+      : `${dy > 0 ? "Up" : "Down"} $${optv2Fmt(Math.abs(dy), 0)}`;
+    const { dx: ax, dy: ay } = optv4NudgeAcc;
+    const total = [];
+    if (ax) total.push(`${ax > 0 ? "right" : "left"} $${optv2Fmt(Math.abs(ax), dp)}`);
+    if (ay) total.push(`${ay > 0 ? "up" : "down"} $${optv2Fmt(Math.abs(ay), 0)}`);
+    status.textContent = `${what}. Shape unchanged`
+      + (total.length ? ` — total ${total.join(" and ")} from the loaded curve.` : ".")
+      + " Keep clicking to keep moving; Apply & Re-run when it looks right.";
+  }
+}
+
+function optv4NudgeUndo() {
+  if (!optv4NudgeLast) { alert("Nothing to undo — no nudge has been applied yet."); return; }
+  const { dx, dy } = optv4NudgeLast;
+  optv4NudgeLast = null;                       // single level, so it can't repeat
+  optv4ApplyNudge(-dx, -dy);
+  optv4NudgeLast = null;
+  optv4RenderNudgeTotal();
 }
 
 function optv4UpdateTargetStatus() {
@@ -14534,6 +14680,11 @@ document.getElementById("btn-optv4-target-delete")?.addEventListener("click", op
 document.getElementById("btn-optv4-target-draw")?.addEventListener("click", optv4ToggleDrawMode);
 document.getElementById("btn-optv4-target-shift")?.addEventListener("click", optv4ShiftTarget);
 document.getElementById("btn-optv4-target-shift-y")?.addEventListener("click", optv4ShiftTargetY);
+document.getElementById("btn-optv4-nudge-left")?.addEventListener("click", () => optv4NudgeTarget(-1, 0));
+document.getElementById("btn-optv4-nudge-right")?.addEventListener("click", () => optv4NudgeTarget(1, 0));
+document.getElementById("btn-optv4-nudge-up")?.addEventListener("click", () => optv4NudgeTarget(0, 1));
+document.getElementById("btn-optv4-nudge-down")?.addEventListener("click", () => optv4NudgeTarget(0, -1));
+document.getElementById("btn-optv4-nudge-undo")?.addEventListener("click", optv4NudgeUndo);
 // Re-shape the parametric (auto) preview live as any Target Shape knob changes —
 // mirrors the dropdown's own behavior (discards manual edits, refetches auto).
 // The $ readouts update on every keystroke ("input"); the actual re-fetch (and
