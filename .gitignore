@@ -20,3 +20,10 @@ data/optimization_snapshots/usecases/*.json
 
 # local server logs
 *.log
+
+# Scratch backups made while editing app.js (which has NUL bytes, so it is
+# copied byte-for-byte rather than rewritten). Never part of the source.
+.fgn.bak
+*.bak
+.verify_app.js
+.overlay_check.js
