@@ -52,19 +52,48 @@
     }
 
     // Script parse/eval failures arrive here, including app.js failing to parse.
+    //
+    // Be strict about what counts as fatal. capture:true is required to see a
+    // script's parse error, but it also surfaces every RESOURCE load failure
+    // (a <script>, <link> or <img> that 404s or is blocked by an extension) —
+    // and those events carry no message, filename or line. Treating them as
+    // fatal put a full-screen "JavaScript failed to load / (unknown location)"
+    // panel over a perfectly working page, which is worse than the problem it
+    // was added to solve. Only our own app.js failing to load is fatal; any
+    // other resource is logged and left alone.
     window.addEventListener("error", function (ev) {
+      var tgt = ev.target;
+      if (tgt && tgt !== window && (tgt.src || tgt.href)) {
+        var url = String(tgt.src || tgt.href);
+        if (/\/static\/app\.js/.test(url)) {
+          show("app.js could not be loaded",
+               esc(url) + "\n\nThe request for the app's own script failed, so "
+               + "nothing can run. Check the Network tab for its status.");
+        } else {
+          console.warn("[startup] resource failed to load (non-fatal):", url);
+        }
+        return;
+      }
+      // A cross-origin script that throws reports a bare "Script error." with
+      // no message, no file and no line. There is nothing actionable to show
+      // and it is usually a third-party script, so don't blank the page for it.
+      if (!ev.message && !(ev.error && ev.error.stack)) {
+        console.warn("[startup] error event with no detail (cross-origin script?) — ignored");
+        return;
+      }
       var where = ev.filename
         ? esc(ev.filename.replace(/^.*\/static\//, "static/"))
             + ":" + ev.lineno + (ev.colno ? ":" + ev.colno : "")
-        : "(unknown location)";
+        : "(location unavailable)";
       var msg = ev.error && ev.error.stack ? ev.error.stack : ev.message;
       show("JavaScript failed to load", where + "\n\n" + esc(msg));
     }, true);
 
+    // Rejections are logged, not fatal: a single failed fetch mid-session must
+    // not throw a modal over a working page. Only startup failures do that.
     window.addEventListener("unhandledrejection", function (ev) {
       var r = ev.reason;
-      show("Unhandled promise rejection",
-           esc((r && (r.stack || r.message)) || r));
+      console.warn("[startup] unhandled promise rejection:", (r && (r.stack || r.message)) || r);
     });
 
     // Belt and braces: a script can also fail without firing "error" (e.g. a
