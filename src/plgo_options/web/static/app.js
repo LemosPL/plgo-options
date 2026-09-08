@@ -10497,7 +10497,16 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
 // only v4 asks for it. opts.dp sets price decimals (FIL needs 2).
 function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
   const spots = data.spot_ladder;
-  const ethSpot = data.eth_spot;
+  // The RUN result names this field "spot" (optimizer_v3), not "eth_spot" — so
+  // reading data.eth_spot here yielded undefined on every run this function has
+  // ever drawn. Consequences were silent: the "% move" column rendered as "—",
+  // the geometric rows never got pinned to spot, and optv2NearestIdx(spots,
+  // undefined) highlighted row 0 instead of the mark. Same fallback chain
+  // optv4AfterSelectedAtHorizon already uses, plus an explicit opts override.
+  const ethSpot = (opts.spot != null ? opts.spot
+    : (data.eth_spot != null ? data.eth_spot
+      : (data.spot != null ? data.spot
+        : (typeof optv4Data !== "undefined" && optv4Data && optv4Data.eth_spot) || 0)));
   const horizons = data.chart_horizons || [0, 16, 30, 60, 90];
   const payoff = data[side].payoff_by_horizon;
   const geometric = !!opts.geometric;
@@ -12971,10 +12980,19 @@ function optv4ChartLayout({ title, assetLabel, C, height }) {
 // replaces a correct table with a differently-formatted one — which is exactly
 // how a FIL run ended up showing an "ETH Spot" header and 0.80 rounded to "1".
 function optv4MatrixOpts() {
+  // Spot passed explicitly: the run result calls it "spot" while /pnl calls it
+  // "eth_spot", and the matrix needs it for the % column, the spot row pin and
+  // the row highlight. Resolving it here keeps all three tables on the same
+  // mark even when they are fed from different payloads.
+  const r = optv4OptResult;
+  const spot = ((r && r.status === "ok" && (r.spot != null ? r.spot : r.eth_spot)) != null
+      ? (r.spot != null ? r.spot : r.eth_spot)
+      : (optv4Data && optv4Data.eth_spot)) || 0;
   return {
     geometric: true,
     dp: optv4Dp(),
     assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH",
+    spot,
   };
 }
 
