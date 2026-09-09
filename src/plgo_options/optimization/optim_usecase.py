@@ -117,7 +117,13 @@ class OptimizerRunParams:
     # control policy was calibrated against for ETH; tune per asset/book.
     delta_band: float = 75.0
     downside_factor: float = 1.0
-    t90_weight: float = 0.0
+    # Convex blend [0,1] between fitting today's target (0) and fitting it
+    # 90 days forward (1) — see optimizer_v3.run_lp. 0.2 keeps today's shape
+    # dominant while still penalizing picks that look fine now but decay
+    # badly by day 90; safe as a default now that bs_vec_bridge (see
+    # bs_value_for_position/_candidate_curve) prices the T+90 term correctly
+    # for near-dated legs instead of snapping them to intrinsic.
+    t90_weight: float = 0.2
     # Power-law tilt on the profile-fit spot_weights: gamma = exp(atm_concentration),
     # so 0 (default) is an exact no-op. >0 concentrates fit pressure at the money
     # (tails matter relatively less); <0 flattens toward a uniform spread across

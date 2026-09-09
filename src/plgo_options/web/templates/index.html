@@ -1650,8 +1650,8 @@
             title="Weight on falling short of the target vs. exceeding it, within the profile-fit term. 1 = symmetric (default, same as before this existed) — being $1 above target costs the same as $1 below. >1 = treat the target as a floor: undershooting it is penalized more than overshooting, since more cushion above target is a bonus, not a problem.">
         </label>
         <label class="pf-filter-label">T+90 Weight
-          <input type="number" id="optv2-t90-weight" value="0" step="0.1" min="0" max="1" style="width:5rem"
-            title="Blend between fitting the target today (0) and fitting it 90 days forward (1) — e.g. 0.3 means 70% today-fit, 30% T+90-fit. A book that matches the target today can still drift badly by T+90 purely from theta decay; this lets the optimizer care about both, not just today. 0 = today only (default, unchanged from before this existed).">
+          <input type="number" id="optv2-t90-weight" value="0.2" step="0.1" min="0" max="1" style="width:5rem"
+            title="Blend between fitting the target today (0) and fitting it 90 days forward (1) — e.g. 0.3 means 70% today-fit, 30% T+90-fit. A book that matches the target today can still drift badly by T+90 purely from theta decay; this lets the optimizer care about both, not just today. Default 0.2: today's shape still dominates, but the optimizer is penalized for picks that decay badly by T+90.">
         </label>
         <label class="pf-filter-label">ATM Concentration
           <input type="number" id="optv2-atm-concentration" value="0" step="0.5" style="width:5rem"
@@ -2136,8 +2136,8 @@
             <p class="optv3-hint">Penalty on falling short of target vs. exceeding it. 1 = symmetric; &gt;1 treats the target as a floor (undershoot hurts more).</p>
           </div>
           <div class="optv3-field">
-            <label for="optv3-t90-weight">T+90 blend <input type="number" id="optv3-t90-weight" value="0" step="0.1" min="0" max="1"></label>
-            <p class="optv3-hint">Blend fitting the target today (0) vs. 90 days forward (1). e.g. 0.3 = 70% today / 30% T+90, so theta drift is considered.</p>
+            <label for="optv3-t90-weight">T+90 blend <input type="number" id="optv3-t90-weight" value="0.2" step="0.1" min="0" max="1"></label>
+            <p class="optv3-hint">Blend fitting the target today (0) vs. 90 days forward (1). e.g. 0.3 = 70% today / 30% T+90, so theta drift is considered. Default 0.2.</p>
           </div>
           <div class="optv3-field">
             <label for="optv3-atm-concentration">ATM concentration <input type="number" id="optv3-atm-concentration" value="0" step="0.5"></label>
@@ -2547,8 +2547,8 @@
             <p class="optv3-hint">Penalty on falling short of target vs. exceeding it. 1 = symmetric; &gt;1 treats the target as a floor (undershoot hurts more).</p>
           </div>
           <div class="optv3-field">
-            <label for="optv4-t90-weight">T+90 blend <input type="number" id="optv4-t90-weight" value="0" step="0.1" min="0" max="1"></label>
-            <p class="optv3-hint">Blend fitting the target today (0) vs. 90 days forward (1). e.g. 0.3 = 70% today / 30% T+90, so theta drift is considered.</p>
+            <label for="optv4-t90-weight">T+90 blend <input type="number" id="optv4-t90-weight" value="0.2" step="0.1" min="0" max="1"></label>
+            <p class="optv3-hint">Blend fitting the target today (0) vs. 90 days forward (1). e.g. 0.3 = 70% today / 30% T+90, so theta drift is considered. Default 0.2.</p>
           </div>
           <div class="optv3-field">
             <label for="optv4-atm-concentration">ATM concentration <input type="number" id="optv4-atm-concentration" value="0" step="0.5"></label>

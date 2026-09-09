@@ -1202,7 +1202,7 @@ class OptimizerV3(BaseOptimizer):
                  enable_delta_rehedge: bool = False,
                  delta_band: float = 75.0,
                  downside_factor: float = 1.0,
-                 t90_weight: float = 0.0,
+                 t90_weight: float = 0.2,
                  manual_target: list[dict] | None = None,
                  target_profile_file: str | None = None,
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,

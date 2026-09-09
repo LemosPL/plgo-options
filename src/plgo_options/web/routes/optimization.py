@@ -127,7 +127,10 @@ class OptimizationParams(BaseModel):
     # codebase's band-triggered control policy was calibrated against for ETH.
     delta_band: float = 75.0
     downside_factor: float = 1.0
-    t90_weight: float = 0.0
+    # Convex blend [0,1] between fitting today's target (0) and fitting it
+    # 90 days forward (1) — see optimizer_v3.run_lp. 0.2 default: mirrors
+    # optim_usecase.OptimizerRunParams.t90_weight.
+    t90_weight: float = 0.2
     # Power-law tilt on the profile-fit spot_weights (gamma = exp(atm_concentration)):
     # 0 (default) is an exact no-op; >0 concentrates fit pressure at the money;
     # <0 flattens it toward a uniform spread. See optimizer_v3.run_lp.
