@@ -10369,8 +10369,14 @@ function optv2RenderResult(data) {
   // curves at "Load Risk Profile" time, which used a different spot_ladder
   // than the optimizer's. Re-rendering from data.before here keeps both
   // matrices on the identical ladder and semantics.
+  // dp/assetLabel: without these, optv2RenderCompareMatrix defaults to
+  // ETH's 0-decimal formatting regardless of the asset actually being run —
+  // on FIL that rounds every $0.0x-$3.xx spot down to a bare integer
+  // ("$0"..."$3", one label for the whole ladder) and mislabels the column
+  // "ETH Spot". Same bug v4 hit and fixed via optv4MatrixOpts (5910d1b).
+  const optv2MatrixOpts = { dp: optv3Dp(), assetLabel: currentAsset };
   if (data.before && data.before.payoff_by_horizon) {
-    optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody");
+    optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody", optv2MatrixOpts);
   }
 
   // Show "After" matrix next to the main P&L Matrix
@@ -10379,7 +10385,7 @@ function optv2RenderResult(data) {
   if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
     $afterPanel.style.display = "";
     $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody");
+    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody", optv2MatrixOpts);
   }
 
   // ── D. Strategy grouping ──
@@ -11430,7 +11436,10 @@ function optv3RenderResult(data) {
     } else { $mtmNote.textContent = ""; }
   }
   if (data.before && data.before.payoff_by_horizon) {
-    optv2RenderCompareMatrix(data, "before", "optv3-matrix-thead", "optv3-matrix-tbody");
+    // dp/assetLabel: see optv2MatrixOpts above — same shared renderer,
+    // same "ETH Spot" / 0-decimal-on-FIL bug without them.
+    optv2RenderCompareMatrix(data, "before", "optv3-matrix-thead", "optv3-matrix-tbody",
+      { dp: optv3Dp(), assetLabel: currentAsset });
   }
   optv3RenderAfterMatrix();
 
@@ -11685,7 +11694,8 @@ function optv3RenderAfterMatrix() {
   const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
   $afterPanel.style.display = "";
   $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  optv2RenderCompareMatrix(dataSel, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody");
+  optv2RenderCompareMatrix(dataSel, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody",
+    { dp: optv3Dp(), assetLabel: currentAsset });
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
