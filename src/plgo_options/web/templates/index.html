@@ -2609,6 +2609,8 @@
             <p class="optv3-hint" style="margin:0 0 .45rem">Roll each counterparty's trades with DTE ≤ its value; the ticked candidates below are exactly what the optimizer rolls. Clear a counterparty to exclude it.</p>
             <div id="optv4-dte-list"><p class="optv3-hint" style="margin:0">Load the risk profile to list counterparties.</p></div>
           </div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-roll-use-ticked"> Roll exactly the ticked candidates</label>
+          <p class="optv3-hint">Off (default) = roll by the DTE thresholds above, exactly as Optimizer v2 does, so the same settings on both pages give the same result. On = roll precisely the rows ticked in <b>Roll candidates</b> below (manual mode) and scope new trades to those counterparties only. That is a genuinely different question to ask the optimizer, which is why it has to be asked for: it used to switch itself on the moment any candidate existed, silently sending a different book to the LP than v2 did.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-roll-itm-only"> ITM-only rolls</label>
           <p class="optv3-hint">When rolling, only touch in-the-money positions. Off by default, matching Optimizer v2 — this flag changes <i>which positions are unwound at all</i>, so the LP starts from a different book and the whole result set shifts.</p>
         </div>
@@ -3534,6 +3536,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=162"></script>
+<script src="/static/app.js?v=163"></script>
 </body>
 </html>

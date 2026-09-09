@@ -14822,17 +14822,31 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     const customSpotRaw = document.getElementById("optv4-custom-spot")?.value;
     const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
 
-    // When there are roll candidates, the tick-to-unwind panel is authoritative:
-    // force exactly the ticked set (roll_dte_threshold = -1 → manual mode). With
-    // no candidates, fall back to the threshold / ITM-only inputs.
-    const rollCandsActive = optv4RollCandidates().length > 0;
+    // The tick-to-unwind panel is now OPT-IN, and this is the single reason v2
+    // and v4 could return completely different books from identical settings.
+    //
+    // It used to activate on `optv4RollCandidates().length > 0` — true merely
+    // because candidates EXIST, not because anyone chose anything. So simply
+    // loading a book silently rewrote three of the highest-leverage inputs to
+    // the LP: roll_dte_threshold became -1 (manual mode, roll exactly this
+    // set), forced_roll_ids became the panel's pre-ticked ITM rows instead of
+    // the Trade Management selection, and counterparties was narrowed to just
+    // the rolled ones. Different positions unwound and a smaller trading
+    // universe means a different starting book, so the diverging payoff
+    // profiles were never a pricing difference — the two pages were optimizing
+    // different problems while showing the same parameters.
+    //
+    // Unchecked (default) = byte-identical inputs to Optimizer v2. Checked =
+    // the v4 panel behaviour, which is genuinely useful but must be asked for.
+    const useTickedRolls = document.getElementById("optv4-roll-use-ticked")?.checked || false;
+    const rollCandsActive = useTickedRolls && optv4RollCandidates().length > 0;
     const rollThresholdParam = rollCandsActive ? -1 : (Number.isNaN(rollDteThreshold) ? null : rollDteThreshold);
     const forcedRollIds = rollCandsActive ? [...optv4RollSel] : [...tmSelected];
 
     // Scope the NEW/replacement trades to the counterparties actually being
     // rolled, so "roll only G20" doesn't spawn trades for Wave/KeyRock/Flowdesk.
-    // An explicit Counterparties selection still wins; otherwise derive scope
-    // from the ticked roll candidates.
+    // An explicit Counterparties selection still wins. Only applies in ticked
+    // mode — narrowing the universe is part of that opt-in, not a default.
     let cptiesParam = selectedCounterparties.length ? selectedCounterparties : null;
     if (rollCandsActive && !cptiesParam) {
       const rolledCps = [...new Set(
