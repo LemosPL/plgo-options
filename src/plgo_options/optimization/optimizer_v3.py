@@ -1123,15 +1123,19 @@ class OptimizerV3(BaseOptimizer):
 
         if option_smile is not None:
             maturity = datetime.combine(p.expiry_date, datetime.min.time())
-            # _year_fraction is time-to-maturity from today, with no horizon
-            # concept — subtract it here so horizon_days actually does
-            # something (previously accepted but silently ignored).
-            T = max(option_smile._year_fraction(maturity) - horizon_days / 365.25, 0.0)
+            # dte_days is time-to-maturity from today, with no horizon concept
+            # of its own — bs_vec_bridge is the one that folds horizon_days
+            # in, via a Brownian-bridge reprice once the position's own
+            # expiry falls before the horizon (see its docstring for why a
+            # plain intrinsic-at-spot_arr snap there is wrong). At
+            # horizon_days=0 (or once the position is still alive at the
+            # horizon) this is an exact, unchanged Markov reprice.
+            dte_days = option_smile._year_fraction(maturity) * 365.25
             sigma = option_smile.compute_vol(maturity, strike=strike)
-        else:
-            T = float('nan')
-            sigma = float(getattr(p, "iv_pct", 0.0) or 0.0) / 100.0
+            return signed_qty * bs_vec_bridge(self.spot, spot_arr, strike, dte_days, horizon_days, sigma, opt)
 
+        T = float('nan')
+        sigma = float(getattr(p, "iv_pct", 0.0) or 0.0) / 100.0
         r = 0.0
         return signed_qty * bs_vec(spot_arr, strike, T, r, sigma, opt)
 
@@ -3031,12 +3035,17 @@ class OptimizerV3(BaseOptimizer):
         )
         maturity = matching_slice.maturity if matching_slice is not None else option_smile.slices[0].maturity
 
+        # dte_days is the candidate's own days-to-expiry; bs_vec_bridge folds
+        # horizon_days in itself (Brownian-bridge reprice once the candidate's
+        # own expiry falls before the horizon — see its docstring). Each
+        # leg's vol only depends on (maturity, strike), not spot, so it's
+        # computed once per leg and applied across the whole ladder rather
+        # than recomputed inside a per-spot loop as before.
+        dte_days = float(c.dte)
+
         if self._is_spread_candidate(c):
             long_leg = c.long_leg
             short_leg = c.short_leg
-
-            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
-            r = 0.0
 
             long_strike = float(long_leg.strike or 0.0)
             short_strike = float(short_leg.strike or 0.0)
@@ -3045,80 +3054,29 @@ class OptimizerV3(BaseOptimizer):
             short_entry = float(short_leg.bs_price_usd or 0.0)
             spread_entry = long_entry - short_entry
 
-            curve_list = []
-            for spot in spot_arr:
-                long_vol = option_smile.compute_vol(
-                    maturity,
-                    strike=long_strike,
-                )
-                short_vol = option_smile.compute_vol(
-                    maturity,
-                    strike=short_strike,
-                )
+            long_vol = option_smile.compute_vol(maturity, strike=long_strike)
+            short_vol = option_smile.compute_vol(maturity, strike=short_strike)
 
-                long_price = options.bs_price(
-                    spot,
-                    long_strike,
-                    T,
-                    r,
-                    long_vol,
-                    long_leg.opt,
-                )
-                short_price = options.bs_price(
-                    spot,
-                    short_strike,
-                    T,
-                    r,
-                    short_vol,
-                    short_leg.opt,
-                )
+            long_curve = bs_vec_bridge(self.spot, spot_arr, long_strike, dte_days, horizon_days, long_vol, long_leg.opt)
+            short_curve = bs_vec_bridge(self.spot, spot_arr, short_strike, dte_days, horizon_days, short_vol, short_leg.opt)
 
-                curve_list.append((long_price - short_price) - spread_entry)
-
-            return np.array(curve_list, dtype=float)
+            return (long_curve - short_curve) - spread_entry
         elif self._is_straddle_candidate(c):
             call_leg = c.call_leg
             put_leg = c.put_leg
 
-            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
-            r = 0.0
-            strike = float(c.strike or 0.0)
             entry_price = float(c.bs_price_usd or 0.0)
+            call_strike = float(call_leg.strike or 0.0)
+            put_strike = float(put_leg.strike or 0.0)
 
-            curve_list = []
-            for spot in spot_arr:
-                call_vol = option_smile.compute_vol(
-                    maturity,
-                    strike=float(call_leg.strike or 0.0),
-                )
-                put_vol = option_smile.compute_vol(
-                    maturity,
-                    strike=float(put_leg.strike or 0.0),
-                )
+            call_vol = option_smile.compute_vol(maturity, strike=call_strike)
+            put_vol = option_smile.compute_vol(maturity, strike=put_strike)
 
-                call_price = options.bs_price(
-                    spot,
-                    float(call_leg.strike or 0.0),
-                    T,
-                    r,
-                    call_vol,
-                    "C",
-                )
-                put_price = options.bs_price(
-                    spot,
-                    float(put_leg.strike or 0.0),
-                    T,
-                    r,
-                    put_vol,
-                    "P",
-                )
+            call_curve = bs_vec_bridge(self.spot, spot_arr, call_strike, dte_days, horizon_days, call_vol, "C")
+            put_curve = bs_vec_bridge(self.spot, spot_arr, put_strike, dte_days, horizon_days, put_vol, "P")
 
-                curve_list.append((call_price + put_price) - entry_price)
-
-            return np.array(curve_list, dtype=float)
+            return (call_curve + put_curve) - entry_price
         elif self._is_iron_condor_candidate(c):
-            T = max(float(c.dte) - horizon_days, 0.0) / 365.25
-            r = 0.0
             entry_price = float(c.bs_price_usd or 0.0)
 
             legs = [
@@ -3128,27 +3086,13 @@ class OptimizerV3(BaseOptimizer):
                 (c.call_high_leg, 1.0),
             ]
 
-            curve_list = []
-            for spot in spot_arr:
-                value = 0.0
-                for leg, leg_sign in legs:
-                    strike = float(leg.strike or 0.0)
-                    vol = option_smile.compute_vol(
-                        maturity,
-                        strike=strike,
-                    )
-                    value += leg_sign * options.bs_price(
-                        spot,
-                        strike,
-                        T,
-                        r,
-                        vol,
-                        leg.opt,
-                    )
+            value = np.zeros_like(spot_arr, dtype=float)
+            for leg, leg_sign in legs:
+                strike = float(leg.strike or 0.0)
+                vol = option_smile.compute_vol(maturity, strike=strike)
+                value += leg_sign * bs_vec_bridge(self.spot, spot_arr, strike, dte_days, horizon_days, vol, leg.opt)
 
-                curve_list.append(value - entry_price)
-
-            return np.array(curve_list, dtype=float)
+            return value - entry_price
         if c.opt == "F":
             # Linear payoff, no vol/maturity dependence — matches
             # bs_value_for_position's own opt=="F" handling. c.strike holds
@@ -3159,20 +3103,10 @@ class OptimizerV3(BaseOptimizer):
             return np.zeros_like(spot_arr, dtype=float)
 
         strike = float(c.strike or 0.0)
-        bs_price = float(c.bs_price_usd or 0.0)
-        T = max(float(c.dte) - horizon_days, 0.0) / 365.25
-        r = 0.0
+        entry_price = float(c.bs_price_usd or 0.0)
+        vol = option_smile.compute_vol(maturity, strike=strike)
 
-        curve_list = []
-        for spot in spot_arr:
-            vol = option_smile.compute_vol(
-                maturity,
-                strike=strike,
-            )
-            price = options.bs_price(spot, strike, T, r, vol, c.opt)
-            curve_list.append(price - bs_price)
-
-        return np.array(curve_list, dtype=float)
+        return bs_vec_bridge(self.spot, spot_arr, strike, dte_days, horizon_days, vol, c.opt) - entry_price
 
     def _candidate_trade_legs(self, c, qty: int) -> list[tuple[Candidate, int, str]]:
         """
