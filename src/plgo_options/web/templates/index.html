@@ -621,7 +621,13 @@
 
     <!-- Portfolio P&L Matrix — same table as the Optimizer v4 "P&L Matrix" -->
     <section class="card">
-      <h2 title="Same rows, columns and values as the P&amp;L Matrix on Optimizer v4: uniform-% spot rows, horizons Now/16d/30d/60d/90d/120d/150d, book MTM at each cell.">P&amp;L Matrix -- Spot Price vs Time Horizon</h2>
+      <h2>P&amp;L Matrix -- Spot Price vs Time Horizon</h2>
+      <p style="margin:.25rem 0 .75rem;font-size:.8rem;color:var(--muted)">
+        The same table Optimizer v4 draws as its <b>before</b> matrix. Cells are
+        <b>P&amp;L from today's mark</b> — 0 at (Now, current spot) — with positions
+        repriced past their own expiry on a Brownian bridge, not snapped to intrinsic,
+        so the far columns keep moving.
+      </p>
       <div class="chain-wrapper">
         <table id="pf-mtm-grid">
           <thead id="pf-mtm-grid-thead"></thead>
@@ -3536,6 +3542,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=165"></script>
+<script src="/static/app.js?v=166"></script>
 </body>
 </html>

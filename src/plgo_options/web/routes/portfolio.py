@@ -16,6 +16,9 @@ from plgo_options.data.trades import read_eth_trades, read_fil_trades
 from plgo_options.pricing.options import bs_price
 from plgo_options.pricing.vol_surface import VolSmile
 from plgo_options.market_data.deribit_client import DeribitClient
+# Same repricer OptimizerV3.build_payoffs uses for its before/after curves —
+# see `pnl_by_horizon` below for why the matrix needs it.
+from plgo_options.optimization.math_utils import bs_vec_bridge
 
 router = APIRouter()
 client = DeribitClient()
@@ -47,6 +50,12 @@ MATRIX_HORIZONS = [30, 45, 60, 90, 120, 150, 180, 270, 360]
 
 # Payoff chart horizons (days forward)
 CHART_HORIZONS = [0, 16, 30, 60, 90, 120, 150]
+
+# Columns of the P&L matrix, on both the Portfolio P&L screen and Optimizer v4
+# (frontend OPTV2_HORIZONS). The optimizer run computes its own curves over
+# sorted(set(chart_horizons) | {0}); keeping the same set here means the two
+# matrices are column-for-column comparable.
+PNL_MATRIX_HORIZONS = sorted(set(CHART_HORIZONS + [0]))
 
 DEFAULT_IV = 0.80  # 80% fallback
 
@@ -593,6 +602,30 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             mtm_vals = signed_qty * vals
             trade_payoff[str(h)] = np.round(mtm_vals, 2).tolist()
 
+        # ------------------------------------------------------------------
+        # P&L-matrix curves — valued exactly the way OptimizerV3.build_payoffs
+        # values its "before" book, so the Portfolio P&L matrix and the
+        # Optimizer v4 before matrix agree cell for cell.
+        #
+        # trade_payoff above uses T_h = max(dte - h, 0): once the horizon
+        # passes the option's own expiry it snaps to intrinsic at the pillar
+        # spot, which is time-invariant — so every column past a position's
+        # DTE repeats the same number. On a book whose longest expiry is ~2
+        # months that made 60d/90d/120d/150d identical (the "flat across
+        # horizons" the matrix showed). bs_vec_bridge instead prices the
+        # payoff at the option's TRUE expiry conditioned on today's spot and
+        # the pillar spot (Brownian bridge on log-spot), which keeps moving
+        # with h — and is what v4 has always shown.
+        #
+        # Vol is iv_pct (not scenario_sigma) because iv_pct is the field the
+        # optimizer reads off this very payload into Position.iv_pct; the two
+        # only differ when Deribit returns a ticker with no mark_iv.
+        # ------------------------------------------------------------------
+        pnl_payoff: dict[str, list[float]] = {}
+        for h in PNL_MATRIX_HORIZONS:
+            vals = bs_vec_bridge(eth_spot, spot_arr, strike, days_rem, h, iv_pct / 100.0, opt)
+            pnl_payoff[str(h)] = np.round(signed_qty * vals, 2).tolist()
+
         # Truncate date strings for display
         if "T" in trade_date:
             trade_date = trade_date.split("T")[0]
@@ -634,6 +667,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "notional_live": notional_live,
             "mtm_by_horizon": mtm_horizon,
             "payoff_by_horizon": trade_payoff,
+            # Bridge-repriced curves for the P&L matrix only (charts and the
+            # optimizer keep reading payoff_by_horizon). See above.
+            "pnl_by_horizon": pnl_payoff,
             "db_status": t.get("_db_status", "active"),
         })
 
@@ -724,6 +760,8 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         "matrix_horizons": MATRIX_HORIZONS,
         "chart_horizons": sorted(set(CHART_HORIZONS + [0])),
         "all_horizons": sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0])),
+        # Columns of the P&L matrix (same set Optimizer v4 draws).
+        "pnl_matrix_horizons": PNL_MATRIX_HORIZONS,
         "vol_surface": vol_surface,
         "no_live_data": False,
         # True when eth_spot came from a fallback (most recent trade's own

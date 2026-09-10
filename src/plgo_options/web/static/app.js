@@ -3752,6 +3752,38 @@ function pfSumCurveForSet(positionIds, horizon) {
   return result;
 }
 
+/* ── P&L-matrix curves: the v4 valuation ──────────────────────────────────
+   `pnl_by_horizon` is the bridge-repriced curve set (/pnl computes it with
+   the same bs_vec_bridge OptimizerV3.build_payoffs uses), so summing it here
+   reproduces the optimizer's "before" book. payoff_by_horizon is the
+   fallback for a payload predating that field — it snaps to intrinsic past
+   each option's own expiry, which is what made the far columns repeat.
+   Rolled positions keep the client-side reprice (no bridge in JS); they are
+   a what-if overlay, not part of the v4 comparison. ── */
+function pfMatrixCurve(positionIds, horizon) {
+  const key = String(horizon);
+  const spots = pfData.spot_ladder;
+  const result = new Array(spots.length).fill(0);
+  let rolled = null;
+  for (const p of pfData.positions) {
+    if (!positionIds.has(p.id)) continue;
+    if (pfRolled.has(p.id)) { (rolled = rolled || []).push(p); continue; }
+    const curve = (p.pnl_by_horizon && p.pnl_by_horizon[key]) || p.payoff_by_horizon[key];
+    if (curve) for (let i = 0; i < spots.length; i++) result[i] += curve[i];
+  }
+  if (rolled) {
+    for (const p of rolled) {
+      const newDte = pfRolled.get(p.id).newDte;
+      const T = Math.max(newDte - horizon, 0) / 365.25;
+      const sigma = (pfLookupIv(newDte, p.strike) ?? p.iv_pct) / 100;
+      for (let i = 0; i < spots.length; i++) {
+        result[i] += p.net_qty * bsPrice(spots[i], p.strike, T, 0, sigma, p.opt);
+      }
+    }
+  }
+  return result;
+}
+
 /** Initialize compare sets with sensible defaults:
  *  Old = expired trades, New = active trades. User can override.
  */
@@ -4040,20 +4072,28 @@ function pfRenderPayoffChart() {
 }
 
 // ── P&L Matrix ───────────────────────────────────────────
-// Same table as Optimizer v4's P&L Matrix (optv4RenderMatrix): same horizon
-// columns (OPTV2_HORIZONS, "Now" for 0), the same uniform-% rows from
-// optvGeometricRows with a "% move" column, and the same interpolation
-// (optv4InterpAt) / rounding / colouring. The numbers already agreed — both
-// sides sum the same `payoff_by_horizon` curves from /api/portfolio/pnl — but
-// the old table picked equal-dollar rows off a hardcoded $500 (ETH) / $0.20
-// (FIL) grid and long-dated 30…360d columns, so the two screens showed the
-// same book in two unrecognisably different tables.
+// The same table Optimizer v4 shows as its "before" matrix, cell for cell:
+//   • columns — OPTV2_HORIZONS ("Now" for 0), the run's own chart_horizons;
+//   • rows    — optvGeometricRows (uniform-%) plus a "% move" column, values
+//               interpolated onto them with optv4InterpAt;
+//   • values  — bridge-repriced book value (pfMatrixCurve → /pnl's
+//               pnl_by_horizon → bs_vec_bridge, the repricer
+//               OptimizerV3.build_payoffs uses) MINUS today's book mark, i.e.
+//               P&L from now, reading 0 at (Now, current spot). That anchor
+//               is build_payoffs' `today_value_before`, interpolated at spot
+//               off the h=0 curve exactly as the optimizer does it.
+//
+// The old table differed on all three counts: equal-dollar rows off a
+// hardcoded $500 (ETH) / $0.20 (FIL) grid, 30…360d columns, and raw MTM
+// valued with T_h = max(dte − h, 0) — which snaps to intrinsic past each
+// option's expiry and made every far column repeat the same number.
 //
 // Portfolio-only extras kept: the Old/New split (two sub-columns per horizon
-// when both sets are populated) and rolled-position repricing via pfSumCurves.
+// when both sets are populated, each anchored to its own current mark) and
+// the client-side reprice of rolled positions.
 function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
-  const horizons = OPTV2_HORIZONS;
+  const horizons = pfData.pnl_matrix_horizons || OPTV2_HORIZONS;
   const ethSpot = pfData.eth_spot;
   const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0;
   const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
@@ -4083,16 +4123,19 @@ function pfRenderMtmGrid() {
 
   // Pre-compute curves over the full ladder once per horizon, then interpolate
   // onto the display rows (both operations are linear, so order doesn't matter).
-  const oldCurves = {}, newCurves = {};
+  // Each set is then anchored to its own value at (h=0, spot) so the table
+  // reads "P&L from today" — build_payoffs' today_value_before, same interp.
+  const anchored = (set) => {
+    const curves = {};
+    for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
+    const anchor = optv4InterpAt(spots, curves[0] || curves[horizons[0]], ethSpot) || 0;
+    for (const h of horizons) curves[h] = curves[h].map(v => v - anchor);
+    return curves;
+  };
+
   const singleSet = newPositions.length > 0 ? pfNewSet : pfOldSet;
-  for (const h of horizons) {
-    if (hasOldAndNew) {
-      oldCurves[h] = pfSumCurveForSet(pfOldSet, h);
-      newCurves[h] = pfSumCurves(pfNewSet, h);
-    } else {
-      oldCurves[h] = pfSumCurveForSet(singleSet, h);
-    }
-  }
+  const oldCurves = anchored(hasOldAndNew ? pfOldSet : singleSet);
+  const newCurves = hasOldAndNew ? anchored(pfNewSet) : null;
 
   const cell = (curve, s, extraStyle) => {
     const v = optv4InterpAt(spots, curve, s) || 0;
