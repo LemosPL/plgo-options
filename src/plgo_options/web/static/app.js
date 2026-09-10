@@ -286,7 +286,17 @@ const CPTY_PRICING = {
 // counterparty exists but we haven't calibrated it for this asset yet.
 function getCptyMethod(cptyKey, asset) {
   if (!cptyKey) return null;
-  const cp = CPTY_PRICING[cptyKey];
+  // Normalize here, not at each call site. CPTY_PRICING's keys are lowercase,
+  // but the counterparty name travels through the app in two cases: dropdown
+  // values / per-leg overrides are already lowercase, while a trade's
+  // `counterparty` is the backend's display-cased "KeyRock" / "Flowdesk". A
+  // raw CPTY_PRICING[cptyKey] lookup silently returns null on the display-cased
+  // form, and every caller treats null as "uncalibrated, use mid vol" — so the
+  // failure mode is a wrong price with no error. That shipped to prod once
+  // (optv4DisplayPriceAtStrike, fixed at its call site in 15cf512); doing it
+  // here means the next caller can't reintroduce it. No-op for the lowercase
+  // callers that were already correct.
+  const cp = CPTY_PRICING[String(cptyKey).trim().toLowerCase()];
   if (!cp) return null;
   const m = cp.byAsset[asset];
   return m ? { name: cp.name, ...m } : { name: cp.name, uncalibrated: true };
@@ -4029,11 +4039,24 @@ function pfRenderPayoffChart() {
   if (noteEl) { noteEl.textContent = pfCollateralNoteText(); noteEl.title = pfBookTooltip(); }
 }
 
-// ── MTM Matrix (HTML table with dollar values) ───────────
+// ── P&L Matrix ───────────────────────────────────────────
+// Same table as Optimizer v4's P&L Matrix (optv4RenderMatrix): same horizon
+// columns (OPTV2_HORIZONS, "Now" for 0), the same uniform-% rows from
+// optvGeometricRows with a "% move" column, and the same interpolation
+// (optv4InterpAt) / rounding / colouring. The numbers already agreed — both
+// sides sum the same `payoff_by_horizon` curves from /api/portfolio/pnl — but
+// the old table picked equal-dollar rows off a hardcoded $500 (ETH) / $0.20
+// (FIL) grid and long-dated 30…360d columns, so the two screens showed the
+// same book in two unrecognisably different tables.
+//
+// Portfolio-only extras kept: the Old/New split (two sub-columns per horizon
+// when both sets are populated) and rolled-position repricing via pfSumCurves.
 function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
-  const horizons = pfData.matrix_horizons;
+  const horizons = OPTV2_HORIZONS;
   const ethSpot = pfData.eth_spot;
+  const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0;
+  const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
 
   const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
   const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
@@ -4041,36 +4064,25 @@ function pfRenderMtmGrid() {
 
   // Build header row
   const thead = document.getElementById("pf-mtm-grid-thead");
+  const hLabel = h => (h === 0 ? "Now" : `${h}d`);
   if (hasOldAndNew) {
-    let hdrHtml = `<tr><th rowspan="2" style="text-align:left">Spot</th>`;
-    for (const h of horizons) hdrHtml += `<th colspan="2">${h}d</th>`;
+    let hdrHtml = `<tr><th rowspan="2" style="text-align:left">${label} Spot</th><th rowspan="2" style="text-align:right">% move</th>`;
+    for (const h of horizons) hdrHtml += `<th colspan="2">${hLabel(h)}</th>`;
     hdrHtml += `</tr><tr>`;
     for (const h of horizons) hdrHtml += `<th style="color:#f0883e;font-size:.7rem">Old</th><th style="color:var(--accent);font-size:.7rem">New</th>`;
     hdrHtml += `</tr>`;
     thead.innerHTML = hdrHtml;
   } else {
-    thead.innerHTML = `<tr><th style="text-align:left">Spot</th>${horizons.map(h => `<th>${h}d</th>`).join("")}</tr>`;
+    thead.innerHTML = `<tr><th style="text-align:left">${label} Spot</th><th style="text-align:right">% move</th>`
+      + horizons.map(h => `<th>${hLabel(h)}</th>`).join("") + `</tr>`;
   }
 
-  // Pick spots at appropriate increments
-  const step = currentAsset === "FIL" ? 0.2 : 500;
-  const maxSpot = currentAsset === "FIL" ? 3.0 : 7000;
-  const displaySpots = [];
-  for (let s = step; s <= maxSpot; s += step) {
-    const rounded = Math.round(s * 100) / 100;  // avoid float drift
-    const idx = spots.findIndex(sp => Math.abs(sp - rounded) < 0.001);
-    if (idx !== -1) displaySpots.push({ spot: rounded, idx });
-  }
-  displaySpots.reverse();
+  // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
+  // Row order is v4's (lowest spot first) so the two tables line up row-for-row.
+  const rows = optvGeometricRows(spots, ethSpot);
 
-  let closestSpot = displaySpots[0]?.spot ?? 0;
-  let closestDiff = Infinity;
-  for (const ds of displaySpots) {
-    const diff = Math.abs(ds.spot - ethSpot);
-    if (diff < closestDiff) { closestDiff = diff; closestSpot = ds.spot; }
-  }
-
-  // Pre-compute curves
+  // Pre-compute curves over the full ladder once per horizon, then interpolate
+  // onto the display rows (both operations are linear, so order doesn't matter).
   const oldCurves = {}, newCurves = {};
   const singleSet = newPositions.length > 0 ? pfNewSet : pfOldSet;
   for (const h of horizons) {
@@ -4082,24 +4094,26 @@ function pfRenderMtmGrid() {
     }
   }
 
-  const fmtVal = v => { const r = Math.round(v); return r >= 0 ? `$${r.toLocaleString()}` : `-$${Math.abs(r).toLocaleString()}`; };
+  const cell = (curve, s, extraStyle) => {
+    const v = optv4InterpAt(spots, curve, s) || 0;
+    const color = v > 0 ? "#66bb6a" : (v < 0 ? "#ef5350" : "");
+    return `<td style="text-align:right;${extraStyle}${color ? `color:${color}` : ""}">${Math.round(v).toLocaleString()}</td>`;
+  };
 
   const tbody = document.getElementById("pf-mtm-grid-body");
   let html = "";
-  for (const { spot, idx } of displaySpots) {
-    const isSpotRow = spot === closestSpot;
+  for (const s of rows) {
+    const isSpotRow = Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9);
+    const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
     html += `<tr class="${isSpotRow ? "pf-mtm-spot-row" : ""}">`;
-    html += `<td style="text-align:left;font-weight:600;white-space:nowrap">$${spot.toLocaleString()}</td>`;
+    html += `<td style="text-align:left;font-weight:600;white-space:nowrap">$${optv2Fmt(s, dp)}</td>`;
+    html += `<td style="text-align:right;color:var(--muted)">${pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%"}</td>`;
     for (const h of horizons) {
-      const oldVal = oldCurves[h][idx];
-      const oldCls = oldVal >= 0 ? "mtm-pos" : "mtm-neg";
       if (hasOldAndNew) {
-        const newVal = newCurves[h][idx];
-        const newCls = newVal >= 0 ? "mtm-pos" : "mtm-neg";
-        html += `<td class="${oldCls}" style="font-size:.75rem">${fmtVal(oldVal)}</td>`;
-        html += `<td class="${newCls}" style="font-size:.75rem">${fmtVal(newVal)}</td>`;
+        html += cell(oldCurves[h], s, "font-size:.75rem;");
+        html += cell(newCurves[h], s, "font-size:.75rem;");
       } else {
-        html += `<td class="${oldCls}">${fmtVal(oldVal)}</td>`;
+        html += cell(oldCurves[h], s, "");
       }
     }
     html += "</tr>";
