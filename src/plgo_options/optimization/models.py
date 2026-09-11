@@ -27,6 +27,13 @@ class Position:
     current_mtm: float
     payoff_by_horizon: dict[str, list[float]]
     mtm_by_horizon: list[float]
+    # Bridge-repriced curve set from portfolio_pnl (see routes/portfolio.py) —
+    # unlike payoff_by_horizon, this keeps moving with the horizon once it
+    # passes the position's own expiry instead of snapping flat to intrinsic.
+    # None for callers that never populated it (the legacy xlsx loader below,
+    # or an older saved snapshot); optimizer.py falls back to
+    # payoff_by_horizon when this is unset.
+    pnl_by_horizon: dict[str, list[float]] | None = None
     # Id of the multi-leg "deal"/structure this leg was booked as part of (see
     # data.deal_grouping.compute_composite_ids) — None when unknown/unset. Two
     # Positions sharing a composite_id came from the same counterparty ticket

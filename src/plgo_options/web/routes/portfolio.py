@@ -667,8 +667,10 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "notional_live": notional_live,
             "mtm_by_horizon": mtm_horizon,
             "payoff_by_horizon": trade_payoff,
-            # Bridge-repriced curves for the P&L matrix only (charts and the
-            # optimizer keep reading payoff_by_horizon). See above.
+            # Bridge-repriced curves for P&L matrices (Portfolio P&L, and
+            # OptimizerV2's before matrix/trade delta — see optimizer.py).
+            # Charts, and OptimizerV2's own trade candidates before running,
+            # keep reading payoff_by_horizon. See above.
             "pnl_by_horizon": pnl_payoff,
             "db_status": t.get("_db_status", "active"),
         })

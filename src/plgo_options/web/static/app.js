@@ -9360,7 +9360,11 @@ function optv2RenderMatrix() {
       const hKey = String(h);
       let cellVal = 0;
       positions.forEach(p => {
-        const curve = p.payoff_by_horizon[hKey];
+        // pnl_by_horizon is the bridge-repriced curve set (see
+        // pfRenderMtmGrid's comment) — keeps moving with h past a
+        // position's own expiry instead of snapping flat to intrinsic.
+        // Fall back to payoff_by_horizon for data that never got it.
+        const curve = (p.pnl_by_horizon && p.pnl_by_horizon[hKey]) || p.payoff_by_horizon[hKey];
         if (curve && curve[si] !== undefined) cellVal += curve[si];
       });
 

@@ -29,7 +29,7 @@ import numpy as np
 from .base_optimizer import BaseOptimizer
 #from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
 from .models import Position, Candidate
-from .math_utils import bs_price, bs_vec, bs_greeks
+from .math_utils import bs_price, bs_vec_bridge, bs_greeks
 from .snapshot import load_snapshot_dict
 from .optimizer_utils import expiry_sort_key, safe_num
 #from .portfolio import load_positions
@@ -449,19 +449,27 @@ class OptimizerV2(BaseOptimizer):
         spot_arr = np.array(self.spot_ladder, dtype=float)
         horizons = sorted(set(self.chart_horizons + [0]))
 
-        # Before payoff: aggregate from existing positions
+        # Before payoff: aggregate from existing positions. Prefer
+        # pnl_by_horizon (bridge-repriced — keeps moving with h past a
+        # position's own expiry instead of snapping flat to intrinsic, see
+        # routes/portfolio.py); fall back to payoff_by_horizon for positions
+        # a caller never populated it for (older saved snapshots).
         before_payoff = {}
         for h in horizons:
             h_key = str(h)
             total = np.zeros(len(spot_arr))
             for p in self.positions:
-                curve = p.payoff_by_horizon.get(h_key)
+                curve = (p.pnl_by_horizon and p.pnl_by_horizon.get(h_key)) or p.payoff_by_horizon.get(h_key)
                 if curve:
                     total += np.array(curve)
             before_payoff[h_key] = np.round(total, 2).tolist()
 
-        # Trade payoff contribution: for each proposed trade, compute BS
-        # values across the spot ladder at each horizon
+        # Trade payoff contribution: for each proposed trade, bridge-reprice
+        # across the spot ladder at each horizon. bs_vec_bridge folds in the
+        # max(dte-h, 0) collapse itself once the trade's own expiry is past
+        # the horizon — a plain bs_vec call here would go flat/intrinsic past
+        # that point instead of continuing to move with h (the same bug
+        # fixed for existing positions above and for Portfolio P&L).
         trade_payoff_delta = {}
         for h in horizons:
             h_key = str(h)
@@ -471,10 +479,8 @@ class OptimizerV2(BaseOptimizer):
                     # Perpetual future: P&L = qty * (spot - entry)
                     vals = spot_arr - t["strike"]
                 else:
-                    dte_at_h = max(t["dte"] - h, 0)
-                    T_h = dte_at_h / 365.25
                     sigma = t["iv_pct"] / 100.0
-                    vals = bs_vec(spot_arr, t["strike"], T_h, 0.0, sigma, t["opt"])
+                    vals = bs_vec_bridge(self.spot, spot_arr, t["strike"], t["dte"], h, sigma, t["opt"])
                 total += t["qty"] * vals
             trade_payoff_delta[h_key] = np.round(total, 2).tolist()
 
