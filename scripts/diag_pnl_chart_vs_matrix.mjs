@@ -1,6 +1,6 @@
 /* Does the Portfolio P&L chart show the same numbers as the P&L Matrix?
  *
- * Both now go through pfAnchoredCurves (bridge-repriced pnl_by_horizon, shifted
+ * Both now go through pfBookCurves (bridge-repriced pnl_by_horizon, shifted
  * by the book's value at (h=0, spot)). This harness pulls those functions
  * straight out of app.js — no copies — feeds them a synthetic book whose
  * pnl_by_horizon and payoff_by_horizon deliberately disagree, and checks:
@@ -40,7 +40,7 @@ function grabConst(name) {
 }
 
 const CONSTS = ['OPTV_MATRIX_STEP_PCT', 'OPTV_MATRIX_MAX_ROWS', 'OPTV_MATRIX_MIN_ROWS'];
-const NAMES = ['pfMatrixCurve', 'pfAnchoredCurves', 'pfPnlHorizons', 'optv4InterpAt', 'optvGeometricRows'];
+const NAMES = ['pfMatrixCurve', 'pfBookCurves', 'pfPnlHorizons', 'optv4InterpAt', 'optvGeometricRows'];
 const preamble = [
   'const OPTV2_HORIZONS = [0, 16, 30, 60, 90, 120, 150];',
   'let pfData = null; const pfRolled = new Map();',
@@ -63,8 +63,8 @@ m.setData({ eth_spot: spot, spot_ladder: spots, pnl_matrix_horizons: HZ, positio
 
 const set = new Set([1, 2]);
 const horizons = m.pfPnlHorizons();
-const chart = m.pfAnchoredCurves(set, horizons);
-const matrix = m.pfAnchoredCurves(set, horizons);
+const chart = m.pfBookCurves(set, horizons);
+const matrix = m.pfBookCurves(set, horizons);
 const rows = m.optvGeometricRows(spots, spot);
 
 let fail = 0;
@@ -82,8 +82,12 @@ for (const h of horizons) {
 }
 check(maxDiff === 0, 'chart == matrix at every (horizon, row): max diff ' + maxDiff);
 
+// Absolute, not anchored: (Now, spot) must equal the summed book value there.
 const atSpot = m.optv4InterpAt(spots, chart[0], spot) || 0;
-check(Math.abs(atSpot) < 1e-9, '(Now, spot) anchor reads 0: got ' + atSpot);
+const rawNow = spots.map((s, i) => (1 + 2) * (s - 2500 + 0 * 3));
+const expectedAtSpot = m.optv4InterpAt(spots, rawNow, spot) || 0;
+check(Math.abs(atSpot - expectedAtSpot) < 1e-9 && Math.abs(atSpot) > 1e-9,
+  '(Now, spot) is the absolute book mark, not 0: got ' + atSpot + ', expected ' + expectedAtSpot);
 
 const perH = horizons.map(h => (m.optv4InterpAt(spots, chart[h], spot) || 0).toFixed(2));
 console.log('      value at spot per horizon: ' + horizons.map((h, i) => h + 'd=' + perH[i]).join('  '));

@@ -3784,18 +3784,26 @@ function pfMatrixCurve(positionIds, horizon) {
   return result;
 }
 
-/** Bridge-repriced curves for `set` at every horizon, each shifted by the set's
- *  own value at (h=0, spot) so the whole family reads "P&L from today" and is
- *  exactly 0 at (Now, spot). That anchor is build_payoffs' `today_value_before`,
- *  interpolated off the h=0 curve the same way the optimizer does it.
+/** Bridge-repriced ABSOLUTE book value for `set` at every horizon.
+ *
+ *  These are levels in dollars — what the book is worth at each spot — not
+ *  P&L-from-today. They were briefly shifted by the set's value at (h=0, spot)
+ *  so the matrix read 0 at (Now, spot), matching Optimizer v4's before matrix.
+ *  That anchor is gone: this screen's whole job is comparing the book against
+ *  posted collateral, and a curve measured from today's mark cannot be laid
+ *  over a collateral level — one is a change, the other is a level. Absolute
+ *  keeps the curves, the matrix and the collateral overlay on one scale, which
+ *  is the only way "is the cushion big enough at this spot" reads off the page.
+ *
+ *  Consequence to keep in mind: the Portfolio matrix now differs from the v4
+ *  before matrix by exactly the book's current mark (a constant), because the
+ *  optimizer anchors server-side in build_payoffs. Same shape, offset origin.
+ *
  *  Shared by the P&L matrix and the payoff chart so the two cannot drift apart
- *  again — a curve on the chart is the matrix column of the same name. */
-function pfAnchoredCurves(set, horizons) {
-  const spots = pfData.spot_ladder;
+ *  — a curve on the chart is the matrix column of the same name. */
+function pfBookCurves(set, horizons) {
   const curves = {};
   for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
-  const anchor = optv4InterpAt(spots, curves[0] || curves[horizons[0]], pfData.eth_spot) || 0;
-  for (const h of horizons) curves[h] = curves[h].map(v => v - anchor);
   return curves;
 }
 
@@ -3943,11 +3951,10 @@ function pfCollateralSumCurve(spots) {
 }
 
 /** Build the posted-collateral overlay trace from the Collateral Map. Plotted
- *  on the RIGHT axis in absolute USD: the payoff curves are now P&L-from-today
- *  (anchored to 0 at spot, matching the P&L matrix) while posted collateral is
- *  a level, so a shared axis would compare two different bases and flatten the
- *  P&L curves against it. Negated when "invert" is on so the cushion dives
- *  alongside the (negative) liability payoff. Returns [] when off/empty. */
+ *  on the SAME axis as the book curves, in absolute USD, because both are
+ *  levels: that is what makes "is the cushion big enough at this spot" legible
+ *  at a glance. Negated when "invert" is on so the cushion dives alongside the
+ *  (negative) liability payoff. Returns [] when off/empty. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
   if (!toggle || !toggle.checked) return [];
@@ -3965,7 +3972,6 @@ function pfCollateralTraces(spots) {
     x: spots, y: invert ? curve.map(v => -v) : curve, type: "scatter", mode: "lines",
     name,
     customdata: curve,
-    yaxis: "y2",
     line: { color: "#d29922", width: 2, dash: "dash" },
     legendgroup: "collateral",
     hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
@@ -3973,8 +3979,16 @@ function pfCollateralTraces(spots) {
 }
 
 // The payoff chart is the P&L matrix drawn as lines: same bridge valuation
-// (pnl_by_horizon), same today's-mark anchor, same horizon set, same labels.
-// Read a cell off the matrix and you can point at it on the curve of that name.
+// (pnl_by_horizon), same absolute dollars, same horizon set, same labels. Read
+// a cell off the matrix and you can point at it on the curve of that name.
+//
+// Everything on this chart is a LEVEL in absolute USD — book value, posted
+// collateral, residual — on one shared axis. The curves were briefly shifted to
+// read 0 at (Now, spot), matching v4's before matrix, but that made them
+// incomparable with the collateral overlay: a change measured from today's mark
+// cannot be laid over a level. Comparing the two is the point of this screen,
+// so absolute wins and the v4 parity is given up (the two now differ by exactly
+// the book's current mark, since the optimizer anchors server-side).
 //
 // It used to plot payoff_by_horizon (T_h = max(dte − h, 0)) unanchored, which
 // (a) offset every curve by the book's current mark and (b) snapped to intrinsic
@@ -3992,11 +4006,6 @@ function pfCollateralTraces(spots) {
 // has six legal steps, so T+16d is not drawn here. It stays in the matrix
 // below, exactly as it does on v4.
 //
-// The collateral overlay and the residual stay in ABSOLUTE dollars on their own
-// right-hand axis: posted collateral is a level, not a P&L-from-now, and the
-// residual is real net coverage (collateral + payoff at expiry), so it keeps
-// using the unanchored payoff. Mixing them onto the anchored axis would both
-// compare two different bases and squash the P&L curves against a large level.
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
   // Only horizons the book actually carries, in v4's chart order.
@@ -4016,7 +4025,7 @@ function pfRenderPayoffChart() {
   // Old portfolio curves (dotted). Keyed by HORIZON, never by position in the
   // list, so hiding a horizon never repaints the survivors — v4's rule.
   if (oldPositions.length > 0) {
-    const oldCurves = pfAnchoredCurves(pfOldSet, allHorizons);
+    const oldCurves = pfBookCurves(pfOldSet, allHorizons);
     allHorizons.forEach((h) => {
       traces.push({
         x: spots, y: oldCurves[h], type: "scatter", mode: "lines",
@@ -4031,7 +4040,7 @@ function pfRenderPayoffChart() {
   // horizons ride the ramp thinner, so theta drift reads as the family peeling
   // away from it — the same emphasis v4 gives its After book.
   if (newPositions.length > 0) {
-    const newCurves = pfAnchoredCurves(pfNewSet, allHorizons);
+    const newCurves = pfBookCurves(pfNewSet, allHorizons);
     allHorizons.forEach((h) => {
       const isNow = h === 0;
       traces.push({
@@ -4044,14 +4053,12 @@ function pfRenderPayoffChart() {
     });
   }
 
-  // Posted-collateral overlay (dashed lines on the right axis, honours filter)
+  // Posted-collateral overlay (dashed, shared axis, honours filter)
   const collTraces = pfCollateralTraces(spots);
   const collInvert = document.getElementById("pf-collateral-invert")?.checked ?? true;
 
-  // Residual (collateral + payoff at expiry) overlay — optional, right axis.
-  // Deliberately built from the UNANCHORED payoff: this is true net coverage in
-  // absolute dollars, not a change in coverage, so it must not carry the
-  // today's-mark shift the P&L curves use.
+  // Residual (collateral + payoff at expiry) overlay — optional. True net
+  // coverage in absolute dollars, on the same scale as everything else.
   if (document.getElementById("pf-collateral-residual")?.checked) {
     const collCurve = pfCollateralSumCurve(spots);
     let payoffCurve = null, plabel = "";
@@ -4066,18 +4073,17 @@ function pfRenderPayoffChart() {
         x: spots, y: residual, type: "scatter", mode: "lines",
         name: `Residual (collateral + ${plabel} payoff @ expiry)`,
         customdata: residual,
-        yaxis: "y2",
-        line: { color: "#2dd4bf", width: 2.5, dash: "dashdot" },
+            line: { color: "#2dd4bf", width: 2.5, dash: "dashdot" },
         legendgroup: "collateral",
         hovertemplate: "Residual: $%{customdata:,.0f}<extra></extra>",
       });
     }
   }
 
-  // Spot line — span the full left-axis range including zero, so it reaches the
-  // $0 line even when everything is negative (e.g. the FIL book). Only the P&L
-  // curves live on that axis now; the collateral overlays are on y2.
-  const allY = traces.flatMap(t => t.y);
+  // Spot line — span the full axis range including zero, so it reaches the $0
+  // line even when everything is negative (e.g. the FIL book). Book curves and
+  // collateral share one axis, so both go into the range.
+  const allY = [...traces.flatMap(t => t.y), ...collTraces.flatMap(t => t.y)];
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
@@ -4092,20 +4098,18 @@ function pfRenderPayoffChart() {
 
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
-  const titleText = `Portfolio P&L from today — Old (${oldPositions.length}) vs New (${newPositions.length})`;
+  const titleText = `Portfolio Payoff vs Collateral — Old (${oldPositions.length}) vs New (${newPositions.length})`;
   const layout = {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
+    // One shared axis in absolute dollars — book value, collateral and residual
+    // are all levels, so they are directly comparable and must not be split
+    // across two scales.
     yaxis: {
-      title: "Portfolio P&L from today (USD)",
+      title: "Portfolio value / Collateral (USD" + (collInvert ? ", collateral negative)" : ")"),
       color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
       tickformat: "$,.2s", rangemode: "tozero",
-    },
-    yaxis2: {
-      title: "Collateral / residual (USD" + (collInvert ? ", collateral negative)" : ")"),
-      color: "#d29922", overlaying: "y", side: "right",
-      showgrid: false, zeroline: false, tickformat: "$,.2s",
     },
     margin: { t: 50, r: 260, b: 50, l: 80 },
     showlegend: true,
@@ -4124,16 +4128,23 @@ function pfRenderPayoffChart() {
 }
 
 // ── P&L Matrix ───────────────────────────────────────────
-// The same table Optimizer v4 shows as its "before" matrix, cell for cell:
+// Laid out like Optimizer v4's "before" matrix:
 //   • columns — OPTV2_HORIZONS ("Now" for 0), the run's own chart_horizons;
 //   • rows    — optvGeometricRows (uniform-%) plus a "% move" column, values
 //               interpolated onto them with optv4InterpAt;
-//   • values  — bridge-repriced book value (pfMatrixCurve → /pnl's
-//               pnl_by_horizon → bs_vec_bridge, the repricer
-//               OptimizerV3.build_payoffs uses) MINUS today's book mark, i.e.
-//               P&L from now, reading 0 at (Now, current spot). That anchor
-//               is build_payoffs' `today_value_before`, interpolated at spot
-//               off the h=0 curve exactly as the optimizer does it.
+//   • values  — bridge-repriced ABSOLUTE book value (pfBookCurves →
+//               pfMatrixCurve → /pnl's pnl_by_horizon → bs_vec_bridge, the
+//               repricer OptimizerV3.build_payoffs uses). Dollars the book is
+//               worth at that spot and horizon, so (Now, current spot) reads
+//               today's mark rather than 0.
+//
+// It briefly subtracted today's mark to read 0 at (Now, spot) and match v4
+// cell for cell. Reverted: this screen sets the book against posted collateral,
+// and a P&L-from-today number cannot be compared with a collateral level. The
+// matrix therefore differs from v4's by exactly the book's current mark — same
+// shape, offset origin — because the optimizer anchors server-side in
+// build_payoffs. The chart above shares pfBookCurves, so the two stay identical
+// to each other.
 //
 // The old table differed on all three counts: equal-dollar rows off a
 // hardcoded $500 (ETH) / $0.20 (FIL) grid, 30…360d columns, and raw MTM
@@ -4141,8 +4152,8 @@ function pfRenderPayoffChart() {
 // option's expiry and made every far column repeat the same number.
 //
 // Portfolio-only extras kept: the Old/New split (two sub-columns per horizon
-// when both sets are populated, each anchored to its own current mark) and
-// the client-side reprice of rolled positions.
+// when both sets are populated) and the client-side reprice of rolled
+// positions.
 function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
   const horizons = pfPnlHorizons();
@@ -4175,11 +4186,11 @@ function pfRenderMtmGrid() {
 
   // Curves are pre-computed over the full ladder once per horizon, then
   // interpolated onto the display rows (both operations are linear, so order
-  // doesn't matter). pfAnchoredCurves is the same call the payoff chart makes,
-  // so each cell here is a point on the curve of the same name over there.
+  // doesn't matter). pfBookCurves is the same call the payoff chart makes, so
+  // each cell here is a point on the curve of the same name over there.
   const singleSet = newPositions.length > 0 ? pfNewSet : pfOldSet;
-  const oldCurves = pfAnchoredCurves(hasOldAndNew ? pfOldSet : singleSet, horizons);
-  const newCurves = hasOldAndNew ? pfAnchoredCurves(pfNewSet, horizons) : null;
+  const oldCurves = pfBookCurves(hasOldAndNew ? pfOldSet : singleSet, horizons);
+  const newCurves = hasOldAndNew ? pfBookCurves(pfNewSet, horizons) : null;
 
   const cell = (curve, s, extraStyle) => {
     const v = optv4InterpAt(spots, curve, s) || 0;

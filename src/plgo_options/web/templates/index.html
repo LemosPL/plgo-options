@@ -539,7 +539,7 @@
         Shows the collateral allocated to <b>this book</b> (matches the page asset) from the Collateral page. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
       </span>
       <span style="font-size:.72rem;color:var(--muted);flex-basis:100%">
-        Curves are <b>P&amp;L from today</b> on the left axis (0 at current spot) — the same numbers as the P&amp;L Matrix below, one line per column. Collateral and residual stay in absolute dollars on the right axis.
+        Curves, collateral and residual are all <b>absolute dollars on one shared axis</b>, so they line up directly. Curves are the book's value at each spot — the same numbers as the P&amp;L Matrix below, one line per column — so at current spot they read today's mark, not zero.
       </span>
       <span id="pf-collateral-note" style="font-size:.7rem;color:var(--muted);cursor:help;flex-basis:100%"></span>
     </div>
@@ -3545,6 +3545,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=169"></script>
+<script src="/static/app.js?v=170"></script>
 </body>
 </html>

@@ -61,7 +61,7 @@ def _lin(series, x):
 has_new = "pnl_by_horizon" in pos[0]
 print("pnl_by_horizon present:", has_new)
 
-print("\nRAW payoff_by_horizon (old matrix valuation):")
+print("\nRAW payoff_by_horizon (superseded valuation, snaps to intrinsic):")
 for lv in levels:
     i = idx_of(lv)
     row = [f"{h}d={book('payoff_by_horizon', h)[i]:,.0f}" for h in HZ]
@@ -70,10 +70,18 @@ for lv in levels:
 if has_new:
     curves = {h: book("pnl_by_horizon", h) for h in HZ}
     anchor = _lin(curves[0], spot)
-    print(f"\nANCHORED pnl_by_horizon (new matrix == v4 before), anchor={anchor:,.0f}:")
+    print("")
+    print("ABSOLUTE pnl_by_horizon - what the Portfolio matrix AND chart show:")
+    for lv in levels:
+        i = idx_of(lv)
+        row = [f"{h}d={curves[h][i]:,.0f}" for h in HZ]
+        print(f"  spot {spots[i]:>8}: " + "  ".join(row))
+    print(f"\nANCHORED (reference only - v4 anchors server-side), anchor={anchor:,.0f}:")
     for lv in levels:
         i = idx_of(lv)
         row = [f"{h}d={curves[h][i] - anchor:,.0f}" for h in HZ]
         print(f"  spot {spots[i]:>8}: " + "  ".join(row))
     at_spot = _lin([v - anchor for v in curves[0]], spot)
-    print(f"\ninvariant: (Now, spot) cell = {at_spot:.4f} (must be 0)")
+    print("")
+    print(f"(Now, spot) absolute = {_lin(curves[0], spot):,.0f}   <- what the UI shows")
+    print(f"(Now, spot) anchored = {at_spot:.4f}   <- v4 basis; differ by the book mark")
