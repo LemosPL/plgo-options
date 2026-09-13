@@ -21,6 +21,32 @@ _cache_lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
 
 CACHE_TTL_SECONDS = 10  # cache responses for 10 seconds
 
+# ---------------------------------------------------------------------------
+# FIL spot sources (see DeribitClient.get_fil_spot_price)
+# ---------------------------------------------------------------------------
+# Ordered by preference; the first venue returning a plausible quote wins.
+# Coinbase and Kraken lead because they are reachable from Cloud Run
+# us-central1 (Binance answers 451 to US IPs, so it is not in the list).
+# cryptoprices.cc is last: it is the source that froze at 0.950905.
+_FIL_SPOT_SOURCES: tuple[tuple[str, str, Any], ...] = (
+    ("coinbase", "https://api.coinbase.com/v2/prices/FIL-USD/spot",
+     lambda r: r.json()["data"]["amount"]),
+    ("kraken", "https://api.kraken.com/0/public/Ticker?pair=FILUSD",
+     lambda r: r.json()["result"]["FILUSD"]["c"][0]),
+    ("okx", "https://www.okx.com/api/v5/market/ticker?instId=FIL-USDT",
+     lambda r: r.json()["data"][0]["last"]),
+    ("coingecko", "https://api.coingecko.com/api/v3/simple/price?ids=filecoin&vs_currencies=usd",
+     lambda r: r.json()["filecoin"]["usd"]),
+    ("cryptoprices.cc", "https://cryptoprices.cc/FIL/",
+     lambda r: r.text.strip()),
+)
+
+# Sanity band for a FIL quote. Wide on purpose — this rejects a source that
+# returns 0, an error page, or a quote denominated in the wrong unit, and must
+# never reject a real move.
+FIL_SPOT_MIN = 0.01
+FIL_SPOT_MAX = 1000.0
+
 
 def _cache_key(method: str, params: dict | None) -> str:
     """Build a hashable cache key from method + sorted params."""
@@ -91,12 +117,44 @@ class DeribitClient:
         return float(ticker["last_price"])
 
     async def get_fil_spot_price(self) -> float:
-        """Return FIL spot price from cryptoprices.cc."""
-        url = "https://cryptoprices.cc/FIL/"
+        """Return FIL spot price, trying each venue in _FIL_SPOT_SOURCES order.
+
+        FIL is not listed on Deribit, so unlike ETH/BTC its spot has to come
+        from outside. It used to come from cryptoprices.cc alone, which froze:
+        it served 0.950905 on every request for hours -- straight from origin,
+        not just from its 30-minute Cloudflare cache -- while Kraken, OKX,
+        Coinbase and CoinGecko all printed 0.98-1.03. A single unmonitored
+        source with no cross-check makes that indistinguishable from a quiet
+        market, which is why FIL prices silently stopped updating.
+
+        So: real exchanges first, cryptoprices.cc demoted to last resort, and
+        every quote bounds-checked before it is accepted. Ordering is
+        deliberate -- Coinbase and Kraken are US-reachable, and prod runs on
+        Cloud Run us-central1 where Binance returns 451.
+        """
+        key = "fil_spot"
+        now = time.monotonic()
+        cached = _cache.get(key)
+        if cached and now < cached[0]:
+            return cached[1]
+
+        errors: list[str] = []
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as http_client:
-            resp = await http_client.get(url)
-            resp.raise_for_status()
-            return float(resp.text.strip())
+            for name, url, extract in _FIL_SPOT_SOURCES:
+                try:
+                    resp = await http_client.get(url, headers={"Cache-Control": "no-cache"})
+                    resp.raise_for_status()
+                    price = float(extract(resp))
+                    # Catches a source returning 0, a placeholder, or a quote in
+                    # the wrong unit -- not normal volatility.
+                    if not (FIL_SPOT_MIN <= price <= FIL_SPOT_MAX):
+                        raise ValueError(f"implausible price {price}")
+                    _cache[key] = (now + CACHE_TTL_SECONDS, price)
+                    return price
+                except Exception as exc:  # noqa: BLE001 - try the next venue
+                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
+        raise RuntimeError("FIL spot unavailable from all sources - " + "; ".join(errors))
 
     async def get_historical_vol_ratio(self, days: int = 30) -> float:
         """Return annualised HV(FIL) / HV(ETH) using CoinGecko daily closes.
