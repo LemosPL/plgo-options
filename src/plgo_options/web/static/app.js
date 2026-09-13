@@ -3980,7 +3980,17 @@ function pfCollateralTraces(spots) {
 // (a) offset every curve by the book's current mark and (b) snapped to intrinsic
 // past each leg's expiry — that's why relevantHorizons() had to hide every
 // h >= maxDte: they were duplicate lines. Bridge curves keep moving with h, so
-// all seven horizons are now drawn.
+// the horizons are now genuinely distinct and all get drawn.
+//
+// Colour is Optimizer v4's palette, unchanged: OPTV4_HORIZON_COLOR, the
+// validated one-hue blue ramp (bright = Now, darkening into the future). It
+// encodes the HORIZON, and the line style encodes the BOOK — Old dotted, New
+// solid — so "Old: T+90d" and "New: T+90d" are the same blue and read as one
+// scenario seen two ways. The old pair of six-colour rainbows encoded time as
+// identity twice over and shared no colour with the optimizer screens.
+// Horizons are OPTV4_CHART_HORIZONS for the same reason v4 uses it: the ramp
+// has six legal steps, so T+16d is not drawn here. It stays in the matrix
+// below, exactly as it does on v4.
 //
 // The collateral overlay and the residual stay in ABSOLUTE dollars on their own
 // right-hand axis: posted collateral is a level, not a P&L-from-now, and the
@@ -3989,10 +3999,10 @@ function pfCollateralTraces(spots) {
 // compare two different bases and squash the P&L curves against a large level.
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
-  const allHorizons = pfPnlHorizons();
-
-  const oldColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166", "#bc8cff"];
-  const newColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364", "#d2a8ff"];
+  // Only horizons the book actually carries, in v4's chart order.
+  const available = new Set(pfPnlHorizons());
+  const allHorizons = OPTV4_CHART_HORIZONS.filter(h => available.has(h));
+  const C = optv4ChartColors();
   const traces = [];
 
   const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
@@ -4003,27 +4013,32 @@ function pfRenderPayoffChart() {
     return h === 0 ? `${prefix}: Now` : `${prefix}: T+${h}d`;
   }
 
-  // Old portfolio curves (dotted)
+  // Old portfolio curves (dotted). Keyed by HORIZON, never by position in the
+  // list, so hiding a horizon never repaints the survivors — v4's rule.
   if (oldPositions.length > 0) {
     const oldCurves = pfAnchoredCurves(pfOldSet, allHorizons);
-    allHorizons.forEach((h, i) => {
+    allHorizons.forEach((h) => {
       traces.push({
         x: spots, y: oldCurves[h], type: "scatter", mode: "lines",
         name: horizonLabel("Old", h),
-        line: { color: oldColors[i % oldColors.length], width: 2, dash: "dot" },
+        line: { color: C.horizon[h] || "#8b949e", width: h === 0 ? 2.5 : 1.5, dash: "dot" },
         legendgroup: `old_h${h}`,
       });
     });
   }
 
-  // New portfolio curves (solid)
+  // New portfolio curves (solid). Now is the bold, filled primary and the later
+  // horizons ride the ramp thinner, so theta drift reads as the family peeling
+  // away from it — the same emphasis v4 gives its After book.
   if (newPositions.length > 0) {
     const newCurves = pfAnchoredCurves(pfNewSet, allHorizons);
-    allHorizons.forEach((h, i) => {
+    allHorizons.forEach((h) => {
+      const isNow = h === 0;
       traces.push({
         x: spots, y: newCurves[h], type: "scatter", mode: "lines",
         name: horizonLabel("New", h),
-        line: { color: newColors[i % newColors.length], width: 2.5 },
+        line: { color: C.horizon[h] || "#8b949e", width: isNow ? 3 : 1.5 },
+        ...(isNow && oldPositions.length === 0 ? { fill: "tozeroy", fillcolor: C.afterFill } : {}),
         legendgroup: `new_h${h}`,
       });
     });
@@ -9324,15 +9339,37 @@ function optv2MatrixDisplayIdx(spots, targetRows = 14) {
    the real mark rather than a level a step away from it.
 
    Returns PRICE LEVELS, not ladder indices: the levels won't sit on a linear
-   ladder, so callers interpolate the payoff curves onto them. */
-function optvGeometricRows(spots, spot, targetRows = 14) {
+   ladder, so callers interpolate the payoff curves onto them.
+
+   Row COUNT is derived from the span, not fixed at 14. A fixed count means the
+   step size is whatever the ladder's width happens to make it, and the two
+   assets have very different widths: FIL's ladder spans 0.20→3.50 (17.5x)
+   against ETH's 500→7,000 (14x), so 14 rows put FIL at ~24% per row — 1.01,
+   then 0.93, then 0.85 with nothing in between — while the moves that actually
+   get traded are single-digit percentages. Solving for the step instead and
+   letting the count fall out gives both assets ~7% rows, so FIL reads at the
+   same resolution as ETH by construction rather than by coincidence.
+
+   MAX_ROWS caps the table: a true 5% step would need ~55 rows on these spans.
+   The wings are kept (a −80% FIL row is a real collateral scenario, not
+   padding), so the cap trades exact step size for a table that still fits. */
+const OPTV_MATRIX_STEP_PCT = 0.05;   // desired move per row
+const OPTV_MATRIX_MAX_ROWS = 41;     // ceiling; span decides the rest
+const OPTV_MATRIX_MIN_ROWS = 9;
+
+function optvGeometricRows(spots, spot, targetRows = null) {
   if (!spots || spots.length < 2) return (spots || []).slice();
   const lo = Math.max(spots[0], 1e-9);
   const hi = spots[spots.length - 1];
   if (!(hi > lo)) return spots.slice();
 
-  const n = Math.max(3, targetRows);
-  const step = Math.log(hi / lo) / (n - 1);
+  const span = Math.log(hi / lo);
+  const n = targetRows != null
+    ? Math.max(3, targetRows)
+    : Math.min(OPTV_MATRIX_MAX_ROWS,
+               Math.max(OPTV_MATRIX_MIN_ROWS,
+                        Math.round(span / Math.log(1 + OPTV_MATRIX_STEP_PCT)) + 1));
+  const step = span / (n - 1);
   const rows = [];
   for (let i = 0; i < n; i++) rows.push(lo * Math.exp(step * i));
 

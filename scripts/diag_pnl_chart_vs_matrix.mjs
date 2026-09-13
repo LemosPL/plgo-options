@@ -32,6 +32,14 @@ function grab(name) {
   return out.join('\n');
 }
 
+// Single-line `const NAME = ...;` declarations those functions close over.
+function grabConst(name) {
+  const l = lines.find(x => x.startsWith('const ' + name + ' ='));
+  if (!l) throw new Error('const not found in app.js: ' + name);
+  return l;
+}
+
+const CONSTS = ['OPTV_MATRIX_STEP_PCT', 'OPTV_MATRIX_MAX_ROWS', 'OPTV_MATRIX_MIN_ROWS'];
 const NAMES = ['pfMatrixCurve', 'pfAnchoredCurves', 'pfPnlHorizons', 'optv4InterpAt', 'optvGeometricRows'];
 const preamble = [
   'const OPTV2_HORIZONS = [0, 16, 30, 60, 90, 120, 150];',
@@ -40,7 +48,7 @@ const preamble = [
   'function bsPrice() { return 0; }',
 ].join('\n');
 const expose = 'return { ' + NAMES.join(', ') + ', setData: v => { pfData = v; } };';
-const m = new Function(preamble + '\n' + NAMES.map(grab).join('\n\n') + '\n' + expose)();
+const m = new Function([preamble, ...CONSTS.map(grabConst), ...NAMES.map(grab), expose].join('\n'))();
 
 const spots = Array.from({ length: 41 }, (_, i) => 1000 + i * 100);
 const spot = 3000;
