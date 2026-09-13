@@ -3784,6 +3784,26 @@ function pfMatrixCurve(positionIds, horizon) {
   return result;
 }
 
+/** Bridge-repriced curves for `set` at every horizon, each shifted by the set's
+ *  own value at (h=0, spot) so the whole family reads "P&L from today" and is
+ *  exactly 0 at (Now, spot). That anchor is build_payoffs' `today_value_before`,
+ *  interpolated off the h=0 curve the same way the optimizer does it.
+ *  Shared by the P&L matrix and the payoff chart so the two cannot drift apart
+ *  again — a curve on the chart is the matrix column of the same name. */
+function pfAnchoredCurves(set, horizons) {
+  const spots = pfData.spot_ladder;
+  const curves = {};
+  for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
+  const anchor = optv4InterpAt(spots, curves[0] || curves[horizons[0]], pfData.eth_spot) || 0;
+  for (const h of horizons) curves[h] = curves[h].map(v => v - anchor);
+  return curves;
+}
+
+/** Horizons shared by the P&L matrix and the payoff chart (Now/16/30/…/150d). */
+function pfPnlHorizons() {
+  return pfData.pnl_matrix_horizons || pfData.chart_horizons || OPTV2_HORIZONS;
+}
+
 /** Initialize compare sets with sensible defaults:
  *  Old = expired trades, New = active trades. User can override.
  */
@@ -3923,8 +3943,10 @@ function pfCollateralSumCurve(spots) {
 }
 
 /** Build the posted-collateral overlay trace from the Collateral Map. Plotted
- *  on the SAME (left) axis as the payoff profile so the two are directly
- *  comparable in USD; negated when "invert" is on so the cushion dives
+ *  on the RIGHT axis in absolute USD: the payoff curves are now P&L-from-today
+ *  (anchored to 0 at spot, matching the P&L matrix) while posted collateral is
+ *  a level, so a shared axis would compare two different bases and flatten the
+ *  P&L curves against it. Negated when "invert" is on so the cushion dives
  *  alongside the (negative) liability payoff. Returns [] when off/empty. */
 function pfCollateralTraces(spots) {
   const toggle = document.getElementById("pf-show-collateral");
@@ -3943,15 +3965,31 @@ function pfCollateralTraces(spots) {
     x: spots, y: invert ? curve.map(v => -v) : curve, type: "scatter", mode: "lines",
     name,
     customdata: curve,
+    yaxis: "y2",
     line: { color: "#d29922", width: 2, dash: "dash" },
     legendgroup: "collateral",
     hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
   }];
 }
 
+// The payoff chart is the P&L matrix drawn as lines: same bridge valuation
+// (pnl_by_horizon), same today's-mark anchor, same horizon set, same labels.
+// Read a cell off the matrix and you can point at it on the curve of that name.
+//
+// It used to plot payoff_by_horizon (T_h = max(dte − h, 0)) unanchored, which
+// (a) offset every curve by the book's current mark and (b) snapped to intrinsic
+// past each leg's expiry — that's why relevantHorizons() had to hide every
+// h >= maxDte: they were duplicate lines. Bridge curves keep moving with h, so
+// all seven horizons are now drawn.
+//
+// The collateral overlay and the residual stay in ABSOLUTE dollars on their own
+// right-hand axis: posted collateral is a level, not a P&L-from-now, and the
+// residual is real net coverage (collateral + payoff at expiry), so it keeps
+// using the unanchored payoff. Mixing them onto the anchored axis would both
+// compare two different bases and squash the P&L curves against a large level.
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
-  const allHorizons = pfData.chart_horizons;
+  const allHorizons = pfPnlHorizons();
 
   const oldColors = ["#f0883e", "#da3633", "#d29922", "#e3b341", "#f78166", "#bc8cff"];
   const newColors = ["#58a6ff", "#3fb950", "#bc8cff", "#79c0ff", "#56d364", "#d2a8ff"];
@@ -3960,26 +3998,17 @@ function pfRenderPayoffChart() {
   const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
   const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
 
-  // Filter horizons: skip horizons beyond the max DTE of selected positions
-  // (otherwise they just duplicate the expiry curve and are misleading)
-  function relevantHorizons(positions) {
-    if (positions.length === 0) return allHorizons;
-    const maxDte = Math.max(...positions.map(p => p.days_remaining || 0));
-    // Always include h=0 (expiry/spot). Only include h>0 if at least one position lives past it.
-    return allHorizons.filter(h => h === 0 || h < maxDte);
-  }
-
+  // Matches the matrix header: h=0 is today's mark, not an expiry payoff.
   function horizonLabel(prefix, h) {
-    return h === 0 ? `${prefix}: Spot (at expiry)` : `${prefix}: T+${h}d`;
+    return h === 0 ? `${prefix}: Now` : `${prefix}: T+${h}d`;
   }
 
   // Old portfolio curves (dotted)
   if (oldPositions.length > 0) {
-    const oldH = relevantHorizons(oldPositions);
-    oldH.forEach((h, i) => {
-      const curve = pfSumCurveForSet(pfOldSet, h);
+    const oldCurves = pfAnchoredCurves(pfOldSet, allHorizons);
+    allHorizons.forEach((h, i) => {
       traces.push({
-        x: spots, y: curve, type: "scatter", mode: "lines",
+        x: spots, y: oldCurves[h], type: "scatter", mode: "lines",
         name: horizonLabel("Old", h),
         line: { color: oldColors[i % oldColors.length], width: 2, dash: "dot" },
         legendgroup: `old_h${h}`,
@@ -3989,11 +4018,10 @@ function pfRenderPayoffChart() {
 
   // New portfolio curves (solid)
   if (newPositions.length > 0) {
-    const newH = relevantHorizons(newPositions);
-    newH.forEach((h, i) => {
-      const curve = pfSumCurves(pfNewSet, h);
+    const newCurves = pfAnchoredCurves(pfNewSet, allHorizons);
+    allHorizons.forEach((h, i) => {
       traces.push({
-        x: spots, y: curve, type: "scatter", mode: "lines",
+        x: spots, y: newCurves[h], type: "scatter", mode: "lines",
         name: horizonLabel("New", h),
         line: { color: newColors[i % newColors.length], width: 2.5 },
         legendgroup: `new_h${h}`,
@@ -4006,6 +4034,9 @@ function pfRenderPayoffChart() {
   const collInvert = document.getElementById("pf-collateral-invert")?.checked ?? true;
 
   // Residual (collateral + payoff at expiry) overlay — optional, right axis.
+  // Deliberately built from the UNANCHORED payoff: this is true net coverage in
+  // absolute dollars, not a change in coverage, so it must not carry the
+  // today's-mark shift the P&L curves use.
   if (document.getElementById("pf-collateral-residual")?.checked) {
     const collCurve = pfCollateralSumCurve(spots);
     let payoffCurve = null, plabel = "";
@@ -4020,6 +4051,7 @@ function pfRenderPayoffChart() {
         x: spots, y: residual, type: "scatter", mode: "lines",
         name: `Residual (collateral + ${plabel} payoff @ expiry)`,
         customdata: residual,
+        yaxis: "y2",
         line: { color: "#2dd4bf", width: 2.5, dash: "dashdot" },
         legendgroup: "collateral",
         hovertemplate: "Residual: $%{customdata:,.0f}<extra></extra>",
@@ -4027,10 +4059,10 @@ function pfRenderPayoffChart() {
     }
   }
 
-  // Spot line — span the full left-axis range (payoff + collateral overlays)
-  // including zero, so it reaches the $0 line even when everything is negative
-  // (e.g. the FIL book). Collateral now shares this axis, so include it.
-  const allY = [...traces.flatMap(t => t.y), ...collTraces.flatMap(t => t.y)];
+  // Spot line — span the full left-axis range including zero, so it reaches the
+  // $0 line even when everything is negative (e.g. the FIL book). Only the P&L
+  // curves live on that axis now; the collateral overlays are on y2.
+  const allY = traces.flatMap(t => t.y);
   if (allY.length > 0) {
     traces.push({
       x: [pfData.eth_spot, pfData.eth_spot],
@@ -4045,21 +4077,26 @@ function pfRenderPayoffChart() {
 
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
-  const titleText = `Portfolio Payoff — Old (${oldPositions.length}) vs New (${newPositions.length})`;
+  const titleText = `Portfolio P&L from today — Old (${oldPositions.length}) vs New (${newPositions.length})`;
   const layout = {
     title: { text: titleText, font: { color: cc.text, size: 16 } },
     paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
     xaxis: { title: assetLabel + " — log scale", type: "log", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.zeroline },
     yaxis: {
-      title: "Portfolio P&L / Collateral (USD" + (collInvert ? ", collateral negative)" : ")"),
+      title: "Portfolio P&L from today (USD)",
       color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
       tickformat: "$,.2s", rangemode: "tozero",
     },
-    margin: { t: 50, r: 200, b: 50, l: 80 },
+    yaxis2: {
+      title: "Collateral / residual (USD" + (collInvert ? ", collateral negative)" : ")"),
+      color: "#d29922", overlaying: "y", side: "right",
+      showgrid: false, zeroline: false, tickformat: "$,.2s",
+    },
+    margin: { t: 50, r: 260, b: 50, l: 80 },
     showlegend: true,
     legend: {
       font: { color: cc.muted, size: 10 },
-      orientation: "v", x: 1.13, y: 1,
+      orientation: "v", x: 1.09, y: 1,
       xanchor: "left", yanchor: "top",
       bgcolor: cc.legendBg, bordercolor: cc.legendBorder, borderwidth: 1,
     },
@@ -4093,7 +4130,7 @@ function pfRenderPayoffChart() {
 // the client-side reprice of rolled positions.
 function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
-  const horizons = pfData.pnl_matrix_horizons || OPTV2_HORIZONS;
+  const horizons = pfPnlHorizons();
   const ethSpot = pfData.eth_spot;
   const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0;
   const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
@@ -4121,21 +4158,13 @@ function pfRenderMtmGrid() {
   // Row order is v4's (lowest spot first) so the two tables line up row-for-row.
   const rows = optvGeometricRows(spots, ethSpot);
 
-  // Pre-compute curves over the full ladder once per horizon, then interpolate
-  // onto the display rows (both operations are linear, so order doesn't matter).
-  // Each set is then anchored to its own value at (h=0, spot) so the table
-  // reads "P&L from today" — build_payoffs' today_value_before, same interp.
-  const anchored = (set) => {
-    const curves = {};
-    for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
-    const anchor = optv4InterpAt(spots, curves[0] || curves[horizons[0]], ethSpot) || 0;
-    for (const h of horizons) curves[h] = curves[h].map(v => v - anchor);
-    return curves;
-  };
-
+  // Curves are pre-computed over the full ladder once per horizon, then
+  // interpolated onto the display rows (both operations are linear, so order
+  // doesn't matter). pfAnchoredCurves is the same call the payoff chart makes,
+  // so each cell here is a point on the curve of the same name over there.
   const singleSet = newPositions.length > 0 ? pfNewSet : pfOldSet;
-  const oldCurves = anchored(hasOldAndNew ? pfOldSet : singleSet);
-  const newCurves = hasOldAndNew ? anchored(pfNewSet) : null;
+  const oldCurves = pfAnchoredCurves(hasOldAndNew ? pfOldSet : singleSet, horizons);
+  const newCurves = hasOldAndNew ? pfAnchoredCurves(pfNewSet, horizons) : null;
 
   const cell = (curve, s, extraStyle) => {
     const v = optv4InterpAt(spots, curve, s) || 0;
