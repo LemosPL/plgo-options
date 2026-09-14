@@ -1825,6 +1825,19 @@ class OptimizerV3(BaseOptimizer):
         print(f"  notional traded      : {total_notional:>14,.0f}")
         print(f"  estimated cash outlay: {total_cash_outlay:>14,.0f}  ({100*total_cash_outlay/max(total_notional,1):.2f}% of notional)")
 
+        # Attach each leg's counterparty-calibrated price (e.g. KeyRock's FIL
+        # quotes, which run at a real vol far from the symmetric mid — see
+        # _attach_cpty_prices) BEFORE any cash-flow accounting below. Without
+        # this, _cash_by_counterparty (and the box neutralizer sized off it)
+        # would balance every counterparty's book at the symmetric mid price
+        # while premium_summary/net_premium_generated further down price the
+        # very same trades at cpty_price_usd — reporting "self-funded" cash
+        # flow here alongside a Net Premium tile that's far from zero for the
+        # exact same trades. Called again after box/rehedge trades are
+        # appended below so those get priced too; safe to call twice; it only
+        # ever adds/overwrites the "cpty_price_usd" key.
+        _attach_cpty_prices(trades, self.spot, self.asset)
+
         def _cash_by_counterparty(trade_list):
             by_cp: dict[str, dict] = {}
             for t in trade_list:
@@ -1832,7 +1845,8 @@ class OptimizerV3(BaseOptimizer):
                     continue
                 cp = t.get("counterparty", "")
                 qty = float(t.get("qty", 0.0) or 0.0)
-                price = float(t.get("bs_price_usd", 0.0) or 0.0)
+                cpty_price = t.get("cpty_price_usd")
+                price = float(cpty_price) if cpty_price is not None else float(t.get("bs_price_usd", 0.0) or 0.0)
                 entry = by_cp.setdefault(cp, {"outlay": 0.0, "collection": 0.0})
                 if qty > 0:
                     entry["outlay"] += qty * price
