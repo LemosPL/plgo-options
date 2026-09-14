@@ -1917,6 +1917,16 @@ class OptimizerV3(BaseOptimizer):
                 trades.append(rehedge_trade)
                 trades = self._aggregate_trade_legs(trades)
 
+        # Re-attach: the box-neutralizer/rehedge trades appended above are new
+        # dicts that never went through the earlier attach call, so without
+        # this they'd price at the symmetric mid in the table below while
+        # premium_summary (attached again further down) prices those SAME
+        # trades at the real calibrated quote — reopening the exact mismatch
+        # this function exists to close, just relocated to the box trades
+        # themselves instead of the original imbalance they were sized to
+        # cancel.
+        _attach_cpty_prices(trades, self.spot, self.asset)
+
         # This is the "does the desk need to wire cash, or does it self-fund"
         # figure to monitor; it should track the LP's own (continuous,
         # pre-rounding) cash_neutrality accounting closely, modulo any box
