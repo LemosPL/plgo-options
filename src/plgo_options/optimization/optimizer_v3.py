@@ -856,18 +856,51 @@ class OptimizerV3(BaseOptimizer):
             return []
 
         _score, box_debit, low_call, low_put, high_call, high_put = best_box
-        # Deliberately not capped by max_qty: a box plays a distinct role from
-        # naked/spread candidates (pure cash neutralization, flat w.r.t. spot
-        # by construction) and should stay fully effective at closing the
-        # imbalance regardless of the size limit applied elsewhere.
-        box_qty = int(round(abs(net_cash_imbalance) / box_debit))
-        if box_qty == 0:
-            return []
 
         # net_cash_imbalance > 0 (outlay > collection, desk needs to raise
         # cash) => sell the box (receive box_debit per unit). < 0 (desk needs
         # to spend cash) => buy the box.
         direction = -1 if net_cash_imbalance > 0.0 else 1
+
+        # box_debit above is the textbook put-call-parity value (all 4 legs at
+        # the symmetric mid) — exactly flat w.r.t. spot/vol, which is what
+        # makes a box a pure cash-neutralizer in the first place. But a
+        # calibrated counterparty doesn't actually quote at the mid: Flowdesk
+        # prices ITM legs at bare intrinsic (no time value) and OTM legs at a
+        # flat elevated vol, KeyRock quotes a flat vol per SIDE regardless of
+        # strike — neither obeys put-call parity, so the box's REAL debit at
+        # what this counterparty would actually charge/pay can differ
+        # substantially from box_debit. Sizing qty off the mid box_debit while
+        # the trade is later priced (by _attach_cpty_prices) at the real quote
+        # reopens exactly the imbalance this function exists to close — just
+        # relocated onto the box's own legs. Reprice at the real quote, per
+        # leg, using the SAME side each leg will actually trade at (mirrors
+        # the qty signs assigned to `legs` below), and size off that instead;
+        # falls back to box_debit itself when uncalibrated (resolve_cpty_price
+        # returns None), unchanged from before this existed.
+        def _real_leg_price(leg, side):
+            resolved = resolve_cpty_price(
+                counterparty, token, self.spot, float(leg.strike),
+                max(float(leg.dte), 0.0) / 365.25, leg.opt, side,
+            )
+            return float(resolved[0]) if resolved is not None else float(leg.bs_price_usd or 0.0)
+
+        buy_side, sell_side = ("buy", "sell") if direction > 0 else ("sell", "buy")
+        real_box_debit = (
+            _real_leg_price(low_call, buy_side)
+            - _real_leg_price(low_put, sell_side)
+            - _real_leg_price(high_call, sell_side)
+            + _real_leg_price(high_put, buy_side)
+        )
+        sizing_debit = real_box_debit if real_box_debit > 0.0 else box_debit
+
+        # Deliberately not capped by max_qty: a box plays a distinct role from
+        # naked/spread candidates (pure cash neutralization, flat w.r.t. spot
+        # by construction) and should stay fully effective at closing the
+        # imbalance regardless of the size limit applied elsewhere.
+        box_qty = int(round(abs(net_cash_imbalance) / sizing_debit))
+        if box_qty == 0:
+            return []
 
         legs = [
             (low_call, direction * box_qty),
