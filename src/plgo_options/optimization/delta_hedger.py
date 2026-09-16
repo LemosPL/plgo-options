@@ -53,8 +53,15 @@ def check_rehedge(
     offset by the perp). A rehedge trades the perp back to fully flatten it
     ("trade to zero", the standard policy for this class of band-triggered
     control problem — see the (3c.nu^2 / 2.lambda)^(1/3) optimal-band result
-    this codebase's band width (75 ETH) was calibrated against) rather than
+    this codebase's band width was originally calibrated against) rather than
     to the edge of the band itself.
+
+    ``band`` is in the underlying's own token units, same as ``mismatch`` —
+    this function is asset-agnostic. Callers on a book that spans assets with
+    very different per-token prices (ETH vs FIL, say) should derive it from a
+    dollar target divided by spot rather than pass a fixed token count, or the
+    same nominal band means wildly different real risk tolerance on each book
+    (see optimizer_v3._build_delta_rehedge_trade's delta_band_usd).
 
     ``extra_option_delta`` folds in option delta not yet reflected as a
     Position — e.g. new option trades proposed in the same run (by a

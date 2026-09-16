@@ -106,16 +106,22 @@ class OptimizerRunParams:
     enable_box_neutralizer: bool = True
     # Post-LP delta cleanup: after the LP's own trades, check whether the
     # resulting book's net option delta (offset by the current perp holding)
-    # still sits within delta_band — if not, propose one perp trade (on
+    # still sits within delta_band_usd — if not, propose one perp trade (on
     # base_optimizer.PERP_COUNTERPARTY) to flatten it back to zero. Orthogonal
     # to the LP's own (rarely perp-using) shape fit — see optimizer_v3
     # run_lp._build_delta_rehedge_trade. Off by default — a new, opt-in
     # feature until users have tried it.
     enable_delta_rehedge: bool = False
-    # Band width in underlying units (e.g. ETH contracts) — mismatches within
-    # the band are left alone. 75 is the value this codebase's band-triggered
-    # control policy was calibrated against for ETH; tune per asset/book.
-    delta_band: float = 75.0
+    # Band width in USD notional — mismatches within the band are left alone.
+    # Converted to underlying token units via spot at evaluation time (see
+    # _build_delta_rehedge_trade), so the same tolerance means the same real
+    # risk on both books: ETH trades in the thousands per token and FIL
+    # trades near $1, so a token-unit band (the original design, 75 ETH)
+    # was ~$52 of notional on FIL — trivial next to real FIL position sizes,
+    # so it fired on virtually any nonzero mismatch. 150,000 approximates
+    # that original 75-ETH band at a representative ETH spot; tune from the
+    # UI per book.
+    delta_band_usd: float = 150_000.0
     downside_factor: float = 1.0
     # Convex blend [0,1] between fitting today's target (0) and fitting it
     # 90 days forward (1) — see optimizer_v3.run_lp. 0.2 keeps today's shape

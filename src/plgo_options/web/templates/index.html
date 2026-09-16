@@ -1782,9 +1782,9 @@
           <input type="checkbox" id="optv2-enable-delta-rehedge">
           Delta Rehedge (perp)
         </label>
-        <label class="pf-filter-label">Delta Band
-          <input type="number" id="optv2-delta-band" value="75" step="1" min="0" style="width:5rem"
-            title="Mismatches within this many underlying units (e.g. ETH contracts) are left alone. 75 is the value this codebase's band-triggered control policy was calibrated against for ETH.">
+        <label class="pf-filter-label">Delta Band ($)
+          <input type="number" id="optv2-delta-band" value="150000" step="1000" min="0" style="width:6.5rem"
+            title="Mismatches within this many dollars of notional are left alone (converted to underlying tokens via spot when the band is checked) — dollar-denominated so the same tolerance means the same real risk on ETH and FIL alike, and stays meaningful as either spot moves.">
         </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
@@ -2251,7 +2251,7 @@
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
-          <div class="optv3-field"><label>Delta band<input type="number" id="optv3-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
+          <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv3-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
           <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
         </div>
@@ -2672,7 +2672,7 @@
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
-          <div class="optv3-field"><label>Delta band<input type="number" id="optv4-delta-band" value="75" step="1" min="0" style="width:5rem"></label></div>
+          <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv4-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
           <div class="optv3-field">
             <label for="optv4-custom-spot">Custom spot <input type="number" id="optv4-custom-spot" step="1" min="0" style="width:6.5rem"></label>
             <p class="optv3-hint">Run the whole optimization as if spot were this price instead of the live mark — candidate strikes, greeks, the target-profile anchor and the payoff ladder all re-center on it (existing positions repriced sticky-strike). Useful for deciding what you'd trade if spot gapped. Blank = live spot.</p>
@@ -3707,6 +3707,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=171"></script>
+<script src="/static/app.js?v=172"></script>
 </body>
 </html>

@@ -121,13 +121,17 @@ class OptimizationParams(BaseModel):
     enable_box_neutralizer: bool = True
     # Post-LP delta cleanup: after the LP's own trades, if the resulting book's
     # net option delta (offset by the current perp holding) still sits outside
-    # delta_band, propose one perp trade to flatten it back to zero. Orthogonal
-    # to the LP's own shape fit, which rarely reaches for the perp itself. Off
-    # by default — a new, opt-in feature until users have tried it.
+    # delta_band_usd, propose one perp trade to flatten it back to zero.
+    # Orthogonal to the LP's own shape fit, which rarely reaches for the perp
+    # itself. Off by default — a new, opt-in feature until users have tried it.
     enable_delta_rehedge: bool = False
-    # Band width in underlying units (e.g. ETH contracts). 75 is the value this
-    # codebase's band-triggered control policy was calibrated against for ETH.
-    delta_band: float = 75.0
+    # Band width in USD notional, converted to underlying token units via
+    # spot at evaluation time (see optimizer_v3._build_delta_rehedge_trade) —
+    # dollar-denominated so the same tolerance means the same real risk on
+    # both books regardless of asset (FIL trades near $1, ETH in the
+    # thousands) or how far either has moved since. 150,000 approximates the
+    # originally ETH-calibrated 75-token band at a representative ETH spot.
+    delta_band_usd: float = 150_000.0
     downside_factor: float = 1.0
     # Convex blend [0,1] between fitting today's target (0) and fitting it
     # 90 days forward (1) — see optimizer_v3.run_lp. 0.2 default: mirrors
@@ -392,7 +396,7 @@ async def run_optimizer(params: OptimizationParams):
         max_trades=params.max_trades,
         enable_box_neutralizer=params.enable_box_neutralizer,
         enable_delta_rehedge=params.enable_delta_rehedge,
-        delta_band=params.delta_band,
+        delta_band_usd=params.delta_band_usd,
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,
         atm_concentration=params.atm_concentration,

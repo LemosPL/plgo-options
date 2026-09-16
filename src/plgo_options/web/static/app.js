@@ -1251,13 +1251,6 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     const $optv2MaxQty = document.getElementById("optv2-max-qty");
     if ($optv2MaxQty) $optv2MaxQty.value = asset === "FIL" ? 5000000 : 5000;
 
-    // Delta rehedge band is likewise asset-scaled (same ~1000x factor as Max
-    // Qty above) — 75 is calibrated for ETH; left at that for FIL it's ~$52
-    // of notional, trivial next to real FIL position sizes, so the rehedge
-    // would fire on virtually any nonzero mismatch and fully flatten delta
-    // every time instead of acting as an actual band.
-    const $optv2DeltaBand = document.getElementById("optv2-delta-band");
-    if ($optv2DeltaBand) $optv2DeltaBand.value = asset === "FIL" ? 75000 : 75;
 
     // Target-profile shape defaults are asset-scaled too (client spec,
     // 2026-08-24, see misc_utils.py's build_parametric_target_profile_eth/
@@ -1288,11 +1281,11 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     if ($optv4Up) $optv4Up.value = asset === "FIL" ? 175 : 90.91;
     if (typeof optv4UpdateTargetShapeReadouts === "function") optv4UpdateTargetShapeReadouts();
 
-    // v4's Max Qty / Delta Band are asset-scaled for the same reasons as v2's.
+    // v4's Max Qty is asset-scaled for the same reasons as v2's. Delta Band
+    // is dollar-denominated (delta_band_usd) — the same figure already means
+    // the same real risk on both books, so it is deliberately left alone here.
     const $optv4MaxQty = document.getElementById("optv4-max-qty");
     if ($optv4MaxQty) $optv4MaxQty.value = asset === "FIL" ? 5000000 : 5000;
-    const $optv4DeltaBand = document.getElementById("optv4-delta-band");
-    if ($optv4DeltaBand) $optv4DeltaBand.value = asset === "FIL" ? 75000 : 75;
 
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
@@ -10207,7 +10200,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       perp_cost_bps: optPerpCostDict("optv2-perpcost-list"),
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
       enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
-      delta_band: parseFloat(document.getElementById("optv2-delta-band")?.value || "75"),
+      delta_band_usd: parseFloat(document.getElementById("optv2-delta-band")?.value || "150000"),
       // User-edited target profile (Target Profile section). null = auto parametric.
       manual_target: (optv2ManualTarget && optv2ManualTarget.length >= 2) ? optv2ManualTarget : null,
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -12415,7 +12408,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       perp_cost_bps: optPerpCostDict("optv3-perpcost-list"),
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
       enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
-      delta_band: parseFloat(document.getElementById("optv3-delta-band")?.value || "75"),
+      delta_band_usd: parseFloat(document.getElementById("optv3-delta-band")?.value || "150000"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv3TargetProfileFile || null,
@@ -15087,7 +15080,7 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       perp_cost_bps: optPerpCostDict("optv4-perpcost-list"),
       // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
       enable_delta_rehedge: document.getElementById("optv4-enable-delta-rehedge")?.checked || false,
-      delta_band: parseFloat(document.getElementById("optv4-delta-band")?.value || "75"),
+      delta_band_usd: parseFloat(document.getElementById("optv4-delta-band")?.value || "150000"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv4TargetProfileFile || null,

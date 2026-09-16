@@ -981,7 +981,7 @@ class OptimizerV3(BaseOptimizer):
             self,
             trades: list[dict],
             roll_position_ids: set,
-            delta_band: float,
+            delta_band_usd: float,
             perp_cost_bps: "dict[str, float] | float | None",
             unwind_discount: float,
             new_position_penalty: float,
@@ -994,6 +994,14 @@ class OptimizerV3(BaseOptimizer):
         the option-delta mismatch (a "F" leg the LP itself proposed already
         carries delta 1:1 and is folded into ``perp_position`` instead, so it
         isn't double-counted).
+
+        ``delta_band_usd`` is denominated in dollars, not underlying tokens —
+        ETH trades in the thousands per token and FIL trades near $1, so a
+        single token-unit band would mean wildly different real risk
+        tolerances on the two books (and drift further as either spot moves).
+        Converted to token units via the run's own spot right here, at the
+        one place check_rehedge (which compares against ``mismatch``, itself
+        in token units) actually consumes it.
 
         Returns None if the band isn't breached, or if it rounds to a zero
         trade — otherwise one perp trade dict on PERP_COUNTERPARTY, sized to
@@ -1015,16 +1023,17 @@ class OptimizerV3(BaseOptimizer):
             for t in trades if t.get("opt") == "F"
         )
 
+        band_tokens = (delta_band_usd / self.spot) if self.spot else 0.0
         decision = check_rehedge(
             positions=live_positions,
             spot=self.spot,
             perp_position=existing_perp_qty + lp_perp_qty,
-            band=delta_band,
+            band=band_tokens,
             extra_option_delta=trade_option_delta,
         )
         print(f"  delta rehedge: option_delta={decision.net_option_delta:,.1f} "
               f"perp_position={decision.perp_position:,.1f} mismatch={decision.mismatch:,.1f} "
-              f"band={decision.band:,.1f} breached={decision.breached}")
+              f"band={decision.band:,.1f} (${delta_band_usd:,.0f}) breached={decision.breached}")
         if not decision.breached:
             return None
 
@@ -1233,7 +1242,7 @@ class OptimizerV3(BaseOptimizer):
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
                  enable_delta_rehedge: bool = False,
-                 delta_band: float = 75.0,
+                 delta_band_usd: float = 150_000.0,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.2,
                  manual_target: list[dict] | None = None,
@@ -1942,7 +1951,7 @@ class OptimizerV3(BaseOptimizer):
         # bounded, delta-only cleanup — to flatten it back to zero.
         if enable_delta_rehedge:
             rehedge_trade = self._build_delta_rehedge_trade(
-                trades, roll_position_ids, delta_band=delta_band,
+                trades, roll_position_ids, delta_band_usd=delta_band_usd,
                 perp_cost_bps=perp_cost_bps,
                 unwind_discount=unwind_discount, new_position_penalty=new_position_penalty,
             )
