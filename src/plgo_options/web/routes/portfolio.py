@@ -19,9 +19,31 @@ from plgo_options.market_data.deribit_client import DeribitClient
 # Same repricer OptimizerV3.build_payoffs uses for its before/after curves —
 # see `pnl_by_horizon` below for why the matrix needs it.
 from plgo_options.optimization.math_utils import bs_vec_bridge
+# The perp hedge leg (data/perp_repository.py). routes/perps.py depends only on
+# data/ + market_data/, so importing it here doesn't create a cycle.
+from plgo_options.data.perp_repository import DEFAULT_VENUE as PERP_VENUE
+from plgo_options.web.routes.perps import build_summary as build_perp_summary
 
 router = APIRouter()
 client = DeribitClient()
+
+
+async def _ensure_mtm_perp_columns(db) -> None:
+    """Add the perp columns to portfolio_mtm_history if this DB predates them.
+
+    init_db runs the same migration at startup; this is the belt-and-braces for
+    a DB that was created or swapped in without it (the surrounding CREATE
+    TABLE IF NOT EXISTS calls exist for the same reason, and a bare CREATE
+    can't add a column to a table that already exists).
+    """
+    cursor = await db.execute("PRAGMA table_info(portfolio_mtm_history)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    for name in ("perp_qty", "perp_mtm_usd", "perp_funding_usd", "net_delta"):
+        if name not in columns:
+            await db.execute(
+                f"ALTER TABLE portfolio_mtm_history ADD COLUMN {name} REAL DEFAULT 0"
+            )
+    await db.commit()
 
 
 def bs_greeks(S: float, K: float, T: float, r: float, sigma: float, opt: str):
@@ -713,6 +735,55 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
 
     spot_ladder = active_ladder
 
+    # ── Perp hedge leg ────────────────────────────────────────────────────
+    # The options book above is only half the position: the optimizer's
+    # delta-rehedge step hedges net option delta with a perp on Binance
+    # Futures, and that leg lives in its own ledger (data/perp_repository.py)
+    # because `trades` can only hold Call/Put legs. Fold it in here so the
+    # delta the desk reads is the one it actually runs, and so the daily
+    # snapshot records the hedged book rather than the naked options.
+    #
+    # Deliberately NOT appended to `positions`: that list feeds the Collateral
+    # page's per-counterparty liability, the Deals grouping and reconciliation,
+    # none of which should grow a "Binance Futures" line — a perp's exchange
+    # margin is not OTC collateral. The optimizer gets the leg injected
+    # explicitly instead (see routes/optimization.py).
+    perp_block = {
+        "net_qty": 0.0, "avg_entry": 0.0, "mark_price": 0.0, "notional_usd": 0.0,
+        "unrealized_pnl_usd": 0.0, "realized_pnl_usd": 0.0,
+        "funding_total_usd": 0.0, "funding_last_30d_usd": 0.0,
+        "funding_apr_pct": None, "venue": PERP_VENUE, "available": False,
+    }
+    try:
+        perp_summary = await build_perp_summary(asset.upper())
+        perp_block = {
+            "net_qty": perp_summary["net_qty"],
+            "avg_entry": perp_summary["avg_entry"],
+            "mark_price": perp_summary["mark_price"],
+            "notional_usd": perp_summary["notional_usd"],
+            "unrealized_pnl_usd": perp_summary["unrealized_pnl_usd"],
+            "realized_pnl_usd": perp_summary["realized_pnl_usd"],
+            "funding_total_usd": perp_summary["funding"]["total_usd"],
+            "funding_last_30d_usd": perp_summary["funding"]["last_30d_usd"],
+            "funding_apr_pct": perp_summary["funding_apr_pct"],
+            "total_pnl_usd": perp_summary["total_pnl_usd"],
+            "venue": perp_summary["venue"],
+            # False only when the ledger is empty — a Binance outage still
+            # leaves the position readable, just without a live mark.
+            "available": perp_summary["trade_count"] > 0,
+        }
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Perp hedge lookup failed: %s", e)
+
+    perp_qty = float(perp_block["net_qty"] or 0.0)
+    perp_mtm = float(perp_block["unrealized_pnl_usd"] or 0.0)
+    perp_funding = float(perp_block["funding_total_usd"] or 0.0)
+    # `total_delta` stays options-only so the stored series keeps meaning what
+    # it always meant; net_delta is that plus the hedge (a perp is delta 1 per
+    # token by construction).
+    net_delta = total_delta + perp_qty
+
     # Lazy daily MTM snapshot: write one row per (date, asset) the first time
     # the endpoint is hit on a new UTC day. INSERT OR IGNORE is a no-op if a
     # row already exists, so this is safe to call on every request.
@@ -729,15 +800,21 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
                 gamma REAL DEFAULT 0,
                 theta REAL DEFAULT 0,
                 vega REAL DEFAULT 0,
+                perp_qty REAL DEFAULT 0,
+                perp_mtm_usd REAL DEFAULT 0,
+                perp_funding_usd REAL DEFAULT 0,
+                net_delta REAL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (snapshot_date, asset)
             )"""
         )
+        await _ensure_mtm_perp_columns(db)
         await db.execute(
             """INSERT OR IGNORE INTO portfolio_mtm_history
                  (snapshot_date, asset, spot, mtm_usd, position_count,
-                  delta, gamma, theta, vega)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  delta, gamma, theta, vega,
+                  perp_qty, perp_mtm_usd, perp_funding_usd, net_delta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 today.isoformat(),
                 asset.upper(),
@@ -748,6 +825,10 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
                 round(float(total_gamma), 6),
                 round(float(total_theta), 4),
                 round(float(total_vega), 4),
+                round(perp_qty, 4),
+                round(perp_mtm, 2),
+                round(perp_funding, 2),
+                round(float(net_delta), 4),
             ),
         )
         await db.commit()
@@ -772,6 +853,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
         # mark rather than presenting it as one.
         "stale_spot": stale_spot,
         "positions": enriched,
+        "perp": perp_block,
         "totals": {
             "total_entry_premium": round(total_entry, 2),
             "current_total_mtm": round(total_mtm, 2),
@@ -781,6 +863,12 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             "portfolio_theta": round(total_theta, 2),
             "portfolio_vega": round(total_vega, 2),
             "collateral_call": round(total_collateral_call, 2),
+            # Options delta plus the perp hedge — the book's real directional
+            # exposure. portfolio_delta above is the options leg alone.
+            "perp_qty": round(perp_qty, 4),
+            "net_delta": round(net_delta, 2),
+            "perp_mtm": round(perp_mtm, 2),
+            "perp_funding": round(perp_funding, 2),
         },
     }
 
@@ -812,13 +900,22 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
                 gamma REAL DEFAULT 0,
                 theta REAL DEFAULT 0,
                 vega REAL DEFAULT 0,
+                perp_qty REAL DEFAULT 0,
+                perp_mtm_usd REAL DEFAULT 0,
+                perp_funding_usd REAL DEFAULT 0,
+                net_delta REAL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (snapshot_date, asset)
             )"""
         )
+        await _ensure_mtm_perp_columns(db)
         cursor = await db.execute(
             """SELECT snapshot_date, spot, mtm_usd, position_count,
-                      delta, gamma, theta, vega
+                      delta, gamma, theta, vega,
+                      COALESCE(perp_qty, 0) AS perp_qty,
+                      COALESCE(perp_mtm_usd, 0) AS perp_mtm_usd,
+                      COALESCE(perp_funding_usd, 0) AS perp_funding_usd,
+                      COALESCE(net_delta, delta) AS net_delta
                FROM portfolio_mtm_history
                WHERE asset = ? AND snapshot_date >= ?
                ORDER BY snapshot_date ASC""",
@@ -838,6 +935,13 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
             "gamma": r["gamma"],
             "theta": r["theta"],
             "vega": r["vega"],
+            # Hedge leg as of that snapshot. `delta` above stays options-only
+            # so the pre-hedge series remains comparable; `net_delta` is the
+            # exposure the desk actually ran that day.
+            "perp_qty": r["perp_qty"],
+            "perp_mtm_usd": r["perp_mtm_usd"],
+            "perp_funding_usd": r["perp_funding_usd"],
+            "net_delta": r["net_delta"],
         }
         for r in rows
     ]

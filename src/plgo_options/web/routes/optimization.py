@@ -20,6 +20,8 @@ from plgo_options.optimization.optim_usecase import (
 )
 from plgo_options.data.database import get_db
 from plgo_options.data.deal_grouping import compute_composite_ids
+from plgo_options.data.perp_repository import DEFAULT_VENUE as PERP_VENUE
+from plgo_options.web.routes.perps import build_summary as perp_summary
 
 router = APIRouter()
 
@@ -214,6 +216,72 @@ class OptimizationParams(BaseModel):
     # deal. None/empty = pure auto-detection.
     composite_overrides: dict[str, dict[str, str]] | None = None
 
+async def _build_perp_position(asset: str, pnl_data: dict) -> dict | None:
+    """The perp hedge as one synthetic `opt == "F"` position, or None if flat.
+
+    Shaped to match what optimization/models.py's Position expects, with three
+    fields that carry real meaning downstream:
+
+    * ``strike`` = average entry. OptimizerV3 values an "F" leg as
+      ``qty * (spot - strike)`` (terminal_payoff_for_position /
+      bs_value_for_position), so entry is exactly the basis that makes the
+      hedge's payoff curve correct.
+    * ``expiry`` far in the future. A perp never expires, and
+      _get_roll_positions sweeps in anything whose DTE is under the roll
+      threshold — a zero DTE here would put the hedge up for rolling.
+    * ``counterparty`` = the venue, matching base_optimizer.PERP_COUNTERPARTY,
+      so counterparty-scoped runs treat it as the hedging venue it is.
+
+    Note it is NOT keyed to match the perp *candidate* in
+    get_held_positions() — see the comment there.
+    """
+    summary = await perp_summary(asset)
+    qty = float(summary.get("net_qty") or 0.0)
+    if abs(qty) < 1e-9:
+        return None
+    avg_entry = float(summary.get("avg_entry") or 0.0)
+    spot = float(pnl_data.get("spot") or pnl_data.get("eth_spot") or 0.0)
+    ladder = pnl_data.get("spot_ladder") or []
+    # A perp's value is linear in spot and has no time dimension, so the same
+    # curve serves every horizon on both the payoff chart and the P&L matrix.
+    curve = [round(qty * (float(s) - avg_entry), 2) for s in ladder]
+    horizons = sorted({
+        *(pnl_data.get("all_horizons") or []),
+        *(pnl_data.get("matrix_horizons") or []),
+        *(pnl_data.get("chart_horizons") or []),
+        *(pnl_data.get("pnl_matrix_horizons") or []),
+    })
+    by_horizon = {str(h): curve for h in horizons}
+    return {
+        "id": -1,
+        "counterparty": PERP_VENUE,
+        "instrument": f"{asset}-PERPETUAL",
+        "opt": "F",
+        "option_type": "Perp",
+        "side": "Long" if qty > 0 else "Short",
+        "strike": avg_entry,
+        "expiry": "2099-12-31",
+        "days_remaining": 36500,
+        "net_qty": qty,
+        "qty": abs(qty),
+        "iv_pct": 0.0,
+        # Delta 1 per token by construction; a perp carries no gamma, theta or
+        # vega, which is why the VOLpts cost model can't price it either.
+        "delta": 1.0,
+        "gamma": 0.0,
+        "theta": 0.0,
+        "vega": 0.0,
+        "mark_price_usd": float(summary.get("mark_price") or spot),
+        "current_mtm": float(summary.get("unrealized_pnl_usd") or 0.0),
+        "payoff_by_horizon": by_horizon,
+        "pnl_by_horizon": by_horizon,
+        "mtm_by_horizon": [round(qty * (spot - avg_entry), 2)
+                           for _ in (pnl_data.get("matrix_horizons") or [])],
+        "composite_id": None,
+        "db_status": "active",
+    }
+
+
 @router.post("/run")
 async def run_optimizer(params: OptimizationParams):
     """Gather optimizer inputs, persist a reproducible use case, and run it."""
@@ -264,6 +332,25 @@ async def run_optimizer(params: OptimizationParams):
             )
         pnl_data["positions"] = filtered
         print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
+
+    # ── Inject the perp hedge leg ─────────────────────────────────────────
+    # portfolio_pnl deliberately keeps the hedge out of `positions` (it would
+    # show up as a Binance Futures line on the Collateral page and in the Deals
+    # grouping). The optimizer is the one consumer that must see it: without
+    # it, check_rehedge reads an existing perp position of zero and re-proposes
+    # the entire delta hedge on every run, however much of it is already on.
+    #
+    # Injected after base_trade_ids scoping on purpose — a trade-level subset
+    # of the options book is still hedged by the whole perp position — but
+    # before composite tagging, which skips it (no composite_id).
+    try:
+        perp_position = await _build_perp_position(params.asset.upper(), pnl_data)
+        if perp_position is not None:
+            pnl_data["positions"] = list(pnl_data.get("positions", []) or []) + [perp_position]
+            print(f"perp hedge: injected {perp_position['net_qty']:,.2f} "
+                  f"{params.asset.upper()} @ {perp_position['strike']:,.4f} avg entry")
+    except Exception as e:
+        print(f"perp hedge: injection skipped ({e})")
 
     # Tag each position with the multi-leg "deal"/composite it belongs to
     # (same grouping the Deals screen shows), so the LP can prefer unwinding

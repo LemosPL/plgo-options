@@ -178,6 +178,11 @@
       Collateral
       <span class="nav-badge" id="nav-badge-collateral"></span>
     </li>
+    <li class="nav-item" data-page="perps">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13A.5.5 0 011 8z"/><path d="M11.5 4.5a.5.5 0 01.707 0l3 3a.5.5 0 010 .707l-3 3a.5.5 0 01-.707-.707L14.293 8l-2.793-2.793a.5.5 0 010-.707z"/><path d="M4.5 11.5a.5.5 0 01-.707 0l-3-3a.5.5 0 010-.707l3-3a.5.5 0 11.707.707L1.707 8l2.793 2.793a.5.5 0 010 .707z"/></svg>
+      Perp Hedge
+      <span class="nav-badge" id="nav-badge-perps"></span>
+    </li>
   </ul>
   <div class="sidebar-bottom">
     <button id="btn-theme-toggle" class="theme-toggle" title="Toggle light/dark theme">
@@ -502,9 +507,17 @@
           <span class="risk-label">Scenario vs Baseline</span>
           <span class="risk-value" id="pf-delta-mtm">--</span>
         </div>
-        <div class="risk-metric">
-          <span class="risk-label">&Delta;</span>
+        <div class="risk-metric" title="Delta of the options book alone, before the perp hedge">
+          <span class="risk-label">&Delta; options</span>
           <span class="risk-value" id="pf-total-delta">--</span>
+        </div>
+        <div class="risk-metric" title="Options delta plus the perp hedge on Binance Futures — the book's real directional exposure. Manage the hedge leg on the Perp Hedge page.">
+          <span class="risk-label">&Delta; net (hedged)</span>
+          <span class="risk-value" id="pf-net-delta">--</span>
+        </div>
+        <div class="risk-metric" title="Signed perp position held against this book, and the funding settled on it to date">
+          <span class="risk-label">Perp hedge</span>
+          <span class="risk-value" id="pf-perp-hedge">--</span>
         </div>
         <div class="risk-metric">
           <span class="risk-label">&Gamma;</span>
@@ -3322,6 +3335,107 @@
     </section>
   </div>
 
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Perp Hedge                                           -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-perps" class="page">
+
+    <section class="card collat-controls">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Perp Hedge &mdash; <span id="perp-asset-label">ETH</span></h2>
+          <span id="perp-symbol-pill" class="collat-spot-pill"></span>
+        </div>
+        <div class="collat-header-right">
+          <button id="btn-perp-add" class="btn-primary" style="width:auto" title="Record a perp fill against this book">+ Record fill</button>
+          <button id="btn-perp-accrue" class="btn-secondary" title="Book every funding payment settled since the last run. Idempotent — safe to press twice.">Accrue funding</button>
+          <button id="btn-perp-refresh" class="btn-secondary collat-refresh-btn" title="Reload position, mark and funding">&#8635; Refresh</button>
+        </div>
+      </div>
+
+      <p style="font-size:.74rem;color:var(--muted);margin:.35rem 0 .75rem;max-width:72ch">
+        The optimizer's delta-rehedge step proposes a perp trade on Binance Futures whenever net option
+        delta leaves its band. Record the fill here and the next run nets against it instead of
+        re-proposing the whole hedge &mdash; and the funding carry lands in P&amp;L.
+      </p>
+
+      <div class="collat-summary-grid">
+        <div class="collat-metric">
+          <div class="collat-metric-label">Net position</div>
+          <div class="collat-metric-value" id="perp-net-qty">--</div>
+          <div class="collat-metric-sub" id="perp-net-sub">no fills recorded</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Avg entry / mark</div>
+          <div class="collat-metric-value" id="perp-entry-mark">--</div>
+          <div class="collat-metric-sub" id="perp-notional-sub">notional --</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Unrealised P&amp;L</div>
+          <div class="collat-metric-value" id="perp-unrealised">--</div>
+          <div class="collat-metric-sub" id="perp-realised-sub">realised --</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Funding settled</div>
+          <div class="collat-metric-value" id="perp-funding-total">--</div>
+          <div class="collat-metric-sub" id="perp-funding-sub">last 30d --</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Total hedge P&amp;L</div>
+          <div class="collat-metric-value" id="perp-total-pnl">--</div>
+          <div class="collat-metric-sub">MTM + realised + funding &minus; fees</div>
+        </div>
+        <div class="collat-metric">
+          <div class="collat-metric-label">Funding rate (trailing)</div>
+          <div class="collat-metric-value" id="perp-funding-apr">--</div>
+          <div class="collat-metric-sub" id="perp-funding-apr-sub">annualised</div>
+        </div>
+      </div>
+      <div id="perp-error" style="display:none;font-size:.75rem;color:var(--red);margin-top:.5rem"></div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 .6rem;font-size:.95rem">Fills</h3>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Traded at</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th>
+              <th class="num">Notional</th><th class="num">Fee</th><th>Source</th><th>Note</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="perp-trades-tbody"></tbody>
+        </table>
+      </div>
+      <div id="perp-trades-empty" style="display:none;font-size:.8rem;color:var(--muted);padding:.75rem 0">
+        No fills yet. Record the perp leg the optimizer proposed and it stops being re-proposed.
+      </div>
+    </section>
+
+    <section class="card">
+      <h3 style="margin:0 0 .6rem;font-size:.95rem">Funding payments</h3>
+      <p style="font-size:.72rem;color:var(--muted);margin:0 0 .6rem">
+        Longs pay shorts when the rate is positive, so a positive payment is money in.
+        Each row is valued against the position the ledger says was held at that moment.
+      </p>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Settled</th><th class="num">Rate</th><th class="num">Annualised</th>
+              <th class="num">Mark</th><th class="num">Position</th><th class="num">Payment</th>
+            </tr>
+          </thead>
+          <tbody id="perp-funding-tbody"></tbody>
+        </table>
+      </div>
+      <div id="perp-funding-empty" style="display:none;font-size:.8rem;color:var(--muted);padding:.75rem 0">
+        Nothing accrued yet &mdash; press <strong>Accrue funding</strong> to book everything settled since the first fill.
+      </div>
+    </section>
+  </div>
+
 </div><!-- end #app-content -->
 
 <!-- MTM history modal (triggered from Portfolio MTM card) -->
@@ -3545,6 +3659,54 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=170"></script>
+
+<!-- Perp fill modal -->
+<div id="perp-modal" class="mtm-modal-backdrop">
+  <div class="mtm-modal collat-modal">
+    <div class="mtm-modal-header">
+      <h3>Record perp fill &mdash; <span id="perp-modal-asset">ETH</span></h3>
+      <button class="mtm-modal-close" id="perp-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="mtm-modal-body">
+      <div class="collat-form-row">
+        <label class="collat-form-label">Side
+          <select id="perp-modal-side">
+            <option value="Buy">Buy (long)</option>
+            <option value="Sell">Sell (short)</option>
+          </select>
+        </label>
+        <label class="collat-form-label">Qty (tokens)
+          <input type="number" step="any" min="0" id="perp-modal-qty" placeholder="0">
+        </label>
+      </div>
+      <div class="collat-form-row">
+        <label class="collat-form-label">Fill price (USD)
+          <input type="number" step="any" min="0" id="perp-modal-price" placeholder="0">
+        </label>
+        <label class="collat-form-label">Fee (USD)
+          <input type="number" step="any" min="0" id="perp-modal-fee" placeholder="0">
+        </label>
+      </div>
+      <div class="collat-form-row">
+        <label class="collat-form-label">Traded at (UTC)
+          <input type="datetime-local" id="perp-modal-time">
+        </label>
+        <label class="collat-form-label">Note
+          <input type="text" id="perp-modal-note" placeholder="e.g. delta rehedge from Optimizer v4">
+        </label>
+      </div>
+      <p style="font-size:.72rem;color:var(--muted);margin:.5rem 0 0">
+        The timestamp matters: funding is accrued against the position held at each past
+        funding settlement, so back-dating a fill re-prices the carry correctly.
+      </p>
+    </div>
+    <div class="modal-actions" style="margin-top:1rem">
+      <button id="btn-perp-modal-save" class="btn-primary" style="width:auto">Record</button>
+      <button id="btn-perp-modal-cancel" class="btn-secondary" style="width:auto">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=171"></script>
 </body>
 </html>

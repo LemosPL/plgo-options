@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS portfolio_mtm_history (
     gamma REAL DEFAULT 0,
     theta REAL DEFAULT 0,
     vega REAL DEFAULT 0,
+    -- Perp hedge leg as of the snapshot: signed qty held, its mark-to-market
+    -- against average entry, and funding settled to date. `delta` above stays
+    -- options-only (it is what the options book alone carries); `net_delta` is
+    -- the figure the desk actually runs, options delta + perp qty.
+    perp_qty REAL DEFAULT 0,
+    perp_mtm_usd REAL DEFAULT 0,
+    perp_funding_usd REAL DEFAULT 0,
+    net_delta REAL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (snapshot_date, asset)
 );
@@ -230,6 +238,57 @@ CREATE TABLE IF NOT EXISTS signal_alert_state (
 """
 
 
+# ── Perp hedge book ───────────────────────────────────────────────────────
+# The optimizer's delta-rehedge step proposes perp trades on Binance Futures,
+# but the `trades` table can only hold Call/Put legs (it is reconciled against
+# counterparty spreadsheets, and every reader normalizes option_type to
+# Call/Put). Perps therefore get their own ledger rather than being forced into
+# that table: keeping them separate leaves reconciliation, deal grouping and
+# the OTC counterparty views untouched, while giving the hedge a real home.
+#
+# One row per fill/adjustment, never per net position — the net is Σ signed qty
+# and the funding accrual needs to know what was held at each past funding
+# timestamp, which only a ledger can answer.
+PERP_TRADES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS perp_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    venue TEXT NOT NULL COLLATE NOCASE DEFAULT 'Binance Futures',
+    symbol TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    price REAL NOT NULL DEFAULT 0,
+    fee_usd REAL NOT NULL DEFAULT 0,
+    traded_at TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'manual',
+    note TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+# One row per settled funding event per (asset, venue). `position_qty` is the
+# signed perp position held at `funding_time` per the ledger above, so the row
+# is a permanent record of what was actually paid/received rather than a figure
+# recomputed (and silently revised) from today's position. PK on
+# (asset, venue, funding_time) makes re-running the accrual idempotent.
+PERP_FUNDING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS perp_funding (
+    asset TEXT NOT NULL COLLATE NOCASE,
+    venue TEXT NOT NULL COLLATE NOCASE,
+    funding_time TEXT NOT NULL,
+    funding_time_ms INTEGER NOT NULL,
+    funding_rate REAL NOT NULL DEFAULT 0,
+    mark_price REAL NOT NULL DEFAULT 0,
+    position_qty REAL NOT NULL DEFAULT 0,
+    payment_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (asset, venue, funding_time_ms)
+);
+"""
+
+
 async def get_db() -> aiosqlite.Connection:
     global _db
     if _db is None:
@@ -260,6 +319,8 @@ async def init_db():
     await db.execute(IV_HISTORY_SCHEMA)
     await db.execute(SIGNAL_JOURNAL_SCHEMA)
     await db.execute(SIGNAL_ALERT_STATE_SCHEMA)
+    await db.execute(PERP_TRADES_SCHEMA)
+    await db.execute(PERP_FUNDING_SCHEMA)
     await db.commit()
 
     # One-time seed of the ETH-book collateral allocation from the values that
@@ -351,6 +412,31 @@ async def init_db():
         if col_name not in columns:
             logger.info("Migrating: adding %r column to counterparty_margin...", col_name)
             await db.execute(f"ALTER TABLE counterparty_margin ADD COLUMN {col_name} {col_type}")
+    await db.commit()
+
+    # Migration: perp hedge columns on the daily MTM snapshot. Older DBs
+    # recorded an options-only book; these carry the hedge leg alongside it so
+    # the delta series reflects the position the desk actually runs.
+    mtm_migrations = [
+        ("perp_qty", "REAL DEFAULT 0"),
+        ("perp_mtm_usd", "REAL DEFAULT 0"),
+        ("perp_funding_usd", "REAL DEFAULT 0"),
+        ("net_delta", "REAL DEFAULT 0"),
+    ]
+    cursor = await db.execute("PRAGMA table_info(portfolio_mtm_history)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    for col_name, col_type in mtm_migrations:
+        if col_name not in columns:
+            logger.info("Migrating: adding %r column to portfolio_mtm_history...", col_name)
+            await db.execute(f"ALTER TABLE portfolio_mtm_history ADD COLUMN {col_name} {col_type}")
+    if "net_delta" not in columns:
+        # Backfill rather than leave historical rows at the column default: no
+        # hedge existed before this feature, so their net delta WAS their
+        # options delta. A default of 0 would read as "perfectly hedged" on
+        # every row predating the migration, which is the opposite of true.
+        await db.execute(
+            "UPDATE portfolio_mtm_history SET net_delta = delta WHERE net_delta = 0"
+        )
     await db.commit()
 
     # Auto-import from Excel on first run

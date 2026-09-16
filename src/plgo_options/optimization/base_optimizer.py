@@ -671,6 +671,16 @@ class BaseOptimizer:
                 exp_code = parts[1]
             else:
                 exp_code = ""
+            # The perp hedge (opt=="F") is deliberately left out. Its position
+            # `strike` is the average entry price while the perp *candidate* is
+            # built at spot, so the two would only ever key-match by accident —
+            # and forcing them to match would let unwind_discount cheapen a
+            # reducing perp trade, which is wrong (closing a perp costs the same
+            # bps as opening one). The LP can still trade the perp freely in
+            # either direction; check_rehedge is what reads the held quantity,
+            # and it reads p.opt == "F" straight off the position list.
+            if p.opt == "F":
+                continue
             key = (exp_code, p.strike, p.opt, p.counterparty)
             # net_qty is already signed (negative=Short, positive=Long) — no side multiplier needed.
             held_positions[key] = held_positions.get(key, 0.0) + p.net_qty

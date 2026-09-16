@@ -1415,6 +1415,9 @@ document.querySelectorAll(".nav-item").forEach(item => {
       }, 60);
     }
     if (pg === "collateral") { collatLoad(); }
+    // Always reloaded rather than gated on a *Loaded flag: the page is
+    // asset-scoped and the mark/funding move between visits.
+    if (pg === "perps") { perpLoad(); }
     // execution is now a subtab inside structurer, not a standalone page
   });
 });
@@ -3490,6 +3493,25 @@ function pfRenderSummary() {
     document.getElementById("pf-total-gamma").textContent = t.portfolio_gamma != null ? t.portfolio_gamma.toFixed(4) : "--";
     document.getElementById("pf-total-theta").textContent = t.portfolio_theta != null ? t.portfolio_theta.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
     document.getElementById("pf-total-vega").textContent = t.portfolio_vega != null ? t.portfolio_vega.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
+
+    // Net (hedged) delta and the perp leg behind it. portfolio_delta above is
+    // the options book alone; net_delta adds the perp, which is delta 1 per
+    // token. See the Perp Hedge page.
+    const $net = document.getElementById("pf-net-delta");
+    if ($net) {
+      $net.textContent = t.net_delta != null ? t.net_delta.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
+      // Only worth colouring when there is a hedge to compare against.
+      $net.className = `risk-value ${t.perp_qty ? (Math.abs(t.net_delta) <= Math.abs(t.portfolio_delta) ? "mtm-pos" : "mtm-neg") : ""}`;
+    }
+    const $hedge = document.getElementById("pf-perp-hedge");
+    if ($hedge) {
+      const q = t.perp_qty || 0;
+      $hedge.textContent = q
+        ? `${q > 0 ? "+" : "\u2212"}${Math.abs(q).toLocaleString(undefined, { maximumFractionDigits: 0 })} · funding ${
+            (t.perp_funding || 0) < 0 ? "\u2212" : ""}$${Math.abs(t.perp_funding || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+        : "none";
+      $hedge.className = "risk-value";
+    }
   }
 }
 
@@ -17695,3 +17717,237 @@ if (document.readyState === "loading") {
 } else {
   radarWirePanels();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Perp Hedge — the delta hedge the optimizer proposes, and its funding carry
+//
+// The options book lives in `trades` (OTC, Call/Put only, reconciled against
+// counterparty spreadsheets); the perp leg has its own ledger behind
+// /api/perps. Recording a fill here is what stops the optimizer re-proposing
+// the entire hedge on every run, and what puts funding into P&L.
+// ═══════════════════════════════════════════════════════════════════════════
+
+let perpData = null;
+let perpFunding = null;
+
+const perpFmtUsd = (v, digits = 0) => {
+  const n = Number(v || 0);
+  const sign = n < 0 ? "−" : "";
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: digits })}`;
+};
+const perpFmtQty = (v) => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+// Perp prices follow the underlying's own scale: FIL trades around $1 and
+// needs 4dp to be readable at all, ETH does not.
+const perpFmtPx = (v) => currentAsset === "FIL"
+  ? Number(v || 0).toFixed(4)
+  : Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+const perpSignClass = (v) => Number(v || 0) >= 0 ? "mtm-pos" : "mtm-neg";
+
+async function perpLoad() {
+  const label = document.getElementById("perp-asset-label");
+  if (label) label.textContent = currentAsset;
+  const $err = document.getElementById("perp-error");
+  if ($err) $err.style.display = "none";
+  try {
+    const [position, trades, funding] = await Promise.all([
+      get(`/api/perps/position?asset=${currentAsset}`),
+      get(`/api/perps/trades?asset=${currentAsset}`),
+      get(`/api/perps/funding?asset=${currentAsset}&limit=60`),
+    ]);
+    perpData = { position, trades: trades.trades || [] };
+    perpFunding = funding;
+    perpRender();
+  } catch (e) {
+    console.error("Perp hedge load failed:", e);
+    if ($err) {
+      $err.style.display = "block";
+      $err.textContent = `Failed to load: ${e.message || e}`;
+    }
+  }
+}
+
+function perpRender() {
+  if (!perpData) return;
+  const p = perpData.position;
+
+  const $pill = document.getElementById("perp-symbol-pill");
+  if ($pill) {
+    $pill.textContent = p.mark_price
+      ? `${p.symbol} @ $${perpFmtPx(p.mark_price)} · ${p.venue}`
+      : `${p.symbol} · ${p.venue} · no live mark`;
+  }
+
+  const flat = Math.abs(p.net_qty) < 1e-9;
+  const $qty = document.getElementById("perp-net-qty");
+  $qty.textContent = flat ? "Flat" : `${p.net_qty > 0 ? "+" : "−"}${perpFmtQty(Math.abs(p.net_qty))}`;
+  $qty.className = `collat-metric-value ${flat ? "" : perpSignClass(p.net_qty)}`;
+  document.getElementById("perp-net-sub").textContent = p.trade_count
+    ? `${p.trade_count} fill${p.trade_count === 1 ? "" : "s"} · ${currentAsset} tokens`
+    : "no fills recorded";
+
+  document.getElementById("perp-entry-mark").textContent = flat
+    ? "--"
+    : `$${perpFmtPx(p.avg_entry)} / $${perpFmtPx(p.mark_price)}`;
+  document.getElementById("perp-notional-sub").textContent = `notional ${perpFmtUsd(p.notional_usd)}`;
+
+  const $unreal = document.getElementById("perp-unrealised");
+  $unreal.textContent = perpFmtUsd(p.unrealized_pnl_usd);
+  $unreal.className = `collat-metric-value ${perpSignClass(p.unrealized_pnl_usd)}`;
+  document.getElementById("perp-realised-sub").textContent =
+    `realised ${perpFmtUsd(p.realized_pnl_usd)} · fees ${perpFmtUsd(p.fees_usd)}`;
+
+  const $fund = document.getElementById("perp-funding-total");
+  $fund.textContent = perpFmtUsd(p.funding.total_usd);
+  $fund.className = `collat-metric-value ${perpSignClass(p.funding.total_usd)}`;
+  document.getElementById("perp-funding-sub").textContent =
+    `last 30d ${perpFmtUsd(p.funding.last_30d_usd)} · ${p.funding.events} payments`;
+
+  const $total = document.getElementById("perp-total-pnl");
+  $total.textContent = perpFmtUsd(p.total_pnl_usd);
+  $total.className = `collat-metric-value ${perpSignClass(p.total_pnl_usd)}`;
+
+  const $apr = document.getElementById("perp-funding-apr");
+  $apr.textContent = p.funding_apr_pct == null ? "--" : `${p.funding_apr_pct.toFixed(2)}%`;
+  // Which way the rate cuts depends on which side you're on: positive funding
+  // is income to a short and a cost to a long, so colour it by what it means
+  // for the position actually held rather than by the sign of the rate.
+  $apr.className = `collat-metric-value ${
+    p.funding_apr_pct == null || flat ? "" : perpSignClass(-p.funding_apr_pct * p.net_qty)}`;
+  document.getElementById("perp-funding-apr-sub").textContent =
+    p.funding_interval_hours
+      ? `annualised · ${p.funding_interval_hours}h interval · trailing 90 prints`
+      : "annualised";
+
+  if (p.market_error) {
+    const $err = document.getElementById("perp-error");
+    $err.style.display = "block";
+    $err.textContent = `Live Binance feed unavailable (${p.market_error}) — position and settled funding are still accurate; the mark and unrealised P&L are not.`;
+  }
+
+  perpRenderTrades();
+  perpRenderFunding();
+}
+
+function perpRenderTrades() {
+  const tb = document.getElementById("perp-trades-tbody");
+  const empty = document.getElementById("perp-trades-empty");
+  const rows = perpData.trades || [];
+  empty.style.display = rows.length ? "none" : "block";
+  tb.innerHTML = rows.slice().reverse().map(t => {
+    const isBuy = String(t.side).toLowerCase() === "buy";
+    const notional = Math.abs(t.qty * t.price);
+    return `<tr>
+      <td>${String(t.traded_at || "").replace("T", " ").replace(/(\+00:00|Z)$/, "")}</td>
+      <td class="${isBuy ? "mtm-pos" : "mtm-neg"}">${isBuy ? "Buy" : "Sell"}</td>
+      <td class="num">${perpFmtQty(t.qty)}</td>
+      <td class="num">$${perpFmtPx(t.price)}</td>
+      <td class="num">${perpFmtUsd(notional)}</td>
+      <td class="num">${t.fee_usd ? perpFmtUsd(t.fee_usd, 2) : "--"}</td>
+      <td>${t.source || "manual"}</td>
+      <td style="color:var(--muted)">${(t.note || "").replace(/</g, "&lt;")}</td>
+      <td class="num"><button class="btn-secondary perp-del" data-id="${t.id}"
+            style="width:auto;padding:.1rem .4rem;font-size:.7rem" title="Delete this fill">&times;</button></td>
+    </tr>`;
+  }).join("");
+
+  tb.querySelectorAll(".perp-del").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Delete this fill? The net position and the funding already accrued against it will be recomputed.")) return;
+      try {
+        await api("DELETE", `/api/perps/trades/${btn.dataset.id}?asset=${currentAsset}`);
+        await perpLoad();
+      } catch (e) {
+        alert(`Delete failed: ${e.message || e}`);
+      }
+    });
+  });
+}
+
+function perpRenderFunding() {
+  const tb = document.getElementById("perp-funding-tbody");
+  const empty = document.getElementById("perp-funding-empty");
+  const rows = (perpFunding && perpFunding.rows) || [];
+  const hours = perpData?.position?.funding_interval_hours || 8;
+  empty.style.display = rows.length ? "none" : "block";
+  tb.innerHTML = rows.map(r => {
+    const apr = r.funding_rate * (24 / hours) * 365 * 100;
+    return `<tr>
+      <td>${String(r.funding_time).replace("T", " ").replace("+00:00", "")}</td>
+      <td class="num">${(r.funding_rate * 100).toFixed(4)}%</td>
+      <td class="num" style="color:var(--muted)">${apr.toFixed(2)}%</td>
+      <td class="num">$${perpFmtPx(r.mark_price)}</td>
+      <td class="num">${perpFmtQty(r.position_qty)}</td>
+      <td class="num ${perpSignClass(r.payment_usd)}">${perpFmtUsd(r.payment_usd, 2)}</td>
+    </tr>`;
+  }).join("");
+}
+
+function perpOpenModal() {
+  document.getElementById("perp-modal-asset").textContent = currentAsset;
+  document.getElementById("perp-modal-qty").value = "";
+  document.getElementById("perp-modal-fee").value = "";
+  document.getElementById("perp-modal-note").value = "";
+  // Pre-fill the price with the live mark and the time with now, since the
+  // common case is recording a fill moments after it happened.
+  document.getElementById("perp-modal-price").value = perpData?.position?.mark_price || "";
+  document.getElementById("perp-modal-time").value =
+    new Date().toISOString().slice(0, 16);
+  document.getElementById("perp-modal").classList.add("open");
+}
+
+function perpCloseModal() {
+  document.getElementById("perp-modal").classList.remove("open");
+}
+
+async function perpSaveFill() {
+  const qty = parseFloat(document.getElementById("perp-modal-qty").value);
+  const price = parseFloat(document.getElementById("perp-modal-price").value);
+  if (!(qty > 0)) { alert("Quantity must be greater than zero."); return; }
+  if (!(price >= 0)) { alert("Fill price must be a number."); return; }
+  const raw = document.getElementById("perp-modal-time").value;
+  try {
+    await post("/api/perps/trades", {
+      asset: currentAsset,
+      side: document.getElementById("perp-modal-side").value,
+      qty,
+      price,
+      fee_usd: parseFloat(document.getElementById("perp-modal-fee").value) || 0,
+      // The picker yields local wall-clock with no zone; the backend treats a
+      // naive stamp as UTC, so say so explicitly rather than let the two
+      // disagree about when the position started.
+      traded_at: raw ? `${raw}:00Z` : null,
+      note: document.getElementById("perp-modal-note").value || "",
+    });
+    perpCloseModal();
+    await perpLoad();
+  } catch (e) {
+    alert(`Could not record the fill: ${e.message || e}`);
+  }
+}
+
+async function perpAccrue() {
+  const btn = document.getElementById("btn-perp-accrue");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Accruing…";
+  try {
+    const res = await post("/api/perps/accrue-funding", { assets: [currentAsset] });
+    await perpLoad();
+    btn.textContent = res.events
+      ? `Booked ${res.events} · ${perpFmtUsd(res.payment_usd, 2)}`
+      : "Already up to date";
+    setTimeout(() => { btn.textContent = original; }, 3000);
+  } catch (e) {
+    alert(`Accrual failed: ${e.message || e}`);
+    btn.textContent = original;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("btn-perp-add")?.addEventListener("click", perpOpenModal);
+document.getElementById("btn-perp-refresh")?.addEventListener("click", perpLoad);
+document.getElementById("btn-perp-accrue")?.addEventListener("click", perpAccrue);
+document.getElementById("perp-modal-close")?.addEventListener("click", perpCloseModal);
+document.getElementById("btn-perp-modal-cancel")?.addEventListener("click", perpCloseModal);
+document.getElementById("btn-perp-modal-save")?.addEventListener("click", perpSaveFill);
