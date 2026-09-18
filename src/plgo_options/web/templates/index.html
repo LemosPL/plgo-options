@@ -2850,18 +2850,11 @@
           <!-- Matrix -->
           <div id="subtab-optv4-matrix" class="sub-tab-pane">
             <div id="optv4-matrix-mtm-note" class="optv3-muted" style="margin-bottom:.75rem"></div>
-            <div id="optv4-matrix-grid" style="display:grid;grid-template-columns:1fr;gap:1.5rem">
-              <div>
-                <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— before</span></h3>
-                <div class="chain-wrapper" style="max-height:500px">
-                  <table class="pf-table"><thead id="optv4-matrix-thead"></thead><tbody id="optv4-matrix-tbody"></tbody></table>
-                </div>
-              </div>
-              <div id="optv4-matrix-after-panel" style="display:none">
-                <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— after</span></h3>
-                <div class="chain-wrapper" style="max-height:500px">
-                  <table class="pf-table"><thead id="optv4-matrix-after-main-thead"></thead><tbody id="optv4-matrix-after-main-tbody"></tbody></table>
-                </div>
+            <div>
+              <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— before vs after, per horizon</span></h3>
+              <p class="optv3-hint" style="margin:0 0 .6rem">Each horizon shows the <b>Before</b> book and the <b>After</b> book side by side, so the pair reads straight across. Columns are 30/60/90/120 days; <b>After</b> honours the trade checkboxes and manual legs, same as the chart.</p>
+              <div class="chain-wrapper" style="max-height:600px">
+                <table class="pf-table"><thead id="optv4-matrix-thead"></thead><tbody id="optv4-matrix-tbody"></tbody></table>
               </div>
             </div>
           </div>
@@ -3707,6 +3700,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=172"></script>
+<script src="/static/app.js?v=173"></script>
 </body>
 </html>

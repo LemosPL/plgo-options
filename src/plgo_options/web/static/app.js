@@ -12537,9 +12537,6 @@ async function optv4Load() {
 
     document.getElementById("optv4-kpi-section").style.display = "";
     document.getElementById("optv4-payoff-empty").style.display = "none";
-    // Reset the "after" matrix panel until a run produces one.
-    document.getElementById("optv4-matrix-after-panel").style.display = "none";
-    document.getElementById("optv4-matrix-grid").style.gridTemplateColumns = "1fr";
     // Reset the run-only trades block until a new run. The Target Profile pane is
     // managed by optv4RenderProfileTable() (called from optv4RenderPreview) so it
     // stays editable off the loaded book even before the first run.
@@ -13159,67 +13156,110 @@ function optv4MatrixOpts() {
   };
 }
 
-function optv4RenderMatrix() {
-  const spots = optv4Data.spot_ladder;
-  const positions = optv4ActivePositions();
-  const ethSpot = optv4Data.eth_spot;
-  if (!positions.length) return;
+/* ── v4 P&L Matrix: ONE table, Before and After paired per horizon ──────────
+   Was two tables side by side in a 1fr-1fr grid — the Before matrix and the
+   After matrix — which meant comparing a cell against its counterpart with two
+   independently scrolling panes and the eye travelling half the screen. They
+   share rows and columns exactly, so they are one table: each horizon gets a
+   Before column and an After column next to it, and the comparison is a glance
+   at two adjacent numbers.
 
-  const { dp, assetLabel: label } = optv4MatrixOpts();
+   Columns are OPTV4_MATRIX_HORIZONS. Now and 16d are gone — the question this
+   table answers is theta drift over the months the desk actually rolls on, and
+   at Now the two books differ only by the trade cost. 150d is past anything
+   traded here, so 120d is the cap. The chart keeps its own wider horizon set;
+   this is a display choice about the table, not about the run. */
+const OPTV4_MATRIX_HORIZONS = [30, 60, 90, 120];
+
+function optv4RenderMatrix() {
+  const r = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.before) ? optv4OptResult : null;
+  const spots = (r && r.spot_ladder) || (optv4Data && optv4Data.spot_ladder);
+  if (!spots || !spots.length) return;
+
+  const { dp, assetLabel: label, spot: ethSpot } = optv4MatrixOpts();
+  const positions = optv4ActivePositions();
+  if (!r && !positions.length) return;
+
+  // Before: after a run the optimizer ships its own curves (anchored
+  // server-side in build_payoffs); before one, sum the loaded book over the
+  // whole ladder once per horizon — cheaper than once per position per row,
+  // and identical since both summing and interpolation are linear.
+  const beforeCurve = (hKey) => {
+    if (r) return (r.before.payoff_by_horizon || {})[hKey];
+    const tot = new Array(spots.length).fill(0);
+    let any = false;
+    positions.forEach(p => {
+      const c = p.payoff_by_horizon && p.payoff_by_horizon[hKey];
+      if (!c) return;
+      any = true;
+      for (let i = 0; i < spots.length; i++) tot[i] += (c[i] || 0);
+    });
+    return any ? tot : null;
+  };
+  // After honours the trade checkboxes and manual legs, exactly as the chart's
+  // After curves do — same helper, so table and chart can never disagree.
+  const afterCurve = (hKey) =>
+    r ? (optv4AfterSelectedAtHorizon(hKey) || (r.after && r.after.payoff_by_horizon || {})[hKey]) : null;
+
+  // Never invent a column the run doesn't carry.
+  const horizons = OPTV4_MATRIX_HORIZONS.filter(h => !!beforeCurve(String(h)));
+  if (!horizons.length) return;
+  const hasAfter = !!r && horizons.some(h => !!afterCurve(String(h)));
+
+  const curves = {};
+  horizons.forEach(h => {
+    const hKey = String(h);
+    curves[h] = { before: beforeCurve(hKey), after: hasAfter ? afterCurve(hKey) : null };
+  });
+
+  // Cone runs only: per-horizon eligible-strike band, shaded on the cells.
+  const coneBounds = (r && r.cone_matrix_bounds) || null;
+
+  const C = optv4ChartColors();
+  const $thead = document.getElementById("optv4-matrix-thead");
+  const groupEdge = "border-left:2px solid var(--border,#30363d)";
+  if (hasAfter) {
+    let h1 = `<tr><th rowspan="2" style="text-align:left">${label} Spot</th><th rowspan="2" style="text-align:right">% move</th>`;
+    let h2 = "<tr>";
+    horizons.forEach(h => {
+      h1 += `<th colspan="2" style="${groupEdge}">${h}d</th>`;
+      h2 += `<th style="${groupEdge};color:${C.before};font-size:.7rem">Before</th>`
+          + `<th style="color:${C.horizon[0]};font-size:.7rem">After</th>`;
+    });
+    $thead.innerHTML = h1 + "</tr>" + h2 + "</tr>";
+  } else {
+    $thead.innerHTML = `<tr><th style="text-align:left">${label} Spot</th><th style="text-align:right">% move</th>`
+      + horizons.map(h => `<th style="${groupEdge}">${h}d</th>`).join("") + "</tr>";
+  }
+
   // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
   const rows = optvGeometricRows(spots, ethSpot);
 
-  const $thead = document.getElementById("optv4-matrix-thead");
-  $thead.innerHTML = "";
-  const headRow = document.createElement("tr");
-  headRow.innerHTML = `<th>${label} Spot</th><th>% move</th>`;
-  OPTV2_HORIZONS.forEach(h => { const th = document.createElement("th"); th.textContent = h === 0 ? "Now" : `${h}d`; headRow.appendChild(th); });
-  $thead.appendChild(headRow);
-
-  // Sum the book once per horizon across the WHOLE ladder, then interpolate
-  // that total onto the display rows. Summing after interpolation would give
-  // the same answer (both are linear) but this is one pass per horizon rather
-  // than one per position per row.
-  const totals = {};
-  OPTV2_HORIZONS.forEach(h => {
-    const hKey = String(h);
-    const tot = new Array(spots.length).fill(0);
-    positions.forEach(p => {
-      const curve = p.payoff_by_horizon[hKey];
-      if (!curve) return;
-      for (let i = 0; i < spots.length; i++) tot[i] += (curve[i] || 0);
-    });
-    totals[hKey] = tot;
-  });
+  const cell = (curve, s, h, edge) => {
+    const v = curve ? (optv4InterpAt(spots, curve, s) || 0) : null;
+    const band = coneBounds && coneBounds[String(h)];
+    const inBand = band && s >= band[0] && s <= band[1];
+    const colour = v == null ? "" : (v > 0 ? "color:#66bb6a" : (v < 0 ? "color:#ef5350" : ""));
+    return `<td class="${inBand ? "cone-band-cell" : ""}" style="text-align:right;`
+      + `${edge ? groupEdge + ";" : ""}${hasAfter ? "font-size:.75rem;" : ""}${colour}">`
+      + `${v == null ? "—" : Math.round(v).toLocaleString()}</td>`;
+  };
 
   const $tbody = document.getElementById("optv4-matrix-tbody");
-  $tbody.innerHTML = "";
-  rows.forEach((s) => {
-    const tr = document.createElement("tr");
-    if (Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9)) {
-      tr.classList.add("row-highlight");
-    }
-    const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + optv2Fmt(s, dp); tdSpot.style.fontWeight = "600";
-    tr.appendChild(tdSpot);
-
+  let html = "";
+  rows.forEach(s => {
+    const isSpot = Math.abs(s - ethSpot) < Math.max(1e-9, Math.abs(ethSpot) * 1e-9);
     const pct = ethSpot > 0 ? (s / ethSpot - 1) * 100 : null;
-    const tdPct = document.createElement("td");
-    tdPct.textContent = pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
-    tdPct.style.textAlign = "right";
-    tdPct.style.color = "var(--muted)";
-    tr.appendChild(tdPct);
-
-    OPTV2_HORIZONS.forEach(h => {
-      const cellVal = optv4InterpAt(spots, totals[String(h)], s) || 0;
-      const td = document.createElement("td");
-      td.textContent = Math.round(cellVal).toLocaleString(); td.style.textAlign = "right";
-      if (cellVal > 0) td.style.color = "#66bb6a";
-      if (cellVal < 0) td.style.color = "#ef5350";
-      tr.appendChild(td);
+    html += `<tr class="${isSpot ? "row-highlight" : ""}">`
+      + `<td style="text-align:left;font-weight:600;white-space:nowrap">$${optv2Fmt(s, dp)}</td>`
+      + `<td style="text-align:right;color:var(--muted)">${pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%"}</td>`;
+    horizons.forEach(h => {
+      html += cell(curves[h].before, s, h, true);
+      if (hasAfter) html += cell(curves[h].after, s, h, false);
     });
-    $tbody.appendChild(tr);
+    html += "</tr>";
   });
+  $tbody.innerHTML = html;
 }
 
 // ── Roll candidates: tick-to-unwind selection. Previews on the payoff chart
@@ -13483,7 +13523,7 @@ function optv4RenderResult(data) {
   if ($mtmNote) {
     if (data.current_book_mtm != null) {
       const mtm = data.current_book_mtm;
-      let noteHtml = `Both matrices show P&amp;L <b>from today</b>, not absolute value — current book MTM is `
+      let noteHtml = `The matrix shows P&amp;L <b>from today</b>, not absolute value — current book MTM is `
         + `<b style="color:${mtm >= 0 ? "var(--green)" : "var(--red)"}">${mtm >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(mtm), 0)}</b> `
         + `(the implicit $0 anchor at Now / current spot).`;
       // After-execution book MTM, net of the assumed per-counterparty trading
@@ -13498,15 +13538,11 @@ function optv4RenderResult(data) {
       $mtmNote.innerHTML = noteHtml;
     } else { $mtmNote.textContent = ""; }
   }
-  if (data.before && data.before.payoff_by_horizon) {
-    // Must pass the same options as the "after" table. This call re-renders the
-    // BEFORE matrix after a run, over the one optv4RenderMatrix drew from the
-    // loaded book — so without them a FIL run replaced a correct table with an
-    // "ETH Spot" header and dp=0 prices, turning 0.80 into "1".
-    optv2RenderCompareMatrix(data, "before", "optv4-matrix-thead",
-      "optv4-matrix-tbody", optv4MatrixOpts());
-  }
-  optv4RenderAfterMatrix();
+  // One table, Before | After paired per horizon. It reads optv4OptResult
+  // directly, so it picks up the run without being handed `data`, and it takes
+  // optv4MatrixOpts() for the asset label and price decimals (a FIL run used to
+  // redraw with an "ETH Spot" header and dp=0, turning 0.80 into "1").
+  optv4RenderMatrix();
 
   // Target profile table (payoff-at-Now: Before / After / Target)
   optv4RenderProfileTable();
@@ -13572,7 +13608,7 @@ function optv4WireReplCheckboxes() {
     const all = document.getElementById("optv4-repl-all");
     if (all) all.checked = optv4ReplDeselected.size === 0;
     optv4RenderPayoff();
-    optv4RenderAfterMatrix();
+    optv4RenderMatrix();
   }));
   const all = document.getElementById("optv4-repl-all");
   if (all) {
@@ -13582,7 +13618,7 @@ function optv4WireReplCheckboxes() {
       if (!all.checked) (optv4Replacements || []).forEach(t => optv4ReplDeselected.add(t._idx));
       tb.querySelectorAll(".optv4-repl-cb").forEach(cb => { cb.checked = !optv4ReplDeselected.has(Number(cb.dataset.idx)); });
       optv4RenderPayoff();
-      optv4RenderAfterMatrix();
+      optv4RenderMatrix();
     };
   }
   // Editable trade sizes: adjust a suggested trade's qty → live After curve/matrix.
@@ -13596,7 +13632,7 @@ function optv4WireReplCheckboxes() {
     // |qty|*price for options but |qty|*spot for a perp, so recomputing it would
     // disagree with what the row rendered. Qty editing behaves exactly as before.
     optv4RenderPayoff();
-    optv4RenderAfterMatrix();
+    optv4RenderMatrix();
   }));
   // Editable strikes: move a suggested trade's strike → live After curve/matrix,
   // and reprice the leg so Price/Value follow it too.
@@ -13614,7 +13650,7 @@ function optv4WireReplCheckboxes() {
       : "Move this trade's strike — the After curve, P&L matrix, Price and Value update live.";
     optv4UpdateReplRow(t);
     optv4RenderPayoff();
-    optv4RenderAfterMatrix();
+    optv4RenderMatrix();
   }));
 }
 
@@ -13735,7 +13771,7 @@ function optv4ApplyPricingLegs() {
   }
   optv4RenderManualLegs();
   optv4RenderPayoff();
-  optv4RenderAfterMatrix();
+  optv4RenderMatrix();
   optv4RenderProfileTable();   // residuals vs the target move with the After book
 
   const bits = [`${applied} trade${applied === 1 ? "" : "s"} updated`];
@@ -13921,7 +13957,7 @@ function optv4PopulateLegExpiries() {
 
 function optv4RefreshAfterWhatIf() {
   optv4RenderPayoff();
-  optv4RenderAfterMatrix();
+  optv4RenderMatrix();
 }
 
 function optv4AddManualLeg() {
@@ -13999,25 +14035,6 @@ function optv4RenderManualLegs() {
   }
 }
 
-// Build an optv4OptResult-shaped object whose `after.payoff_by_horizon` reflects
-// only the selected trades, and (re)render the "After" P&L matrix from it.
-function optv4RenderAfterMatrix() {
-  const r = optv4OptResult;
-  const $afterPanel = document.getElementById("optv4-matrix-after-panel");
-  const $matrixGrid = document.getElementById("optv4-matrix-grid");
-  if (!(r && r.after && r.after.payoff_by_horizon && $afterPanel && $matrixGrid)) return;
-  const adj = {};
-  Object.keys(r.after.payoff_by_horizon).forEach(hKey => {
-    adj[hKey] = optv4AfterSelectedAtHorizon(hKey) || r.after.payoff_by_horizon[hKey];
-  });
-  const dataSel = Object.assign({}, r, { after: { payoff_by_horizon: adj } });
-  $afterPanel.style.display = "";
-  $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-  // Same uniform-% rows as the "before" matrix above, so the two tables line
-  // up row for row and can be read side by side.
-  optv2RenderCompareMatrix(dataSel, "after", "optv4-matrix-after-main-thead",
-    "optv4-matrix-after-main-tbody", optv4MatrixOpts());
-}
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
 // spec entries map to cells: {colspan?, label?} for a label cell, {key: fn} to sum
