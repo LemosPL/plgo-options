@@ -3360,10 +3360,26 @@ async function loadPortfolio() {
   $btn.classList.add("loading");
   $btn.textContent = "Loading…";
 
-  const includeExpired = document.getElementById("pf-include-expired").checked;
+  const $incExpired = document.getElementById("pf-include-expired");
+  const includeExpired = $incExpired.checked;
+  // Set when the active-only load came back empty and we retried with
+  // expired included, so the banner below can explain the book on screen.
+  let expiredFallback = false;
 
   try {
-    pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExpired}`);
+    try {
+      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExpired}`);
+    } catch (first) {
+      // A book whose every trade has rolled off 404s with "No trades
+      // found", and this used to be swallowed — the screen just stayed
+      // blank with nothing said, which reads as a broken page rather than
+      // an empty one. The trades still exist, they are simply all expired,
+      // so show them instead of nothing and say why.
+      if (includeExpired || !(first.message || "").includes("404")) throw first;
+      pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=true`);
+      expiredFallback = true;
+      $incExpired.checked = true;   // keep the toggle honest about what is shown
+    }
     pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
 
@@ -3416,6 +3432,14 @@ async function loadPortfolio() {
     // eth_spot fell back to the most recent trade's own reference spot.
     const staleSpotBanner = document.getElementById("pf-stale-spot-banner");
     if (staleSpotBanner) staleSpotBanner.style.display = pfData.stale_spot ? "" : "none";
+    const expBanner = document.getElementById("pf-expired-fallback-banner");
+    if (expBanner) {
+      expBanner.style.display = expiredFallback ? "" : "none";
+      if (expiredFallback) {
+        document.getElementById("pf-expired-fallback-asset").textContent = currentAsset;
+        document.getElementById("pf-expired-fallback-count").textContent = pfData.positions.length;
+      }
+    }
     document.getElementById("pf-spot-label").textContent = `${currentAsset} Spot`;
 
     pfRenderAll();
@@ -3423,9 +3447,17 @@ async function loadPortfolio() {
   } catch (e) {
     console.error("Failed to load portfolio:", e);
     if (e.message && e.message.includes("404")) {
-      // No trades for this asset yet
+      // Genuinely no trades for this asset — not even expired ones (the
+      // retry above would have found those). Say so rather than leaving a
+      // blank page that looks broken.
       const banner = document.getElementById("pf-no-live-banner");
       if (banner) banner.style.display = "none";
+      const expBanner = document.getElementById("pf-expired-fallback-banner");
+      if (expBanner) {
+        expBanner.style.display = "";
+        expBanner.textContent = `No trades at all for ${currentAsset} — active or expired. `
+          + `Add trades on the Trade Management screen.`;
+      }
       portfolioLoaded = true;
       return;
     }

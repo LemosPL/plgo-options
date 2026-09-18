@@ -453,12 +453,23 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
             pass  # fall back to DEFAULT_IV, same as the FIL branch above
 
         # Collect unique Deribit instrument names for batch ticker fetch.
+        #
+        # Only instruments that are still LISTED. An expired option has no
+        # ticker by definition, so asking for one is a request that can only
+        # fail — and it fails slowly: Deribit errors on a delisted instrument
+        # and _get retries with backoff before giving up. With
+        # include_expired=true on a book whose trades have all rolled off, that
+        # was the entire cost of the request: 77 expired ETH options took 23.6s,
+        # every second of it spent waiting for tickers that cannot exist. The
+        # enrichment loop below already prices a no-ticker expired option at
+        # intrinsic, so nothing downstream needs the failed lookup.
+        today_for_tickers = date.today()
         unique_instruments: set[str] = set()
         for t in trades:
             opt_code = "C" if "call" in str(t.get("Option Type") or "").lower() else "P"
             strike_val = _safe_float(t.get("Strike"))
             expiry_dt = _iso_to_date(str(t.get("Option Expiry Date") or ""))
-            if expiry_dt and strike_val > 0:
+            if expiry_dt and strike_val > 0 and expiry_dt >= today_for_tickers:
                 unique_instruments.add(_build_instrument(expiry_dt, strike_val, opt_code))
 
         # Batch-fetch tickers for live greeks / mark price

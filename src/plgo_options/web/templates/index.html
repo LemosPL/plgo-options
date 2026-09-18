@@ -471,6 +471,12 @@
       Live spot price is unavailable right now (market data feed down) — showing the most recent trade's reference spot instead. Greeks, IV, and P&amp;L below are computed off this stale price.
     </div>
 
+    <!-- Every trade has rolled off: the active-only load found nothing, so the
+         page auto-included expired rather than rendering blank. -->
+    <div id="pf-expired-fallback-banner" class="under-construction-banner" style="display:none">
+      No <b>active</b> trades for <b id="pf-expired-fallback-asset">this book</b> — every position has expired, so the book below is <b>expired trades</b> (<span id="pf-expired-fallback-count">0</span>). They are held at intrinsic value. Untick <b>Include Expired</b> to hide them.
+    </div>
+
     <!-- Summary banner -->
     <section class="card" id="portfolio-summary">
       <h2>Portfolio MTM Summary</h2>
@@ -3703,6 +3709,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=174"></script>
+<script src="/static/app.js?v=175"></script>
 </body>
 </html>
