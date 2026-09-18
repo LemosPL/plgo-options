@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -135,6 +137,36 @@ async def bulk_expire_trades(body: BulkExpireRequest):
         if trade:
             results.append(trade)
     return {"expired": len(results), "trades": results}
+
+
+@router.post("/bulk-reactivate")
+async def bulk_reactivate_trades(body: BulkExpireRequest):
+    """Put expired trades back to 'active', leaving their expiry date alone.
+
+    Returns `will_auto_expire`: the ids whose expiry is already in the past, so
+    _auto_expire_trades will expire them again on the next startup. That is the
+    chosen behaviour (reactivate as-is), so the caller warns rather than the
+    server refusing — but it must be surfaced, or the change looks like it
+    silently failed when the app is next restarted.
+    """
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="No trade IDs provided")
+    db = await get_db()
+    today = date.today().isoformat()
+    results = []
+    will_auto_expire = []
+    for tid in body.ids:
+        trade = await repo.reactivate_trade(db, tid)
+        if trade:
+            results.append(trade)
+            expiry = str(trade.get("expiry") or "")
+            if expiry and expiry < today:
+                will_auto_expire.append(tid)
+    return {
+        "reactivated": len(results),
+        "will_auto_expire": will_auto_expire,
+        "trades": results,
+    }
 
 
 @router.get("/{trade_id}")

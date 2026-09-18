@@ -276,6 +276,10 @@
         <div class="pf-toolbar-spacer"></div>
         <button id="btn-tm-new" class="btn-primary" style="width:auto">+ New Trade</button>
         <button id="btn-tm-bulk-expire" class="btn-secondary tm-bulk-btn" style="width:auto;display:none">Expire Selected</button>
+        <!-- Only shown when the selection contains expired rows. Tick "Show
+             Expired" to get them on screen and selectable. -->
+        <button id="btn-tm-bulk-reactivate" class="btn-secondary tm-bulk-btn" style="width:auto;display:none"
+          title="Put the selected expired trades back to active. The expiry date is left unchanged, so any trade already past its expiry will be auto-expired again on the next app restart — edit its expiry to keep it active.">Reactivate Selected</button>
         <button id="btn-tm-bulk-delete" class="btn-secondary tm-bulk-btn btn-delete" style="width:auto;display:none">Delete Selected</button>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="tm-show-expired"> Show Expired
@@ -3709,6 +3713,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=175"></script>
+<script src="/static/app.js?v=176"></script>
 </body>
 </html>

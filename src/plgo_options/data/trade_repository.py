@@ -158,6 +158,39 @@ async def expire_trade(
     return await get_trade(db, trade_id)
 
 
+async def reactivate_trade(
+    db: aiosqlite.Connection,
+    trade_id: int,
+    changed_by: str = "user",
+) -> dict | None:
+    """Put an expired (or deleted) trade back to 'active'. Expiry is untouched.
+
+    The inverse of expire_trade, and deliberately nothing more: it does not
+    move the expiry date. So for a trade whose expiry is already in the past,
+    _auto_expire_trades will mark it expired again on the next startup — that
+    is the documented behaviour, not an oversight, and callers are expected to
+    warn. `will_auto_expire` on the bulk endpoint reports exactly which ids
+    that applies to.
+    """
+    current = await get_trade(db, trade_id)
+    if current is None:
+        return None
+
+    now = datetime.utcnow().isoformat()
+    await db.execute(
+        "UPDATE trades SET status = 'active', updated_at = ? WHERE id = ?",
+        (now, trade_id),
+    )
+    await db.execute(
+        """INSERT INTO trade_audit_log
+           (trade_id, action, field_changed, old_value, new_value, changed_by)
+           VALUES (?, 'reactivate', 'status', ?, 'active', ?)""",
+        (trade_id, current["status"], changed_by),
+    )
+    await db.commit()
+    return await get_trade(db, trade_id)
+
+
 async def get_trade_history(
     db: aiosqlite.Connection,
     trade_id: int,

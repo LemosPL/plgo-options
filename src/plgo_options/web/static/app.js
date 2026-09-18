@@ -1658,7 +1658,7 @@ function tmRenderTable() {
     const sideColor = (t.side || "").toLowerCase().includes("buy") || (t.side || "").toLowerCase().includes("long") ? "qty-long" : "qty-short";
 
     return `<tr class="${rowClass}" data-tid="${tid}">
-      <td><input type="checkbox" class="tm-row-check" data-tid="${tid}" ${isSelected ? "checked" : ""} ${isExpired ? "disabled" : ""}></td>
+      <td><input type="checkbox" class="tm-row-check" data-tid="${tid}" ${isSelected ? "checked" : ""}></td>
       <td><span class="status-dot ${statusClass}"></span></td>
       <td style="text-align:left">${t.counterparty || ""}</td>
       <td>${t.trade_date || ""}</td>
@@ -2284,22 +2284,50 @@ function tmInvalidatePortfolio() {
 // ─── Bulk select & actions ──────────────────────────────────
 let tmSelected = new Set();
 
+// Rows the bulk actions can touch: anything not soft-deleted. Expired rows
+// are included so they can be reactivated — they used to render a disabled
+// checkbox, which made "select the expired ones and bring them back"
+// impossible from the UI at all.
+function tmSelectableRows() {
+  return tmEnriched.filter(t => t.db_status !== "deleted");
+}
+
+function tmSelectedByStatus() {
+  const byId = new Map(tmEnriched.map(t => [t.db_id || t.id, t]));
+  const sel = [...tmSelected].map(id => byId.get(id)).filter(Boolean);
+  return {
+    active: sel.filter(t => t.db_status === "active"),
+    expired: sel.filter(t => t.db_status === "expired"),
+  };
+}
+
 function tmUpdateBulkUI() {
   const n = tmSelected.size;
-  document.getElementById("btn-tm-bulk-expire").style.display = n > 0 ? "" : "none";
-  document.getElementById("btn-tm-bulk-delete").style.display = n > 0 ? "" : "none";
-  document.getElementById("btn-tm-bulk-expire").textContent = `Expire Selected (${n})`;
-  document.getElementById("btn-tm-bulk-delete").textContent = `Delete Selected (${n})`;
+  const { active, expired } = tmSelectedByStatus();
+  const $expire = document.getElementById("btn-tm-bulk-expire");
+  const $delete = document.getElementById("btn-tm-bulk-delete");
+  const $react = document.getElementById("btn-tm-bulk-reactivate");
+  // Expire only means something for rows that are still active; Reactivate
+  // only for rows that are expired. Showing both unconditionally invites
+  // a click that silently does nothing.
+  $expire.style.display = active.length > 0 ? "" : "none";
+  $expire.textContent = `Expire Selected (${active.length})`;
+  $delete.style.display = n > 0 ? "" : "none";
+  $delete.textContent = `Delete Selected (${n})`;
+  if ($react) {
+    $react.style.display = expired.length > 0 ? "" : "none";
+    $react.textContent = `Reactivate Selected (${expired.length})`;
+  }
   // Update header checkbox
-  const visibleActive = tmEnriched.filter(t => t.db_status === "active");
-  const allChecked = visibleActive.length > 0 && visibleActive.every(t => tmSelected.has(t.db_id || t.id));
+  const selectable = tmSelectableRows();
+  const allChecked = selectable.length > 0 && selectable.every(t => tmSelected.has(t.db_id || t.id));
   document.getElementById("tm-check-all").checked = allChecked;
 }
 
 document.getElementById("tm-check-all").addEventListener("change", (e) => {
-  const visibleActive = tmEnriched.filter(t => t.db_status === "active");
+  const selectable = tmSelectableRows();
   if (e.target.checked) {
-    visibleActive.forEach(t => tmSelected.add(t.db_id || t.id));
+    selectable.forEach(t => tmSelected.add(t.db_id || t.id));
   } else {
     tmSelected.clear();
   }
@@ -2317,6 +2345,49 @@ document.getElementById("btn-tm-bulk-expire").addEventListener("click", async ()
     tmLoad();
   } catch (err) {
     alert("Bulk expire failed: " + err.message);
+  }
+});
+
+document.getElementById("btn-tm-bulk-reactivate")?.addEventListener("click", async () => {
+  const expired = tmSelectedByStatus().expired;
+  if (!expired.length) return;
+  const ids = expired.map(t => t.db_id || t.id);
+
+  // Reactivating does NOT move the expiry date, and _auto_expire_trades
+  // re-expires anything active whose expiry is already past on the next app
+  // start. Say so up front and name the count, otherwise the change looks
+  // like it silently failed after the next restart.
+  const today = new Date().toISOString().slice(0, 10);
+  const stale = expired.filter(t => t.expiry && String(t.expiry).slice(0, 10) < today);
+  let msg = `Reactivate ${ids.length} expired trade(s)?
+
+Status goes back to active. `
+    + `The expiry date is left unchanged.`;
+  if (stale.length) {
+    msg += `
+
+Note: ${stale.length} of them already expired `
+      + `(${stale.slice(0, 3).map(t => String(t.expiry).slice(0, 10)).join(", ")}`
+      + `${stale.length > 3 ? ", …" : ""}), so the daily auto-expiry will mark them `
+      + `expired again next time the app restarts. To keep them active, edit the `
+      + `expiry to a future date after reactivating.`;
+  }
+  if (!confirm(msg)) return;
+
+  try {
+    const res = await post("/api/trades/bulk-reactivate", { ids });
+    tmSelected.clear();
+    tmInvalidatePortfolio();
+    await tmLoad();
+    const n = res.reactivated ?? ids.length;
+    const auto = (res.will_auto_expire || []).length;
+    alert(`Reactivated ${n} trade(s).`
+      + (auto ? `
+
+${auto} still carry a past expiry date and will be auto-expired `
+                + `on the next app restart — edit their expiry to keep them active.` : ""));
+  } catch (err) {
+    alert("Reactivate failed: " + err.message);
   }
 });
 
