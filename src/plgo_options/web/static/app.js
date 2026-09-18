@@ -12510,6 +12510,12 @@ async function optv4Load() {
     optv4PopulateCounterparties();
     optRenderVolPts("optv4-volpts-list", optv4Data);
     optRenderNettingPct("optv4-nettingpct-list", optv4Data);
+    // Hint the live spot as the placeholder — blank still means "use live
+    // spot", this is just so the field isn't a mystery number to fill in.
+    // Ported from v2 (which hardcodes 2dp); FIL trades near $1, so follow
+    // the asset's own precision rather than flattening 0.9808 to "0.98".
+    const $optv4CustomSpot = document.getElementById("optv4-custom-spot");
+    if ($optv4CustomSpot) $optv4CustomSpot.placeholder = optv2Fmt(optv4Data.eth_spot, optv4Dp() ? 4 : 2);
     optv4RenderDteList();
     optv4PopulateLegExpiries();
     optv4RenderManualLegs();
@@ -15108,6 +15114,19 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     console.log("Optimizer v4 result:", data);
     optv4HideError();
     optv4RenderResult(data);
+    // Surface whether this run used a hypothetical spot instead of the live
+    // mark — the "Before" column of the matrix is the CURRENT book repriced at
+    // that hypothetical spot, not what the book is actually worth right now.
+    // v4 sent custom_spot but showed nothing back, so a run on a gapped spot
+    // was indistinguishable from a live one. Mirrors v2.
+    const $v4CustomSpotWrap = document.getElementById("optv4-sum-custom-spot-wrap");
+    if ($v4CustomSpotWrap) {
+      $v4CustomSpotWrap.style.display = customSpot != null ? "" : "none";
+      if (customSpot != null) {
+        document.getElementById("optv4-sum-custom-spot").textContent =
+          "$" + optv2Fmt(customSpot, optv4Dp() ? 4 : 2);
+      }
+    }
     if (saveRequested) { await optv4LoadSnapshots(); }
   } catch (e) {
     console.error("Optimizer v4 run failed:", e);
