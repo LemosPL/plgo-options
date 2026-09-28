@@ -13,6 +13,8 @@ paths and compares the hedge P&L of:
   static        flatten delta once at the start, never adjust
   doc_rows      the B1 perp rows: flatten when spot first crosses +/-step
                 from Monday's reference, each direction once per week
+  doc_rows_expiry  the same, plus flatten on each option expiry (an
+                expiring in-the-money leg takes its delta with it)
   daily         flatten once a day at the 16:00 UK handover (15:00 UTC)
   band_$X       check every hour; flatten when |net delta| > $X
                 (the same trade-to-zero rule as delta_hedger.check_rehedge)
@@ -233,6 +235,13 @@ def option_paths(legs: list[Leg], spot0_today: float, path: np.ndarray, hours_to
     steps = np.arange(len(path))[:, None]
     T = (hours_to_expiry[None, :] - steps) / HOURS_PER_YEAR
     value, delta = bs_value_delta(path[:, None], K[None, :], T, sigma, is_call[None, :])
+    # A leg that expires inside the path settles once, at the spot on its
+    # expiry step, and is worth that cash from then on - not intrinsic at
+    # later spots, which would move the book's value with zero delta behind it.
+    for j, h in enumerate(hours_to_expiry):
+        e = max(int(np.ceil(h)), 0)
+        if e < len(path):
+            value[e:, j] = value[e, j]
     return value @ q, delta @ q
 
 
@@ -241,7 +250,8 @@ def option_paths(legs: list[Leg], spot0_today: float, path: np.ndarray, hours_to
 # ---------------------------------------------------------------------------
 
 def run_policy(name: str, times: pd.DatetimeIndex, path: np.ndarray, funding: np.ndarray,
-               opt_delta: np.ndarray, cost_bps: float, asset: str, band_usd: float | None = None) -> dict:
+               opt_delta: np.ndarray, cost_bps: float, asset: str, band_usd: float | None = None,
+               expiry_steps: frozenset[int] = frozenset()) -> dict:
     n = len(path)
     perp = 0.0
     fees = funding_paid = perp_pnl = 0.0
@@ -276,7 +286,11 @@ def run_policy(name: str, times: pd.DatetimeIndex, path: np.ndarray, funding: np
             if times[i].hour == HANDOVER_UTC_HOUR and times[i].date() != last_day_hedged:
                 trade_to_zero(i)
                 last_day_hedged = times[i].date()
-        elif name == "doc_rows":
+        elif name in ("doc_rows", "doc_rows_expiry"):
+            if name == "doc_rows_expiry" and i in expiry_steps:
+                # An expiring leg takes its delta with it; flatten the hedge
+                # that was sized against it the same hour.
+                trade_to_zero(i)
             week = times[i].isocalendar()[:2]
             if week != last_week and times[i].weekday() == 0 and times[i].hour >= 8:
                 ref, fired_up, fired_dn, last_week = path[i], False, False, week
@@ -328,7 +342,7 @@ def backtest_asset(asset: str, args) -> pd.DataFrame:
         print("  NOTE: book is net SHORT gamma - tighter re-hedging is expected to COST money here,"
               " in exchange for lower P&L variance.")
 
-    policies = ["unhedged", "static", "doc_rows", "daily"] + [f"band_{int(b)}" for b in args.bands]
+    policies = ["unhedged", "static", "doc_rows", "doc_rows_expiry", "daily"] + [f"band_{int(b)}" for b in args.bands]
     starts = range(0, len(mkt) - window_h, args.step_days * 24)
     out = []
     for s in starts:
@@ -339,11 +353,13 @@ def backtest_asset(asset: str, args) -> pd.DataFrame:
             # the re-hedging earns from chop from what the path's trend did.
             path = path * (path[0] / path[-1]) ** (np.arange(len(path)) / (len(path) - 1))
         value, delta = option_paths(legs, spot_today, path, hours_to_expiry, sigma)
+        expiry_steps = frozenset(int(np.ceil(h)) for h in hours_to_expiry if 0 < np.ceil(h) < len(path))
         rets = np.diff(np.log(path))
         rv = rets.std() * np.sqrt(HOURS_PER_YEAR)
         for p in policies:
             band = float(p.split("_")[1]) if p.startswith("band") else None
-            r = run_policy(p, w.index, path, w["funding"].to_numpy(), delta, args.cost_bps, asset, band)
+            r = run_policy(p, w.index, path, w["funding"].to_numpy(), delta, args.cost_bps, asset, band,
+                           expiry_steps)
             r.update(asset=asset, start=w.index[0].date(), rv=rv, iv=sigma,
                      move=path[-1] / path[0] - 1, option_pnl=value[-1] - value[0])
             r["total_pnl"] = r["option_pnl"] + r["hedge_pnl"]
