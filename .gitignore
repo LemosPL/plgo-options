@@ -27,3 +27,6 @@ data/optimization_snapshots/usecases/*.json
 *.bak
 .verify_app.js
 .overlay_check.js
+
+# Market data cached by scripts/backtest_rehedge_band.py
+data/cache/
