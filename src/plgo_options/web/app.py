@@ -39,6 +39,8 @@ from plgo_options.web.routes import reconciliation
 from plgo_options.web.routes import deals
 from plgo_options.web.routes import signals
 from plgo_options.web.routes import perps
+from plgo_options.web.routes import agents as agents_routes
+from plgo_options.agents.store import init_agent_tables
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -48,6 +50,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await init_agent_tables()
     yield
     await close_db()
 
@@ -76,6 +79,7 @@ def create_app() -> FastAPI:
     app.include_router(deals.router, prefix="/api/deals", tags=["deals"])
     app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
     app.include_router(perps.router, prefix="/api/perps", tags=["perps"])
+    app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():

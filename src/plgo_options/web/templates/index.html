@@ -183,6 +183,11 @@
       Perp Hedge
       <span class="nav-badge" id="nav-badge-perps"></span>
     </li>
+    <li class="nav-item" data-page="agents">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a2 2 0 00-2 2v1H4.5A1.5 1.5 0 003 5.5v7A1.5 1.5 0 004.5 14h7a1.5 1.5 0 001.5-1.5v-7A1.5 1.5 0 0011.5 4H10V3a2 2 0 00-2-2zm-1 3V3a1 1 0 112 0v1H7zM6 8a1 1 0 110 2 1 1 0 010-2zm4 0a1 1 0 110 2 1 1 0 010-2z"/></svg>
+      Agents
+      <span class="nav-badge" id="nav-badge-agents"></span>
+    </li>
   </ul>
   <div class="sidebar-bottom">
     <button id="btn-theme-toggle" class="theme-toggle" title="Toggle light/dark theme">
@@ -3343,6 +3348,46 @@
 
 
   <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Agents                                               -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-agents" class="page">
+    <section class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+        <div>
+          <h2 style="margin:0">Desk agents</h2>
+          <p style="margin:.25rem 0 0;color:var(--muted);font-size:.8rem">Shadow mode: agents read, compute and propose. People trade. Every proposal passes the mandate gate.</p>
+        </div>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <span id="agents-kill-state" class="collat-spot-pill"></span>
+          <button id="btn-agents-kill" class="btn-secondary" style="width:auto">Kill switch</button>
+          <button id="btn-agents-refresh" class="btn-secondary" style="width:auto">&#8635; Refresh</button>
+        </div>
+      </div>
+      <div id="agents-warn" style="display:none;margin-top:.75rem;padding:.5rem .75rem;border-radius:6px;background:rgba(245,158,11,.12);color:var(--text);font-size:.8rem"></div>
+    </section>
+    <section class="card">
+      <h3 style="margin-top:0">Agents</h3>
+      <table class="data-table" style="width:100%"><thead><tr><th>Agent</th><th>When (UK)</th><th>Last run</th><th>Status</th><th></th></tr></thead>
+      <tbody id="agents-tbody"></tbody></table>
+    </section>
+    <section class="card">
+      <h3 style="margin-top:0">Proposals</h3>
+      <table class="data-table" style="width:100%"><thead><tr><th>#</th><th>When</th><th>Asset</th><th>From</th><th>Proposal</th><th>Route</th><th>Why</th><th></th></tr></thead>
+      <tbody id="agents-props-tbody"></tbody></table>
+    </section>
+    <section class="card">
+      <h3 style="margin-top:0">Latest output <span id="agents-output-name" style="color:var(--muted);font-weight:400"></span></h3>
+      <pre id="agents-output" style="white-space:pre-wrap;font-size:.78rem;max-height:520px;overflow:auto;margin:0"></pre>
+    </section>
+    <section class="card">
+      <h3 style="margin-top:0">Policy (Monday) &mdash; <span id="agents-policy-asset">ETH</span></h3>
+      <p style="color:var(--muted);font-size:.78rem;margin:.25rem 0 .5rem">View, reference, rows, stop, limits and the Optimizer v4 preset. Set by Lucas and Chris; agents only read it. The floor can only go up.</p>
+      <textarea id="agents-policy-json" style="width:100%;min-height:320px;font-family:monospace;font-size:.75rem"></textarea>
+      <div style="display:flex;gap:.5rem;margin-top:.5rem"><button id="btn-agents-policy-save" class="btn-primary" style="width:auto">Save policy</button><span id="agents-policy-msg" style="font-size:.8rem;color:var(--muted)"></span></div>
+    </section>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
   <!-- PAGE: Perp Hedge                                           -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-perps" class="page">
@@ -3714,5 +3759,6 @@
 </div>
 
 <script src="/static/app.js?v=176"></script>
+<script src="/static/agents.js?v=1"></script>
 </body>
 </html>
