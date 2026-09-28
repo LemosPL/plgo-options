@@ -19,8 +19,8 @@ paths and compares the hedge P&L of:
 
 Method, and what it deliberately holds fixed:
 
-* The book: every active C/P trade for the asset in the DB with expiry after
-  --asof, taken as-is (strikes, quantities, expiries).
+* The book: every active C/P trade for the asset in the DB (or the app's
+  trade export, --trades-xlsx) with expiry after --asof, taken as-is (strikes, quantities, expiries).
 * Sticky moneyness replay: for each historical start date the strikes are
   rescaled by (spot then / spot today) and quantities by the inverse, so
   every window starts with the same dollar shape and the same days to
@@ -42,6 +42,8 @@ does in the regime the doc is worried about.
 Usage:
     .venv/bin/python scripts/backtest_rehedge_band.py
     .venv/bin/python scripts/backtest_rehedge_band.py --detrend
+    .venv/bin/python scripts/backtest_rehedge_band.py --db data/plgo_options.prod.db
+    .venv/bin/python scripts/backtest_rehedge_band.py --trades-xlsx ~/Downloads/PLGO_Trades_2026-09-28.xlsx
     .venv/bin/python scripts/backtest_rehedge_band.py --asset ETH --days 1095 --cost-bps 5
     .venv/bin/python scripts/backtest_rehedge_band.py --bands 100000,250000,500000,1000000 --csv-out out.csv
 """
@@ -149,8 +151,41 @@ class Leg:
     expiry: date
 
 
-def load_book(asset: str, asof: date) -> list[Leg]:
-    con = sqlite3.connect(DB_PATH)
+def load_book_xlsx(asset: str, asof: date, paths: list[Path]) -> list[Leg]:
+    """Active C/P legs from the app's Trade Management export(s)
+    (PLGO_Trades_<date>.xlsx: ID, Status, Side Long/Short, Type, Instrument,
+    Expiry, Strike, Qty, ...). The asset comes from the Instrument prefix."""
+    import openpyxl
+
+    legs, seen = [], set()
+    for path in paths:
+        ws = openpyxl.load_workbook(path, read_only=True, data_only=True).worksheets[0]
+        rows = ws.iter_rows(values_only=True)
+        col = {name: i for i, name in enumerate(next(rows))}
+        for r in rows:
+            if r[col["ID"]] is None or r[col["ID"]] in seen:
+                continue
+            seen.add(r[col["ID"]])
+            if str(r[col["Status"]]).lower() != "active":
+                continue
+            if not str(r[col["Instrument"]] or "").upper().startswith(asset + "-"):
+                continue
+            opt = str(r[col["Type"]] or "")[:1].upper()
+            if opt not in ("C", "P"):
+                continue
+            exp = r[col["Expiry"]]
+            exp = exp.date() if isinstance(exp, datetime) else date.fromisoformat(str(exp)[:10])
+            if exp <= asof:
+                continue
+            sign = 1.0 if str(r[col["Side"]]).lower() in ("long", "buy") else -1.0
+            legs.append(Leg(opt, float(r[col["Strike"]]), sign * float(r[col["Qty"]]), exp))
+    return legs
+
+
+def load_book(asset: str, asof: date, db_path: Path = DB_PATH, xlsx: list[Path] | None = None) -> list[Leg]:
+    if xlsx:
+        return load_book_xlsx(asset, asof, xlsx)
+    con = sqlite3.connect(db_path)
     rows = con.execute(
         "SELECT side, option_type, expiry, strike, qty FROM trades "
         "WHERE status = 'active' AND asset = ? AND option_type IN ('Call', 'Put')",
@@ -266,7 +301,7 @@ def run_policy(name: str, times: pd.DatetimeIndex, path: np.ndarray, funding: np
 # ---------------------------------------------------------------------------
 
 def backtest_asset(asset: str, args) -> pd.DataFrame:
-    legs = load_book(asset, args.asof)
+    legs = load_book(asset, args.asof, args.db, args.trades_xlsx)
     if not legs:
         print(f"{asset}: no active option legs after {args.asof}, skipping")
         return pd.DataFrame()
@@ -362,6 +397,9 @@ def summarize(df: pd.DataFrame) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--asset", choices=["ETH", "FIL", "both"], default="both")
+    ap.add_argument("--db", type=Path, default=DB_PATH, help="trades DB (e.g. data/plgo_options.prod.db)")
+    ap.add_argument("--trades-xlsx", type=Path, nargs="+",
+                    help="read the book from the app's Trade Management export(s) instead of the DB")
     ap.add_argument("--asof", type=date.fromisoformat, default=date.today())
     ap.add_argument("--days", type=int, default=730, help="history to replay over")
     ap.add_argument("--window-days", type=int, default=90)
