@@ -3427,10 +3427,26 @@
         </section>
 
         <section class="card">
-          <h3 style="margin-top:0">Policy (Monday) &mdash; <span id="agents-policy-asset">ETH</span></h3>
-          <p style="color:var(--muted);font-size:.78rem;margin:.25rem 0 .5rem">View, reference, rows, stop, limits and the Optimizer v4 preset. Set by Lucas and Chris; agents only read it. The floor can only go up.</p>
-          <textarea id="agents-policy-json" style="width:100%;min-height:320px;font-family:monospace;font-size:.75rem"></textarea>
-          <div style="display:flex;gap:.5rem;margin-top:.5rem"><button id="btn-agents-policy-save" class="btn-primary" style="width:auto">Save policy</button><span id="agents-policy-msg" style="font-size:.8rem;color:var(--muted)"></span></div>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap">
+            <h3 style="margin:0">Monday policy &mdash; <span id="agents-policy-asset">ETH</span></h3>
+            <span id="agents-policy-example" class="ag-ex" style="display:none">running the manual&rsquo;s EXAMPLE numbers</span>
+          </div>
+          <p style="color:var(--muted);font-size:.76rem;margin:.3rem 0 .9rem;max-width:62rem">
+            Part A is decided away from the screen, once a week, by Lucas and Chris together; Part B then runs off it
+            mechanically. Agents only ever <em>read</em> this. Set the real numbers here and the &ldquo;example limits&rdquo;
+            warning clears.
+          </p>
+          <div id="agents-policy-form"></div>
+          <div style="display:flex;gap:.5rem;align-items:center;margin-top:1rem;flex-wrap:wrap">
+            <button id="btn-agents-policy-save" class="btn-primary" style="width:auto">Save policy</button>
+            <button id="btn-agents-policy-reload" class="btn-secondary" style="width:auto">Discard changes</button>
+            <span id="agents-policy-msg" style="font-size:.8rem;color:var(--muted)"></span>
+          </div>
+          <details style="margin-top:1rem">
+            <summary style="cursor:pointer;color:var(--muted);font-size:.76rem">Raw JSON (Optimizer v4 preset and anything not above)</summary>
+            <textarea id="agents-policy-json" style="width:100%;min-height:260px;font-family:monospace;font-size:.72rem;margin-top:.5rem"></textarea>
+            <p style="color:var(--muted);font-size:.72rem;margin:.35rem 0 0">Saving from the form overwrites these fields. Edit here only for the <code>optimizer</code> block.</p>
+          </details>
         </section>
       </main>
     </div>
@@ -3808,6 +3824,6 @@
 </div>
 
 <script src="/static/app.js?v=176"></script>
-<script src="/static/agents.js?v=4"></script>
+<script src="/static/agents.js?v=5"></script>
 </body>
 </html>

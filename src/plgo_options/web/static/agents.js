@@ -25,7 +25,7 @@
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const asset = () => (typeof currentAsset !== "undefined" ? currentAsset : "ETH");
-  let selected = null, PROPS = [], DOC = null;
+  let selected = null, PROPS = [], DOC = null, POLICY = {};
 
   async function api(url, opts) {
     const r = await fetch(url, opts);
@@ -104,6 +104,127 @@
         '</dl>' +
       '</div>';
     }).join("");
+  }
+
+  // The Monday policy as a form rather than raw JSON, grouped the way the
+  // manual is and captioned in its own words so the number being typed and the
+  // rule it enforces sit next to each other.
+  const POLICY_GROUPS = [
+    { id: "A1", title: "A1 · The view",
+      blurb: "One question decides everything else: do we believe this asset makes a big move in " +
+             "the next three months? Written down on Monday with a date on it. It does not change " +
+             "during the week because the price moved — only because the reasoning changed.",
+      fields: [
+        { k: "view", label: "The view", type: "select",
+          opts: [["big_move", "Big move coming, direction unknown"], ["up", "Big move up"],
+                 ["range", "Range-bound, nothing happens"]],
+          help: "big_move keeps the current shape. up moves upside close to the money. " +
+                "range means a smaller, closer, shorter-dated book — that is a reshape, not an adjustment." },
+        { k: "view_range_low",  label: "Expected range low",  type: "num",
+          help: "The price range we expect over 90 days." },
+        { k: "view_range_high", label: "Expected range high", type: "num" },
+        { k: "view_check_date", label: "Say we were right by", type: "date",
+          help: "The date by which we call the view right or wrong." },
+        { k: "view_note", label: "Reasoning", type: "text",
+          help: "Why. This is the line that has to change before the view does." },
+      ] },
+    { id: "A2", title: "A2 · The floor",
+      blurb: "The floor only goes up. Once we raise the level below which the book cannot lose more, " +
+             "it never comes back down — and a roll that lowers it is a roll down wearing different clothes.",
+      fields: [
+        { k: "floor_price", label: "Floor", type: "num",
+          help: "Every proposal is tested against this. The gate rejects anything that lowers it." },
+      ] },
+    { id: "A3", title: "A3 · The limits",
+      blurb: "Set by Chris, reviewed monthly. These are the boundaries execution operates inside — " +
+             "nobody at the screen changes them.",
+      fields: [
+        { k: "stop_price", label: "Stop price", type: "num",
+          help: "Where we de-risk regardless of view. At the stop we close; we do not roll." },
+        { k: "stop_loss_usd", label: "Stop: further loss ($)", type: "num",
+          help: "Or this much more loss against Monday's mark, whichever comes first." },
+        { k: "book_notional_usd", label: "Book size ($)", type: "num",
+          help: "The underlying notional the options sit against." },
+        { k: "max_single_trade_usd", label: "Max single trade, Lucas alone ($)", type: "num",
+          help: "Biggest position he can put on or take off without calling. Anything larger goes to the handover." },
+        { k: "max_cost_per_trade_usd", label: "Max cost per trade ($)", type: "num",
+          help: "Premium we can pay net, after what we sell." },
+        { k: "max_cost_per_month_usd", label: "Max cost per month ($)", type: "num",
+          help: "Everything paid net across the month. The line that stops a bad month becoming a bad quarter." },
+        { k: "max_perp_notional_usd", label: "Max perp / forward ($)", type: "num",
+          help: "The biggest linear hedge allowed at any time." },
+        { k: "perp_funding_budget_month_usd", label: "Monthly funding budget ($)", type: "num",
+          help: "What the hedge is allowed to cost us to carry." },
+        { k: "allowed_counterparties", label: "Counterparty universe", type: "list",
+          help: "Comma-separated. Nothing outside this list without a conversation." },
+      ] },
+    { id: "B1", title: "B1 · The levels",
+      blurb: "Monday's reference price populates every row. Until it is set, rows are inactive and " +
+             "the row watcher has nothing to measure against.",
+      fields: [
+        { k: "reference_price", label: "Monday reference price", type: "num",
+          help: "Spot at the point we set the week's rows." },
+        { k: "reference_set_on", label: "Reference set on", type: "date" },
+        { k: "reference_delta", label: "Target exposure (delta at reference)", type: "num",
+          help: "Book delta at the reference — what execution steers back toward." },
+        { k: "row_steps_pct", label: "Row steps (%)", type: "list",
+          help: "Comma-separated, e.g. 10,20,30 for ETH or 15,30,45 for FIL. Each fires once a week." },
+      ] },
+    { id: "B3", title: "B3 · How we deal",
+      blurb: "Price it ourselves first, two quotes minimum, quote the whole package never the legs.",
+      fields: [
+        { k: "cost_tolerance_usd", label: "Quote tolerance vs our model ($)", type: "num",
+          help: "If the quote is wider than our number plus this, we do not trade." },
+      ] },
+  ];
+
+  function renderPolicyForm(pol) {
+    const val = (k) => {
+      const v = pol[k];
+      if (v == null) return "";
+      return Array.isArray(v) ? v.join(", ") : String(v);
+    };
+    $("agents-policy-form").innerHTML = POLICY_GROUPS.map((g) =>
+      '<fieldset style="border:1px solid rgba(148,163,184,.25);border-radius:6px;padding:.75rem 1rem;margin:0 0 .9rem">' +
+      '<legend style="padding:0 .4rem;font-size:.8rem;font-weight:600">' + esc(g.title) + '</legend>' +
+      '<p style="color:var(--muted);font-size:.73rem;margin:0 0 .75rem;max-width:60rem">' + esc(g.blurb) + '</p>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(265px,1fr));gap:.75rem 1.25rem">' +
+      g.fields.map((f) => {
+        const id = "pol-" + f.k;
+        let input;
+        if (f.type === "select") {
+          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="select" style="width:100%">' +
+            f.opts.map((o) => '<option value="' + o[0] + '"' +
+              (val(f.k) === o[0] ? " selected" : "") + ">" + esc(o[1]) + "</option>").join("") + "</select>";
+        } else {
+          const t = f.type === "num" ? "number" : f.type === "date" ? "date" : "text";
+          input = '<input id="' + id + '" data-pk="' + f.k + '" data-pt="' + f.type + '" type="' + t + '"' +
+            (f.type === "num" ? ' step="any"' : "") +
+            ' value="' + esc(val(f.k)) + '" style="width:100%">';
+        }
+        return '<label style="display:block;font-size:.75rem">' +
+          '<span style="display:block;margin-bottom:.15rem">' + esc(f.label) + "</span>" + input +
+          (f.help ? '<span style="display:block;color:var(--muted);font-size:.68rem;margin-top:.15rem">' +
+            esc(f.help) + "</span>" : "") + "</label>";
+      }).join("") + "</div></fieldset>").join("");
+  }
+
+  function readPolicyForm(base) {
+    const out = { ...base };
+    document.querySelectorAll("#agents-policy-form [data-pk]").forEach((el) => {
+      const k = el.dataset.pk, t = el.dataset.pt, raw = el.value.trim();
+      if (t === "num") {
+        out[k] = raw === "" ? null : Number(raw);
+      } else if (t === "list") {
+        const parts = raw ? raw.split(",").map((x) => x.trim()).filter(Boolean) : [];
+        out[k] = k === "row_steps_pct" ? parts.map(Number).filter((n) => !isNaN(n)) : parts;
+      } else if (t === "date") {
+        out[k] = raw || null;
+      } else {
+        out[k] = raw;
+      }
+    });
+    return out;
   }
 
   function legLine(l) {
@@ -205,8 +326,13 @@
       renderDecisions();
 
       $("agents-policy-asset").textContent = asset();
-      if (document.activeElement !== $("agents-policy-json")) {
-        $("agents-policy-json").value = JSON.stringify(st.policies[asset()] || {}, null, 2);
+      POLICY = st.policies[asset()] || {};
+      $("agents-policy-example").style.display = POLICY.is_example ? "" : "none";
+      // Don't clobber half-typed edits: only repaint when nothing here has focus.
+      if (!$("agents-policy-form").contains(document.activeElement) &&
+          document.activeElement !== $("agents-policy-json")) {
+        renderPolicyForm(POLICY);
+        $("agents-policy-json").value = JSON.stringify(POLICY, null, 2);
       }
     } catch (e) {
       $("agents-warn").style.display = "";
@@ -230,6 +356,35 @@
     }
   }
 
+  const MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+  // The optimizer emits ISO expiries ("2026-12-25", sometimes with a time);
+  // Pricing keys its vol smiles by Deribit code ("25DEC26") and looks them up
+  // with an exact string match. Handing it the ISO form matches nothing and
+  // cannot be bracketed either, which is the
+  //   "Cannot price expiry 2026-12-25 - no vol smile data available"
+  // alert. Convert, and prefer a code already on the loaded surface so the leg
+  // gets a real smile rather than a synthetic one.
+  function toDeribitExpiry(v) {
+    if (!v) return null;
+    const s = String(v).trim();
+    if (/^\d{1,2}[A-Za-z]{3}\d{2}$/.test(s)) return s.toUpperCase();
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    const y = +m[1], mo = +m[2], d = +m[3];
+
+    const smiles = (typeof volSurface !== "undefined" && volSurface && volSurface.smiles) || [];
+    for (const sm of smiles) {
+      const c = (sm.expiry_code || "").match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+      if (c && +c[1] === d && MON.indexOf(c[2]) === mo - 1 && 2000 + +c[3] === y) {
+        return sm.expiry_code;            // exact surface match
+      }
+    }
+    // Deribit writes single-digit days without a leading zero (5DEC26).
+    return `${d}${MON[mo - 1]}${String(y).slice(2)}`;
+  }
+
   // B3: price it ourselves first. Load the option legs into the Pricing page
   // (perp legs are A4 direction-only and have no vol to price) and jump there.
   function priceIt(p) {
@@ -249,8 +404,17 @@
       const q = Number(l.qty);
       const side = l.side ? String(l.side).toLowerCase() : (q < 0 ? "sell" : "buy");
       addLeg(side, String(l.opt || "C").toUpperCase(), l.strike, "0",
-        Math.abs(q) || 1, l.expiry || null, l.counterparty || "");
+        Math.abs(q) || 1, toDeribitExpiry(l.expiry), l.counterparty || "");
     });
+    // Point the global expiry selector at the legs' expiry too, so "Compute"
+    // and the chain loader operate on the same maturity the proposal used.
+    const es = document.getElementById("expiry-select");
+    const code = toDeribitExpiry((opts.find((l) => l.expiry) || {}).expiry);
+    if (es && code) {
+      for (let i = 0; i < es.options.length; i++) {
+        if (es.options[i].value === code) { es.value = code; break; }
+      }
+    }
     const cp = document.getElementById("cpty-pricing-select");
     const first = (opts.find((l) => l.counterparty) || {}).counterparty;
     if (cp && first) {
@@ -345,9 +509,15 @@
       });
       load();
     }
+    if (t.id === "btn-agents-policy-reload") { load(); return; }
     if (t.id === "btn-agents-policy-save") {
       try {
-        const body = JSON.parse($("agents-policy-json").value);
+        // Start from the raw JSON so the optimizer preset survives, then let
+        // the form fields win for everything they cover.
+        let base;
+        try { base = JSON.parse($("agents-policy-json").value); }
+        catch (e) { base = { ...POLICY }; }
+        const body = readPolicyForm(base);
         body.is_example = false;
         await api("/api/agents/policy/" + asset(), {
           method: "PUT", headers: { "Content-Type": "application/json" },
