@@ -185,3 +185,46 @@ def test_auth_me_is_readable_while_signed_out(monkeypatch):
     r = TestClient(app, follow_redirects=False).get("/api/auth/me")
     assert r.status_code == 200
     assert r.json() == {"signed_in": False, "auth_enabled": True, "user": None}
+
+
+# ── the callback URL scheme ──────────────────────────────────────────────────
+# Cloud Run forwards to the container over plain HTTP, so a naive url_for()
+# sends Google "http://..." and the sign-in dies on redirect_uri_mismatch
+# against the registered https URI. These pin the scheme down.
+
+def _callback_for(monkeypatch, host: str, headers: dict[str, str]) -> str:
+    app, auth_mod = _app(monkeypatch, enabled=True)
+    seen = {}
+
+    @app.get("/auth/_probe")
+    async def _probe(request: Request):
+        seen["url"] = auth_mod.callback_url(request)
+        return JSONResponse({"url": seen["url"]})
+
+    TestClient(app, base_url=f"http://{host}").get("/auth/_probe", headers=headers)
+    return seen["url"]
+
+
+def test_callback_uses_https_when_proxy_says_so(monkeypatch):
+    url = _callback_for(monkeypatch, "plgo-options-x.a.run.app",
+                        {"X-Forwarded-Proto": "https"})
+    assert url == "https://plgo-options-x.a.run.app/auth/callback"
+
+
+def test_callback_handles_a_forwarded_proto_list(monkeypatch):
+    """Chained proxies send "https,http" — the client-facing scheme is first."""
+    url = _callback_for(monkeypatch, "plgo-options-x.a.run.app",
+                        {"X-Forwarded-Proto": "https, http"})
+    assert url.startswith("https://")
+
+
+def test_callback_defaults_to_https_for_a_remote_host(monkeypatch):
+    """No proxy header (direct container hit) must still not produce http://."""
+    url = _callback_for(monkeypatch, "plgo-options-x.a.run.app", {})
+    assert url == "https://plgo-options-x.a.run.app/auth/callback"
+
+
+def test_callback_stays_http_on_localhost(monkeypatch):
+    """Local dev has no TLS; forcing https there would break the dev flow."""
+    url = _callback_for(monkeypatch, "127.0.0.1:8000", {})
+    assert url == "http://127.0.0.1:8000/auth/callback"

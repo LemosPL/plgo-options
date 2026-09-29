@@ -169,12 +169,30 @@ async def login_page(request: Request):
 </div></body></html>""")
 
 
+def callback_url(request: Request) -> str:
+    """The absolute /auth/callback URL, with the scheme the browser actually used.
+
+    Cloud Run terminates TLS at its proxy and forwards to the container over
+    plain HTTP, so url_for() builds "http://..." and Google rejects the
+    redirect as a mismatch against the registered "https://..." URI. Trust
+    X-Forwarded-Proto when the proxy sets it, and otherwise assume https for
+    anything that is not a local dev host.
+    """
+    url = request.url_for("auth_callback")
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if proto in ("http", "https"):
+        return str(url.replace(scheme=proto))
+    if url.hostname not in ("127.0.0.1", "localhost"):
+        return str(url.replace(scheme="https"))
+    return str(url)
+
+
 @router.get("/auth/login")
 async def auth_login(request: Request):
     if not AUTH_ENABLED:
         return RedirectResponse("/", status_code=302)
     request.session["next"] = request.query_params.get("next", "/")
-    return await oauth.google.authorize_redirect(request, str(request.url_for("auth_callback")))
+    return await oauth.google.authorize_redirect(request, callback_url(request))
 
 
 @router.get("/auth/callback", name="auth_callback")
