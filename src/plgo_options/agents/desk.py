@@ -421,9 +421,35 @@ async def close_check(ctx: dict) -> dict:
 
 # ── 7. Monday pack and 8. monthly review ──────────────────────────────────
 
+async def set_monday_reference(asset: str, spot: float | None, pol: AssetPolicy) -> str | None:
+    """B1: Monday's reference populates every row, so set it from spot.
+
+    Observation, not judgement — the reference is where the market was when the
+    week's levels were struck, which is why the manual files it under "Chris
+    sets, Lucas fills in" rather than under the view.
+
+    Only ever writes once per week, and never overwrites a reference a person
+    already set this Monday: if someone has struck the week deliberately, the
+    agent must not move it underneath them. Everything else in the policy is
+    left alone — in particular is_example, because whether the limits are real
+    is a decision about A3, not about B1.
+    """
+    this_monday = week_key()
+    if not spot or spot <= 0:
+        return None
+    if pol.reference_set_on == this_monday:
+        return None                                   # already struck this week
+    before = pol.reference_price
+    pol.reference_price = float(spot)
+    pol.reference_set_on = this_monday
+    await store.save_policy(pol, by="monday-pack")
+    return (f"Reference set to {_p(asset, spot)} for the week of {this_monday}"
+            + (f" (was {_p(asset, before)})." if before else " (none before)."))
+
+
 async def monday_pack(ctx: dict) -> dict:
     from plgo_options.web.market_trend import build_market_trend
-    pols, out = [], []
+    pols, out, set_notes = [], [], []
     last_week = (datetime.now(UK) - timedelta(days=7))
     lw_key = week_key(last_week)
     for asset in ASSETS:
@@ -431,6 +457,13 @@ async def monday_pack(ctx: dict) -> dict:
         pols.append(pol)
         book, _ = await _safe(get_book(asset))
         spot = (book or {}).get("spot")
+        # A preview must not move the mandate, so only the real 07:30 run writes.
+        if ctx.get("deliver"):
+            note, err = await _safe(set_monday_reference(asset, spot, pol))
+            if note:
+                set_notes.append(f"{asset}: {note}")
+            elif err:
+                set_notes.append(f"{asset}: reference NOT set - {err}")
         trend, _ = await _safe(build_market_trend(asset, spot), {})
         fired = sorted(await store.fired_rows(asset, lw_key))
         props = [p for p in await store.list_proposals(limit=300)
@@ -460,7 +493,10 @@ async def monday_pack(ctx: dict) -> dict:
             draft = build_rows(asset, spot, pol.row_steps_pct)
             out.append("Draft rows if the reference is today's spot: " +
                        ", ".join(f"{r.key} {_p(asset, r.price)}" for r in draft))
-    out.append("DECIDE (Lucas + Chris): the view, the reference, the stop. Save in Agents > Policy.")
+    if set_notes:
+        out.append("REFERENCE (set automatically this morning): " + " ".join(set_notes))
+    out.append("DECIDE (Lucas + Chris): the view, the stop, and whether the limits are still right. "
+               "Save in Agents > Policy.")
     return {"facts": _header(pols) + "\nMONDAY PACK\n" + "\n".join(out), "deliver": True}
 
 
@@ -528,6 +564,10 @@ async def run_agent(name: str, ctx: dict | None = None, deliver: bool = True,
         if await store.kill_switch_on() and name not in ("close-check",):
             result = {"facts": "Kill switch is ON - agent skipped.", "deliver": False}
         else:
+            # Agents that change stored state (monday-pack writes B1's reference)
+            # need to know a preview from the real run, or a "what would this
+            # say?" click would move the mandate.
+            ctx.setdefault("deliver", deliver)
             result = await AGENTS[name](ctx)
         facts = result.get("facts", "")
         text, ai_err = (await narrate(name, facts, use_ai)) if name in NARRATED else (facts, None)
