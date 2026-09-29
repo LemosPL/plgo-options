@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 try:
@@ -39,6 +40,32 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 # disables the check — fine locally, set it in prod so a public Cloud Run URL
 # can't be triggered by anyone who finds it.
 SIGNALS_TOKEN = os.environ.get("SIGNALS_TOKEN", "")
+
+# ── Google Sign-In ─────────────────────────────────────────────────────
+# The desk is four people on two Google Workspace domains, so we let Google own
+# passwords, MFA and offboarding and keep only an allowlist here. Sign-in is
+# enforced only when both client credentials are present: a deploy that has not
+# had its secrets wired yet stays reachable rather than locking everyone out.
+# Check AUTH_ENABLED (not the raw vars) before assuming a request is protected.
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+AUTH_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+# Signs the session cookie. Generated per-process when unset, which is fine for
+# a single instance (max-instances is 1) but logs everyone out on each deploy;
+# set it in prod to keep sessions across revisions.
+SESSION_SECRET = os.environ.get("SESSION_SECRET", "") or secrets.token_urlsafe(48)
+
+# Who may sign in. Comma-separated override via ALLOWED_EMAILS.
+_DEFAULT_ALLOWED = (
+    "chris@protocol.ai,patrick@protocol.ai,"
+    "constantin.denuelle@protocol.ai,lucas.lemos@pl-at.ch"
+)
+ALLOWED_EMAILS = frozenset(
+    e.strip().lower()
+    for e in os.environ.get("ALLOWED_EMAILS", _DEFAULT_ALLOWED).split(",")
+    if e.strip()
+)
 
 # Timezone the brief is stamped in (the 09:00 cadence is London-based).
 BRIEF_TIMEZONE = os.environ.get("BRIEF_TIMEZONE", "Europe/London")
