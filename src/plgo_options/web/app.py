@@ -22,6 +22,7 @@ for _stream in (sys.stdout, sys.stderr):
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
@@ -41,6 +42,8 @@ from plgo_options.web.routes import signals
 from plgo_options.web.routes import perps
 from plgo_options.web.routes import agents as agents_routes
 from plgo_options.agents.store import init_agent_tables
+from plgo_options.web import auth as auth_mod
+from plgo_options.config import SESSION_SECRET
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -51,6 +54,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 async def lifespan(app: FastAPI):
     await init_db()
     await init_agent_tables()
+    await auth_mod.init_auth_tables()
     yield
     await close_db()
 
@@ -80,6 +84,15 @@ def create_app() -> FastAPI:
     app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
     app.include_router(perps.router, prefix="/api/perps", tags=["perps"])
     app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
+
+    # Google Sign-In. Routes first, then the gate, then the session store:
+    # Starlette runs middleware in reverse order of addition, so adding
+    # SessionMiddleware last puts it outermost and request.session is
+    # populated before AuthMiddleware looks at it.
+    app.include_router(auth_mod.router, tags=["auth"])
+    app.add_middleware(auth_mod.AuthMiddleware)
+    app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
+                       https_only=False, same_site="lax")
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():
