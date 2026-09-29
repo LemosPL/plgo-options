@@ -18,8 +18,11 @@ dvol - rv_forward is the variance risk premium an option buyer paid.
 Deribit chain (the same VIX formula on mark prices), to check DVOL and to
 read the vol at tenors DVOL doesn't cover, such as the book's December expiry.
 
+FIL has no listed options anywhere, so --asset FIL gives the realized side only.
+
 Usage:
     .venv/bin/python scripts/eth_implied_vs_realized.py
+    .venv/bin/python scripts/eth_implied_vs_realized.py --asset FIL
     .venv/bin/python scripts/eth_implied_vs_realized.py --chain --csv-out eth_vol.csv
 """
 
@@ -57,10 +60,10 @@ def fetch_dvol(client: httpx.Client) -> pd.Series:
     return pd.Series(df["c"].to_numpy(), index=idx, name="dvol").sort_index()
 
 
-def fetch_daily_closes(client: httpx.Client, start: str = "2021-01-01") -> pd.Series:
+def fetch_daily_closes(client: httpx.Client, symbol: str = "ETHUSDT", start: str = "2021-01-01") -> pd.Series:
     cursor, rows = int(pd.Timestamp(start).timestamp() * 1000), []
     while True:
-        page = client.get(BINANCE_KLINES, params={"symbol": "ETHUSDT", "interval": "1d",
+        page = client.get(BINANCE_KLINES, params={"symbol": symbol, "interval": "1d",
                                                   "startTime": cursor, "limit": 1000}).json()
         rows += page
         if len(page) < 1000:
@@ -72,14 +75,15 @@ def fetch_daily_closes(client: httpx.Client, start: str = "2021-01-01") -> pd.Se
     return pd.Series([float(r[4]) for r in rows], index=idx, name="close")
 
 
+def realized_vol(closes: pd.Series, window: int = 30) -> pd.DataFrame:
+    """Trailing and forward realized vol (%), variance-swap convention."""
+    var = (np.log(closes).diff() ** 2).rolling(window).sum() * 365 / window
+    return pd.DataFrame({"rv_trailing": np.sqrt(var) * 100, "rv_forward": np.sqrt(var.shift(-window)) * 100})
+
+
 def implied_vs_realized(dvol: pd.Series, closes: pd.Series, window: int = 30) -> pd.DataFrame:
-    r2 = np.log(closes).diff() ** 2
-    var = r2.rolling(window).sum() * 365 / window
-    df = pd.DataFrame({
-        "dvol": dvol,
-        "rv_trailing": np.sqrt(var) * 100,
-        "rv_forward": np.sqrt(var.shift(-window)) * 100,
-    })
+    df = realized_vol(closes, window)
+    df.insert(0, "dvol", dvol)
     return df.dropna(subset=["dvol"])
 
 
@@ -125,10 +129,23 @@ def chain_variance_swap_vols(client: httpx.Client) -> pd.DataFrame:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--asset", choices=["ETH", "FIL"], default="ETH",
+                    help="FIL has no listed options, so FIL gives realized vol only")
     ap.add_argument("--window", type=int, default=30)
     ap.add_argument("--chain", action="store_true", help="also compute var-swap vols from today's chain")
     ap.add_argument("--csv-out", type=Path)
     args = ap.parse_args()
+
+    if args.asset == "FIL":
+        with httpx.Client(timeout=30) as client:
+            df = realized_vol(fetch_daily_closes(client, "FILUSDT"), args.window).dropna(subset=["rv_trailing"])
+        print(f"FIL {args.window}d realized, {df.index.min():%Y-%m-%d} to {df.index.max():%Y-%m-%d}: "
+              f"today {df['rv_trailing'].iloc[-1]:.1f}%, mean {df['rv_trailing'].mean():.1f}%")
+        for year, g in df.groupby(df.index.year):
+            print(f"  {year}: mean {g['rv_trailing'].mean():.0f}%  range {g['rv_trailing'].min():.0f}-{g['rv_trailing'].max():.0f}%")
+        if args.csv_out:
+            df.to_csv(args.csv_out)
+        return
 
     with httpx.Client(timeout=30) as client:
         df = implied_vs_realized(fetch_dvol(client), fetch_daily_closes(client), args.window)
