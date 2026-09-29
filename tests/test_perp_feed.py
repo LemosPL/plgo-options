@@ -154,3 +154,85 @@ async def test_missing_klines_leave_mark_zero_rather_than_guessing(monkeypatch):
     monkeypatch.setattr(perp_feed, "_json", fake_json)
     ev = await perp_feed.get_funding_history("ETH")
     assert len(ev) == 2 and all(e.mark_price == 0.0 for e in ev)
+
+
+# ── the OKX history path ─────────────────────────────────────────────────────
+# Cloud Run gets 451 from Binance AND 403 from Bybit, so OKX is the venue that
+# actually has to carry funding history in production.
+
+OKX_RATES = {"data": [
+    {"fundingTime": "1790697600000", "fundingRate": "0.0000598415868892"},
+    {"fundingTime": "1790668800000", "fundingRate": "0.0000572899115064"},
+]}
+OKX_CANDLES = {"data": [
+    ["1790697600000", "2673", "2683.54", "2667.81", "2674.79", "1"],
+    ["1790668800000", "2700", "2710.00", "2699.00", "2707.69", "1"],
+]}
+
+
+@pytest.fixture
+def history_venues():
+    original = list(perp_feed.HISTORY_VENUES)
+    yield perp_feed.HISTORY_VENUES
+    perp_feed.HISTORY_VENUES[:] = original
+
+
+@pytest.mark.asyncio
+async def test_okx_carries_history_when_binance_451_and_bybit_403(monkeypatch, history_venues):
+    """The exact production condition."""
+    async def b403(*a, **k):
+        req = httpx.Request("GET", "https://api.bybit.com/x")
+        raise httpx.HTTPStatusError("403", request=req,
+                                    response=httpx.Response(403, request=req))
+
+    history_venues[0] = ("binance", _451)
+    history_venues[1] = ("bybit", b403)
+
+    async def fake_json(url, params=None):
+        return OKX_CANDLES if "candles" in url else OKX_RATES
+
+    monkeypatch.setattr(perp_feed, "_json", fake_json)
+
+    ev = await perp_feed.get_funding_history("ETH", limit=30)
+    assert [e.funding_time_ms for e in ev] == [1790668800000, 1790697600000]
+    assert [e.mark_price for e in ev] == [2707.69, 2674.79]
+    assert len({e.mark_price for e in ev}) == 2
+
+
+@pytest.mark.asyncio
+async def test_history_outage_raises_naming_every_venue(history_venues):
+    async def dead(*a, **k):
+        raise RuntimeError("down")
+
+    history_venues[:] = [("binance", dead), ("bybit", dead), ("okx", dead)]
+    with pytest.raises(RuntimeError) as e:
+        await perp_feed.get_funding_history("ETH")
+    msg = str(e.value)
+    assert "binance" in msg and "bybit" in msg and "okx" in msg
+
+
+@pytest.mark.asyncio
+async def test_okx_mark_series_pages_backwards(monkeypatch):
+    """One OKX page is 100 hourly candles (~4 days); a 90-event history needs
+    several, so the walk-back has to actually advance and then stop."""
+    pages, calls = [], {"n": 0}
+
+    def page(base_ts):
+        return {"data": [[str(base_ts - i * 3_600_000), "1", "1", "1",
+                          str(2600 + i), "1"] for i in range(100)]}
+
+    async def fake_json(url, params=None):
+        calls["n"] += 1
+        after = int(params["after"])
+        pages.append(after)
+        return page(after - 3_600_000)
+
+    monkeypatch.setattr(perp_feed, "_json", fake_json)
+    t_max = 1790697600000
+    t_min = t_max - 300 * 3_600_000            # needs ~3 pages
+    marks = await perp_feed._okx_mark_series("ETH-USDT-SWAP", t_min, t_max)
+
+    assert calls["n"] >= 3, "should have paged back more than once"
+    assert calls["n"] <= 12, "must respect the page cap"
+    assert pages == sorted(pages, reverse=True), "cursor must move backwards"
+    assert len(marks) > 100

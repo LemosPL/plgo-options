@@ -177,21 +177,97 @@ async def _bybit_funding_history(asset: str, start_ms: int | None,
     return events
 
 
+async def _okx_mark_series(inst: str, t_min: int, t_max: int) -> dict[int, float]:
+    """Hourly mark closes covering [t_min, t_max], keyed by candle open ms.
+
+    OKX pages backwards: ``after`` returns records earlier than the timestamp
+    given, 100 at a time. One page is ~4 days, so a 90-event history needs
+    several; walk back until the window is covered or the venue stops giving
+    new candles.
+    """
+    marks: dict[int, float] = {}
+    cursor = t_max + 3_600_000
+    for _ in range(12):                              # 12 x 100h ~ 50 days
+        d = await _json(f"{OKX_BASE}/api/v5/market/history-mark-price-candles",
+                        {"instId": inst, "bar": "1H", "after": cursor, "limit": 100})
+        rows = (d or {}).get("data") or []
+        if not rows:
+            break
+        for c in rows:
+            marks[int(c[0])] = float(c[4])           # [ts, o, h, l, c, confirm]
+        oldest = min(int(c[0]) for c in rows)
+        if oldest <= t_min or oldest >= cursor:
+            break
+        cursor = oldest
+    return marks
+
+
+async def _okx_funding_history(asset: str, start_ms: int | None,
+                               end_ms: int | None, limit: int) -> list[FundingEvent]:
+    """OKX rates joined to its mark candles on the shared timestamp grid."""
+    inst = _okx_inst(asset)
+    params: dict[str, object] = {"instId": inst, "limit": min(int(limit), 100)}
+    if start_ms is not None:
+        params["before"] = int(start_ms)
+    if end_ms is not None:
+        params["after"] = int(end_ms)
+    d = await _json(f"{OKX_BASE}/api/v5/public/funding-rate-history", params)
+    rows = (d or {}).get("data") or []
+    if not rows:
+        return []
+
+    stamps = sorted(int(r["fundingTime"]) for r in rows)
+    marks: dict[int, float] = {}
+    try:
+        marks = await _okx_mark_series(inst, stamps[0], stamps[-1])
+    except Exception as e:                           # noqa: BLE001
+        log.warning("OKX mark candles for %s unavailable (%s); "
+                    "funding events will carry mark 0", inst, type(e).__name__)
+
+    events = [
+        FundingEvent(
+            funding_time_ms=int(r["fundingTime"]),
+            rate=float(r["fundingRate"]),
+            mark_price=marks.get(int(r["fundingTime"]), 0.0),
+        )
+        for r in rows
+    ]
+    events.sort(key=lambda e: e.funding_time_ms)
+    return events
+
+
+async def _binance_funding_history(asset: str, start_ms: int | None,
+                                   end_ms: int | None, limit: int) -> list[FundingEvent]:
+    return await binance_client.get_funding_history(
+        asset, start_ms=start_ms, end_ms=end_ms, limit=limit)
+
+
+# Same order as the marks, and for the same reason. Every venue here must be
+# able to supply the mark AT settlement as well as the rate: a payment is
+# -qty x mark x rate, so booking carry against a wrong mark is worse than
+# booking none. Bybit is kept ahead of OKX even though Cloud Run currently
+# gets 403 from it — that is a network fact that may change, not a reason to
+# reorder venues by quality.
+HISTORY_VENUES: list[tuple[str, object]] = [
+    ("binance", _binance_funding_history),
+    ("bybit", _bybit_funding_history),
+    ("okx", _okx_funding_history),
+]
+
+
 async def get_funding_history(asset: str, start_ms: int | None = None,
                               end_ms: int | None = None,
                               limit: int = 1000) -> list[FundingEvent]:
-    """Settled funding events, oldest first, from the first venue that answers.
-
-    OKX is deliberately absent: it publishes rates but nothing that gives the
-    mark at each settlement, and booking carry against a wrong mark is worse
-    than booking none.
-    """
-    try:
-        return await binance_client.get_funding_history(
-            asset, start_ms=start_ms, end_ms=end_ms, limit=limit)
-    except Exception as e:                           # noqa: BLE001
-        detail = f"{type(e).__name__}"
-        if isinstance(e, httpx.HTTPStatusError):
-            detail += f" {e.response.status_code}"
-        log.warning("Binance funding history for %s failed (%s); trying Bybit", asset, detail)
-    return await _bybit_funding_history(asset, start_ms, end_ms, limit)
+    """Settled funding events, oldest first, from the first venue that answers."""
+    errors = []
+    for name, fn in HISTORY_VENUES:
+        try:
+            return await fn(asset, start_ms, end_ms, limit)
+        except Exception as e:                       # noqa: BLE001 - try the next venue
+            detail = f"{type(e).__name__}"
+            if isinstance(e, httpx.HTTPStatusError):
+                detail += f" {e.response.status_code}"
+            errors.append(f"{name}: {detail}")
+            log.warning("funding history for %s failed on %s (%s)", asset, name, detail)
+    raise RuntimeError(f"No venue could supply funding history for {asset} - "
+                       + "; ".join(errors))
