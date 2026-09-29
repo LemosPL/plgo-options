@@ -3351,6 +3351,27 @@
   <!-- PAGE: Agents                                               -->
   <!-- ══════════════════════════════════════════════════════════ -->
   <div id="page-agents" class="page">
+    <style>
+      .ag-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:1rem;align-items:start}
+      @media(max-width:1100px){.ag-grid{grid-template-columns:1fr}}
+      .ag-rail{position:sticky;top:.5rem}
+      .ag-task{display:flex;gap:.6rem;align-items:flex-start;padding:.5rem .6rem;border-radius:6px;cursor:pointer;
+               border-left:3px solid var(--ag-c,#64748b);background:rgba(148,163,184,.06);margin-bottom:.35rem}
+      .ag-task:hover{background:rgba(148,163,184,.14)}
+      .ag-task.sel{background:rgba(148,163,184,.20);outline:1px solid rgba(148,163,184,.35)}
+      .ag-task-n{font-weight:600;font-size:.82rem}
+      .ag-task-w{color:var(--muted);font-size:.7rem}
+      .ag-task-s{font-size:.68rem;margin-top:.15rem}
+      .ag-dot{width:8px;height:8px;border-radius:50%;background:var(--ag-c,#64748b);margin-top:.35rem;flex:0 0 8px}
+      .ag-chip{display:inline-block;padding:.05rem .4rem;border-radius:4px;font-size:.66rem;font-weight:600;letter-spacing:.02em}
+      .ag-run{margin-left:auto;font-size:.66rem;padding:.15rem .4rem;width:auto}
+      .ag-kv{display:grid;grid-template-columns:auto 1fr;gap:.15rem .6rem;font-size:.76rem}
+      .ag-kv dt{color:var(--muted)}
+      .ag-kv dd{margin:0;font-variant-numeric:tabular-nums}
+      .ag-sec{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:.6rem 0 .25rem}
+      .ag-ex{color:#f59e0b;font-weight:600}
+    </style>
+
     <section class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
         <div>
@@ -3365,26 +3386,54 @@
       </div>
       <div id="agents-warn" style="display:none;margin-top:.75rem;padding:.5rem .75rem;border-radius:6px;background:rgba(245,158,11,.12);color:var(--text);font-size:.8rem"></div>
     </section>
-    <section class="card">
-      <h3 style="margin-top:0">Agents</h3>
-      <table class="data-table" style="width:100%"><thead><tr><th>Agent</th><th>When (UK)</th><th>Last run</th><th>Status</th><th></th></tr></thead>
-      <tbody id="agents-tbody"></tbody></table>
-    </section>
-    <section class="card">
-      <h3 style="margin-top:0">Proposals</h3>
-      <table class="data-table" style="width:100%"><thead><tr><th>#</th><th>When</th><th>Asset</th><th>From</th><th>Proposal</th><th>Route</th><th>Why</th><th></th></tr></thead>
-      <tbody id="agents-props-tbody"></tbody></table>
-    </section>
-    <section class="card">
-      <h3 style="margin-top:0">Latest output <span id="agents-output-name" style="color:var(--muted);font-weight:400"></span></h3>
-      <pre id="agents-output" style="white-space:pre-wrap;font-size:.78rem;max-height:520px;overflow:auto;margin:0"></pre>
-    </section>
-    <section class="card">
-      <h3 style="margin-top:0">Policy (Monday) &mdash; <span id="agents-policy-asset">ETH</span></h3>
-      <p style="color:var(--muted);font-size:.78rem;margin:.25rem 0 .5rem">View, reference, rows, stop, limits and the Optimizer v4 preset. Set by Lucas and Chris; agents only read it. The floor can only go up.</p>
-      <textarea id="agents-policy-json" style="width:100%;min-height:320px;font-family:monospace;font-size:.75rem"></textarea>
-      <div style="display:flex;gap:.5rem;margin-top:.5rem"><button id="btn-agents-policy-save" class="btn-primary" style="width:auto">Save policy</button><span id="agents-policy-msg" style="font-size:.8rem;color:var(--muted)"></span></div>
-    </section>
+
+    <div class="ag-grid">
+      <aside class="ag-rail">
+        <section class="card" style="padding:.75rem">
+          <h3 style="margin:0 0 .1rem;font-size:.9rem">Desk timetable</h3>
+          <p style="margin:0 0 .5rem;color:var(--muted);font-size:.68rem">Part B2, UK time. Click an agent to read its note.</p>
+          <div id="agents-tasklist"></div>
+        </section>
+      </aside>
+
+      <main style="min-width:0">
+        <section class="card">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap">
+            <h3 style="margin:0">Strategy in force</h3>
+            <button id="btn-agents-doc" class="btn-secondary" style="width:auto;font-size:.7rem">Read the manual</button>
+          </div>
+          <p style="margin:.2rem 0 .6rem;color:var(--muted);font-size:.74rem">What the gate actually enforces right now. Set on Monday; agents only read it.</p>
+          <div id="agents-strategy" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:1rem"></div>
+          <div id="agents-doc" style="display:none;margin-top:.75rem;border-top:1px solid rgba(148,163,184,.25);padding-top:.6rem">
+            <pre id="agents-doc-body" style="white-space:pre-wrap;font-size:.72rem;max-height:420px;overflow:auto;margin:0"></pre>
+          </div>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0">Agent note <span id="agents-output-name" style="color:var(--muted);font-weight:400"></span></h3>
+          <pre id="agents-output" style="white-space:pre-wrap;font-size:.78rem;max-height:520px;overflow:auto;margin:0">Select an agent on the left.</pre>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0">Proposals</h3>
+          <p style="margin:.2rem 0 .6rem;color:var(--muted);font-size:.74rem">Price it (B3: our model first, then two quotes) &rarr; validate the shape in Optimizer v4 &rarr; decide.</p>
+          <div id="agents-props"></div>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0">Decisions</h3>
+          <p style="margin:.2rem 0 .6rem;color:var(--muted);font-size:.74rem">Every proposal the gate routed or refused, and what we did about it.</p>
+          <div id="agents-decisions"></div>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0">Policy (Monday) &mdash; <span id="agents-policy-asset">ETH</span></h3>
+          <p style="color:var(--muted);font-size:.78rem;margin:.25rem 0 .5rem">View, reference, rows, stop, limits and the Optimizer v4 preset. Set by Lucas and Chris; agents only read it. The floor can only go up.</p>
+          <textarea id="agents-policy-json" style="width:100%;min-height:320px;font-family:monospace;font-size:.75rem"></textarea>
+          <div style="display:flex;gap:.5rem;margin-top:.5rem"><button id="btn-agents-policy-save" class="btn-primary" style="width:auto">Save policy</button><span id="agents-policy-msg" style="font-size:.8rem;color:var(--muted)"></span></div>
+        </section>
+      </main>
+    </div>
   </div>
 
   <!-- ══════════════════════════════════════════════════════════ -->
@@ -3759,6 +3808,6 @@
 </div>
 
 <script src="/static/app.js?v=176"></script>
-<script src="/static/agents.js?v=1"></script>
+<script src="/static/agents.js?v=2"></script>
 </body>
 </html>
