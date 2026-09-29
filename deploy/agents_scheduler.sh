@@ -19,15 +19,17 @@ REGION="${REGION:-us-central1}"
 TZ_UK="Europe/London"
 
 job() {  # name  cron  agent  [deadline]  [body]
-  local name="$1" cron="$2" agent="$3" deadline="${4:-180s}" body="${5:-{\"deliver\":true}}"
+  local default_body='{"deliver":true}'
+  local name="$1" cron="$2" agent="$3" deadline="${4:-180s}" body="${5:-$default_body}"
+  local hdrs="Content-Type=application/json,X-Signals-Token=$SIGNALS_TOKEN"
   local args=(--project="$PROJECT" --location="$REGION" --schedule="$cron" --time-zone="$TZ_UK"
               --uri="$SERVICE_URL/api/agents/run/$agent" --http-method=POST
-              --headers="Content-Type=application/json,X-Signals-Token=$SIGNALS_TOKEN"
               --message-body="$body" --attempt-deadline="$deadline")
+  # `update http` takes --update-headers; only `create http` accepts --headers.
   if gcloud scheduler jobs describe "$name" --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
-    gcloud scheduler jobs update http "$name" "${args[@]}"
+    gcloud scheduler jobs update http "$name" "${args[@]}" --update-headers="$hdrs"
   else
-    gcloud scheduler jobs create http "$name" "${args[@]}"
+    gcloud scheduler jobs create http "$name" "${args[@]}" --headers="$hdrs"
   fi
 }
 
