@@ -33,9 +33,9 @@ job() {  # name  cron  agent  [deadline]  [body]
 
 job agents-row-watcher     "*/5 * * * *"  row-watcher
 job agents-morning-open    "0 9 * * 1-5"  morning-open
-job agents-optimizer-am    "30 9 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["ETH"]}}'
+job agents-optimizer-am    "30 9 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["ETH","FIL"]}}'
 job agents-handover        "30 15 * * 1-5" handover
-job agents-optimizer-pm    "0 16 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["ETH"]}}'
+job agents-optimizer-pm    "0 16 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["ETH","FIL"]}}'
 job agents-night-desk      "0 23 * * 1-5" night-desk
 job agents-close-check     "0 2 * * 2-6"  close-check
 job agents-monday-pack     "30 7 * * 1"   monday-pack
