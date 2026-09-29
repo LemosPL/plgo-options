@@ -237,10 +237,16 @@
       return;
     }
     legs.length = 0;
-    opts.forEach((l) => addLeg(
-      String(l.side || "buy").toLowerCase(),
-      String(l.opt || "C").toUpperCase(),
-      l.strike, "0", l.qty, l.expiry || null, l.counterparty || ""));
+    opts.forEach((l) => {
+      // Pricing takes direction from `side` and treats quantity as a magnitude
+      // (app.js: dir = side === "buy" ? 1 : -1). The v4 trade carries the sign
+      // in BOTH side and qty, so passing qty through would cancel the side out
+      // and silently flip a sell into a buy.
+      const q = Number(l.qty);
+      const side = l.side ? String(l.side).toLowerCase() : (q < 0 ? "sell" : "buy");
+      addLeg(side, String(l.opt || "C").toUpperCase(), l.strike, "0",
+        Math.abs(q) || 1, l.expiry || null, l.counterparty || "");
+    });
     const cp = document.getElementById("cpty-pricing-select");
     const first = (opts.find((l) => l.counterparty) || {}).counterparty;
     if (cp && first) {
