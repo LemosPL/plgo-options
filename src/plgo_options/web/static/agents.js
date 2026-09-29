@@ -185,27 +185,25 @@
       return Array.isArray(v) ? v.join(", ") : String(v);
     };
     $("agents-policy-form").innerHTML = POLICY_GROUPS.map((g) =>
-      '<fieldset style="border:1px solid rgba(148,163,184,.25);border-radius:6px;padding:.75rem 1rem;margin:0 0 .9rem">' +
-      '<legend style="padding:0 .4rem;font-size:.8rem;font-weight:600">' + esc(g.title) + '</legend>' +
-      '<p style="color:var(--muted);font-size:.73rem;margin:0 0 .75rem;max-width:60rem">' + esc(g.blurb) + '</p>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(265px,1fr));gap:.75rem 1.25rem">' +
+      '<fieldset>' +
+      '<legend>' + esc(g.title) + '</legend>' +
+      '<p class="ag-blurb">' + esc(g.blurb) + '</p>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:.45rem .9rem">' +
       g.fields.map((f) => {
         const id = "pol-" + f.k;
         let input;
         if (f.type === "select") {
-          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="select" style="width:100%">' +
+          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="select">' +
             f.opts.map((o) => '<option value="' + o[0] + '"' +
               (val(f.k) === o[0] ? " selected" : "") + ">" + esc(o[1]) + "</option>").join("") + "</select>";
         } else {
           const t = f.type === "num" ? "number" : f.type === "date" ? "date" : "text";
           input = '<input id="' + id + '" data-pk="' + f.k + '" data-pt="' + f.type + '" type="' + t + '"' +
             (f.type === "num" ? ' step="any"' : "") +
-            ' value="' + esc(val(f.k)) + '" style="width:100%">';
+            ' value="' + esc(val(f.k)) + '">';
         }
-        return '<label style="display:block;font-size:.75rem">' +
-          '<span style="display:block;margin-bottom:.15rem">' + esc(f.label) + "</span>" + input +
-          (f.help ? '<span style="display:block;color:var(--muted);font-size:.68rem;margin-top:.15rem">' +
-            esc(f.help) + "</span>" : "") + "</label>";
+        return "<label><span>" + esc(f.label) + "</span>" + input +
+          (f.help ? '<span class="ag-help">' + esc(f.help) + "</span>" : "") + "</label>";
       }).join("") + "</div></fieldset>").join("");
   }
 
@@ -251,24 +249,24 @@
       const col = p.route === "rejected" ? "#f59e0b" : p.route === "lucas" ? "#10b981" : "#3b82f6";
       const legs = (p.proposal || {}).legs || [];
       const nOpt = legs.filter((l) => (l.kind || "option") === "option").length;
-      return '<div style="border-left:3px solid ' + col + ';background:rgba(148,163,184,.06);border-radius:6px;padding:.6rem .75rem;margin-bottom:.5rem">' +
-        '<div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">' +
+      return '<div style="border-left:2px solid ' + col + ';background:rgba(148,163,184,.05);border-radius:5px;padding:.4rem .55rem;margin-bottom:.35rem">' +
+        '<div style="display:flex;gap:.45rem;align-items:baseline;flex-wrap:wrap">' +
           '<span class="ag-chip" style="background:' + col + '22;color:' + col + '">' + esc(p.route.toUpperCase()) + '</span>' +
-          '<b style="font-size:.8rem">#' + p.id + " " + esc(p.asset) + '</b>' +
-          '<span style="color:var(--muted);font-size:.72rem">' + esc(p.agent) + " · " +
+          '<b style="font-size:.74rem">#' + p.id + " " + esc(p.asset) + '</b>' +
+          '<span style="color:var(--muted);font-size:.65rem">' + esc(p.agent) + " · " +
             esc(p.created_at.slice(5, 16).replace("T", " ")) + " · " + esc(p.kind || "") + '</span>' +
         '</div>' +
-        '<div style="font-size:.78rem;margin:.3rem 0">' + esc(p.summary) + '</div>' +
-        (legs.length ? '<div style="font-size:.72rem;margin:.25rem 0 .4rem">' +
+        '<div style="font-size:.72rem;margin:.2rem 0">' + esc(p.summary) + '</div>' +
+        (legs.length ? '<div style="font-size:.66rem;line-height:1.4;margin:.15rem 0 .3rem">' +
           legs.map((l) => "• " + legLine(l)).join("<br>") + '</div>' : "") +
-        ((p.reasons || []).length ? '<div style="font-size:.71rem;color:#f59e0b;margin-bottom:.4rem">' +
+        ((p.reasons || []).length ? '<div style="font-size:.65rem;line-height:1.35;color:#f59e0b;margin-bottom:.3rem">' +
           (p.reasons || []).map(esc).join("<br>") + '</div>' : "") +
-        '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
-          '<button class="btn-secondary" style="width:auto;font-size:.7rem" data-price="' + p.id + '"' +
+        '<div style="display:flex;gap:.3rem;flex-wrap:wrap">' +
+          '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-price="' + p.id + '"' +
             (nOpt ? "" : " disabled") + '>Price it (B3)</button>' +
-          '<button class="btn-secondary" style="width:auto;font-size:.7rem" data-v4="' + p.id + '">Validate in v4</button>' +
-          '<button class="btn-secondary" style="width:auto;font-size:.7rem" data-decide="' + p.id + '" data-status="executed">Executed</button>' +
-          '<button class="btn-secondary" style="width:auto;font-size:.7rem" data-decide="' + p.id + '" data-status="declined">Decline</button>' +
+          '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-v4="' + p.id + '">Validate in v4</button>' +
+          '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-decide="' + p.id + '" data-status="executed">Executed</button>' +
+          '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-decide="' + p.id + '" data-status="declined">Decline</button>' +
         '</div>' +
       '</div>';
     }).join("");
