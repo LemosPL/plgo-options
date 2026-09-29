@@ -68,42 +68,97 @@
     }).join("");
   }
 
-  // A1-A5 and B1/B3 as the gate will actually apply them today.
+  // A1-A5 and B1/B3 as the gate will actually apply them today. One table with
+  // both books side by side rather than two stacks: the question this panel has
+  // to answer at a glance is "what is still missing", and that only reads if
+  // ETH and FIL sit on the same row.
+  const MISSING = '<span style="color:#f59e0b">not set</span>';
+
   function renderStrategy(policies) {
-    $("agents-strategy").innerHTML = Object.keys(policies).map((a) => {
-      const p = policies[a] || {};
-      const ex = p.is_example ? ' <span class="ag-ex">EXAMPLE</span>' : "";
-      const range = (p.view_range_low != null && p.view_range_high != null)
-        ? " " + px(a, p.view_range_low) + "–" + px(a, p.view_range_high) : "";
-      return '<div>' +
-        '<div style="font-weight:600;margin-bottom:.3rem">' + esc(a) + ex + '</div>' +
-        '<div class="ag-sec">A1 view</div>' +
-        '<dl class="ag-kv">' +
-          '<dt>view</dt><dd>' + esc(p.view || "—") + range + '</dd>' +
-          '<dt>checked</dt><dd>' + day(p.view_check_date) + '</dd>' +
-        '</dl>' +
-        '<div class="ag-sec">A2 · A3 floor, stop, limits</div>' +
-        '<dl class="ag-kv">' +
-          '<dt>floor</dt><dd>' + px(a, p.floor_price) + '</dd>' +
-          '<dt>stop</dt><dd>' + px(a, p.stop_price) +
-            (p.stop_loss_usd ? " · " + money(p.stop_loss_usd) : "") + '</dd>' +
-          '<dt>book</dt><dd>' + money(p.book_notional_usd) + '</dd>' +
-          '<dt>single trade</dt><dd>' + money(p.max_single_trade_usd) + '</dd>' +
-          '<dt>cost/trade</dt><dd>' + money(p.max_cost_per_trade_usd) + '</dd>' +
-          '<dt>cost/month</dt><dd>' + money(p.max_cost_per_month_usd) + '</dd>' +
-          '<dt>perp cap</dt><dd>' + money(p.max_perp_notional_usd) + '</dd>' +
-          '<dt>funding/mo</dt><dd>' + money(p.perp_funding_budget_month_usd) + '</dd>' +
-        '</dl>' +
-        '<div class="ag-sec">B1 rows · B3 tolerance</div>' +
-        '<dl class="ag-kv">' +
-          '<dt>rows</dt><dd>' + ((p.row_steps_pct || []).length
-            ? "±" + p.row_steps_pct.join("/") + "%" : "—") + '</dd>' +
-          '<dt>reference</dt><dd>' + px(a, p.reference_price) +
-            (p.reference_set_on ? " · " + day(p.reference_set_on) : "") + '</dd>' +
-          '<dt>tolerance</dt><dd>' + money(p.cost_tolerance_usd) + '</dd>' +
-        '</dl>' +
-      '</div>';
-    }).join("");
+    const assets = Object.keys(policies);
+    const P = (a) => policies[a] || {};
+
+    // Monday's rows are reference x (1 +/- step%), so they only exist once a
+    // reference does. Showing the levels is the point of B1 - a percentage is
+    // not something you can watch the tape against.
+    const rowLevels = (a) => {
+      const p = P(a), ref = p.reference_price, steps = p.row_steps_pct || [];
+      if (!ref || !steps.length) {
+        return steps.length ? '±' + steps.join("/") + "% <span style=\"color:#f59e0b\">(needs a reference)</span>"
+                            : MISSING;
+      }
+      const down = steps.map((s) => px(a, ref * (1 - s / 100))).join("  ");
+      const up = steps.map((s) => px(a, ref * (1 + s / 100))).join("  ");
+      return '<span style="color:var(--muted)">↓</span> ' + down +
+             '  <span style="color:var(--muted)">↑</span> ' + up;
+    };
+
+    const ROWS = [
+      { sec: "A1 · the view" },
+      { label: "View", v: (a) => esc(P(a).view || ""), miss: (a) => !P(a).view },
+      { label: "Expected range, 90d",
+        v: (a) => px(a, P(a).view_range_low) + " – " + px(a, P(a).view_range_high),
+        miss: (a) => P(a).view_range_low == null || P(a).view_range_high == null },
+      { label: "Right or wrong by", v: (a) => day(P(a).view_check_date),
+        miss: (a) => !P(a).view_check_date },
+      { sec: "A2 · the floor" },
+      { label: "Floor (only ever rises)", v: (a) => px(a, P(a).floor_price),
+        miss: (a) => P(a).floor_price == null },
+      { sec: "A3 · the limits" },
+      { label: "Stop", v: (a) => px(a, P(a).stop_price), miss: (a) => P(a).stop_price == null },
+      { label: "Stop: further loss", v: (a) => money(P(a).stop_loss_usd),
+        miss: (a) => !P(a).stop_loss_usd },
+      { label: "Book size", v: (a) => money(P(a).book_notional_usd),
+        miss: (a) => !P(a).book_notional_usd },
+      { label: "Single trade, Lucas alone", v: (a) => money(P(a).max_single_trade_usd),
+        miss: (a) => !P(a).max_single_trade_usd },
+      { label: "Cost per trade", v: (a) => money(P(a).max_cost_per_trade_usd),
+        miss: (a) => !P(a).max_cost_per_trade_usd },
+      { label: "Cost per month", v: (a) => money(P(a).max_cost_per_month_usd),
+        miss: (a) => !P(a).max_cost_per_month_usd },
+      { label: "Perp / forward cap", v: (a) => money(P(a).max_perp_notional_usd),
+        miss: (a) => !P(a).max_perp_notional_usd },
+      { label: "Funding budget, monthly", v: (a) => money(P(a).perp_funding_budget_month_usd),
+        miss: (a) => !P(a).perp_funding_budget_month_usd },
+      { label: "Counterparty universe",
+        v: (a) => (P(a).allowed_counterparties || []).length + " named",
+        miss: (a) => !(P(a).allowed_counterparties || []).length },
+      { sec: "B1 · the levels" },
+      { label: "Monday reference", v: (a) => px(a, P(a).reference_price) +
+          (P(a).reference_set_on ? ' <span style="color:var(--muted)">' + day(P(a).reference_set_on) + "</span>" : ""),
+        miss: (a) => P(a).reference_price == null },
+      { label: "Target exposure (delta)", v: (a) => P(a).reference_delta == null ? ""
+          : Number(P(a).reference_delta).toLocaleString(), miss: (a) => P(a).reference_delta == null },
+      { label: "Rows", v: rowLevels, miss: () => false, wide: true },
+      { sec: "B3 · how we deal" },
+      { label: "Quote tolerance vs model", v: (a) => money(P(a).cost_tolerance_usd),
+        miss: (a) => !P(a).cost_tolerance_usd },
+    ];
+
+    // How much of the mandate is actually decided.
+    const checks = ROWS.filter((r) => r.label && r.miss);
+    const gaps = {};
+    assets.forEach((a) => { gaps[a] = checks.filter((r) => r.miss(a)).length; });
+    const summary = assets.map((a) => {
+      const set = checks.length - gaps[a];
+      const col = gaps[a] ? "#f59e0b" : "#10b981";
+      return esc(a) + ' <span style="color:' + col + '">' + set + "/" + checks.length + " set</span>" +
+        (P(a).is_example ? ' <span class="ag-ex">EXAMPLE</span>' : "");
+    }).join('<span style="color:var(--muted)"> · </span>');
+
+    $("agents-strategy").innerHTML =
+      '<div style="font-size:.7rem;margin-bottom:.4rem">' + summary + "</div>" +
+      '<table class="ag-strat"><thead><tr><th></th>' +
+        assets.map((a) => "<th>" + esc(a) + "</th>").join("") + "</tr></thead><tbody>" +
+      ROWS.map((r) => {
+        if (r.sec) {
+          return '<tr class="ag-strat-sec"><td colspan="' + (assets.length + 1) + '">' +
+            esc(r.sec) + "</td></tr>";
+        }
+        return "<tr><td>" + esc(r.label) + "</td>" + assets.map((a) =>
+          '<td' + (r.wide ? ' style="white-space:normal"' : "") + ">" +
+          (r.miss && r.miss(a) ? MISSING : r.v(a)) + "</td>").join("") + "</tr>";
+      }).join("") + "</tbody></table>";
   }
 
   // The Monday policy as a form rather than raw JSON, grouped the way the
