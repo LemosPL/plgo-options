@@ -108,10 +108,14 @@
 
   function legLine(l) {
     const isOpt = (l.kind || "option") === "option";
+    // Direction lives in `side`; show the quantity as a magnitude so a short
+    // leg doesn't read as "Sell ... x-499". Expiries arrive both as a date and
+    // as a full timestamp — show the date either way.
+    const q = Math.abs(Number(l.qty));
     return esc(l.side || "") + " " + esc(l.opt || "") +
       (isOpt ? " " + esc(l.strike) : "") +
-      (isOpt && l.expiry ? " " + esc(l.expiry) : "") +
-      " ×" + esc(l.qty) +
+      (isOpt && l.expiry ? " " + esc(String(l.expiry).slice(0, 10)) : "") +
+      " ×" + (isFinite(q) ? q.toLocaleString() : esc(l.qty)) +
       (l.counterparty ? ' <span style="color:var(--muted)">@' + esc(l.counterparty) + "</span>" : "") +
       (isOpt ? "" : ' <span style="color:var(--muted)">(perp — A4: direction only)</span>');
   }
