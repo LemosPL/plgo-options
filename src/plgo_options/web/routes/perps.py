@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from plgo_options.config import SIGNALS_TOKEN
 from plgo_options.data import perp_repository as repo
 from plgo_options.data.database import get_db
-from plgo_options.market_data import binance_client
+from plgo_options.market_data import perp_feed
 
 router = APIRouter()
 
@@ -57,21 +57,23 @@ async def build_summary(asset: str, venue: str = repo.DEFAULT_VENUE) -> dict:
     funding = await repo.funding_summary(db, asset, venue)
 
     mark = None
+    mark_venue = None
     mark_price = 0.0
     funding_apr_pct = None
     interval_hours = None
     try:
-        mark = await binance_client.get_mark(asset)
+        vm = await perp_feed.get_mark_with_venue(asset)
+        mark, mark_venue = vm.mark, vm.venue
         mark_price = mark.mark_price
-        history = await binance_client.get_funding_history(asset, limit=90)
+        history = await perp_feed.get_funding_history(asset, limit=90)
         if history:
-            interval_ms = binance_client.infer_interval_ms(history)
+            interval_ms = perp_feed.infer_interval_ms(history)
             interval_hours = interval_ms / 3_600_000
             # Trailing average over the fetched window rather than the last
             # print: a single funding period is noisy enough that the instant
             # rate annualizes to numbers that swing by tens of percent.
             avg_rate = sum(e.rate for e in history) / len(history)
-            funding_apr_pct = binance_client.annualized_rate(avg_rate, interval_ms) * 100.0
+            funding_apr_pct = perp_feed.annualized_rate(avg_rate, interval_ms) * 100.0
     except Exception as exc:  # live feed down — the ledger is still readable
         market_error = f"{type(exc).__name__}: {exc}"
     else:
@@ -81,7 +83,10 @@ async def build_summary(asset: str, venue: str = repo.DEFAULT_VENUE) -> dict:
     return {
         "asset": (asset or "").upper(),
         "venue": venue,
-        "symbol": binance_client.symbol_for(asset),
+        "symbol": perp_feed.symbol_for(asset),
+        # Which venue actually answered: Binance is 451 from Cloud Run, so a
+        # brief quoting a mark should be able to say where it came from.
+        "mark_venue": mark_venue,
         "net_qty": round(position.net_qty, 6),
         "avg_entry": round(position.avg_entry, 6),
         "mark_price": round(mark_price, 6),

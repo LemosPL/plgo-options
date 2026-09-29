@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from plgo_options.market_data import binance_client
+from plgo_options.market_data import perp_feed
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ async def add_trade(
         (
             asset,
             venue,
-            binance_client.symbol_for(asset),
+            perp_feed.symbol_for(asset),
             "Sell" if signed_qty(side, 1) < 0 else "Buy",
             abs(float(qty or 0.0)),
             float(price or 0.0),
@@ -315,7 +315,7 @@ async def accrue_funding(
     # Binance caps a page at 1000 events (~11 months at 8h). Page forward so a
     # first accrual over a long-standing hedge doesn't silently stop at 1000.
     while True:
-        events = await binance_client.get_funding_history(asset, start_ms=cursor_ms, limit=1000)
+        events = await perp_feed.get_funding_history(asset, start_ms=cursor_ms, limit=1000)
         if not events:
             break
         for ev in events:
@@ -357,7 +357,7 @@ async def funding_summary(
     row = await cursor.fetchone()
     total, count, last_at = (row[0] or 0.0), int(row[1] or 0), (row[2] or "")
 
-    cutoff = datetime.fromtimestamp((_now_ms() - 30 * binance_client.DAY_MS) / 1000,
+    cutoff = datetime.fromtimestamp((_now_ms() - 30 * perp_feed.DAY_MS) / 1000,
                                     tz=timezone.utc).isoformat(timespec="seconds")
     cursor = await db.execute(
         """SELECT COALESCE(SUM(payment_usd), 0) FROM perp_funding
