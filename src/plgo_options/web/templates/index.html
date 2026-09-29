@@ -3389,6 +3389,22 @@
       #agents-policy-form label>span:first-child{display:block;margin-bottom:.1rem}
       #agents-policy-form .ag-help{display:block;color:var(--muted);font-size:.62rem;line-height:1.25;margin-top:.1rem}
       #agents-policy-form input,#agents-policy-form select{width:100%;font-size:.72rem;padding:.2rem .35rem}
+      /* the rendered manual */
+      .ag-md{max-height:460px;overflow:auto;font-size:.7rem;line-height:1.45;padding-right:.4rem}
+      .ag-md h1{font-size:.86rem;margin:.1rem 0 .3rem}
+      .ag-md h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+                margin:.9rem 0 .3rem;border-top:1px solid rgba(148,163,184,.2);padding-top:.5rem}
+      .ag-md h3{font-size:.74rem;text-transform:none;letter-spacing:0;color:var(--text);margin:.7rem 0 .25rem}
+      .ag-md h4{font-size:.7rem;color:var(--muted);margin:.5rem 0 .2rem}
+      .ag-md p{font-size:.7rem;margin:.25rem 0 .45rem;max-width:64rem}
+      .ag-md ul{margin:.2rem 0 .5rem 1rem;padding:0}
+      .ag-md li{margin:.12rem 0}
+      .ag-md code{background:rgba(148,163,184,.14);padding:0 .2rem;border-radius:3px}
+      .ag-md-t{border-collapse:collapse;width:100%;margin:.35rem 0 .7rem;font-size:.66rem}
+      .ag-md-t th,.ag-md-t td{border:1px solid rgba(148,163,184,.22);padding:.22rem .4rem;
+                              text-align:left;vertical-align:top}
+      .ag-md-t th{background:rgba(148,163,184,.1);font-weight:600}
+      .ag-md-t tr:nth-child(even) td{background:rgba(148,163,184,.04)}
 </style>
 
     <section class="card">
@@ -3424,7 +3440,7 @@
           <p>What the gate enforces right now.</p>
           <div id="agents-strategy" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:.8rem"></div>
           <div id="agents-doc" style="display:none;margin-top:.75rem;border-top:1px solid rgba(148,163,184,.25);padding-top:.6rem">
-            <pre id="agents-doc-body" style="white-space:pre-wrap;font-size:.68rem;line-height:1.35;max-height:400px;overflow:auto;margin:0"></pre>
+            <div id="agents-doc-body" class="ag-md"></div>
           </div>
         </section>
 
@@ -3841,6 +3857,6 @@
 </div>
 
 <script src="/static/app.js?v=176"></script>
-<script src="/static/agents.js?v=6"></script>
+<script src="/static/agents.js?v=7"></script>
 </body>
 </html>

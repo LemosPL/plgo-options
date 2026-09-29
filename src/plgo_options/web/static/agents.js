@@ -225,6 +225,65 @@
     return out;
   }
 
+  // The manual is a converted Word document: mostly prose, but its real content
+  // is 14 tables (the view matrix, the limits, instrument-for-job, the day).
+  // Dumped into a <pre> those read as pipe soup, so render them as tables.
+  // Split on newlines without writing an escape sequence into this file:
+  // earlier tooling kept turning a literal backslash-n into a real newline
+  // and breaking the regex across lines.
+  const NEWLINE = String.fromCharCode(10);
+  const RE_CR = new RegExp(String.fromCharCode(13), "g");
+
+  function mdToHtml(md) {
+    const inline = (t) => esc(t)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+      .replace(/`([^`]+)`/g, "<code>$1</code>");
+    const lines = String(md).replace(RE_CR, "").split(NEWLINE);
+    const out = [];
+    let i = 0, list = null;
+    const closeList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+
+    while (i < lines.length) {
+      const ln = lines[i];
+
+      // table: a header row, a --- separator, then body rows
+      if (/^\s*\|/.test(ln) && i + 1 < lines.length && /^\s*\|[\s|:-]+\|\s*$/.test(lines[i + 1])) {
+        closeList();
+        const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+        const head = cells(ln);
+        i += 2;
+        const body = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { body.push(cells(lines[i])); i++; }
+        out.push('<table class="ag-md-t"><thead><tr>' +
+          head.map((c) => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>" +
+          body.map((r) => "<tr>" + r.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>").join("") +
+          "</tbody></table>");
+        continue;
+      }
+
+      const h = ln.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { closeList(); out.push("<h" + h[1].length + ">" + inline(h[2].replace(/\*\*/g, "")) +
+                                     "</h" + h[1].length + ">"); i++; continue; }
+
+      const li = ln.match(/^\s*[-*]\s+(.*)$/);
+      if (li) {
+        if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+        out.push("<li>" + inline(li[1]) + "</li>"); i++; continue;
+      }
+
+      if (!ln.trim()) { closeList(); i++; continue; }
+
+      closeList();
+      const buf = [];
+      while (i < lines.length && lines[i].trim() && !/^\s*\|/.test(lines[i]) &&
+             !/^#{1,6}\s/.test(lines[i]) && !/^\s*[-*]\s/.test(lines[i])) { buf.push(lines[i]); i++; }
+      out.push("<p>" + inline(buf.join(" ")) + "</p>");
+    }
+    closeList();
+    return out.join("");
+  }
+
   function legLine(l) {
     const isOpt = (l.kind || "option") === "option";
     // Direction lives in `side`; show the quantity as a magnitude so a short
@@ -494,9 +553,10 @@
         $("agents-doc-body").textContent = "Loading…";
         try {
           const r = await fetch("/static/strategy.md");
-          DOC = r.ok ? await r.text() : "Strategy document not found on the server.";
-        } catch (e) { DOC = "Could not load the strategy document: " + e.message; }
-        $("agents-doc-body").textContent = DOC;
+          DOC = r.ok ? mdToHtml(await r.text())
+                     : "<p>Strategy document not found on the server.</p>";
+        } catch (e) { DOC = "<p>Could not load the strategy document: " + esc(e.message) + "</p>"; }
+        $("agents-doc-body").innerHTML = DOC;
       }
     }
     if (t.id === "btn-agents-kill") {
