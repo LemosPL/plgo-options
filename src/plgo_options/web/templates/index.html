@@ -3389,19 +3389,30 @@
       #agents-policy-form label>span:first-child{display:block;margin-bottom:.1rem}
       #agents-policy-form .ag-help{display:block;color:var(--muted);font-size:.62rem;line-height:1.25;margin-top:.1rem}
       #agents-policy-form input,#agents-policy-form select{width:100%;font-size:.72rem;padding:.2rem .35rem}
-      /* strategy in force: one table, both books, gaps obvious */
-      .ag-strat{border-collapse:collapse;width:100%;font-size:.7rem}
-      .ag-strat th{text-align:left;font-weight:600;padding:.12rem .45rem;
-                   border-bottom:1px solid rgba(148,163,184,.25)}
-      .ag-strat th:first-child{width:38%}
-      .ag-strat td{padding:.11rem .45rem;vertical-align:top;font-variant-numeric:tabular-nums;
-                   white-space:nowrap}
+      /* strategy in force: one ruled table, both books, gaps obvious */
+      .ag-strat{border-collapse:collapse;width:100%;font-size:.7rem;
+                border:1px solid rgba(148,163,184,.28)}
+      .ag-strat th{text-align:left;font-weight:600;padding:.26rem .5rem;
+                   background:rgba(148,163,184,.12);
+                   border-bottom:1px solid rgba(148,163,184,.35);
+                   border-right:1px solid rgba(148,163,184,.18)}
+      .ag-strat th:last-child{border-right:0}
+      .ag-strat th:first-child{width:36%}
+      .ag-strat td{padding:.2rem .5rem;vertical-align:top;font-variant-numeric:tabular-nums;
+                   white-space:nowrap;
+                   border-top:1px solid rgba(148,163,184,.14);
+                   border-right:1px solid rgba(148,163,184,.14)}
+      .ag-strat td:last-child{border-right:0}
       .ag-strat td:first-child{color:var(--muted);font-variant-numeric:normal;white-space:normal}
-      .ag-strat tbody tr:hover td{background:rgba(148,163,184,.06)}
-      .ag-strat-sec td{color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
-                       font-size:.6rem;padding-top:.45rem}
-      .ag-strat-sec:hover td{background:none !important}
-
+      .ag-strat tbody tr:hover td{background:rgba(148,163,184,.07)}
+      /* the A1/A2/A3/B1/B3 bands: a full-width rule, not just indented text */
+      .ag-strat-sec td{color:var(--text);text-transform:uppercase;letter-spacing:.06em;
+                       font-size:.61rem;font-weight:600;padding:.3rem .5rem .22rem;
+                       background:rgba(148,163,184,.13);
+                       border-top:2px solid rgba(148,163,184,.35);
+                       border-right:0}
+      .ag-strat-sec:first-child td{border-top:0}
+      .ag-strat-sec:hover td{background:rgba(148,163,184,.13) !important}
       /* the rendered manual */
       .ag-md{max-height:460px;overflow:auto;font-size:.7rem;line-height:1.45;padding-right:.4rem}
       .ag-md h1{font-size:.86rem;margin:.1rem 0 .3rem}
@@ -3870,6 +3881,6 @@
 </div>
 
 <script src="/static/app.js?v=176"></script>
-<script src="/static/agents.js?v=8"></script>
+<script src="/static/agents.js?v=9"></script>
 </body>
 </html>
