@@ -16889,10 +16889,78 @@ function renderDealList() {
       <div class="deal-card-meta" style="margin-top:.2rem">
         <span>max +${fmtUsd(d.max_profit)} / ${fmtUsd(d.max_loss)}</span>
         <span>MTM ${fmtUsd(d.mtm)}</span>
-      </div>`;
+      </div>
+      ${dealSparkline(d)}`;
     card.addEventListener("click", () => toggleDeal(d.id));
     list.appendChild(card);
   });
+}
+
+// A deal's P&L-at-expiry curve, inline on its card. The backend already sends
+// `payoff` over the shared `grid` (premium included, so it is true P&L, not
+// intrinsic) — it was computed and then never drawn.
+//
+// Polarity is carried by POSITION against a labelled zero line, not by hue:
+// the app's green/red pair measures ΔE 2.2 under deuteranopia on this surface,
+// so a red/green payoff curve is unreadable for the commonest form of colour
+// blindness. One accent line plus an explicit zero rule is legible to everyone,
+// and the numbers sit beside it as text so the chart is never the only carrier.
+function dealSparkline(d) {
+  const g = dealsData && dealsData.grid, p = d.payoff;
+  if (!g || g.length < 2 || !p || p.length !== g.length) return "";
+
+  const W = 240, H = 40, PAD = 4;
+  let lo = Math.min.apply(null, p), hi = Math.max.apply(null, p);
+  if (!isFinite(lo) || !isFinite(hi)) return "";
+  if (hi - lo < 1e-9) { lo -= 1; hi += 1; }          // a flat curve still needs a line
+  const span = hi - lo;
+  const px = (i) => PAD + (i / (g.length - 1)) * (W - 2 * PAD);
+  const py = (v) => PAD + (1 - (v - lo) / span) * (H - 2 * PAD);
+
+  const pts = [];
+  for (let i = 0; i < p.length; i++) pts.push(px(i).toFixed(1) + "," + py(p[i]).toFixed(1));
+
+  // Zero line: only drawn when zero is actually inside the plotted range,
+  // otherwise it would sit on the frame and imply a crossing that isn't there.
+  let zero = "";
+  if (lo <= 0 && hi >= 0) {
+    const yz = py(0);
+    // Labelled, because "above the line is profit" should be stated rather
+    // than assumed — it is what carries polarity here instead of hue.
+    zero = '<line x1="0" x2="' + W + '" y1="' + yz.toFixed(1) + '" y2="' + yz.toFixed(1) +
+      '" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 2" vector-effect="non-scaling-stroke"/>' +
+      '<text x="1.5" y="' + (yz - 1.5).toFixed(1) + '" font-size="7" fill="var(--muted)">0</text>';
+  }
+
+  // Where we are now. A payoff diagram without today's spot on it makes the
+  // reader guess which part of the curve is live.
+  let spotMark = "";
+  const s = dealsData.spot, here = dealInterpAt(p, s);
+  if (s > 0 && here !== null && s >= g[0] && s <= g[g.length - 1]) {
+    const xs = (PAD + ((s - g[0]) / (g[g.length - 1] - g[0])) * (W - 2 * PAD)).toFixed(1);
+    spotMark =
+      '<line x1="' + xs + '" x2="' + xs + '" y1="0" y2="' + H +
+        '" stroke="var(--muted)" stroke-width="1" opacity=".45" vector-effect="non-scaling-stroke"/>' +
+      '<circle cx="' + xs + '" cy="' + py(here).toFixed(1) + '" r="2.6" fill="var(--accent)"' +
+        ' stroke="var(--surface)" stroke-width="1.5"/>';
+  }
+
+  const tip = "P&L at expiry across spot. Now " + fmtUsd(here === null ? d.mtm : here) +
+    " at spot " + fmtStrike(s) + ". Max " + fmtUsd(d.max_profit) + " / " + fmtUsd(d.max_loss) +
+    (d.breakevens && d.breakevens.length
+      ? ". Breakeven " + d.breakevens.map(fmtStrike).join(", ") : "");
+
+  return '<svg class="deal-spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"' +
+    ' role="img" aria-label="' + escAttr(tip) + '"><title>' + escAttr(tip) + '</title>' +
+    zero + spotMark +
+    '<polyline points="' + pts.join(" ") + '" fill="none" stroke="var(--accent)"' +
+    ' stroke-width="2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>';
+}
+
+function escAttr(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 // Stable colour for a selected deal (by its position in the selection order).
