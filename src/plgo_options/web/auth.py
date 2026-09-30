@@ -46,7 +46,8 @@ GOOGLE_METADATA = "https://accounts.google.com/.well-known/openid-configuration"
 # Reachable without a session. Everything else needs one. /api/auth/ is here
 # because the UI has to be able to ask "am I signed in?" while signed out —
 # it reports session state and nothing about the book.
-PUBLIC_PREFIXES = ("/login", "/auth/", "/api/auth/", "/static/", "/health", "/favicon.ico")
+PUBLIC_PREFIXES = ("/login", "/auth/", "/api/auth/", "/api/version",
+                   "/static/", "/health", "/favicon.ico")
 
 # Scheduler-driven endpoints. They carry X-Signals-Token and are guarded by
 # their own routers; a browser session is not involved. Narrow on purpose:

@@ -228,3 +228,70 @@ def test_callback_stays_http_on_localhost(monkeypatch):
     """Local dev has no TLS; forcing https there would break the dev flow."""
     url = _callback_for(monkeypatch, "127.0.0.1:8000", {})
     assert url == "http://127.0.0.1:8000/auth/callback"
+
+
+# ── session lifetime ─────────────────────────────────────────────────────────
+
+def test_session_lasts_one_day_not_starlette_default(monkeypatch):
+    """Starlette defaults to 14 days, which is a long time for a session that
+    can read the whole book."""
+    import plgo_options.config as config
+    importlib.reload(config)
+    assert config.SESSION_MAX_AGE_SECONDS == 86400
+
+
+def test_session_lifetime_is_env_overridable(monkeypatch):
+    monkeypatch.setenv("SESSION_MAX_AGE_SECONDS", "3600")
+    import plgo_options.config as config
+    importlib.reload(config)
+    assert config.SESSION_MAX_AGE_SECONDS == 3600
+    monkeypatch.delenv("SESSION_MAX_AGE_SECONDS")
+    importlib.reload(config)
+
+
+def test_an_expired_session_is_refused(monkeypatch):
+    """max_age bounds the signature, not just the cookie, so a session copied
+    out of a browser stops working at the same point rather than living on."""
+    import plgo_options.config as config
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "cid")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "csec")
+    monkeypatch.setenv("SESSION_SECRET", "test-secret-value-for-sessions")
+    importlib.reload(config)
+    from plgo_options.web import auth as auth_mod
+    importlib.reload(auth_mod)
+
+    app = FastAPI()
+
+    @app.get("/")
+    async def index():
+        return JSONResponse({"ok": "index"})
+
+    @app.get("/auth/_test_signin")
+    async def si(request: Request):
+        request.session["user"] = {"email": "lucas.lemos@pl-at.ch", "name": "L", "picture": ""}
+        return JSONResponse({"ok": True})
+
+    app.include_router(auth_mod.router)
+    app.add_middleware(auth_mod.AuthMiddleware)
+    # one second, so "expired" is reachable without waiting a day
+    app.add_middleware(SessionMiddleware, secret_key=config.SESSION_SECRET, max_age=1)
+
+    c = TestClient(app, follow_redirects=False)
+    c.get("/auth/_test_signin")
+    assert c.get("/").status_code == 200          # fresh session works
+
+    import time
+    time.sleep(1.2)
+    r = c.get("/")                                 # same cookie, now stale
+    assert r.status_code == 302 and r.headers["location"].startswith("/login")
+
+
+def test_version_endpoint_is_public(monkeypatch):
+    """The badge has to be readable before sign-in — it is the one thing you
+    need to tell a failed deploy from a cached page."""
+    app, _ = _app(monkeypatch, enabled=True)
+    r = TestClient(app, follow_redirects=False).get("/api/version")
+    # Route lives on the real app factory, not this miniature one; what matters
+    # here is that the gate lets it through rather than 302/401-ing it.
+    assert r.status_code != 401
+    assert not (r.status_code == 302 and "/login" in r.headers.get("location", ""))

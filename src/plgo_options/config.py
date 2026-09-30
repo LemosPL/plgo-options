@@ -56,6 +56,13 @@ AUTH_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 # set it in prod to keep sessions across revisions.
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "") or secrets.token_urlsafe(48)
 
+# How long a signed-in session lasts, in seconds. Starlette defaults to 14
+# days, which is a long time for a session that can read the whole book; one
+# day means a laptop left open is stale by morning. It bounds the signature
+# too, not just the cookie, so an exported cookie stops working at the same
+# point. Raise it only if re-signing-in each day proves to be a nuisance.
+SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE_SECONDS", 24 * 3600))
+
 # Who may sign in. Comma-separated override via ALLOWED_EMAILS.
 _DEFAULT_ALLOWED = (
     "chris@protocol.ai,patrick@protocol.ai,"

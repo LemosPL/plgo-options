@@ -91,15 +91,28 @@ async function api(method, path, body) {
 const get  = (path) => api("GET", path);
 const post = (path, body) => api("POST", path, body);
 
-// Show the deployed build number (derived from the app.js cache-buster ?v=N) in
-// the sidebar, so it's obvious whether a user is on the latest deployed version.
+// Show what is actually deployed. This used to read the ?v=N off app.js, but
+// that number is hand-maintained: a change to any other file left it stale, so
+// the badge reported a build unrelated to what was running — it sat on "build
+// 176" through a dozen deploys. /api/version reports Cloud Run's K_REVISION,
+// which changes on every deploy by itself, so the badge cannot go stale. It
+// doubles as a cache check: if it doesn't move after a deploy, the page is
+// cached rather than the deploy having failed.
 (function showAppVersion() {
-  try {
-    const s = document.querySelector('script[src*="app.js"]');
-    const m = s && s.src.match(/[?&]v=(\d+)/);
-    const el = document.getElementById("app-version");
-    if (el) el.textContent = m ? `build ${m[1]}` : "build ?";
-  } catch (e) { /* ignore */ }
+  const el = document.getElementById("app-version");
+  if (!el) return;
+  fetch("/api/version")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      const rev = d && d.revision ? String(d.revision) : "";
+      if (!rev) { el.textContent = "build ?"; return; }
+      // "plgo-options-00314-j8f" -> "00314-j8f"; "local" is left alone.
+      const m = rev.match(/(\d{5}-\w+)$/);
+      el.textContent = rev === "local" ? "local" : "rev " + (m ? m[1] : rev);
+      el.title = "Deployed revision: " + rev +
+        " — if this does not change after a deploy, your page is cached (Ctrl+Shift+R)";
+    })
+    .catch(() => { el.textContent = "build ?"; });
 })();
 
 // ─── Vol surface helpers (for pricer) ────────────────────────

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from contextlib import asynccontextmanager
 
 # Force UTF-8 on the process's own log streams before anything can write to
@@ -43,7 +44,7 @@ from plgo_options.web.routes import perps
 from plgo_options.web.routes import agents as agents_routes
 from plgo_options.agents.store import init_agent_tables
 from plgo_options.web import auth as auth_mod
-from plgo_options.config import SESSION_SECRET
+from plgo_options.config import SESSION_MAX_AGE_SECONDS, SESSION_SECRET
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -92,7 +93,8 @@ def create_app() -> FastAPI:
     app.include_router(auth_mod.router, tags=["auth"])
     app.add_middleware(auth_mod.AuthMiddleware)
     app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET,
-                       https_only=False, same_site="lax")
+                       https_only=False, same_site="lax",
+                       max_age=SESSION_MAX_AGE_SECONDS)
 
     # Static files (only mount if directory exists)
     if STATIC_DIR.is_dir():
@@ -100,6 +102,22 @@ def create_app() -> FastAPI:
 
     # Templates
     templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+    @app.get("/api/version")
+    async def version():
+        """What is actually running.
+
+        The badge used to read the ?v=N on app.js, which is hand-maintained:
+        a change to any other file left it stale, so it reported a build that
+        had nothing to do with what was deployed. Cloud Run sets K_REVISION in
+        every container, so report that instead and the badge cannot lie.
+        Public on purpose - it is the one thing you need before signing in to
+        know whether the page you are looking at is cached.
+        """
+        return {
+            "revision": os.environ.get("K_REVISION", "local"),
+            "service": os.environ.get("K_SERVICE", "local"),
+        }
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
