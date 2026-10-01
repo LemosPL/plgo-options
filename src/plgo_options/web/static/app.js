@@ -17130,10 +17130,22 @@ function renderDealsView() {
       ${hasWhatIf ? whatifBannerHtml(single, base, wi) : ""}
       <div id="deals-payoff-chart" class="chart-container" style="min-height:440px"></div>
     </section>
+    ${single && (single.decay_days || []).length > 1 ? `
+    <section class="card">
+      <div class="pf-toolbar">
+        <h2 style="margin:0">Time decay &mdash; if spot stays at ${fmtStrike(dealsData.spot)}</h2>
+      </div>
+      <p style="color:var(--muted);font-size:.78rem;margin:.2rem 0 .5rem">
+        What this deal is worth as the days pass with spot unchanged. Separate chart
+        because the axis is time, not price.
+      </p>
+      <div id="deals-decay-chart" class="chart-container" style="min-height:260px"></div>
+    </section>` : ""}
     <div class="deals-summary-grid">${summaries}</div>
     ${legsSection}`;
 
   drawDealsChart(deals, single, base, wi);
+  drawDealDecayChart(single);
   if (single) renderLegsTable(single);
 
   document.getElementById("btn-deals-clear-sel")?.addEventListener("click", () => {
@@ -17292,6 +17304,61 @@ function suggestZeroCost(deal) {
 // Overlay each selected deal's payoff profile (one line per deal). When a
 // single deal is selected we also show its terminal-spot distribution,
 // breakeven markers, and the what-if "after closing" curve.
+// Theta bleed: P&L against days forward, spot held at today's level. Its own
+// chart rather than a second axis on the payoff plot — the x-axis is a
+// different variable, and two scales on one frame is the chart mistake that
+// makes people misread both series.
+//
+// One series, so no legend: the title names it. Polarity reads off a labelled
+// zero line, as on the card sparklines, rather than green/red — that pair is
+// ~2 dE apart under deuteranopia on this surface.
+function drawDealDecayChart(single) {
+  const el = document.getElementById("deals-decay-chart");
+  if (!el) return;
+  if (!single || !(single.decay_days || []).length) { el.innerHTML = ""; return; }
+
+  const c = chartColors();
+  const x = single.decay_days, y = single.decay_pnl;
+  const traces = [{
+    x: x, y: y, name: "P&L", type: "scatter", mode: "lines",
+    line: { color: "#58a6ff", width: 2 },
+    hovertemplate: "In %{x}d<br>P&L %{y:$,.0f}<extra></extra>",
+  }];
+
+  // Today and expiry are the two readings a trader checks first, so label
+  // them directly instead of making them hunt along the line.
+  traces.push({
+    x: [x[0], x[x.length - 1]], y: [y[0], y[y.length - 1]],
+    type: "scatter", mode: "markers+text",
+    text: ["  now " + fmtUsd(y[0]), "expiry " + fmtUsd(y[y.length - 1]) + "  "],
+    // Placed away from the line rather than on it: the curve leaves `now`
+    // heading up-right and arrives at expiry from above, so labels go below
+    // and above respectively. Padding spaces keep them off their markers.
+    textposition: ["bottom right", "top left"],
+    textfont: { size: 10, color: c.muted },
+    marker: { color: "#58a6ff", size: 8, line: { color: c.paper, width: 1.5 } },
+    hoverinfo: "skip", showlegend: false,
+  });
+
+  Plotly.react(el, traces, {
+    margin: { l: 64, r: 18, t: 10, b: 40 },
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: { color: c.text, size: 11 },
+    xaxis: {
+      title: { text: "Days from today", font: { size: 11 } },
+      gridcolor: c.grid, zeroline: false, color: c.muted,
+    },
+    yaxis: {
+      title: { text: "P&L (USD)", font: { size: 11 } },
+      gridcolor: c.grid, color: c.muted,
+      zeroline: true, zerolinecolor: c.zeroline, zerolinewidth: 1,
+      tickprefix: "$", tickformat: ",.0f",
+    },
+    showlegend: false,
+    hovermode: "x unified",
+  }, { displayModeBar: false, responsive: true });
+}
+
 function drawDealsChart(deals, single, base, wi) {
   const el = document.getElementById("deals-payoff-chart");
   if (!el) return;

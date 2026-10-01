@@ -346,6 +346,47 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
             "payoff": [round(float(x), 2) for x in leg_payoff],
         })
 
+    # ── time decay at today's spot ────────────────────────────────────────
+    # What the deal is worth as the days pass if spot does not move: the theta
+    # bleed, which the price-and-time curves imply but never state directly.
+    #
+    # Plain BS with T = max(dte - h, 0) is the RIGHT formula here, unlike the
+    # pnl_curves above which need bs_vec_bridge. The bridge exists to handle a
+    # pillar spot that differs from today's, so a leg already expired at the
+    # pillar is not wrongly assumed to have settled at the pillar spot. Here
+    # spot is pinned at today's level by construction, so a leg that has
+    # expired really did settle at intrinsic at this very spot — which is
+    # exactly what max(dte - h, 0) gives.
+    decay_days: list[int] = []
+    decay_pnl: list[float] = []
+    if spot > 0 and horizon_days > 0:
+        step = max(1, horizon_days // 60)          # <= ~61 points, always daily or coarser
+        days_axis = list(range(0, horizon_days + 1, step))
+        if days_axis[-1] != horizon_days:
+            days_axis.append(horizon_days)
+        spot_arr = np.array([spot])
+        # IV per leg once, not once per day: this loop runs ~60 days x legs x
+        # deals, and a surface lookup inside it turned one page render into
+        # thousands of redundant interpolations.
+        leg_sigmas = []
+        for leg in legs:
+            iv_l = _iv_from_surface(leg["expiry"], leg["strike"], smiles,
+                                    deribit_dates, today)
+            leg_sigmas.append((iv_l / 100.0) if iv_l is not None else DEFAULT_IV)
+        for h in days_axis:
+            total = 0.0
+            for leg, sig_l in zip(legs, leg_sigmas):
+                t_rem = max(leg["days_rem"] - h, 0) / 365.25
+                if t_rem > 0:
+                    val = float(_bs_vec(spot_arr, leg["strike"], t_rem, 0.0, sig_l,
+                                        leg["opt"])[0])
+                else:
+                    val = (max(spot - leg["strike"], 0.0) if leg["opt"] == "C"
+                           else max(leg["strike"] - spot, 0.0))
+                total += leg["signed_qty"] * val + leg["premium_usd"]
+            decay_days.append(int(h))
+            decay_pnl.append(round(total, 2))
+
     label, desc = _classify(legs)
 
     # Probability model at the deal horizon, using ATM IV at the spot.
@@ -386,6 +427,9 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
         "horizons": deal_horizons,
         "pnl_curves": {k: [round(float(x), 2) for x in v]
                        for k, v in horizon_curves.items()},
+        # Theta bleed at today's spot: days forward -> P&L if spot stays put.
+        "decay_days": decay_days,
+        "decay_pnl": decay_pnl,
         "prob_mass": [float(x) for x in mass] if mass is not None else None,
         "prob_density": [float(x) for x in density] if density is not None else None,
         "prob_profit": prob_profit,
