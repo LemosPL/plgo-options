@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from plgo_options.data.collar_loans import drop_collar_loans
 from plgo_options.data.database import get_db
 from plgo_options.market_data.deribit_client import DeribitClient
 from plgo_options.web.routes.portfolio import portfolio_pnl
@@ -136,7 +137,7 @@ async def _load_margin_rows() -> list[dict]:
                   requested_usd, notes, updated_at
            FROM counterparty_margin"""
     )
-    rows = await cursor.fetchall()
+    rows = drop_collar_loans(await cursor.fetchall())
     return [
         {
             "counterparty": r["counterparty"],
@@ -689,6 +690,16 @@ async def collateral_map():
     db = await get_db()
     cur = await db.execute("SELECT counterparty, asset, book, qty FROM counterparty_collateral")
     rows = await cur.fetchall()
+    # Collar-loan counterparties leave the map with their posted collateral AND
+    # their liability together. The liability already went when portfolio_pnl
+    # dropped their trades, so keeping the posted side here would show haircut
+    # collateral against nothing and report a meaningless surplus.
+    #
+    # Note what this costs: what is posted to FalconX and Galaxy is no longer
+    # visible on this screen. That was the explicit choice — those books are
+    # managed as loans, not as desk risk — but it does mean the collateral map
+    # is now the managed book's map, not everything the firm has posted.
+    rows = drop_collar_loans(rows)
 
     assets = list(MAP_ASSETS)
     for r in rows:

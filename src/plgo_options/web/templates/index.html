@@ -2161,6 +2161,20 @@
           </div>
         </div>
 
+        <!-- Book scope -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Book scope</div>
+          <div class="optv3-field">
+            <label for="optv4-exclude-collar-loans" style="display:flex;gap:.45rem;align-items:center">
+              <input type="checkbox" id="optv4-exclude-collar-loans" checked style="width:auto;margin:0">
+              Exclude collar loans (FalconX, Galaxy)
+            </label>
+            <p class="optv3-hint">On by default. Those books are borrowing structures, not risk the desk steers,
+              so the optimizer and the agents fit the target against the managed book only. Untick to pull them
+              back in for this run &mdash; it will change the base curve, the collateral figure and the sizing.</p>
+          </div>
+        </div>
+
         <!-- Objective weights -->
         <div class="optv3-group">
           <div class="optv3-group-title">Objective weights</div>
@@ -3880,7 +3894,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=180"></script>
+<script src="/static/app.js?v=181"></script>
 <script src="/static/agents.js?v=9"></script>
 </body>
 </html>

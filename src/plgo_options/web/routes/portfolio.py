@@ -11,6 +11,7 @@ import numpy as np
 from scipy.stats import norm
 
 from plgo_options.data.database import get_db
+from plgo_options.data.collar_loans import split_collar_loans
 from plgo_options.data.trade_repository import list_trades
 from plgo_options.data.trades import read_eth_trades, read_fil_trades
 from plgo_options.pricing.options import bs_price
@@ -351,13 +352,24 @@ async def build_market_context(asset: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/pnl")
-async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False):
-    """Return per-trade MTM across spot ladder and time horizons."""
+async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
+                        include_collar_loans: bool = False):
+    """Return per-trade MTM across spot ladder and time horizons.
+
+    ``include_collar_loans`` defaults to False: the FalconX and Galaxy books are
+    borrowing structures, not risk the desk steers, and leaving them in made
+    Optimizer v4 fit its target against legs nobody intends to adjust. Every
+    consumer of this payload — v4, the agents, collateral, holistic — therefore
+    sees the managed book by default. The Optimizer v4 screen has a toggle to
+    bring them back; see ``data.collar_loans``.
+    """
     is_fil = asset.upper() == "FIL"
     # 1. Read trades from database
     try:
         db = await get_db()
         db_trades = await list_trades(db, include_expired=include_expired, include_deleted=False, asset=asset.upper())
+        if not include_collar_loans:
+            db_trades, _dropped = split_collar_loans(db_trades)
         # Map DB fields to legacy column names the enrichment loop expects
         trades = []
         for t in db_trades:

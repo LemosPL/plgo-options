@@ -15162,6 +15162,10 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
 
     const data = await post("/api/optimization/run", {
       asset: currentAsset,
+      // Collar loans (FalconX, Galaxy) are out of the managed book by default.
+      // The toggle ships ON (exclude), so we only send true when someone has
+      // deliberately unticked it to pull those legs back into the analysis.
+      include_collar_loans: !(document.getElementById("optv4-exclude-collar-loans")?.checked ?? true),
       lam_factor: parseFloat(document.getElementById("optv4-lam-factor").value || "0.2"),
       downside_factor: parseFloat(document.getElementById("optv4-downside-factor")?.value || "1"),
       t90_weight: parseFloat(document.getElementById("optv4-t90-weight")?.value || "0.2"),

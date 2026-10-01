@@ -72,6 +72,10 @@ async def _fetch_collateral_by_cp() -> dict[str, dict[str, float]]:
 
 class OptimizationParams(BaseModel):
     asset: str = "ETH"
+    # Collar loans (FalconX, Galaxy) are out of the managed book by default;
+    # the v4 screen ships with its toggle on and sends true only when a
+    # person unticks it. See data.collar_loans.
+    include_collar_loans: bool = False
     lam_factor: float = 0.2
     mu_factor: float = 0.0
     target_expiry: str | None = None
@@ -296,7 +300,9 @@ async def run_optimizer(params: OptimizationParams):
         # whatever positions it was given in favor of a fresh xlsx re-read; now
         # that it uses these positions directly, True here would flood the book
         # with every historically-expired trade as if it were still live.
-        pnl_data = await portfolio_pnl(asset=params.asset.upper(), include_expired=False)
+        pnl_data = await portfolio_pnl(
+            asset=params.asset.upper(), include_expired=False,
+            include_collar_loans=params.include_collar_loans)
     except HTTPException as e:
         raise HTTPException(
             status_code=e.status_code,

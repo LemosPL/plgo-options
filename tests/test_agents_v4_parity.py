@@ -18,7 +18,12 @@ from plgo_options.web.routes import optimization as route
 def test_agent_params_match_v4_page(monkeypatch):
     captured = {}
 
-    async def fake_pnl(asset, include_expired=False):
+    # Mirrors portfolio_pnl's signature, including include_collar_loans — the
+    # route passes it through, so a stub that omits it fails with a TypeError
+    # rather than a parity mismatch. Defaulting it False here matches the real
+    # default: collar loans are out of the managed book unless asked for.
+    async def fake_pnl(asset, include_expired=False, include_collar_loans=False):
+        captured["include_collar_loans"] = include_collar_loans
         return {"spot": 2684.0, "positions": [], "totals": {}}
 
     async def fake_perp(asset, pnl):
@@ -62,3 +67,28 @@ def test_agent_params_match_v4_page(monkeypatch):
                                       **opt.run_kwargs("ETH", preset, variant)))
     diffs = {k: (page[k], agent[k]) for k in page if page[k] != agent[k]}
     assert diffs == {}, diffs
+
+
+def test_agent_sweep_excludes_collar_loans_like_the_v4_page(monkeypatch):
+    """The agents' sweep must see the same book the v4 page does by default.
+
+    The v4 screen ships with "Exclude collar loans" ticked, so the agent — which
+    has no UI and never passes the flag — has to land on the same exclusion via
+    the default. If these two ever disagree the agent would propose trades sized
+    against a different book than the one a person is looking at.
+    """
+    import inspect
+
+    from plgo_options.agents import optimizer as agent_opt
+    from plgo_options.web.routes.portfolio import portfolio_pnl
+
+    # The agent calls portfolio_pnl without the flag ...
+    src = inspect.getsource(agent_opt)
+    assert "portfolio_pnl(" in src
+    assert "include_collar_loans" not in src, (
+        "the agent should rely on the default rather than pin the flag, so the "
+        "two cannot drift apart"
+    )
+    # ... and that default is exclusion.
+    assert inspect.signature(portfolio_pnl).parameters[
+        "include_collar_loans"].default is False

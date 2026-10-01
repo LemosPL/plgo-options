@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import numpy as np
 
+from plgo_options.data.collar_loans import split_collar_loans
 from plgo_options.data.database import get_db
 from plgo_options.data.deal_grouping import (
     classify_structure as _classify,
@@ -167,6 +168,10 @@ async def build_deals_payload(
         db = await get_db()
         rows = await list_trades(db, include_expired=include_expired,
                                  include_deleted=False, asset=asset)
+        # Collar loans (FalconX, Galaxy) are borrowing structures, not risk the
+        # desk steers, so they leave the managed book here too — otherwise the
+        # Deals screen and the optimizer would disagree about what the book is.
+        rows, _collar_rows = split_collar_loans(rows)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read trades: {e}")
 
