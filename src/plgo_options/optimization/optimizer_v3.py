@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from .base_optimizer import BaseOptimizer, RiskMode, PERP_COUNTERPARTY
 from .collateral_optimization import CollateralOptimization
-from .delta_hedger import check_rehedge, perp_trade_cost
+from .delta_hedger import net_option_delta, perp_trade_cost, plan_counterparty_rehedge
 from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
 from .math_utils import bs_vec, bs_vec_bridge
@@ -977,7 +977,14 @@ class OptimizerV3(BaseOptimizer):
 
         return box_trades
 
-    def _build_delta_rehedge_trade(
+    # Smallest per-counterparty rehedge leg worth trading, as a fraction of the
+    # delta band: below it a counterparty's leg is noise (and a fee) rather
+    # than collateral relief. With fewer than 10 counterparties a breached book
+    # always has at least one counterparty above it (|Σ m| > band means some
+    # |m| > band / n), so the floor can never swallow a whole rehedge.
+    _REHEDGE_MIN_LEG_FRACTION = 0.10
+
+    def _build_delta_rehedge_trades(
             self,
             trades: list[dict],
             roll_position_ids: set,
@@ -985,64 +992,111 @@ class OptimizerV3(BaseOptimizer):
             perp_cost_bps: "dict[str, float] | float | None",
             unwind_discount: float,
             new_position_penalty: float,
-    ) -> dict | None:
-        """Delta-band cleanup via delta_hedger.check_rehedge, run on the book
-        this LP call just produced (existing positions minus whatever's being
-        rolled off, plus every option trade just proposed) rather than on a
-        live/intraday snapshot. ``trades`` already includes roll-unwind and
+            counterparties: list[str] | None = None,
+    ) -> list[dict]:
+        """Delta-band cleanup via delta_hedger.plan_counterparty_rehedge, run on
+        the book this LP call just produced (existing positions minus whatever's
+        being rolled off, plus every option trade just proposed) rather than on
+        a live/intraday snapshot. ``trades`` already includes roll-unwind and
         box-neutralizer legs by the time this runs; only C/P legs count toward
         the option-delta mismatch (a "F" leg the LP itself proposed already
-        carries delta 1:1 and is folded into ``perp_position`` instead, so it
-        isn't double-counted).
+        carries delta 1:1 and is folded into that counterparty's perp position
+        instead, so it isn't double-counted).
+
+        The trigger is the whole book's mismatch against the band, as before;
+        once breached, each counterparty flattens its OWN option delta with a
+        perp booked at that counterparty, so the hedge nets against the options
+        it offsets there (collateral) instead of sitting on an exchange venue
+        nothing nets against. A hedge already held on the exchange
+        (PERP_COUNTERPARTY) has no options beside it, so the same rule unwinds
+        it as the counterparty hedges take over. Only counterparties in the
+        run's scope trade; one scoped out keeps its delta.
+
+        Counterparty names are matched case-insensitively ("KeyRock" and
+        "Keyrock" are one counterparty) and each leg is booked under the
+        spelling the book's option legs use.
 
         ``delta_band_usd`` is denominated in dollars, not underlying tokens —
         ETH trades in the thousands per token and FIL trades near $1, so a
         single token-unit band would mean wildly different real risk
         tolerances on the two books (and drift further as either spot moves).
-        Converted to token units via the run's own spot right here, at the
-        one place check_rehedge (which compares against ``mismatch``, itself
-        in token units) actually consumes it.
+        Converted to token units via the run's own spot right here.
 
-        Returns None if the band isn't breached, or if it rounds to a zero
-        trade — otherwise one perp trade dict on PERP_COUNTERPARTY, sized to
-        flatten the mismatch back to zero (delta_hedger's policy, not just to
-        the edge of the band).
+        Returns [] if the band isn't breached or every leg rounds to zero —
+        otherwise one perp trade dict per counterparty, each sized to flatten
+        that counterparty back to zero (delta_hedger's trade-to-zero policy).
         """
         live_positions = [p for p in self.positions if id(p) not in roll_position_ids]
 
-        trade_option_delta = sum(
-            float(t.get("delta_contribution", 0.0) or 0.0)
-            for t in trades if t.get("opt") in ("C", "P")
-        )
-        existing_perp_qty = sum(
-            float(getattr(p, "net_qty", 0.0) or 0.0)
-            for p in live_positions if str(getattr(p, "opt", "") or "") == "F"
-        )
-        lp_perp_qty = sum(
-            float(t.get("qty", 0.0) or 0.0)
-            for t in trades if t.get("opt") == "F"
-        )
+        spelling: dict[str, str] = {}
 
+        def key(cp) -> str:
+            name = str(cp or "").strip()
+            k = name.lower()
+            spelling.setdefault(k, name)
+            return k
+
+        # Option-leg spellings first, so a perp venue recorded as "Keyrock"
+        # books under the book's own "KeyRock".
+        option_positions_by_cp: dict[str, list] = {}
+        for p in live_positions:
+            if str(getattr(p, "opt", "") or "") in ("C", "P"):
+                option_positions_by_cp.setdefault(key(getattr(p, "counterparty", "")), []).append(p)
+        option_delta_by_cp = {
+            k: net_option_delta(ps, self.spot) for k, ps in option_positions_by_cp.items()
+        }
+        for t in trades:
+            if t.get("opt") in ("C", "P"):
+                k = key(t.get("counterparty"))
+                option_delta_by_cp[k] = (option_delta_by_cp.get(k, 0.0)
+                                         + float(t.get("delta_contribution", 0.0) or 0.0))
+        perp_by_cp: dict[str, float] = {}
+        for p in live_positions:
+            if str(getattr(p, "opt", "") or "") == "F":
+                k = key(getattr(p, "counterparty", ""))
+                perp_by_cp[k] = perp_by_cp.get(k, 0.0) + float(getattr(p, "net_qty", 0.0) or 0.0)
+        for t in trades:
+            if t.get("opt") == "F":
+                k = key(t.get("counterparty"))
+                perp_by_cp[k] = perp_by_cp.get(k, 0.0) + float(t.get("qty", 0.0) or 0.0)
+
+        scope = {
+            c.strip().lower() for c in (counterparties or [])
+            if c and c.strip() and c.strip().upper() != "ALL"
+        }
         band_tokens = (delta_band_usd / self.spot) if self.spot else 0.0
-        decision = check_rehedge(
-            positions=live_positions,
-            spot=self.spot,
-            perp_position=existing_perp_qty + lp_perp_qty,
-            band=band_tokens,
-            extra_option_delta=trade_option_delta,
+        plan = plan_counterparty_rehedge(
+            option_delta_by_cp, perp_by_cp, band=band_tokens,
+            min_leg=band_tokens * self._REHEDGE_MIN_LEG_FRACTION,
+            eligible=scope or None,
         )
+        decision = plan.decision
         print(f"  delta rehedge: option_delta={decision.net_option_delta:,.1f} "
               f"perp_position={decision.perp_position:,.1f} mismatch={decision.mismatch:,.1f} "
               f"band={decision.band:,.1f} (${delta_band_usd:,.0f}) breached={decision.breached}")
         if not decision.breached:
-            return None
+            return []
+        for k, m in sorted(plan.mismatch_by_cp.items()):
+            print(f"    {spelling.get(k, k):20s} mismatch={m:>+12,.1f}  trade={plan.legs.get(k, 0.0):>+12,.1f}")
+        print(f"    residual after rehedge={plan.residual:+,.1f}")
 
-        trade_qty = int(round(decision.trade_qty))
-        if trade_qty == 0:
-            return None
+        out = []
+        for k, qty in plan.legs.items():
+            trade_qty = int(round(qty))
+            if trade_qty == 0:
+                continue
+            out.append(self._perp_rehedge_trade(
+                spelling.get(k, k), trade_qty, perp_cost_bps,
+                unwind_discount=unwind_discount, new_position_penalty=new_position_penalty,
+            ))
+        return out
 
+    def _perp_rehedge_trade(self, counterparty: str, trade_qty: int,
+                            perp_cost_bps, unwind_discount: float,
+                            new_position_penalty: float) -> dict:
+        """One DELTA_REHEDGE perp trade dict at ``counterparty``."""
         cost_bps = CollateralOptimization._resolve(
-            perp_cost_bps, PERP_COUNTERPARTY, default=_PERP_COST_BPS_FALLBACK,
+            perp_cost_bps, counterparty, default=_PERP_COST_BPS_FALLBACK,
         )
         cost = perp_trade_cost(trade_qty, self.spot, cost_bps)
         est_cash_outlay = self._estimate_trade_cash_outlay(
@@ -1052,7 +1106,7 @@ class OptimizerV3(BaseOptimizer):
         )
         instrument_name = f"{self.asset}-PERPETUAL"
         return {
-            "counterparty": PERP_COUNTERPARTY,
+            "counterparty": counterparty,
             "instrument": instrument_name,
             "strategy": "DELTA_REHEDGE",
             "strategy_instrument": instrument_name,
@@ -1947,16 +2001,18 @@ class OptimizerV3(BaseOptimizer):
         # what the LP just picked, check whether the resulting book's net
         # option delta (existing positions plus every option trade just
         # proposed) still sits within a band once offset by the current perp
-        # holding, and if not, propose ONE additional perp trade — a cheap,
-        # bounded, delta-only cleanup — to flatten it back to zero.
+        # holdings, and if not, propose perp trades — one per counterparty,
+        # each flattening that counterparty's own delta where its options sit
+        # — a cheap, bounded, delta-only cleanup back to zero.
         if enable_delta_rehedge:
-            rehedge_trade = self._build_delta_rehedge_trade(
+            rehedge_trades = self._build_delta_rehedge_trades(
                 trades, roll_position_ids, delta_band_usd=delta_band_usd,
                 perp_cost_bps=perp_cost_bps,
                 unwind_discount=unwind_discount, new_position_penalty=new_position_penalty,
+                counterparties=counterparties,
             )
-            if rehedge_trade is not None:
-                trades.append(rehedge_trade)
+            if rehedge_trades:
+                trades.extend(rehedge_trades)
                 trades = self._aggregate_trade_legs(trades)
 
         # Re-attach: the box-neutralizer/rehedge trades appended above are new

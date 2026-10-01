@@ -3,8 +3,10 @@
 Why this exists
 ---------------
 The optimizer's delta-rehedge step (``optimization/delta_hedger.py``) proposes
-a perp trade on Binance Futures whenever the book's net option delta leaves its
-band — but until now there was nowhere to record the fill. The ``trades`` table
+perp trades whenever the book's net option delta leaves its band — one per
+counterparty, booked with that counterparty, so ``venue`` is the counterparty's
+name (older fills sit on Binance Futures). Until this ledger existed there was
+nowhere to record the fill. The ``trades`` table
 holds OTC option legs reconciled against counterparty spreadsheets and
 normalizes every ``option_type`` to Call/Put, so a perp could not live there.
 The consequences were all live at once: ``check_rehedge`` always read an
@@ -43,10 +45,21 @@ from plgo_options.market_data import perp_feed
 
 logger = logging.getLogger(__name__)
 
-# The optimizer hedges on one venue (see optimization/optimizer_v3.py's
-# PERP_COUNTERPARTY); the schema is per-venue so a second one can be added
-# without a migration.
+# Where a fill lands when no venue is named. The optimizer's delta rehedge now
+# books each counterparty's hedge with that counterparty (venue = the OTC
+# counterparty's name), so the ledger holds several venues per asset; this one
+# is the exchange the hedge originally sat on and is kept as the default so
+# fills recorded before that change still read back as they always did.
 DEFAULT_VENUE = "Binance Futures"
+
+# Venues whose perp margin is exchange margin rather than OTC collateral: a
+# position there nets against nothing on the Collateral page. Every other venue
+# is an OTC counterparty, and its perp nets against that counterparty's options.
+EXCHANGE_VENUES = frozenset({DEFAULT_VENUE.lower()})
+
+
+def is_exchange_venue(venue: str | None) -> bool:
+    return (venue or "").strip().lower() in EXCHANGE_VENUES
 
 
 def _now_ms() -> int:
@@ -153,6 +166,28 @@ async def add_trade(
     await db.commit()
     await invalidate_funding_from(db, asset, venue, to_epoch_ms(stamp))
     return int(cursor.lastrowid or 0)
+
+
+async def list_venues(db: aiosqlite.Connection, asset: str) -> list[str]:
+    """Every venue holding active fills for ``asset``, in first-seen order.
+
+    Venue names are matched case-insensitively everywhere (the column is
+    NOCASE), so "KeyRock" and "Keyrock" collapse to whichever spelling was
+    recorded first.
+    """
+    cursor = await db.execute(
+        """SELECT venue FROM perp_trades
+           WHERE asset = ? COLLATE NOCASE AND status = 'active'
+           GROUP BY venue COLLATE NOCASE ORDER BY MIN(id)""",
+        (asset,),
+    )
+    return [str(r["venue"]) for r in await cursor.fetchall()]
+
+
+async def get_trade(db: aiosqlite.Connection, trade_id: int) -> dict | None:
+    cursor = await db.execute("SELECT * FROM perp_trades WHERE id = ?", (int(trade_id),))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
 
 
 async def delete_trade(db: aiosqlite.Connection, trade_id: int) -> bool:

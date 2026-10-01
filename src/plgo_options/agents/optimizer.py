@@ -155,14 +155,14 @@ def pareto(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 async def gather_book(asset: str) -> tuple[dict, dict]:
     """The same inputs /api/optimization/run assembles, fetched once."""
     from plgo_options.data.deal_grouping import compute_composite_ids
-    from plgo_options.web.routes.optimization import _build_perp_position, _fetch_collateral_by_cp
+    from plgo_options.web.routes.optimization import _build_perp_positions, _fetch_collateral_by_cp
     from plgo_options.web.routes.portfolio import portfolio_pnl
 
     pnl = await portfolio_pnl(asset=asset.upper(), include_expired=False)
     try:
-        perp = await _build_perp_position(asset.upper(), pnl)
-        if perp is not None:
-            pnl["positions"] = list(pnl.get("positions") or []) + [perp]
+        perps = await _build_perp_positions(asset.upper(), pnl)
+        if perps:
+            pnl["positions"] = list(pnl.get("positions") or []) + perps
     except Exception:
         pass
     positions = pnl.get("positions") or []

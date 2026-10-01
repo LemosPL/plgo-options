@@ -36,10 +36,21 @@ from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 
 Counterparties = ["Keyrock", "Flowdesk", "Deribit"]
 
-# Venue for the synthetic perp/future candidate — Binance Futures lists perps
-# for both ETH and FIL (Deribit doesn't offer FIL perpetuals), so it's the one
-# venue that works across both assets this optimizer supports.
+# Exchange venue for perps — Binance Futures lists perps for both ETH and FIL
+# (Deribit doesn't offer FIL perpetuals). Perp candidates and the delta rehedge
+# trade with the run's OTC counterparties instead, so each hedge nets against
+# the options it offsets at that counterparty rather than tying up separate
+# exchange margin; this venue is only the fallback when no OTC counterparty is
+# in scope, and the name a legacy hedge recorded here still carries.
 PERP_COUNTERPARTY = "Binance Futures"
+
+
+def perp_counterparties(counterparties) -> list[str]:
+    """Venues to offer perps on: the OTC counterparties in scope, or the
+    exchange when there are none."""
+    otc = [cp for cp in (counterparties or [])
+           if cp and str(cp).strip().lower() != PERP_COUNTERPARTY.lower()]
+    return otc or [PERP_COUNTERPARTY]
 
 
 class RiskMode(Enum):
@@ -225,9 +236,10 @@ class BaseOptimizer:
 
                     for counterparty in counterparties:
                         if counterparty == PERP_COUNTERPARTY:
-                            # Not an options venue — it only ever appears here if a
-                            # caller explicitly scopes counterparties to include it;
-                            # the perp candidate itself is added unconditionally below.
+                            # Not an options venue — it appears here if a caller
+                            # scopes counterparties to include it, or if the book
+                            # still holds a hedge there; perp candidates are added
+                            # separately below.
                             continue
                         c = self.create_candidate(S, strike, 0., sigma, opt, expiry_code, expiry_date, dte, counterparty)
                         candidates.append(c)
@@ -261,18 +273,19 @@ class BaseOptimizer:
         # Perpetual future: delta=1, no gamma/theta/vega. A perp is a standing
         # instrument, not tied to any options expiry, so it's always in the
         # candidate universe (unlike option legs, which are scoped to
-        # target_expiry). Always available regardless of the run's options
-        # counterparty scope too — PERP_COUNTERPARTY (Binance Futures) is a
-        # distinct hedging venue from the OTC options counterparties being
-        # scoped in/out above, not one more of them, and the book never holds
-        # a position there yet for it to be auto-selected by.
-        perp_candidate = self.create_candidate(S, S, 0.0, 0.0, "F", "PERP", "",
-                                               0, PERP_COUNTERPARTY)
-        perp_candidate.delta = 1
-        # bs_greeks prices "F" at max(K-S, 0) = 0 for S==K, but a perp's
-        # price for notional/collateral/cash-flow purposes is just spot.
-        perp_candidate.bs_price_usd = S
-        candidates.append(perp_candidate)
+        # target_expiry). One per OTC counterparty in scope, so a perp the LP
+        # picks sits with the counterparty whose options it offsets (and counts
+        # toward that counterparty's loss cap); the exchange only when no OTC
+        # counterparty is in scope. Appended last — run_previous reads the
+        # final candidate as the perp.
+        for perp_cp in perp_counterparties(counterparties):
+            perp_candidate = self.create_candidate(S, S, 0.0, 0.0, "F", "PERP", "",
+                                                   0, perp_cp)
+            perp_candidate.delta = 1
+            # bs_greeks prices "F" at max(K-S, 0) = 0 for S==K, but a perp's
+            # price for notional/collateral/cash-flow purposes is just spot.
+            perp_candidate.bs_price_usd = S
+            candidates.append(perp_candidate)
 
         return candidates
 
@@ -677,8 +690,8 @@ class BaseOptimizer:
             # and forcing them to match would let unwind_discount cheapen a
             # reducing perp trade, which is wrong (closing a perp costs the same
             # bps as opening one). The LP can still trade the perp freely in
-            # either direction; check_rehedge is what reads the held quantity,
-            # and it reads p.opt == "F" straight off the position list.
+            # either direction; the delta rehedge is what reads the held
+            # quantity, per counterparty, straight off the position list.
             if p.opt == "F":
                 continue
             key = (exp_code, p.strike, p.opt, p.counterparty)

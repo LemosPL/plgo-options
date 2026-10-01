@@ -20,7 +20,6 @@ from plgo_options.optimization.optim_usecase import (
 )
 from plgo_options.data.database import get_db
 from plgo_options.data.deal_grouping import compute_composite_ids
-from plgo_options.data.perp_repository import DEFAULT_VENUE as PERP_VENUE
 from plgo_options.web.routes.perps import build_summary as perp_summary
 
 router = APIRouter()
@@ -130,7 +129,7 @@ class OptimizationParams(BaseModel):
     # itself. Off by default — a new, opt-in feature until users have tried it.
     enable_delta_rehedge: bool = False
     # Band width in USD notional, converted to underlying token units via
-    # spot at evaluation time (see optimizer_v3._build_delta_rehedge_trade) —
+    # spot at evaluation time (see optimizer_v3._build_delta_rehedge_trades) —
     # dollar-denominated so the same tolerance means the same real risk on
     # both books regardless of asset (FIL trades near $1, ETH in the
     # thousands) or how far either has moved since. 150,000 approximates the
@@ -224,8 +223,9 @@ class OptimizationParams(BaseModel):
     # deal. None/empty = pure auto-detection.
     composite_overrides: dict[str, dict[str, str]] | None = None
 
-async def _build_perp_position(asset: str, pnl_data: dict) -> dict | None:
-    """The perp hedge as one synthetic `opt == "F"` position, or None if flat.
+async def _build_perp_positions(asset: str, pnl_data: dict) -> list[dict]:
+    """The perp hedge as synthetic `opt == "F"` positions, one per venue that
+    holds a non-flat position (each OTC counterparty, plus the exchange).
 
     Shaped to match what optimization/models.py's Position expects, with three
     fields that carry real meaning downstream:
@@ -237,13 +237,29 @@ async def _build_perp_position(asset: str, pnl_data: dict) -> dict | None:
     * ``expiry`` far in the future. A perp never expires, and
       _get_roll_positions sweeps in anything whose DTE is under the roll
       threshold — a zero DTE here would put the hedge up for rolling.
-    * ``counterparty`` = the venue, matching base_optimizer.PERP_COUNTERPARTY,
-      so counterparty-scoped runs treat it as the hedging venue it is.
+    * ``counterparty`` = the venue, spelled the way that counterparty's option
+      legs spell it ("KeyRock" vs "Keyrock"), so the rehedge and the
+      per-counterparty loss cap see the perp in the same bucket as the options
+      it hedges. The exchange venue keeps its own name (PERP_COUNTERPARTY).
 
     Note it is NOT keyed to match the perp *candidate* in
     get_held_positions() — see the comment there.
     """
     summary = await perp_summary(asset)
+    spelling = {str(p.get("counterparty") or "").strip().lower(): p.get("counterparty")
+                for p in pnl_data.get("positions") or [] if p.get("counterparty")}
+    out = []
+    for i, venue_summary in enumerate(summary.get("by_venue") or []):
+        venue = str(venue_summary["venue"])
+        leg = _perp_position(asset, pnl_data, venue_summary,
+                             spelling.get(venue.strip().lower(), venue), pos_id=-1 - i)
+        if leg is not None:
+            out.append(leg)
+    return out
+
+
+def _perp_position(asset: str, pnl_data: dict, summary: dict, counterparty: str,
+                   pos_id: int) -> dict | None:
     qty = float(summary.get("net_qty") or 0.0)
     if abs(qty) < 1e-9:
         return None
@@ -261,8 +277,8 @@ async def _build_perp_position(asset: str, pnl_data: dict) -> dict | None:
     })
     by_horizon = {str(h): curve for h in horizons}
     return {
-        "id": -1,
-        "counterparty": PERP_VENUE,
+        "id": pos_id,
+        "counterparty": counterparty,
         "instrument": f"{asset}-PERPETUAL",
         "opt": "F",
         "option_type": "Perp",
@@ -345,20 +361,21 @@ async def run_optimizer(params: OptimizationParams):
 
     # ── Inject the perp hedge leg ─────────────────────────────────────────
     # portfolio_pnl deliberately keeps the hedge out of `positions` (it would
-    # show up as a Binance Futures line on the Collateral page and in the Deals
-    # grouping). The optimizer is the one consumer that must see it: without
-    # it, check_rehedge reads an existing perp position of zero and re-proposes
-    # the entire delta hedge on every run, however much of it is already on.
+    # show up in the Deals grouping and reconciliation). The optimizer is the
+    # one consumer that must see it, per counterparty: without it, the rehedge
+    # reads an existing perp position of zero at each counterparty and
+    # re-proposes the entire delta hedge on every run, however much is on.
     #
     # Injected after base_trade_ids scoping on purpose — a trade-level subset
     # of the options book is still hedged by the whole perp position — but
     # before composite tagging, which skips it (no composite_id).
     try:
-        perp_position = await _build_perp_position(params.asset.upper(), pnl_data)
-        if perp_position is not None:
-            pnl_data["positions"] = list(pnl_data.get("positions", []) or []) + [perp_position]
-            print(f"perp hedge: injected {perp_position['net_qty']:,.2f} "
-                  f"{params.asset.upper()} @ {perp_position['strike']:,.4f} avg entry")
+        perp_positions = await _build_perp_positions(params.asset.upper(), pnl_data)
+        if perp_positions:
+            pnl_data["positions"] = list(pnl_data.get("positions", []) or []) + perp_positions
+        for leg in perp_positions:
+            print(f"perp hedge: injected {leg['net_qty']:,.2f} {params.asset.upper()} "
+                  f"@ {leg['strike']:,.4f} avg entry on {leg['counterparty']}")
     except Exception as e:
         print(f"perp hedge: injection skipped ({e})")
 

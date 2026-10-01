@@ -10317,7 +10317,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       box_fee_bps: optBoxFeeDict("optv2-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
       perp_cost_bps: optPerpCostDict("optv2-perpcost-list"),
-      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv2-delta-band")?.value || "150000"),
       // User-edited target profile (Target Profile section). null = auto parametric.
@@ -10959,20 +10959,30 @@ function optVolPtsDict(listId) {
 // _PERP_COST_BPS_FALLBACK so the input seeds with the same fallback.
 const OPT_DEFAULT_PERP_COST_BPS = 2;
 
-// The synthetic perp candidate always trades on this one venue (engine's
-// PERP_COUNTERPARTY) — independent of which OTC options counterparties are in
-// the loaded book, so unlike VOLpts/box-fee this always renders exactly one
-// row, never derived from data.positions.
+// The exchange venue (engine's PERP_COUNTERPARTY). Perps now trade with the
+// book's OTC counterparties — each one's delta is hedged where its options sit
+// — so this only gets a cost row when it still holds a hedge the rehedge would
+// unwind, or when the book has no counterparty to hedge with at all.
 const OPT_PERP_COUNTERPARTY = "Binance Futures";
 
-// Render the editable perp-cost input, in BPS of notional (price × qty) — a
-// perp has zero vega so the VOLpts model can't price it.
+// Render one editable perp-cost input per counterparty, in BPS of notional
+// (price × qty) — a perp has zero vega so the VOLpts model can't price it.
+// Mirrors optRenderBoxFee, keeping values already typed.
 function optRenderPerpCost(listId, data) {
   const box = document.getElementById(listId);
   if (!box) return;
-  const prev = box.querySelector(".opt-perpcost-input")?.value;
-  const v = prev != null ? prev : OPT_DEFAULT_PERP_COST_BPS;
-  box.innerHTML = `<div class="optv3-field"><label>${OPT_PERP_COUNTERPARTY}<input type="number" class="opt-perpcost-input" data-cpty="${OPT_PERP_COUNTERPARTY}" value="${v}" step="0.25" min="0" style="width:5rem"></label></div>`;
+  const prev = {};
+  box.querySelectorAll(".opt-perpcost-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
+  const isExchange = cp => String(cp).toLowerCase() === OPT_PERP_COUNTERPARTY.toLowerCase();
+  const cps = [...new Set(((data && data.positions) || [])
+    .map(p => p.counterparty).filter(cp => cp && !isExchange(cp)))].sort();
+  const exchangeHedge = ((data && data.perp && data.perp.by_venue) || [])
+    .some(v => v.is_exchange && Math.abs(v.net_qty || 0) > 1e-9);
+  if (exchangeHedge || !cps.length) cps.push(OPT_PERP_COUNTERPARTY);
+  box.innerHTML = cps.map(cp => {
+    const v = prev[cp] != null ? prev[cp] : OPT_DEFAULT_PERP_COST_BPS;
+    return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-perpcost-input" data-cpty="${cp}" value="${v}" step="0.25" min="0" style="width:5rem"></label></div>`;
+  }).join("");
 }
 
 // Collect {counterparty: perp cost bps} from the inputs, or null if none set.
@@ -12525,7 +12535,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       box_fee_bps: optBoxFeeDict("optv3-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
       perp_cost_bps: optPerpCostDict("optv3-perpcost-list"),
-      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv3-delta-band")?.value || "150000"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -15224,7 +15234,7 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       box_fee_bps: optBoxFeeDict("optv4-boxfee-list"),
       // Per-counterparty perp/future trading cost, in bps of notional.
       perp_cost_bps: optPerpCostDict("optv4-perpcost-list"),
-      // Post-LP delta cleanup via a perp trade — see delta_hedger.check_rehedge.
+      // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv4-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv4-delta-band")?.value || "150000"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -18140,8 +18150,34 @@ function perpRender() {
     $err.textContent = `Live Binance feed unavailable (${p.market_error}) — position and settled funding are still accurate; the mark and unrealised P&L are not.`;
   }
 
+  perpRenderVenues();
   perpRenderTrades();
   perpRenderFunding();
+}
+
+// Per-venue split of the hedge: with the rehedge booking each counterparty's
+// leg at that counterparty, the net above is a sum across venues, and each
+// venue's leg is what nets against that counterparty's collateral.
+function perpRenderVenues() {
+  const box = document.getElementById("perp-venues");
+  if (!box) return;
+  const venues = (perpData.position.by_venue || []).filter(v => v.trade_count);
+  if (venues.length < 2 && !(venues.length === 1 && !venues[0].is_exchange)) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "block";
+  box.innerHTML = `<div class="table-wrap"><table class="data-table">
+    <thead><tr><th>Venue</th><th class="num">Net qty</th><th class="num">Avg entry</th>
+      <th class="num">Unrealised</th><th class="num">Funding</th><th>Collateral</th></tr></thead>
+    <tbody>${venues.map(v => `<tr>
+      <td>${v.venue}</td>
+      <td class="num ${Math.abs(v.net_qty) < 1e-9 ? "" : perpSignClass(v.net_qty)}">${Math.abs(v.net_qty) < 1e-9 ? "Flat" : perpFmtQty(v.net_qty)}</td>
+      <td class="num">${Math.abs(v.net_qty) < 1e-9 ? "--" : "$" + perpFmtPx(v.avg_entry)}</td>
+      <td class="num ${perpSignClass(v.unrealized_pnl_usd)}">${perpFmtUsd(v.unrealized_pnl_usd)}</td>
+      <td class="num ${perpSignClass(v.funding.total_usd)}">${perpFmtUsd(v.funding.total_usd)}</td>
+      <td style="color:var(--muted)">${v.is_exchange ? "exchange margin" : "nets vs. options"}</td>
+    </tr>`).join("")}</tbody></table></div>`;
 }
 
 function perpRenderTrades() {
@@ -18154,6 +18190,7 @@ function perpRenderTrades() {
     const notional = Math.abs(t.qty * t.price);
     return `<tr>
       <td>${String(t.traded_at || "").replace("T", " ").replace(/(\+00:00|Z)$/, "")}</td>
+      <td>${(t.venue || "").replace(/</g, "&lt;")}</td>
       <td class="${isBuy ? "mtm-pos" : "mtm-neg"}">${isBuy ? "Buy" : "Sell"}</td>
       <td class="num">${perpFmtQty(t.qty)}</td>
       <td class="num">$${perpFmtPx(t.price)}</td>
@@ -18170,7 +18207,7 @@ function perpRenderTrades() {
     btn.addEventListener("click", async () => {
       if (!confirm("Delete this fill? The net position and the funding already accrued against it will be recomputed.")) return;
       try {
-        await api("DELETE", `/api/perps/trades/${btn.dataset.id}?asset=${currentAsset}`);
+        await api("DELETE", `/api/perps/trades/${btn.dataset.id}`);
         await perpLoad();
       } catch (e) {
         alert(`Delete failed: ${e.message || e}`);
@@ -18189,6 +18226,7 @@ function perpRenderFunding() {
     const apr = r.funding_rate * (24 / hours) * 365 * 100;
     return `<tr>
       <td>${String(r.funding_time).replace("T", " ").replace("+00:00", "")}</td>
+      <td>${(r.venue || "").replace(/</g, "&lt;")}</td>
       <td class="num">${(r.funding_rate * 100).toFixed(4)}%</td>
       <td class="num" style="color:var(--muted)">${apr.toFixed(2)}%</td>
       <td class="num">$${perpFmtPx(r.mark_price)}</td>
@@ -18203,6 +18241,12 @@ function perpOpenModal() {
   document.getElementById("perp-modal-qty").value = "";
   document.getElementById("perp-modal-fee").value = "";
   document.getElementById("perp-modal-note").value = "";
+  // Suggest the venues already holding fills; the counterparty the optimizer
+  // booked the leg on is typed (or picked) here.
+  const venues = [...new Set((perpData?.position?.by_venue || []).map(v => v.venue))];
+  document.getElementById("perp-modal-venues").innerHTML =
+    venues.map(v => `<option value="${v.replace(/"/g, "&quot;")}"></option>`).join("");
+  document.getElementById("perp-modal-venue").value = "";
   // Pre-fill the price with the live mark and the time with now, since the
   // common case is recording a fill moments after it happened.
   document.getElementById("perp-modal-price").value = perpData?.position?.mark_price || "";
@@ -18220,10 +18264,13 @@ async function perpSaveFill() {
   const price = parseFloat(document.getElementById("perp-modal-price").value);
   if (!(qty > 0)) { alert("Quantity must be greater than zero."); return; }
   if (!(price >= 0)) { alert("Fill price must be a number."); return; }
+  const venue = document.getElementById("perp-modal-venue").value.trim();
+  if (!venue) { alert("Say who the perp is held with — the counterparty (or Binance Futures)."); return; }
   const raw = document.getElementById("perp-modal-time").value;
   try {
     await post("/api/perps/trades", {
       asset: currentAsset,
+      venue,
       side: document.getElementById("perp-modal-side").value,
       qty,
       price,

@@ -526,7 +526,7 @@
           <span class="risk-label">&Delta; options</span>
           <span class="risk-value" id="pf-total-delta">--</span>
         </div>
-        <div class="risk-metric" title="Options delta plus the perp hedge on Binance Futures — the book's real directional exposure. Manage the hedge leg on the Perp Hedge page.">
+        <div class="risk-metric" title="Options delta plus the perp hedge across every venue (counterparties and Binance Futures) — the book's real directional exposure. Manage the hedge leg on the Perp Hedge page.">
           <span class="risk-label">&Delta; net (hedged)</span>
           <span class="risk-value" id="pf-net-delta">--</span>
         </div>
@@ -1793,7 +1793,7 @@
           <input type="checkbox" id="optv2-enable-composite-unwind" checked>
           Unwind Whole Composites
         </label>
-        <label class="toggle-label" style="margin:0" title="Post-LP step: if the resulting book's net option delta (existing positions plus every option trade just proposed), offset by the current perp holding, still sits outside the band below, propose one perp trade on Binance Futures to flatten it back to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.">
+        <label class="toggle-label" style="margin:0" title="Post-LP step: if the resulting book's net option delta (existing positions plus every option trade just proposed), offset by the current perp holdings, still sits outside the band below, propose perp trades with the book's counterparties: each counterparty's own delta is flattened by a perp booked with that counterparty, so the hedge nets against its options for collateral. A hedge left on Binance Futures is unwound as they take over. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.">
           <input type="checkbox" id="optv2-enable-delta-rehedge">
           Delta Rehedge (perp)
         </label>
@@ -1825,7 +1825,7 @@
       </div>
       <div style="margin-top:.9rem;border-top:1px solid var(--border);padding-top:.75rem">
         <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin-bottom:.4rem">Perp/future trading cost — bps of notional</div>
-        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">The optimizer always hedges via a perp on Binance Futures (perps for both ETH and FIL) — an always-available venue, independent of the book's OTC options counterparties. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
+        <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">Perps trade with the book's counterparties — each one's delta is hedged where its options sit, so the hedge nets against them for collateral; Binance Futures only appears when it still holds a hedge to unwind. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
         <div id="optv2-perpcost-list" style="display:flex;flex-wrap:wrap;gap:.75rem"><div class="optv3-field"><label>Binance Futures<input type="number" class="opt-perpcost-input" data-cpty="Binance Futures" value="2" step="0.25" min="0" style="width:5rem"></label></div></div>
       </div>
     </section>
@@ -2269,7 +2269,7 @@
         <!-- Perp/future trading cost -->
         <div class="optv3-group">
           <div class="optv3-group-title">Perp/future trading cost (bps of notional)</div>
-          <p class="optv3-hint" style="margin:0 0 .55rem">The optimizer always hedges via a perp on Binance Futures (perps for both ETH and FIL) — an always-available venue, independent of the book's OTC options counterparties. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
+          <p class="optv3-hint" style="margin:0 0 .55rem">Perps trade with the book's counterparties — each one's delta is hedged where its options sit, so the hedge nets against them for collateral; Binance Futures only appears when it still holds a hedge to unwind. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
           <div id="optv3-perpcost-list"><div class="optv3-field"><label>Binance Futures<input type="number" class="opt-perpcost-input" data-cpty="Binance Futures" value="2" step="0.25" min="0" style="width:5rem"></label></div></div>
         </div>
 
@@ -2279,7 +2279,7 @@
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
-          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
+          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holdings, still sits outside the band, propose one perp trade per counterparty, booked with that counterparty, flattening its own delta to zero (nets against its options for collateral; a Binance Futures hedge is unwound as they take over). Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
           <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv3-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
           <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
@@ -2690,7 +2690,7 @@
         <!-- Perp/future trading cost -->
         <div class="optv3-group">
           <div class="optv3-group-title">Perp/future trading cost (bps of notional)</div>
-          <p class="optv3-hint" style="margin:0 0 .55rem">The optimizer always hedges via a perp on Binance Futures (perps for both ETH and FIL) — an always-available venue, independent of the book's OTC options counterparties. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
+          <p class="optv3-hint" style="margin:0 0 .55rem">Perps trade with the book's counterparties — each one's delta is hedged where its options sit, so the hedge nets against them for collateral; Binance Futures only appears when it still holds a hedge to unwind. A perp carries zero vega, so the VOLpts cost above can't price it. Cost = notional (price × qty) × bps/10,000 per executed leg.</p>
           <div id="optv4-perpcost-list"><div class="optv3-field"><label>Binance Futures<input type="number" class="opt-perpcost-input" data-cpty="Binance Futures" value="2" step="0.25" min="0" style="width:5rem"></label></div></div>
         </div>
 
@@ -2700,7 +2700,7 @@
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-box-neutralizer" checked> Box neutralizer</label>
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
-          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holding, still sits outside the band, propose one perp trade on Binance Futures to flatten it to zero. Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
+          <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holdings, still sits outside the band, propose one perp trade per counterparty, booked with that counterparty, flattening its own delta to zero (nets against its options for collateral; a Binance Futures hedge is unwound as they take over). Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
           <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv4-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
           <div class="optv3-field">
             <label for="optv4-custom-spot">Custom spot <input type="number" id="optv4-custom-spot" step="1" min="0" style="width:6.5rem"></label>
@@ -3542,9 +3542,11 @@
       </div>
 
       <p style="font-size:.74rem;color:var(--muted);margin:.35rem 0 .75rem;max-width:72ch">
-        The optimizer's delta-rehedge step proposes a perp trade on Binance Futures whenever net option
-        delta leaves its band. Record the fill here and the next run nets against it instead of
-        re-proposing the whole hedge &mdash; and the funding carry lands in P&amp;L.
+        The optimizer's delta-rehedge step proposes perp trades whenever net option delta leaves its
+        band &mdash; one per counterparty, booked with that counterparty so it nets against the options
+        it hedges there. Record each fill here under its counterparty and the next run nets against it
+        instead of re-proposing the hedge, the Collateral page nets its MtM against that counterparty's
+        options, and the funding carry lands in P&amp;L (priced off the exchange perp's rate).
       </p>
 
       <div class="collat-summary-grid">
@@ -3579,6 +3581,7 @@
           <div class="collat-metric-sub" id="perp-funding-apr-sub">annualised</div>
         </div>
       </div>
+      <div id="perp-venues" style="display:none;margin-top:.75rem"></div>
       <div id="perp-error" style="display:none;font-size:.75rem;color:var(--red);margin-top:.5rem"></div>
     </section>
 
@@ -3588,7 +3591,7 @@
         <table class="data-table">
           <thead>
             <tr>
-              <th>Traded at</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th>
+              <th>Traded at</th><th>Venue</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th>
               <th class="num">Notional</th><th class="num">Fee</th><th>Source</th><th>Note</th><th></th>
             </tr>
           </thead>
@@ -3610,7 +3613,7 @@
         <table class="data-table">
           <thead>
             <tr>
-              <th>Settled</th><th class="num">Rate</th><th class="num">Annualised</th>
+              <th>Settled</th><th>Venue</th><th class="num">Rate</th><th class="num">Annualised</th>
               <th class="num">Mark</th><th class="num">Position</th><th class="num">Payment</th>
             </tr>
           </thead>
@@ -3855,6 +3858,13 @@
       <button class="mtm-modal-close" id="perp-modal-close" aria-label="Close">&times;</button>
     </div>
     <div class="mtm-modal-body">
+      <div class="collat-form-row">
+        <label class="collat-form-label">Counterparty / venue
+          <input type="text" id="perp-modal-venue" list="perp-modal-venues" placeholder="e.g. KeyRock"
+                 title="Who the perp is held with — the counterparty the optimizer booked the leg on. Its MtM nets against that counterparty's options on the Collateral page.">
+          <datalist id="perp-modal-venues"></datalist>
+        </label>
+      </div>
       <div class="collat-form-row">
         <label class="collat-form-label">Side
           <select id="perp-modal-side">

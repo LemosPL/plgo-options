@@ -106,15 +106,16 @@ class OptimizerRunParams:
     enable_box_neutralizer: bool = True
     # Post-LP delta cleanup: after the LP's own trades, check whether the
     # resulting book's net option delta (offset by the current perp holding)
-    # still sits within delta_band_usd — if not, propose one perp trade (on
-    # base_optimizer.PERP_COUNTERPARTY) to flatten it back to zero. Orthogonal
-    # to the LP's own (rarely perp-using) shape fit — see optimizer_v3
-    # run_lp._build_delta_rehedge_trade. Off by default — a new, opt-in
+    # still sits within delta_band_usd — if not, propose perp trades, one per
+    # counterparty, each flattening that counterparty's own delta with a perp
+    # booked there (so it nets against those options for collateral).
+    # Orthogonal to the LP's own (rarely perp-using) shape fit — see
+    # optimizer_v3 run_lp._build_delta_rehedge_trades. Off by default — a new, opt-in
     # feature until users have tried it.
     enable_delta_rehedge: bool = False
     # Band width in USD notional — mismatches within the band are left alone.
     # Converted to underlying token units via spot at evaluation time (see
-    # _build_delta_rehedge_trade), so the same tolerance means the same real
+    # _build_delta_rehedge_trades), so the same tolerance means the same real
     # risk on both books: ETH trades in the thousands per token and FIL
     # trades near $1, so a token-unit band (the original design, 75 ETH)
     # was ~$52 of notional on FIL — trivial next to real FIL position sizes,

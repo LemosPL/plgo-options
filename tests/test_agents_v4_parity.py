@@ -42,7 +42,7 @@ def test_agent_params_match_v4_page(monkeypatch):
             return {"status": "ok"}
 
     monkeypatch.setattr(route, "portfolio_pnl", fake_pnl)
-    monkeypatch.setattr(route, "_build_perp_position", fake_perp)
+    monkeypatch.setattr(route, "_build_perp_positions", fake_perp)
     monkeypatch.setattr(route, "_fetch_collateral_by_cp", fake_coll)
     monkeypatch.setattr(route, "OptimizerUseCase", FakeUseCase)
 

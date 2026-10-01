@@ -61,7 +61,7 @@ def check_rehedge(
     very different per-token prices (ETH vs FIL, say) should derive it from a
     dollar target divided by spot rather than pass a fixed token count, or the
     same nominal band means wildly different real risk tolerance on each book
-    (see optimizer_v3._build_delta_rehedge_trade's delta_band_usd).
+    (see optimizer_v3._build_delta_rehedge_trades' delta_band_usd).
 
     ``extra_option_delta`` folds in option delta not yet reflected as a
     Position — e.g. new option trades proposed in the same run (by a
@@ -87,3 +87,69 @@ def perp_trade_cost(trade_qty: float, spot: float, cost_bps: float) -> float:
     the standard convention for perpetual futures (unlike the vega-based cost
     this codebase uses for options; a perp has no vega to price off of)."""
     return abs(trade_qty) * spot * cost_bps / 10_000.0
+
+
+@dataclass
+class CounterpartyRehedgePlan:
+    """Per-counterparty split of a breached rehedge: who trades what."""
+    decision: RehedgeDecision            # the whole-book check that gated it
+    mismatch_by_cp: dict[str, float]     # each counterparty's own unhedged delta
+    legs: dict[str, float]               # signed perp qty to trade, per counterparty
+    residual: float                      # book mismatch left after the legs trade
+
+
+def plan_counterparty_rehedge(
+        option_delta_by_cp: dict[str, float],
+        perp_by_cp: dict[str, float],
+        band: float,
+        min_leg: float = 0.0,
+        eligible=None,
+) -> CounterpartyRehedgePlan:
+    """Split a delta rehedge across counterparties so each hedge nets against
+    the options it offsets.
+
+    The trigger is unchanged — the WHOLE book's mismatch (every counterparty's
+    option delta plus every perp, wherever held) against ``band``, so a book
+    whose counterparties offset each other is left alone. Once breached, each
+    eligible counterparty trades a perp that flattens its OWN mismatch to zero
+    (option delta + perp already held there): that is the leg that shrinks its
+    collateral exposure, rather than one hedge on a venue nothing nets against.
+    A venue holding a perp but no options (the exchange) has the perp as its
+    whole mismatch, so the same rule unwinds it as the counterparty hedges take
+    over.
+
+    ``eligible`` (keys, or None for all) limits which counterparties may trade
+    — the run's counterparty scope. Legs smaller than ``min_leg`` tokens are
+    skipped rather than traded for noise. All keys must already be normalized
+    (the caller lower-cases counterparty names); units are underlying tokens.
+    """
+    keys = set(option_delta_by_cp) | set(perp_by_cp)
+    mismatch_by_cp = {
+        k: float(option_delta_by_cp.get(k, 0.0)) + float(perp_by_cp.get(k, 0.0))
+        for k in keys
+    }
+    book_mismatch = sum(mismatch_by_cp.values())
+    breached = abs(book_mismatch) > band
+    decision = RehedgeDecision(
+        net_option_delta=sum(option_delta_by_cp.values()),
+        perp_position=sum(perp_by_cp.values()),
+        mismatch=book_mismatch,
+        band=band,
+        breached=breached,
+        trade_qty=-book_mismatch if breached else 0.0,
+    )
+    legs: dict[str, float] = {}
+    if breached:
+        allowed = None if eligible is None else set(eligible)
+        for k, m in mismatch_by_cp.items():
+            if allowed is not None and k not in allowed:
+                continue
+            if abs(m) < max(min_leg, 1e-9):
+                continue
+            legs[k] = -m
+    return CounterpartyRehedgePlan(
+        decision=decision,
+        mismatch_by_cp=mismatch_by_cp,
+        legs=legs,
+        residual=book_mismatch + sum(legs.values()),
+    )

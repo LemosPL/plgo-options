@@ -760,22 +760,24 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
 
     # ── Perp hedge leg ────────────────────────────────────────────────────
     # The options book above is only half the position: the optimizer's
-    # delta-rehedge step hedges net option delta with a perp on Binance
-    # Futures, and that leg lives in its own ledger (data/perp_repository.py)
-    # because `trades` can only hold Call/Put legs. Fold it in here so the
-    # delta the desk reads is the one it actually runs, and so the daily
-    # snapshot records the hedged book rather than the naked options.
+    # delta-rehedge step hedges net option delta with perps — each
+    # counterparty's delta with a perp at that counterparty, plus any legacy
+    # hedge on Binance Futures — and those legs live in their own ledger
+    # (data/perp_repository.py) because `trades` can only hold Call/Put legs.
+    # Fold the total in here so the delta the desk reads is the one it
+    # actually runs, and so the daily snapshot records the hedged book rather
+    # than the naked options.
     #
-    # Deliberately NOT appended to `positions`: that list feeds the Collateral
-    # page's per-counterparty liability, the Deals grouping and reconciliation,
-    # none of which should grow a "Binance Futures" line — a perp's exchange
-    # margin is not OTC collateral. The optimizer gets the leg injected
-    # explicitly instead (see routes/optimization.py).
+    # Deliberately NOT appended to `positions`: that list feeds the Deals
+    # grouping and reconciliation, which are option-only. The perp's MtM is
+    # netted into per-counterparty liability by routes/collateral.py from
+    # `perp.by_venue`, and the optimizer gets the legs injected explicitly
+    # (see routes/optimization.py).
     perp_block = {
         "net_qty": 0.0, "avg_entry": 0.0, "mark_price": 0.0, "notional_usd": 0.0,
         "unrealized_pnl_usd": 0.0, "realized_pnl_usd": 0.0,
         "funding_total_usd": 0.0, "funding_last_30d_usd": 0.0,
-        "funding_apr_pct": None, "venue": PERP_VENUE, "available": False,
+        "funding_apr_pct": None, "venue": PERP_VENUE, "by_venue": [], "available": False,
     }
     try:
         perp_summary = await build_perp_summary(asset.upper())
@@ -791,6 +793,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             "funding_apr_pct": perp_summary["funding_apr_pct"],
             "total_pnl_usd": perp_summary["total_pnl_usd"],
             "venue": perp_summary["venue"],
+            "by_venue": [
+                {k: v[k] for k in ("venue", "is_exchange", "net_qty", "avg_entry",
+                                   "unrealized_pnl_usd")}
+                for v in perp_summary.get("by_venue") or []
+            ],
             # False only when the ledger is empty — a Binance outage still
             # leaves the position readable, just without a live mark.
             "available": perp_summary["trade_count"] > 0,

@@ -13,7 +13,11 @@ Data model — one row per (counterparty, portfolio_asset):
     )
 
 Liability per row = Σ max(0, −MtM_usd) across the counterparty's open
-positions in `portfolio_asset` options (BS MtM, matches Portfolio P&L page).
+positions in `portfolio_asset` options (BS MtM, matches Portfolio P&L page),
+then netted against the MtM of any perp hedge held with that counterparty:
+max(0, options liability − perp MtM). Options stay gross; only the perp nets,
+since it exists to offset that counterparty's option delta. A perp on an
+exchange venue (Binance Futures) is exchange margin and nets against nothing.
 """
 
 from __future__ import annotations
@@ -157,9 +161,30 @@ async def _load_margin_rows() -> list[dict]:
     ]
 
 
+def _otc_perps(data: dict | None) -> dict[str, dict]:
+    """OTC perp legs of a single-asset portfolio response, keyed by
+    counterparty (lower-cased): {"venue", "net_qty", "avg_entry", "mtm"}.
+    Exchange venues are left out — their margin is not OTC collateral."""
+    out: dict[str, dict] = {}
+    for v in ((data or {}).get("perp") or {}).get("by_venue") or []:
+        if v.get("is_exchange") or abs(float(v.get("net_qty") or 0)) < 1e-9:
+            continue
+        out[str(v["venue"]).strip().lower()] = {
+            "venue": v["venue"],
+            "net_qty": float(v["net_qty"]),
+            "avg_entry": float(v.get("avg_entry") or 0),
+            "mtm": float(v.get("unrealized_pnl_usd") or 0),
+        }
+    return out
+
+
 def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str, str], dict[str, int]]:
     """For a single-asset portfolio response, return:
        liabilities[cp_lower], display_names[cp_lower], position_count[cp_lower].
+
+    Option legs count gross (Σ max(0, −MtM)); an OTC perp held with the
+    counterparty then nets against that total, floored at zero. The perp
+    counts as one position.
     """
     liabilities: dict[str, float] = {}
     display: dict[str, str] = {}
@@ -175,6 +200,10 @@ def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str,
         mtm = float(p.get("current_mtm") or 0)
         if mtm < 0:
             liabilities[k] = liabilities.get(k, 0.0) + (-mtm)
+        counts[k] = counts.get(k, 0) + 1
+    for k, perp in _otc_perps(data).items():
+        display.setdefault(k, perp["venue"])
+        liabilities[k] = max(0.0, liabilities.get(k, 0.0) - perp["mtm"])
         counts[k] = counts.get(k, 0) + 1
     return liabilities, display, counts
 
@@ -478,6 +507,7 @@ async def collateral_scenario(asset: str = "ETH"):
     current_spot = float(data.get("eth_spot") or 0)  # field misleadingly named in portfolio_pnl
     ladder: list[float] = list(data.get("spot_ladder") or [])
     positions: list[dict] = data.get("positions") or []
+    otc_perps = _otc_perps(data)
 
     if not ladder:
         raise HTTPException(status_code=502, detail="No spot ladder from portfolio engine")
@@ -516,13 +546,20 @@ async def collateral_scenario(asset: str = "ETH"):
         # Liability at this spot = Σ max(0, −signed_qty × value) across positions.
         # portfolio_pnl already returns payoff_by_horizon["0"] = signed_qty × value
         # at each spot in the ladder.
-        liability = 0.0
+        # Per counterparty first, so an OTC perp nets against its own
+        # counterparty's options only (see _compute_liabilities).
+        liab_by_cp: dict[str, float] = {}
         for p in positions:
             mtm_arr = (p.get("payoff_by_horizon") or {}).get("0") or []
             if i < len(mtm_arr):
                 mtm = float(mtm_arr[i])
                 if mtm < 0:
-                    liability += -mtm
+                    k = (p.get("counterparty") or "").strip().lower()
+                    liab_by_cp[k] = liab_by_cp.get(k, 0.0) - mtm
+        for k, perp in otc_perps.items():
+            perp_mtm = perp["net_qty"] * (float(s) - perp["avg_entry"])
+            liab_by_cp[k] = max(0.0, liab_by_cp.get(k, 0.0) - perp_mtm)
+        liability = sum(liab_by_cp.values())
 
         eth_px = s if a == "ETH" else other_spot
         fil_px = s if a == "FIL" else other_spot
