@@ -106,11 +106,14 @@ const post = (path, body) => api("POST", path, body);
     .then((d) => {
       const rev = d && d.revision ? String(d.revision) : "";
       if (!rev) { el.textContent = "build ?"; return; }
-      // "plgo-options-00314-j8f" -> "00314-j8f"; "local" is left alone.
-      const m = rev.match(/(\d{5}-\w+)$/);
-      el.textContent = rev === "local" ? "local" : "rev " + (m ? m[1] : rev);
+      // Cloud Run names revisions "<service>-00316-5p4". That zero-padded
+      // counter increments on every deploy, so it is already the build number —
+      // just show it as one. The full revision stays in the tooltip.
+      const m = rev.match(/-(\d{3,6})-/);
+      el.textContent = rev === "local" ? "local"
+        : (m ? "build " + parseInt(m[1], 10) : "build ?");
       el.title = "Deployed revision: " + rev +
-        " — if this does not change after a deploy, your page is cached (Ctrl+Shift+R)";
+        " — if this number does not change after a deploy, your page is cached (Ctrl+Shift+R)";
     })
     .catch(() => { el.textContent = "build ?"; });
 })();
