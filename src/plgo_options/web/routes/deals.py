@@ -35,8 +35,10 @@ from plgo_options.data.deal_grouping import (
     group_composite_legs,
 )
 from plgo_options.data.trade_repository import list_trades
+from plgo_options.optimization.math_utils import bs_vec_bridge
 from plgo_options.web.routes.portfolio import (
     DEFAULT_IV,
+    PNL_MATRIX_HORIZONS,
     bs_greeks,
     build_market_context,
     _bs_vec,
@@ -259,6 +261,23 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
 
     leg_payloads = []
     total_payoff = np.zeros_like(grid)
+    # P&L across price AND time: one curve per horizon, so the shape can be read
+    # before expiry rather than only at it. Valued with bs_vec_bridge, the same
+    # way the Portfolio P&L matrix and Optimizer v4 value their curves, so the
+    # three screens agree. Not max(dte - h, 0): that snaps to intrinsic at the
+    # pillar spot once the horizon passes a leg's own expiry, which makes every
+    # later column identical — the "flat across horizons" this book already
+    # had once and fixed.
+    #
+    # Only horizons inside the deal's own life. Past a leg's expiry the bridge
+    # prices the conditional expectation of an already-settled payoff given
+    # today's spot and the pillar spot, so the ATM value decays to intrinsic at
+    # expiry and then RISES again (386 -> 0 at h=90 -> 201 at h=120 for a
+    # 90-day call). That is correct for the book-wide matrix, where legs have
+    # mixed expiries, and meaningless for one deal: after expiry its P&L is
+    # realized and fixed. The at-expiry case is the `payoff` line.
+    deal_horizons = [h for h in PNL_MATRIX_HORIZONS if h < horizon_days]
+    horizon_curves = {str(h): np.zeros_like(grid) for h in deal_horizons}
     greeks = {"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
     net_credit = 0.0       # entry cash: + received, - paid
     deal_mtm = 0.0         # current signed mark-to-market value (USD)
@@ -284,6 +303,15 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
         iv = _iv_from_surface(leg["expiry"], K, smiles, deribit_dates, today)
         sigma = (iv / 100.0) if iv is not None else DEFAULT_IV
         t_leg = max(leg["days_rem"], 0) / 365.25
+
+        # This leg's contribution to each horizon curve. The premium is the
+        # entry cashflow and is added once per horizon, so every curve is P&L
+        # against what we paid rather than a raw mark.
+        if spot > 0:
+            for h in deal_horizons:
+                vals = bs_vec_bridge(spot, grid, K, max(leg["days_rem"], 0),
+                                     float(h), sigma, opt)
+                horizon_curves[str(h)] += signed_qty * vals + prem_usd
 
         # Current value per contract (USD) and close cash (signed MTM on exit).
         if t_leg > 0 and spot > 0:
@@ -352,6 +380,12 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
         "atm_iv_pct": round(sigma_atm * 100, 1),
         "greeks": {k: round(v, 4) for k, v in greeks.items()},
         "payoff": [round(float(x), 2) for x in total_payoff],
+        # P&L by price and time. Keys are days forward; "0" is today's mark.
+        # The at-expiry line above stays as `payoff` — it is the terminal case
+        # and the one the breakevens and max profit/loss are measured on.
+        "horizons": deal_horizons,
+        "pnl_curves": {k: [round(float(x), 2) for x in v]
+                       for k, v in horizon_curves.items()},
         "prob_mass": [float(x) for x in mass] if mass is not None else None,
         "prob_density": [float(x) for x in density] if density is not None else None,
         "prob_profit": prob_profit,

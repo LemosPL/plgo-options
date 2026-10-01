@@ -17311,16 +17311,45 @@ function drawDealsChart(deals, single, base, wi) {
     });
   }
 
+  // Single-deal extra: P&L by price AND time. The at-expiry line below is the
+  // terminal case; these are the same P&L marked at horizons inside the deal's
+  // life, so time decay is visible instead of implied.
+  //
+  // Ordered data, so a sequential ramp — one hue, light (today) to dark
+  // (closest to expiry) — not categorical hues. These four steps pass the
+  // ordinal checks against this surface (monotone L, gaps >= 0.06, light end
+  // 3.92:1): #cde2fb #9ec5f4 #5598e7 #2a78d6. Four is also why only three
+  // horizons are drawn plus expiry; eight nested lines is not a readable chart.
+  let yMin = Infinity, yMax = -Infinity;
+  if (single && single.pnl_curves && (single.horizons || []).length) {
+    const RAMP = ["#cde2fb", "#9ec5f4", "#5598e7"];
+    const hs = single.horizons.slice();
+    let pick;
+    if (hs.length <= 3) pick = hs;
+    else pick = [hs[0], hs[Math.round((hs.length - 1) / 2)], hs[hs.length - 1]];
+    pick.forEach((h, i) => {
+      const y = single.pnl_curves[String(h)];
+      if (!y) return;
+      for (const v of y) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+      const label = h === 0 ? "Today" : `+${h}d`;
+      traces.push({
+        x: grid, y: y, name: `P&L ${label}`,
+        type: "scatter", mode: "lines",
+        line: { color: RAMP[i] || RAMP[RAMP.length - 1], width: 1.5 },
+        hovertemplate: `${label}<br>Spot %{x}<br>P&L %{y:$,.0f}<extra></extra>`,
+      });
+    });
+  }
+
   // One payoff line per selected deal. Track overall P&L extent so the spot /
   // breakeven verticals (drawn as traces — log x-axis can't use shapes cleanly)
   // span the full plot.
-  let yMin = Infinity, yMax = -Infinity;
   deals.forEach(d => {
     const m = dealMetrics(d, new Set());
     for (const v of m.after) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
     traces.push({
       x: grid, y: m.after,
-      name: `${d.counterparty} · ${d.strategy}`,
+      name: single ? `P&L at expiry · ${d.strategy}` : `${d.counterparty} · ${d.strategy}`,
       type: "scatter", mode: "lines",
       line: { color: dealColor(d.id), width: 2, dash: (single && hasWhatIf) ? "dot" : "solid" },
       hovertemplate: `${d.counterparty} ${d.strategy}<br>Spot %{x}<br>P&L %{y:$,.0f}<extra></extra>`,
