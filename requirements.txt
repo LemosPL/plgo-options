@@ -16,4 +16,5 @@ anthropic>=0.80
 python-dotenv>=1.0
 scikit-learn>=1.4
 authlib>=1.3
+httpx2  # authlib>=1.8 warns when falling back to httpx
 itsdangerous>=2.1
