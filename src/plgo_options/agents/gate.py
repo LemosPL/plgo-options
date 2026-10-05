@@ -56,10 +56,34 @@ class GateContext:
     perp_funding_month_usd: float = 0.0
     monday_mtm_usd: float | None = None
     current_mtm_usd: float | None = None
+    book_delta_usd: float | None = None  # options delta x spot, for the full-delta perp cap
 
 
 def _is_box(leg: dict) -> bool:
     return "BOX" in str(leg.get("strategy") or "").upper()
+
+
+def _roll_pairs(legs: list[dict]) -> tuple[list[tuple[dict, dict]], bool]:
+    """(unwind, new) pairs of the same counterparty and option type, and whether
+    every option leg belongs to one - i.e. the trade is only a roll."""
+    opts = [l for l in legs if l.get("kind", "option") == "option" and not _is_box(l)]
+    unwinds = [l for l in opts if l.get("is_unwind")]
+    news = [l for l in opts if not l.get("is_unwind")]
+    pairs, used, all_paired = [], set(), bool(unwinds)
+    for u in unwinds:
+        cands = [n for n in news if n.get("counterparty") == u.get("counterparty")
+                 and str(n.get("opt")) == str(u.get("opt"))]
+        if not cands:
+            all_paired = False
+            continue
+        n = min(cands, key=lambda c: abs(float(c["strike"]) - float(u["strike"])))
+        used.add(id(n))
+        pairs.append((u, n))
+    return pairs, all_paired and len(used) == len(news)
+
+
+def is_pure_roll(legs: list[dict]) -> bool:
+    return _roll_pairs(legs)[1]
 
 
 def classify_rolls(legs: list[dict]) -> list[dict]:
@@ -68,16 +92,8 @@ def classify_rolls(legs: list[dict]) -> list[dict]:
     Returns one entry per pair with type: out_same_strike | out_and_up |
     out_and_down | same_expiry_strike_move | in | diagonal.
     """
-    opts = [l for l in legs if l.get("kind", "option") == "option" and not _is_box(l)]
-    unwinds = [l for l in opts if l.get("is_unwind")]
-    news = [l for l in opts if not l.get("is_unwind")]
     pairs = []
-    for u in unwinds:
-        cands = [n for n in news if n.get("counterparty") == u.get("counterparty")
-                 and str(n.get("opt")) == str(u.get("opt"))]
-        if not cands:
-            continue
-        n = min(cands, key=lambda c: abs(float(c["strike"]) - float(u["strike"])))
+    for u, n in _roll_pairs(legs)[0]:
         ue, ne = str(u.get("expiry"))[:10], str(n.get("expiry"))[:10]
         uk, nk = float(u["strike"]), float(n["strike"])
         if ne == ue:
@@ -124,6 +140,9 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
     perp_legs = [l for l in legs if l.get("kind") == "perp"]
     notional = abs(float(p.get("notional_usd") or 0))
     net_cost = float(p.get("net_cost_usd") or 0)
+    lucas_rolls = not pol.rolls_need_chris
+    roll_only = lucas_rolls and is_pure_roll(legs)
+    perp_single, perp_cap = pol.perp_limits(ctx.book_delta_usd)
 
     # 0. Kill switch and frozen curves stop everything.
     if ctx.kill_switch:
@@ -137,6 +156,8 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
     if p.get("purpose") == "direction" and option_legs:
         reject.append("Never trade an option to change direction; use a perp or forward (A4).")
         check("instrument", False, "option legs on a direction trade", "A4")
+    elif option_legs and roll_only:
+        check("instrument", True, f"{len(option_legs)} option legs, roll only -> Lucas", "A5")
     elif option_legs:
         to_chris.append("Option trade changes the shape of the book (B1, B2b).")
         check("instrument", True, f"{len(option_legs)} option legs -> Chris", "A4")
@@ -163,6 +184,8 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
         elif t == "in":
             reject.append(f"Roll shortens expiry: {desc} (A5).")
             check("roll", False, desc, "A5")
+        elif t in ("out_same_strike", "out_and_up", "out_and_down", "diagonal") and lucas_rolls:
+            check("roll", True, desc + " -> Lucas (inside limits)", "A5")
         elif t in ("out_same_strike", "out_and_up", "out_and_down", "diagonal"):
             to_chris.append(f"Roll {t.replace('_', ' ')}: {desc}. Nobody rolls alone (A5).")
             check("roll", True, desc + " -> Chris", "A5")
@@ -187,25 +210,27 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
           f"net {'debit' if net_cost > 0 else 'credit'} ${abs(net_cost):,.0f}", "A3 / A5-2")
 
     # 6. Size (A3): above Lucas's limit, he does the limit, Chris the rest.
-    if perp_legs and not option_legs and notional > pol.max_single_trade_usd:
-        res.lucas_notional_usd = pol.max_single_trade_usd
-        res.chris_notional_usd = notional - pol.max_single_trade_usd
-        to_chris.append(f"Size ${notional:,.0f} over Lucas's ${pol.max_single_trade_usd:,.0f}: "
+    size_limit = perp_single if perp_legs and not option_legs else pol.max_single_trade_usd
+    if perp_legs and not option_legs and notional > perp_single:
+        res.lucas_notional_usd = perp_single
+        res.chris_notional_usd = notional - perp_single
+        to_chris.append(f"Size ${notional:,.0f} over Lucas's ${perp_single:,.0f}: "
                         f"Lucas does ${res.lucas_notional_usd:,.0f}, Chris decides the rest (A3).")
     elif option_legs and notional > pol.max_single_trade_usd:
         to_chris.append(f"Option notional ${notional:,.0f} over the single-trade limit (A3).")
-    check("size", notional <= pol.max_single_trade_usd, f"${notional:,.0f}", "A3")
+    check("size", notional <= size_limit, f"${notional:,.0f} vs ${size_limit:,.0f}", "A3")
 
     # 7. Perp caps (A3).
     if perp_legs:
         signed = sum((1 if l.get("side") == "Buy" else -1) * abs(float(l.get("qty") or 0)) * ctx.spot
                      for l in perp_legs)
         after = abs(ctx.perp_notional_usd + signed)
-        if after > pol.max_perp_notional_usd:
-            to_chris.append(f"Perp position would be ${after:,.0f}, over the ${pol.max_perp_notional_usd:,.0f} cap (A3).")
-        if ctx.perp_funding_month_usd > pol.perp_funding_budget_month_usd:
+        if after > perp_cap:
+            to_chris.append(f"Perp position would be ${after:,.0f}, over the ${perp_cap:,.0f} cap (A3).")
+        budget = pol.perp_funding_budget_month_usd
+        if budget is not None and ctx.perp_funding_month_usd > budget:
             to_chris.append("Perp funding this month is over budget (A3).")
-        check("perp caps", after <= pol.max_perp_notional_usd, f"after ${after:,.0f}", "A3")
+        check("perp caps", after <= perp_cap, f"after ${after:,.0f} vs cap ${perp_cap:,.0f}", "A3")
 
     # 8. Price (B3): the whole package, our model, two quotes. Recorded, not blocking here.
     check("price", True, "needs our model price + 2 package quotes before execution", "B3 / A5-3")

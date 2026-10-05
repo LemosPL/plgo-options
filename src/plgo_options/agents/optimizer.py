@@ -49,7 +49,7 @@ def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any]) -> 
         asset=asset.upper(),
         lam_factor=variant["lam_factor"],
         mu_factor=preset.mu_factor,
-        target_expiry=preset.target_expiry,
+        target_expiry=preset.effective_expiry(),
         cone_width_sigma=1.5,
         cone_quarterly_only=True,
         unwind_discount=preset.unwind_discount,
@@ -200,7 +200,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
     ranked = rank(summaries)
     return {
         "asset": policy.asset,
-        "target": {"expiry": preset.target_expiry, "counterparties": preset.counterparties,
+        "target": {"expiry": preset.effective_expiry(), "counterparties": preset.counterparties,
                    "trough": preset.target_trough_payoff, "down": preset.target_down_ratio,
                    "up": preset.target_up_ratio, "file": preset.target_profile_file},
         "runs": len(grid),

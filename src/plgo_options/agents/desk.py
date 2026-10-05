@@ -113,6 +113,7 @@ async def _gate_ctx(pol: AssetPolicy, spot: float, book: dict | None = None,
         perp_funding_month_usd=abs(float(((perp or {}).get("funding") or {}).get("last_30d_usd") or 0)),
         monday_mtm_usd=float(monday["mtm_usd"]) if monday else None,
         current_mtm_usd=(book or {}).get("mtm"),
+        book_delta_usd=float(book["delta"]) * spot if book and book.get("delta") is not None and spot else None,
     )
 
 
@@ -134,14 +135,15 @@ def _row_trade(asset: str, row, spot: float, book: dict, pol: AssetPolicy) -> di
         ref_delta = getattr(pol, "reference_delta", None)
         drift_units = (book["delta"] - ref_delta) if ref_delta is not None else None
         if drift_units is None:
-            notional = pol.max_single_trade_usd * (0.83 if row.step == 1 else 1.0)
+            single, _ = pol.perp_limits(None)
+            notional = single * (0.83 if row.step == 1 else 1.0)
         else:
             notional = abs(drift_units) * spot
         side = "Sell" if row.direction > 0 else "Buy"
         qty = notional / spot if spot else 0
         return {"asset": asset, "source": "row", "purpose": "direction", "row_key": row.key,
                 "legs": [{"kind": "perp", "side": side, "qty": round(qty, 2),
-                          "counterparty": "Binance Futures", "opt": "F"}],
+                          "counterparty": pol.perp_venue, "opt": "F"}],
                 "notional_usd": notional, "net_cost_usd": notional * 0.0002, "spot": spot,
                 "reason": f"Row {row.key} fired: {row.action}"}
     if row.instrument == "options" and asset.upper() == "ETH":

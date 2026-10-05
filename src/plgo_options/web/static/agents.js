@@ -116,8 +116,12 @@
         miss: (a) => !P(a).max_cost_per_trade_usd },
       { label: "Cost per month", v: (a) => money(P(a).max_cost_per_month_usd),
         miss: (a) => !P(a).max_cost_per_month_usd },
-      { label: "Perp / forward cap", v: (a) => money(P(a).max_perp_notional_usd),
+      { label: "Perp / forward cap", v: (a) => money(P(a).max_perp_notional_usd) +
+          (P(a).perp_cap_full_delta ? " or full delta" : "") +
+          (P(a).perp_venue ? ' <span style="color:var(--muted)">@' + esc(P(a).perp_venue) + "</span>" : ""),
         miss: (a) => !P(a).max_perp_notional_usd },
+      { label: "Rolls", v: (a) => P(a).rolls_need_chris === false ? "Lucas, inside limits" : "Chris",
+        miss: () => false },
       { label: "Funding budget, monthly", v: (a) => money(P(a).perp_funding_budget_month_usd),
         miss: (a) => !P(a).perp_funding_budget_month_usd },
       { label: "Counterparty universe",
@@ -208,8 +212,14 @@
           help: "Everything paid net across the month. The line that stops a bad month becoming a bad quarter." },
         { k: "max_perp_notional_usd", label: "Max perp / forward ($)", type: "num",
           help: "The biggest linear hedge allowed at any time." },
+        { k: "perp_cap_full_delta", label: "Perps up to full delta", type: "bool",
+          help: "Yes: the perp cap and Lucas's single perp trade grow to the options book's delta ($) when that is larger." },
+        { k: "perp_venue", label: "Perp venue", type: "text",
+          help: "Where row perps trade, and where the hedge's collateral sits." },
         { k: "perp_funding_budget_month_usd", label: "Monthly funding budget ($)", type: "num",
-          help: "What the hedge is allowed to cost us to carry." },
+          help: "What the hedge is allowed to cost us to carry. Empty = no budget set." },
+        { k: "rolls_need_chris", label: "Rolls need Chris", type: "bool",
+          help: "No: Lucas rolls alone inside size and cost limits. Shortening expiry or moving the strike at the same expiry stays rejected." },
         { k: "allowed_counterparties", label: "Counterparty universe", type: "list",
           help: "Comma-separated. Nothing outside this list without a conversation." },
       ] },
@@ -247,9 +257,10 @@
       g.fields.map((f) => {
         const id = "pol-" + f.k;
         let input;
-        if (f.type === "select") {
-          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="select">' +
-            f.opts.map((o) => '<option value="' + o[0] + '"' +
+        if (f.type === "select" || f.type === "bool") {
+          const opts = f.type === "bool" ? [["true", "Yes"], ["false", "No"]] : f.opts;
+          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="' + f.type + '">' +
+            opts.map((o) => '<option value="' + o[0] + '"' +
               (val(f.k) === o[0] ? " selected" : "") + ">" + esc(o[1]) + "</option>").join("") + "</select>";
         } else {
           const t = f.type === "num" ? "number" : f.type === "date" ? "date" : "text";
@@ -271,6 +282,8 @@
       } else if (t === "list") {
         const parts = raw ? raw.split(",").map((x) => x.trim()).filter(Boolean) : [];
         out[k] = k === "row_steps_pct" ? parts.map(Number).filter((n) => !isNaN(n)) : parts;
+      } else if (t === "bool") {
+        out[k] = raw === "true";
       } else if (t === "date") {
         out[k] = raw || null;
       } else {

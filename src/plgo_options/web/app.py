@@ -42,6 +42,7 @@ from plgo_options.web.routes import deals
 from plgo_options.web.routes import signals
 from plgo_options.web.routes import perps
 from plgo_options.web.routes import agents as agents_routes
+from plgo_options.agents.decisions import apply_pending as apply_decision_sheets
 from plgo_options.agents.store import init_agent_tables
 from plgo_options.web import auth as auth_mod
 from plgo_options.config import SESSION_MAX_AGE_SECONDS, SESSION_SECRET
@@ -55,6 +56,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 async def lifespan(app: FastAPI):
     await init_db()
     await init_agent_tables()
+    await apply_decision_sheets()
     await auth_mod.init_auth_tables()
     yield
     await close_db()

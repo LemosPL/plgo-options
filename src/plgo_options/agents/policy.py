@@ -9,6 +9,7 @@ values, and every brief says so at the top.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 
@@ -22,6 +23,10 @@ class OptimizerPreset:
     fewest and smallest trades.
     """
     target_expiry: str = "25DEC26"
+    # Move the target out once it gets close (decision sheet 5 Oct 2026: "all
+    # DEC26, move once 1-month out to MAR27"). None = never switch.
+    next_expiry: str | None = None
+    switch_days_before: int = 30
     counterparties: list[str] = field(default_factory=lambda: ["Flowdesk"])
 
     # Parametric V target (see misc_utils._scaled_linear_v_target_profile):
@@ -65,6 +70,19 @@ class OptimizerPreset:
     max_giveback_usd: float = 250_000.0
     max_runs: int = 16
 
+    def effective_expiry(self, today: date | None = None) -> str:
+        """The maturity the sweep targets today: next_expiry once target_expiry
+        is within switch_days_before days."""
+        if not self.next_expiry:
+            return self.target_expiry
+        try:
+            exp = datetime.strptime(self.target_expiry, "%d%b%y").date()
+        except ValueError:
+            return self.target_expiry
+        if (exp - (today or date.today())).days <= self.switch_days_before:
+            return self.next_expiry
+        return self.target_expiry
+
 
 @dataclass
 class AssetPolicy:
@@ -86,7 +104,12 @@ class AssetPolicy:
     max_cost_per_trade_usd: float = 0.0
     max_cost_per_month_usd: float = 0.0
     max_perp_notional_usd: float = 0.0
-    perp_funding_budget_month_usd: float = 0.0
+    # "500k - full directional exposure": the perp cap and Lucas's single perp
+    # trade grow to the options book's delta ($) when that is larger.
+    perp_cap_full_delta: bool = False
+    perp_funding_budget_month_usd: float | None = 0.0   # None = no budget set
+    perp_venue: str = "Binance Futures"    # where row perps trade
+    rolls_need_chris: bool = True          # A5; False = Lucas rolls inside his limits
     cost_tolerance_usd: float = 50_000.0   # B1a ±US$50k
     allowed_counterparties: list[str] = field(default_factory=list)
     optimizer: OptimizerPreset = field(default_factory=OptimizerPreset)
@@ -94,6 +117,14 @@ class AssetPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def perp_limits(self, book_delta_usd: float | None = None) -> tuple[float, float]:
+        """(biggest perp trade Lucas does alone, biggest perp position)."""
+        single, cap = self.max_single_trade_usd, self.max_perp_notional_usd
+        if self.perp_cap_full_delta and book_delta_usd:
+            full = abs(book_delta_usd)
+            single, cap = max(single, full), max(cap, full)
+        return single, cap
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "AssetPolicy":
