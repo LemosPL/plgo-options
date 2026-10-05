@@ -293,6 +293,30 @@ const CPTY_PRICING = {
       // ETH: not calibrated yet — fill in as you trade ETH with Keyrock.
     },
   },
+  // "bidSkewByTenor" (FalconX FIL, from their 30/60/90d call-bid sheet, spot ref
+  // 0.9374). Backing vols out of the 24 bids gives ~77.5% at every tenor with a
+  // mild upward skew: vol = base + slope x ln(K/spot), fitted per tenor and
+  // interpolated in days between them (flat outside 30-90d). Reprices all 24
+  // to within 2.3% (0.17% of spot). Bids only: legs we BUY return null and stay
+  // at mid until they quote offers. Not mirrored in pricing/cpty_pricing.py on
+  // purpose - the optimizer zeroes its VOLpts for calibrated counterparties, so
+  // a bid-only method would make buying from FalconX look free.
+  falconx: {
+    name: "FalconX",
+    byAsset: {
+      FIL: {
+        model: "bidSkewByTenor",
+        bidCurve: [
+          { days: 30, base: 77.6, slope: 18.8 },
+          { days: 60, base: 77.2, slope: 8.8 },
+          { days: 90, base: 77.9, slope: 13.0 },
+        ],
+        calibratedNote: "Calibrated from FalconX's FIL call bids (spot ref 0.9374, 30/60/90d, " +
+          "5-50% OTM) - reprices all 24 quotes to within 2.3% (0.17% of spot). " +
+          "Their offer side is not quoted yet, so legs you buy stay at mid.",
+      },
+    },
+  },
   wave:    { name: "Wave",    byAsset: {} },  // not calibrated yet
   g20:     { name: "G20",     byAsset: {} },  // not calibrated yet
 };
@@ -342,6 +366,24 @@ function syncPricingCptySelector(counterparties) {
 // Returns { prem, ivShown, mode } or null if it can't be applied.
 function applyCptyPricing(method, { spot, K, T, type, side }) {
   if (!method || method.uncalibrated) return null;
+
+  // Bid-only skew by tenor: what they pay for what we sell. Strikes below spot
+  // were not quoted, so they sit at the at-the-money level (no skew).
+  if (method.model === "bidSkewByTenor") {
+    if (side !== "sell") return null;              // no offer side yet -> mid
+    const pts = method.bidCurve, days = T * 365;
+    let base = pts[0].base, slope = pts[0].slope;
+    if (days >= pts[pts.length - 1].days) {
+      ({ base, slope } = pts[pts.length - 1]);
+    } else if (days > pts[0].days) {
+      const i = pts.findIndex((p) => p.days >= days);
+      const a = pts[i - 1], b = pts[i], w = (days - a.days) / (b.days - a.days);
+      base = a.base + w * (b.base - a.base);
+      slope = a.slope + w * (b.slope - a.slope);
+    }
+    const volPct = base + slope * Math.max(Math.log(K / spot), 0);
+    return { prem: pricerBs(spot, K, T, 0, volPct / 100, type), ivShown: volPct, mode: "bid" };
+  }
 
   // Two-sided vol market: the vol depends on which side WE trade, not on the
   // strike. They buy from us at their bid vol and sell to us at their ask vol,
@@ -417,6 +459,22 @@ function cptyMethodBoxHtml(cptyKey, asset) {
       `calls, they are charging more for whatever you are buying. And unlike Flowdesk, ` +
       `<strong>in-the-money options keep their full time value</strong> — nothing is priced at ` +
       `intrinsic only.</p>` +
+      `<p style="margin:.4rem 0 0;font-size:.68rem;opacity:.75">${method.calibratedNote}</p>`;
+  }
+  if (method.model === "bidSkewByTenor") {
+    const c = method.bidCurve;
+    return `<strong>How ${method.name} prices your trades</strong>` +
+      `<p style="margin:.4rem 0 0">${method.name} buys from us at about ` +
+      `<strong>${Math.round(c.reduce((s, p) => s + p.base, 0) / c.length)}% vol</strong> near the money, ` +
+      `rising slowly the further out the strike is (e.g. a strike 50% above spot carries ` +
+      `about ${(c[c.length - 1].base + c[c.length - 1].slope * Math.log(1.5)).toFixed(0)}% at ` +
+      `${c[c.length - 1].days} days).</p>` +
+      `<ul style="margin:.35rem 0 0 .9rem;padding:0;list-style:disc">` +
+      c.map((p) => `<li>${p.days}d: ${p.base}% at the money, +${(p.slope * Math.log(1.25)).toFixed(1)} ` +
+        `vol points at 25% out of the money</li>`).join("") +
+      `</ul>` +
+      `<p style="margin:.4rem 0 0"><strong>Only legs you sell use their price.</strong> They have not ` +
+      `quoted an offer, so legs you buy are shown at the mid vol surface.</p>` +
       `<p style="margin:.4rem 0 0;font-size:.68rem;opacity:.75">${method.calibratedNote}</p>`;
   }
   return `<strong>${method.name} methodology</strong> — ${method.calibratedNote}` +
