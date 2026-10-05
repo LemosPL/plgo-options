@@ -66,7 +66,8 @@ SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE_SECONDS", 24 * 360
 # Who may sign in. Comma-separated override via ALLOWED_EMAILS.
 _DEFAULT_ALLOWED = (
     "chris@protocol.ai,patrick@protocol.ai,"
-    "constantin.denuelle@protocol.ai,lucas.lemos@pl-at.ch"
+    "constantin.denuelle@protocol.ai,lucas.lemos@pl-at.ch,"
+    "connor.dales@protocol.ai"
 )
 ALLOWED_EMAILS = frozenset(
     e.strip().lower()

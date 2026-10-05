@@ -67,10 +67,11 @@ def _sign_in(client: TestClient, app: FastAPI, email: str):
 
 # ── the allowlist ────────────────────────────────────────────────────────────
 
-def test_allowlist_holds_the_four_desk_addresses(monkeypatch):
+def test_allowlist_holds_the_desk_addresses(monkeypatch):
     _, auth_mod = _app(monkeypatch, enabled=True)
     for e in ("chris@protocol.ai", "patrick@protocol.ai",
-              "constantin.denuelle@protocol.ai", "lucas.lemos@pl-at.ch"):
+              "constantin.denuelle@protocol.ai", "lucas.lemos@pl-at.ch",
+              "connor.dales@protocol.ai"):
         assert auth_mod.is_allowed(e), e
 
 
