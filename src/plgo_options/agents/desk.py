@@ -53,7 +53,9 @@ async def get_book(asset: str) -> dict:
     pnl = await portfolio_pnl(asset=asset, include_expired=False)
     t = pnl.get("totals") or {}
     positions = [p for p in (pnl.get("positions") or []) if str(p.get("opt") or "").upper() != "F"]
-    return {"spot": float(pnl.get("spot") or 0), "mtm": float(t.get("current_total_mtm") or 0),
+    # portfolio_pnl names the asset's spot eth_spot, FIL included.
+    spot = float(pnl.get("spot") or pnl.get("eth_spot") or 0)
+    return {"spot": spot, "mtm": float(t.get("current_total_mtm") or 0),
             "delta": float(t.get("portfolio_delta") or 0), "theta": float(t.get("portfolio_theta") or 0),
             "vega": float(t.get("portfolio_vega") or 0), "positions": positions, "n": len(positions)}
 

@@ -118,3 +118,16 @@ async def test_apply_pending_runs_once(monkeypatch):
     assert await decisions.apply_pending() == ["2026-10-05"]
     assert saved == [("ETH", "decision-sheet 2026-10-05"), ("FIL", "decision-sheet 2026-10-05")]
     assert await decisions.apply_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_get_book_reads_spot_from_eth_spot(monkeypatch):
+    """portfolio_pnl returns the spot as eth_spot (FIL too); a 0 spot blanked the Monday pack."""
+    from plgo_options.agents import desk
+    from plgo_options.web.routes import portfolio
+
+    async def fake_pnl(asset, include_expired=False):
+        return {"eth_spot": 1.02, "totals": {"current_total_mtm": -1.0}, "positions": []}
+
+    monkeypatch.setattr(portfolio, "portfolio_pnl", fake_pnl)
+    assert (await desk.get_book("FIL"))["spot"] == 1.02

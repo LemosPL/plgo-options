@@ -208,7 +208,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "ranked": ranked,
         "pareto": pareto(summaries),
         "best": [s for s in ranked if not s["disqualified"]][:3],
-        "spot": float(pnl.get("spot") or 0),
+        "spot": float(pnl.get("spot") or pnl.get("eth_spot") or 0),
         "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
     }
 
