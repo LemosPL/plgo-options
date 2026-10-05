@@ -493,9 +493,23 @@ async def monday_pack(ctx: dict) -> dict:
                        f"spot {'inside' if inside else 'OUTSIDE'}; check date {pol.view_check_date or 'not set'}.")
         else:
             out.append(f"View: '{pol.view}' - no 90-day range written yet (A1).")
-        if spot:
+        # The rows the watcher is actually measuring against this week. Drafts
+        # off spot only when there is no reference struck this week to show.
+        if pol.reference_price and pol.reference_set_on == week_key():
+            fired_now = await store.fired_rows(asset, week_key())
+            live = build_rows(asset, pol.reference_price, pol.row_steps_pct)
+            out.append(f"Live rows around the reference {_p(asset, pol.reference_price)} "
+                       f"(set {pol.reference_set_on}): " + ", ".join(
+                           f"{r.key} {_p(asset, r.price)}"
+                           + (f" ({(r.price / spot - 1) * 100:+.1f}% from spot)" if spot else "")
+                           + (" FIRED" if r.key in fired_now else "")
+                           for r in live))
+            if pol.stop_price:
+                out.append(f"Stop {_p(asset, pol.stop_price)}"
+                           + (f" ({(pol.stop_price / spot - 1) * 100:+.1f}% from spot)." if spot else "."))
+        elif spot:
             draft = build_rows(asset, spot, pol.row_steps_pct)
-            out.append("Draft rows if the reference is today's spot: " +
+            out.append("No reference struck this week. Draft rows if the reference is today's spot: " +
                        ", ".join(f"{r.key} {_p(asset, r.price)}" for r in draft))
     if set_notes:
         out.append("REFERENCE (set automatically this morning): " + " ".join(set_notes))

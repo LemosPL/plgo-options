@@ -183,3 +183,28 @@ async def _one(*a, **k):
 
 async def _noop(*a, **k):
     return None
+
+
+@pytest.mark.asyncio
+async def test_pack_shows_the_live_rows_around_this_weeks_reference(saved, monkeypatch):
+    """Once a reference is struck this week, the pack lists the rows the watcher
+    uses (around the reference, not today's spot), with fired rows and the stop."""
+    _isolate_monday_pack(monkeypatch)
+
+    async def policy(asset):
+        p = default_policy(asset)
+        p.reference_price = 2700 if asset == "ETH" else 1.00
+        p.reference_set_on = week_key()
+        p.row_steps_pct = [5, 10, 20] if asset == "ETH" else [10, 20, 30]
+        return p
+
+    async def fired(asset, week):
+        return {"+5"} if asset == "ETH" else set()
+
+    monkeypatch.setattr(desk.store, "get_policy", policy)
+    monkeypatch.setattr(desk.store, "fired_rows", fired)
+    facts = (await desk.monday_pack({"deliver": False}))["facts"]
+    assert "Live rows around the reference 2,700" in facts
+    assert "-20 2,160" in facts and "+5 2,835" in facts and "FIRED" in facts
+    assert "Stop 2,100" in facts
+    assert "-30 0.7000" in facts and "Draft rows" not in facts
