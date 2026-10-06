@@ -371,8 +371,17 @@ async def optimizer(ctx: dict) -> dict:
                         k = "gives back at a key spot" if d.startswith("gives back") else d
                         why[k] = why.get(k, 0) + 1
             n_err = sum(1 for e in res["errors"] if e.get("target") == tname)
+            mine = [s for s in res["ranked"] if s["target"]["name"] == tname and s["key_spot_changes"]]
+            near = max(mine, key=lambda s: s["worst_change_usd"], default=None)
+            detail = ""
+            if near:
+                w = min(near["key_spot_changes"], key=lambda d: d["change_usd"])
+                nv = near["variant"]
+                detail = (f" | closest: λ{nv['lam_factor']} max{nv['max_trades']} fit +{near['fit_gain_pct']}%, "
+                          f"worst {_m(w['change_usd'])} at {w['moneyness']:+.0%} (T+{near.get('judged_on_days', 0)}d) - "
+                          + ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in near["key_spot_changes"]))
             out.append(f"[{tname}] no run passed: " + (", ".join(f"{k} x{v}" for k, v in why.items()) or "-")
-                       + (f", {n_err} errors" if n_err else ""))
+                       + (f", {n_err} errors" if n_err else "") + detail)
         for i, s in enumerate(best, 1):
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
