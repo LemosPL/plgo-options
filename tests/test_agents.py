@@ -175,3 +175,14 @@ def test_policy_roundtrip():
     p = default_policy("FIL")
     q = AssetPolicy.from_dict(p.to_dict())
     assert q == p
+
+
+def test_gate_keeps_rejections_apart_from_chris_items():
+    leg = {"kind": "option", "side": "Buy", "opt": "P", "strike": 2700, "expiry": "2026-12-25",
+           "qty": 100, "counterparty": "Nobody Capital"}
+    r = g.evaluate({"asset": "ETH", "purpose": "shape", "legs": [leg], "notional_usd": 300_000}, ctx())
+    d = r.to_dict()
+    assert r.route == g.REJECTED
+    assert any("Unknown counterparty" in x for x in d["rejected_by"])
+    assert not any("Unknown counterparty" in x for x in d["needs_chris"])
+    assert any("shape" in x for x in d["needs_chris"])

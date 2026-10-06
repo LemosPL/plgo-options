@@ -37,11 +37,14 @@ class GateResult:
     checks: list[dict[str, Any]] = field(default_factory=list)
     lucas_notional_usd: float = 0.0     # when a trade is split (A3 example)
     chris_notional_usd: float = 0.0
+    rejected_by: list[str] = field(default_factory=list)   # the rules it broke
+    needs_chris: list[str] = field(default_factory=list)   # what goes on the handover
 
     def to_dict(self) -> dict[str, Any]:
         return {"route": self.route, "reasons": self.reasons, "checks": self.checks,
                 "lucas_notional_usd": self.lucas_notional_usd,
-                "chris_notional_usd": self.chris_notional_usd}
+                "chris_notional_usd": self.chris_notional_usd,
+                "rejected_by": self.rejected_by, "needs_chris": self.needs_chris}
 
 
 @dataclass
@@ -266,6 +269,7 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
         reject.append(f"Unknown counterparty: {', '.join(unknown)} (A3).")
     check("universe", not unknown, "ok" if not unknown else ", ".join(unknown), "A3")
 
+    res.rejected_by, res.needs_chris = list(reject), list(to_chris)
     if reject:
         res.route, res.reasons = REJECTED, reject + to_chris
     elif to_chris:

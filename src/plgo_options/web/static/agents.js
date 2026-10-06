@@ -407,14 +407,63 @@
       (isOpt ? "" : ' <span style="color:var(--muted)">(perp — A4: direction only)</span>');
   }
 
+  // The manual's rule codes in plain words, for "why was this rejected".
+  const RULES = {
+    "A1": "the view", "A2": "the floor", "A3": "the limits", "A4": "which instrument",
+    "A5": "rolls", "B1": "the weekly rows", "B2": "kill switch", "B2a": "two-curve check",
+    "B2b": "the handover", "B3": "how we deal",
+  };
+  const ruleWords = (txt) => {
+    const m = String(txt).match(/\((A\d|B\d[ab]?)[^)]*\)\s*\.?$/);
+    return m && RULES[m[1]] ? " <span style=\"color:var(--muted)\">— " + m[1] + " " + RULES[m[1]] + "</span>" : "";
+  };
+  let PFILTER = "all";
+
+  function whyBlock(p) {
+    const g = (p.proposal || {}).gate || {};
+    let rej = g.rejected_by, chris = g.needs_chris;
+    if (!rej && !chris) {                       // proposals made before the split was stored
+      rej = p.route === "rejected" ? (p.reasons || []) : [];
+      chris = p.route === "rejected" ? [] : (p.route === "lucas" ? [] : (p.reasons || []));
+    }
+    const failed = (g.checks || []).filter((c) => c.ok === false);
+    let h = "";
+    if (rej && rej.length) {
+      h += '<div style="font-size:.68rem;line-height:1.4;margin:.2rem 0 .3rem;padding:.3rem .45rem;border-radius:4px;' +
+        'background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35)">' +
+        '<b style="color:#ef4444">Why it was rejected</b><br>' +
+        rej.map((r) => "✕ " + esc(r) + ruleWords(r)).join("<br>") +
+        (failed.length ? '<div style="color:var(--muted);margin-top:.2rem">Checks that failed: ' +
+          failed.map((c) => esc(c.check) + " (" + esc(c.note) + ")").join("; ") + "</div>" : "") +
+        "</div>";
+    }
+    if (chris && chris.length) {
+      h += '<div style="font-size:.65rem;line-height:1.35;color:#3b82f6;margin-bottom:.3rem">' +
+        "<b>" + (rej && rej.length ? "Would also need Chris" : "Needs Chris") + "</b><br>" +
+        chris.map((r) => "• " + esc(r) + ruleWords(r)).join("<br>") + "</div>";
+    }
+    return h;
+  }
+
   function renderProposals() {
     const live = PROPS.filter((p) => p.status === "open");
-    if (!live.length) {
-      $("agents-props").innerHTML = '<p style="color:var(--muted);font-size:.8rem;margin:0">No open proposals.</p>';
+    const n = (r) => live.filter((p) => r === "all" || p.route === r ||
+      (r === "chris" && p.route === "lucas_tell_chris")).length;
+    const chip = (r, label, col) => '<button class="btn-secondary" data-pfilter="' + r + '" style="width:auto;' +
+      "font-size:.64rem;padding:.12rem .45rem;" + (PFILTER === r ? "border-color:" + col + ";color:" + col + ";font-weight:600" : "") +
+      '">' + label + " " + n(r) + "</button>";
+    const bar = '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.45rem">' +
+      chip("all", "All", "#94a3b8") + chip("rejected", "Rejected", "#ef4444") +
+      chip("chris", "Chris", "#3b82f6") + chip("lucas", "Lucas", "#10b981") + "</div>";
+    const shown = live.filter((p) => PFILTER === "all" || p.route === PFILTER ||
+      (PFILTER === "chris" && p.route === "lucas_tell_chris"));
+    if (!shown.length) {
+      $("agents-props").innerHTML = bar + '<p style="color:var(--muted);font-size:.8rem;margin:0">' +
+        (live.length ? "Nothing in this filter." : "No open proposals.") + "</p>";
       return;
     }
-    $("agents-props").innerHTML = live.map((p) => {
-      const col = p.route === "rejected" ? "#f59e0b" : p.route === "lucas" ? "#10b981" : "#3b82f6";
+    $("agents-props").innerHTML = bar + shown.map((p) => {
+      const col = p.route === "rejected" ? "#ef4444" : p.route === "lucas" ? "#10b981" : "#3b82f6";
       const legs = (p.proposal || {}).legs || [];
       const nOpt = legs.filter((l) => (l.kind || "option") === "option").length;
       return '<div style="border-left:2px solid ' + col + ';background:rgba(148,163,184,.05);border-radius:5px;padding:.4rem .55rem;margin-bottom:.35rem">' +
@@ -427,8 +476,7 @@
         '<div style="font-size:.72rem;margin:.2rem 0">' + esc(p.summary) + '</div>' +
         (legs.length ? '<div style="font-size:.66rem;line-height:1.4;margin:.15rem 0 .3rem">' +
           legs.map((l) => "• " + legLine(l)).join("<br>") + '</div>' : "") +
-        ((p.reasons || []).length ? '<div style="font-size:.65rem;line-height:1.35;color:#f59e0b;margin-bottom:.3rem">' +
-          (p.reasons || []).map(esc).join("<br>") + '</div>' : "") +
+        whyBlock(p) +
         '<div style="display:flex;gap:.3rem;flex-wrap:wrap">' +
           '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-price="' + p.id + '"' +
             (nOpt ? "" : " disabled") + '>Price it (B3)</button>' +
@@ -766,6 +814,8 @@
 
   document.addEventListener("click", async (ev) => {
     if (!(ev.target instanceof HTMLElement)) return;
+    const pf = ev.target.closest("[data-pfilter]");
+    if (pf) { PFILTER = pf.dataset.pfilter; renderProposals(); return; }
     const t = ev.target.closest("[data-show],[data-run],[data-price],[data-v4],[data-decide],button");
     if (!t) return;
 
