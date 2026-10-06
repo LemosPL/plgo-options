@@ -10378,6 +10378,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv2-delta-band")?.value || "150000"),
+      ...optCollateralTransferParams("optv2"),
       // User-edited target profile (Target Profile section). null = auto parametric.
       manual_target: (optv2ManualTarget && optv2ManualTarget.length >= 2) ? optv2ManualTarget : null,
       // Saved target profile selected in the dropdown (engine loads the CSV).
@@ -10608,6 +10609,7 @@ function optv2RenderResult(data) {
   // Cash flow by counterparty — premium paid (outlay) vs. collected across
   // every proposed trade, including forced/DTE rolls. Net far from 0 means
   // the desk needs to wire cash to fund the trades, not self-fund them.
+  optRenderCollateralTransfers("optv2", data);
   const $cashSection = document.getElementById("optv2-cash-flow-section");
   const $cashBody = document.getElementById("optv2-cash-flow-tbody");
   const cashByCp = data.cash_by_counterparty || {};
@@ -10758,6 +10760,60 @@ function optv2RenderResult(data) {
     ], 12,
     "No replacement or new trades proposed."
   );
+}
+
+// Collateral transfer controls → OptimizationParams fields (see
+// routes/optimization.py). Off unless the page's checkbox is ticked.
+function optCollateralTransferParams(prefix) {
+  const el = id => document.getElementById(`${prefix}-${id}`);
+  const num = (id, d) => { const v = parseFloat(el(id)?.value); return Number.isFinite(v) ? v : d; };
+  return {
+    enable_collateral_transfers: !!el("coll-xfer")?.checked,
+    collateral_hub: (el("coll-hub")?.value || "Flowdesk").trim() || "Flowdesk",
+    collateral_carry_pct: num("coll-carry", 0.1),
+    collateral_horizon_days: Math.round(num("coll-horizon", 90)),
+    collateral_buffer_usd: num("coll-buffer", 500000),
+    collateral_transfer_fee_usd: num("coll-fee", 10),
+  };
+}
+
+// Render data.collateral_transfers: the moves, then each counterparty's
+// collateral before/after against what it would be owed. Headroom is the
+// cushion left at the worst spot on the ladder, after the buffer, with the
+// book's own asset marked at that spot — the column to read for safety.
+function optRenderCollateralTransfers(prefix, data) {
+  const box = document.getElementById(`${prefix}-coll-xfer-section`);
+  if (!box) return;
+  const ct = data && data.collateral_transfers;
+  if (!ct) { box.style.display = "none"; box.innerHTML = ""; return; }
+  const usd = v => (v < 0 ? "-$" : "$") + optv2Fmt(Math.abs(v || 0), 0);
+  const qty = v => Number(v || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const moves = ct.transfers || [];
+  const rows = Object.entries(ct.by_counterparty || {})
+    .sort((a, b) => (b[1].is_hub - a[1].is_hub) || a[0].localeCompare(b[0]));
+  box.style.display = "";
+  box.innerHTML = `
+    <h3 style="margin:.2rem 0 .5rem;font-size:.95rem">Collateral Transfers (hub: ${ct.hub})</h3>
+    <p style="font-size:.72rem;color:var(--muted);margin:0 0 .5rem">
+      Carry over ${ct.horizon_days} days: ${usd(ct.carry_before_usd)} &rarr; <b>${usd(ct.carry_after_usd)}</b>
+      &middot; transfer fees ${usd(ct.fees_usd)}. Planned on the final proposed book (after rounding, box and rehedge trades).</p>
+    ${moves.length ? `<table class="pf-table" style="max-width:620px;margin-bottom:.75rem">
+      <thead><tr><th>From</th><th>To</th><th>Asset</th><th class="num">Qty</th><th class="num">USD</th></tr></thead>
+      <tbody>${moves.map(t => `<tr><td>${t.from}</td><td>${t.to}</td><td>${t.asset}</td>
+        <td class="num">${qty(t.qty)}</td><td class="num">${usd(t.usd)}</td></tr>`).join("")}</tbody>
+    </table>` : `<p style="font-size:.8rem;margin:0 0 .75rem">No transfers: every counterparty already holds about what it needs.</p>`}
+    <table class="pf-table" style="max-width:820px">
+      <thead><tr><th>Counterparty</th><th class="num">Posted before</th><th class="num">Posted after</th>
+        <th class="num" title="What we would owe it at today's spot">Owed today</th>
+        <th class="num" title="What we would owe it at the worst spot on the ladder">Owed worst</th>
+        <th class="num" title="Collateral minus (owed + buffer) at the tightest spot, own-asset collateral marked at that spot">Min headroom</th>
+        <th class="num" title="Short even after transfers — new collateral needed">Shortfall</th></tr></thead>
+      <tbody>${rows.map(([cp, v]) => `<tr><td>${cp}${v.is_hub ? " <span style=\"color:var(--muted)\">(hub)</span>" : ""}</td>
+        <td class="num">${usd(v.posted_before_usd)}</td><td class="num">${usd(v.posted_after_usd)}</td>
+        <td class="num">${usd(v.requirement_today_usd)}</td><td class="num">${usd(v.requirement_usd)}</td>
+        <td class="num" style="color:${(v.min_headroom_usd || 0) >= 0 ? "var(--green)" : "var(--red)"}">${v.min_headroom_usd == null ? "—" : usd(v.min_headroom_usd)}</td>
+        <td class="num" style="color:${v.shortfall_usd > 0 ? "var(--red)" : ""}">${v.shortfall_usd > 0 ? usd(v.shortfall_usd) : "—"}</td></tr>`).join("")}</tbody>
+    </table>`;
 }
 
 function optv2RenderTradeTable(tbodyId, rows, countId, rowFn, colspan, emptyMsg) {
@@ -11737,6 +11793,7 @@ function optv3RenderResult(data) {
     } else { $am.textContent = "—"; $am.style.color = ""; }
   }
 
+  optRenderCollateralTransfers("optv3", data);
   // Cash flow by counterparty
   const $cashBody = document.getElementById("optv3-cash-flow-tbody");
   const $cashEmpty = document.getElementById("optv3-cash-empty");
@@ -12596,6 +12653,7 @@ document.getElementById("btn-run-optv3")?.addEventListener("click", async () => 
       // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv3-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv3-delta-band")?.value || "150000"),
+      ...optCollateralTransferParams("optv3"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv3TargetProfileFile || null,
@@ -13650,6 +13708,7 @@ function optv4RenderResult(data) {
     } else { $am.textContent = "—"; $am.style.color = ""; }
   }
 
+  optRenderCollateralTransfers("optv4", data);
   // Cash flow by counterparty
   const $cashBody = document.getElementById("optv4-cash-flow-tbody");
   const $cashEmpty = document.getElementById("optv4-cash-empty");
@@ -15295,6 +15354,7 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv4-enable-delta-rehedge")?.checked || false,
       delta_band_usd: parseFloat(document.getElementById("optv4-delta-band")?.value || "150000"),
+      ...optCollateralTransferParams("optv4"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
       // Overridden by manual_target when the Target column has been edited.
       target_profile_file: optv4TargetProfileFile || null,

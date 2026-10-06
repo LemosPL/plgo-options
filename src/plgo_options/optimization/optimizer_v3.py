@@ -1304,6 +1304,7 @@ class OptimizerV3(BaseOptimizer):
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,
                  collateral_by_cp: "dict[str, dict[str, float]] | None" = None,
                  enforce_collateral_cap: bool = False,
+                 collateral_transfer: dict | None = None,
                  enable_composite_unwind: bool = True,
                  atm_concentration: float = 0.0,
                  # Parametric (auto) target-profile shape — see
@@ -1757,6 +1758,12 @@ class OptimizerV3(BaseOptimizer):
                            getattr(leg, "opt", ""), getattr(leg, "counterparty", ""))
                     leg_groups.setdefault(key, []).append((j, sign))
 
+        transfer_cfg = (
+            self._collateral_transfer_config(collateral_transfer, spot_arr, base_payoff_by_cp,
+                                             candidates, c_payoffs)
+            if collateral_transfer else None
+        )
+
         lp = CollateralOptimization(self.asset, counterparties)
         lp_result = lp.optimize(
             spot_arr, spot_weights, residual, candidates, c_payoffs,
@@ -1785,6 +1792,7 @@ class OptimizerV3(BaseOptimizer):
             base_stress_by_cp=base_stress_by_cp,
             collateral_floor_by_cp=collateral_floor_by_cp,
             enforce_collateral_floor=enforce_collateral_cap,
+            collateral_transfer=transfer_cfg,
         )
 
         if lp_result is None:
@@ -2060,6 +2068,15 @@ class OptimizerV3(BaseOptimizer):
 
         _attach_cpty_prices(trades, self.spot, self.asset)
         premium_summary = self._trade_premium_summary(trades)
+
+        # Re-plan the collateral transfers on the book this run actually
+        # proposes: the LP's own transfer variables steered its trade choice,
+        # but rounding, the box neutralizer and the rehedge's perps have moved
+        # each counterparty's requirement since.
+        collateral_transfers = None
+        if transfer_cfg:
+            collateral_transfers = CollateralOptimization.plan_transfers(
+                transfer_cfg, self._final_value_by_cp(transfer_cfg, base_payoff_by_cp, spot_arr, trades))
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
 
@@ -2183,6 +2200,10 @@ class OptimizerV3(BaseOptimizer):
             # with collateral data (see collateral_by_cp); always computed
             # when available, independent of enforce_collateral_cap.
             "cp_worst_case_net": lp_result.get("cp_worst_case_net", {}),
+            # Collateral to move between each counterparty and the hub so every
+            # counterparty holds what this book needs there (+ buffer) and the
+            # rest sits at the hub, where it carries no cost. None when off.
+            "collateral_transfers": collateral_transfers,
             "fit_error_before": round(weighted_fit_error_before, 2),
             "fit_error_after": round(weighted_fit_error_after, 2),
             "spot_ladder": spot_arr.tolist(),
@@ -3229,6 +3250,116 @@ class OptimizerV3(BaseOptimizer):
         vol = option_smile.compute_vol(maturity, strike=strike)
 
         return bs_vec_bridge(self.spot, spot_arr, strike, dte_days, horizon_days, vol, c.opt) - entry_price
+
+    # One-off cost per $ of collateral a counterparty is short that the book
+    # cannot cover by moving what it already has ("post new collateral").
+    # Far above the carry, so the LP moves existing collateral or trims the
+    # liability first, but finite, so an under-collateralized book never
+    # turns the whole run infeasible.
+    _COLLATERAL_SHORTFALL_COST = 0.01
+
+    def _candidate_entry(self, c) -> float:
+        """The entry price _candidate_curve nets out, so curve + entry is the
+        candidate's market value across the ladder."""
+        if self._is_spread_candidate(c):
+            return float(c.long_leg.bs_price_usd or 0.0) - float(c.short_leg.bs_price_usd or 0.0)
+        if self._is_structured_candidate(c):
+            return float(c.bs_price_usd or 0.0)
+        if getattr(c, "opt", "") == "F":
+            return 0.0      # a perp's curve is already its value (spot - entry)
+        return float(c.bs_price_usd or 0.0)
+
+    def _collateral_transfer_config(self, raw: dict, spot_arr, base_payoff_by_cp,
+                                    candidates, c_payoffs) -> dict:
+        """Inputs for CollateralOptimization's transfer model, from the route's
+        raw config: {"hub", "posted": {cp: {asset: qty}} (this book's
+        allocation), "prices": {asset: usd}, "carry_pct" (annual %),
+        "horizon_days", "buffer_usd", "fee_usd"}.
+
+        Counterparty names are matched case-insensitively and rewritten to the
+        spelling the book's positions use, which is what the LP keys on.
+        """
+        spelling: dict[str, str] = {}
+        for p in self.positions:
+            cp = str(getattr(p, "counterparty", "") or "")
+            spelling.setdefault(cp.strip().lower(), cp)
+        for c in candidates:
+            cp = str(getattr(c, "counterparty", "") or "")
+            spelling.setdefault(cp.strip().lower(), cp)
+
+        def name(cp: str) -> str:
+            return spelling.get(str(cp).strip().lower(), str(cp))
+
+        posted: dict[str, dict[str, float]] = {}
+        for cp, by_asset in (raw.get("posted") or {}).items():
+            row = posted.setdefault(name(cp), {})
+            for a, q in (by_asset or {}).items():
+                a = "USDC" if str(a).upper() == "USD" else str(a).upper()
+                row[a] = row.get(a, 0.0) + float(q or 0.0)
+        hub = name(raw.get("hub") or "Flowdesk")
+        posted.setdefault(hub, {})
+
+        assets = sorted({a for by in posted.values() for a in by})
+        prices = {str(a).upper(): float(v or 0.0) for a, v in (raw.get("prices") or {}).items()}
+        prices["USDC"] = 1.0
+        prices[self.asset] = float(self.spot)
+        n = len(spot_arr)
+        price_curves = {
+            a: (np.asarray(spot_arr, dtype=float) if a == self.asset else np.full(n, prices.get(a, 0.0)))
+            for a in assets
+        }
+        haircuts = {cp: {a: effective_haircut_rate(cp, a, q) for a, q in by.items()}
+                    for cp, by in posted.items()}
+        base_lower = {str(cp).strip().lower(): arr for cp, arr in base_payoff_by_cp.items()}
+        base_value_by_cp = {cp: base_lower[cp.strip().lower()] for cp in posted
+                            if cp.strip().lower() in base_lower}
+        candidate_values = np.array([
+            np.asarray(c_payoffs[j], dtype=float) + self._candidate_entry(c)
+            for j, c in enumerate(candidates)
+        ]) if candidates else np.zeros((0, n))
+        horizon = float(raw.get("horizon_days", 90))
+        return {
+            "hub": hub,
+            "posted": posted,
+            "price_today": {a: (price_curves[a][0] if a != self.asset else float(self.spot)) for a in assets},
+            "price_curves": price_curves,
+            "haircuts": haircuts,
+            "base_value_by_cp": base_value_by_cp,
+            "candidate_values": candidate_values,
+            "candidate_cps": [getattr(c, "counterparty", "") for c in candidates],
+            "carry_rate": float(raw.get("carry_pct", 0.1)) / 100.0 * horizon / 365.0,
+            "horizon_days": horizon,
+            "buffer_usd": float(raw.get("buffer_usd", 500_000.0)),
+            "fee_usd": float(raw.get("fee_usd", 10.0)),
+            "shortfall_cost": self._COLLATERAL_SHORTFALL_COST,
+            "n_spots": n,
+            "spot_index": int(np.argmin(np.abs(np.asarray(spot_arr, dtype=float) - self.spot))),
+        }
+
+    def _final_value_by_cp(self, cfg, base_payoff_by_cp, spot_arr, trades) -> dict:
+        """Each collateral counterparty's market value on the ladder after the
+        run's final trades. Roll unwinds are skipped: the rolled positions are
+        already out of base_payoff_by_cp."""
+        n = len(spot_arr)
+        out = {cp: np.asarray(cfg["base_value_by_cp"].get(cp, np.zeros(n)), dtype=float).copy()
+               for cp in cfg["posted"]}
+        by_lower = {cp.strip().lower(): cp for cp in out}
+        for t in trades:
+            if t.get("strategy") == "ROLL_UNWIND":
+                continue
+            cp = by_lower.get(str(t.get("counterparty") or "").strip().lower())
+            if cp is None:
+                continue
+            qty = float(t.get("qty", 0.0) or 0.0)
+            if t.get("opt") == "F":
+                vals = spot_arr - float(t.get("strike", 0.0) or 0.0)
+            elif t.get("opt") in ("C", "P"):
+                vals = bs_vec_bridge(self.spot, spot_arr, float(t["strike"]), t.get("dte", 0), 0,
+                                     float(t.get("iv_pct", 0.0) or 0.0) / 100.0, t["opt"])
+            else:
+                continue
+            out[cp] = out[cp] + qty * vals
+        return out
 
     def _candidate_trade_legs(self, c, qty: int) -> list[tuple[Candidate, int, str]]:
         """

@@ -69,6 +69,48 @@ async def _fetch_collateral_by_cp() -> dict[str, dict[str, float]]:
     return result
 
 
+async def _fetch_book_collateral(book: str, include_collar_loans: bool) -> dict[str, dict[str, float]]:
+    """Collateral posted against ONE options book, per counterparty per asset
+    (counterparty_collateral.book) — the allocation the transfer model may move
+    between counterparties without touching what backs the other book. Collar
+    loans stay out unless the run includes them, matching the positions."""
+    from plgo_options.data.collar_loans import drop_collar_loans
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral "
+            "WHERE book = ? COLLATE NOCASE GROUP BY counterparty, asset", (book,))
+        rows = [dict(r) for r in await cur.fetchall()]
+    except Exception:
+        return {}
+    if not include_collar_loans:
+        rows = drop_collar_loans(rows)
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        if r["qty"]:
+            out.setdefault(str(r["counterparty"]), {})[str(r["asset"]).upper()] = float(r["qty"])
+    return out
+
+
+async def _collateral_transfer_config(params: "OptimizationParams") -> dict | None:
+    if not params.enable_collateral_transfers:
+        return None
+    from plgo_options.web.routes.collateral import _effective_prices
+    asset = params.asset.upper()
+    posted = await _fetch_book_collateral(asset, params.include_collar_loans)
+    assets = sorted({a for by in posted.values() for a in by})
+    prices, _, _ = await _effective_prices(assets)
+    return {
+        "hub": params.collateral_hub,
+        "posted": posted,
+        "prices": prices,
+        "carry_pct": params.collateral_carry_pct,
+        "horizon_days": params.collateral_horizon_days,
+        "buffer_usd": params.collateral_buffer_usd,
+        "fee_usd": params.collateral_transfer_fee_usd,
+    }
+
+
 class OptimizationParams(BaseModel):
     asset: str = "ETH"
     # Collar loans (FalconX, Galaxy) are out of the managed book by default;
@@ -169,6 +211,18 @@ class OptimizationParams(BaseModel):
     # tighter at each spot. Off (default) = informational only, unchanged
     # trade selection from before this existed.
     use_collateral_cap: bool = False
+    # Collateral transfer model: collateral posted against this book anywhere
+    # but the hub costs carry_pct a year over horizon_days; each counterparty
+    # must keep what it would be owed at every spot on the ladder plus
+    # buffer_usd, and the run proposes moving the rest to the hub at
+    # transfer_fee_usd per transfer. Trades that add liability at a non-hub
+    # counterparty pay for the collateral they pin there. Off by default.
+    enable_collateral_transfers: bool = False
+    collateral_hub: str = "Flowdesk"
+    collateral_carry_pct: float = 0.1
+    collateral_horizon_days: int = 90
+    collateral_buffer_usd: float = 500_000.0
+    collateral_transfer_fee_usd: float = 10.0
     # Optional allow-list of DB trade ids: when set, the optimizer's *input book*
     # is scoped to exactly these trades (the "current portfolio" it optimizes
     # against becomes only this subset), instead of the whole asset book. Sourced
@@ -431,6 +485,7 @@ async def run_optimizer(params: OptimizationParams):
         max_cp_loss_usd=params.max_cp_loss_usd,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
+        collateral_transfer=await _collateral_transfer_config(params),
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,

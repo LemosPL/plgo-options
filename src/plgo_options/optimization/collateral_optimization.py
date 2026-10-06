@@ -102,6 +102,7 @@ class CollateralOptimization:
         base_stress_by_cp=None,
         collateral_floor_by_cp=None,
         enforce_collateral_floor=False,
+        collateral_transfer=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -464,7 +465,15 @@ class CollateralOptimization:
                     prob += cp_total_i >= -float(floor_curve[i]), f"cp_loss_cap_{cp}_{i}"
                 applied_floor_min[cp] = float(np.min(floor_curve))
 
-        prob += lam_factor * profile_error + trading_cost + collateral_cost + cash_neutrality_cost
+        transfer_model = None
+        transfer_cost = 0.0
+        if collateral_transfer:
+            transfer_model = self._add_collateral_transfers(
+                prob, collateral_transfer, buy_vars, sell_vars, cp_indices, n_spots)
+            transfer_cost = transfer_model["cost"]
+
+        prob += (lam_factor * profile_error + trading_cost + collateral_cost
+                 + cash_neutrality_cost + transfer_cost)
 
         # Per-counterparty signed net notional constraint (existing + net new <= max).
         if max_exposure_by_counterparty:
@@ -493,7 +502,10 @@ class CollateralOptimization:
                     f"gross_collateral_{cp}",
                 )
 
-        self._solve_problem(prob, "PULP_CBC_CMD")
+        # The transfer fee is a fixed $ per transfer, so the transfer model adds
+        # binaries; give branch-and-bound room beyond the pure LP's 1s budget.
+        self._solve_problem(prob, "PULP_CBC_CMD",
+                            time_limit=10 if transfer_model and transfer_model["binaries"] else 1)
 
         if prob.status != pulp.LpStatusOptimal:
             print(f"CollateralOptimization failed: {pulp.LpStatus[prob.status]}")
@@ -655,13 +667,228 @@ class CollateralOptimization:
             "cp_worst_case_net": cp_worst_case_net,
             "cp_loss_cap_warnings": cp_loss_cap_warnings,
             "composite_remaining": composite_remaining,
+            # The LP's own view; run_lp re-plans on the final book for display.
+            "collateral_transfers": (
+                self._collateral_transfer_report(transfer_model, net_qty, collateral_transfer,
+                                                 verbose=False)
+                if transfer_model else None
+            ),
         }
 
-    def _solve_problem(self, prob, algo):
+    # ── Collateral transfers ──────────────────────────────────────────────
+    #
+    # Collateral posted with a counterparty other than the hub (Flowdesk)
+    # carries a holding cost; at the hub it is free. Each counterparty must
+    # keep enough to cover what we would owe it at every spot on the ladder,
+    # plus a buffer. The LP may move collateral between each counterparty and
+    # the hub, per asset, at a fixed fee per transfer. So it sends whatever a
+    # counterparty does not need to the hub, and — the part that touches the
+    # trades — every dollar of liability a trade adds at a non-hub
+    # counterparty is collateral that must stay there and keep costing carry.
+    #
+    # Requirement at spot i = max(0, -V_cp(i)), V_cp = market value of that
+    # counterparty's book (existing + this run's trades) at that spot: what a
+    # counterparty margins against is the value it would owe or be owed, not
+    # our P&L since entry. Coverage, linear in the trades and transfers:
+    #     Σ_a (1 - h_a) · P_a · price_a(i)  ≥  -V_cp(i) + buffer    (each i)
+    #     Σ_a (1 - h_a) · P_a · price_a(i)  ≥  buffer
+    # with P_a the post-transfer quantity, for every counterparty with exposure
+    # in this book (one without has no requirement). Price curves move with the ladder
+    # for the book's own asset (wrong-way risk), are 1 for USD/USDC and flat
+    # at today's price for anything else. Haircuts are fixed at today's
+    # blended rate (a concentration tier makes the true rate depend on the
+    # quantity, which is not linear). A counterparty that cannot be covered
+    # with what the book holds gets a shortfall at `shortfall_cost` per $ —
+    # "post new collateral" — rather than making the whole run infeasible.
+
+    @staticmethod
+    def _add_collateral_transfers(prob, cfg, buy_vars, sell_vars, cp_indices, n_spots):
+        hub = cfg["hub"]
+        posted = cfg["posted"]                       # {cp: {asset: qty}} — this book's allocation
+        price_today = cfg["price_today"]             # {asset: usd}
+        price_curves = cfg["price_curves"]           # {asset: np.ndarray(n_spots)}
+        haircuts = cfg.get("haircuts") or {}         # {cp: {asset: rate}}
+        base_value = cfg["base_value_by_cp"]         # {cp: np.ndarray(n_spots)}
+        values = cfg["candidate_values"]             # np.ndarray(n_candidates, n_spots)
+        carry = float(cfg["carry_rate"])             # fraction of value over the horizon
+        buffer = float(cfg["buffer_usd"])
+        fee = float(cfg["fee_usd"])
+        shortfall_cost = float(cfg["shortfall_cost"])
+
+        assets = sorted({a for by in posted.values() for a, q in by.items() if q})
+        totals = {a: sum(float(by.get(a, 0.0) or 0.0) for by in posted.values()) for a in assets}
+        others = [cp for cp in posted if cp != hub]
+
+        out_vars, in_vars, bin_vars = {}, {}, {}
+        for cp in others:
+            for a in assets:
+                at_cp = float(posted[cp].get(a, 0.0) or 0.0)
+                at_hub = float(posted.get(hub, {}).get(a, 0.0) or 0.0)
+                if at_cp <= 0 and at_hub <= 0 and totals[a] <= 0:
+                    continue
+                tag = f"{cp}_{a}".replace(" ", "_")
+                o = pulp.LpVariable(f"xfer_out_{tag}", lowBound=0, upBound=max(at_cp, 0.0))
+                i_ = pulp.LpVariable(f"xfer_in_{tag}", lowBound=0, upBound=max(totals[a], 0.0))
+                out_vars[(cp, a)], in_vars[(cp, a)] = o, i_
+                if fee > 0:
+                    z = pulp.LpVariable(f"xfer_on_{tag}", cat="Binary")
+                    prob += o + i_ <= max(totals[a], 1e-9) * z, f"xfer_fee_link_{tag}"
+                    bin_vars[(cp, a)] = z
+
+        def qty_after(cp, a):
+            q = float(posted.get(cp, {}).get(a, 0.0) or 0.0)
+            if cp == hub:
+                return q + pulp.lpSum(out_vars[(k, b)] - in_vars[(k, b)]
+                                      for (k, b) in out_vars if b == a)
+            if (cp, a) in out_vars:
+                return q - out_vars[(cp, a)] + in_vars[(cp, a)]
+            return q
+
+        # The hub cannot send what it does not hold.
+        for a in assets:
+            prob += qty_after(hub, a) >= 0, f"xfer_hub_nonneg_{a}"
+
+        shortfall_vars = {}
+        for cp in posted:
+            idx = cp_indices.get(cp, [])
+            base = base_value.get(cp)
+            sf = pulp.LpVariable(f"xfer_shortfall_{cp}".replace(" ", "_"), lowBound=0)
+            shortfall_vars[cp] = sf
+            # No exposure in this book, no requirement and no buffer: whatever
+            # it holds can move (the hub included — it only receives).
+            if base is None and not idx:
+                continue
+            rates = haircuts.get(cp, {})
+            after = {a: qty_after(cp, a) for a in assets}
+            prob += (pulp.lpSum((1.0 - rates.get(a, 0.0)) * float(price_today.get(a, 0.0)) * after[a]
+                                for a in assets) + sf >= buffer), f"xfer_buffer_{cp}".replace(" ", "_")
+            for i in range(n_spots):
+                cover_i = pulp.lpSum((1.0 - rates.get(a, 0.0)) * float(price_curves[a][i]) * after[a]
+                                     for a in assets)
+                value_i = (float(base[i]) if base is not None else 0.0) + pulp.lpSum(
+                    (buy_vars[j] - sell_vars[j]) * float(values[j][i]) for j in idx)
+                prob += cover_i + sf >= -value_i + buffer, f"xfer_cover_{cp}_{i}".replace(" ", "_")
+
+        carry_cost = pulp.lpSum(
+            carry * float(price_today.get(a, 0.0)) * qty_after(cp, a)
+            for cp in others for a in assets
+        )
+        # A vanishing per-$ charge on every move, so a zero fee never lets the
+        # solver send collateral out and straight back in (a free wash). 1e-6,
+        # not smaller: CBC treats coefficients much below that as zero.
+        churn = 1e-6 * pulp.lpSum(float(price_today.get(a, 0.0)) * (out_vars[k] + in_vars[k])
+                                  for k in out_vars for a in [k[1]])
+        cost = (carry_cost + fee * pulp.lpSum(bin_vars.values())
+                + shortfall_cost * pulp.lpSum(shortfall_vars.values()) + churn)
+        return {"cost": cost, "out": out_vars, "in": in_vars, "binaries": bin_vars,
+                "shortfall": shortfall_vars, "assets": assets, "qty_after": qty_after}
+
+    @classmethod
+    def plan_transfers(cls, cfg, value_by_cp) -> dict | None:
+        """Transfers for a FIXED book: ``value_by_cp`` is each counterparty's
+        final market-value curve on the ladder (trades already decided). The
+        LP's own transfer variables steer which trades it picks; this re-plans
+        the transfers on the book the run actually proposes, after rounding,
+        the box neutralizer and the delta rehedge's perps have changed it."""
+        fixed = dict(cfg, base_value_by_cp=value_by_cp,
+                     candidate_values=np.zeros((0, cfg["n_spots"])), candidate_cps=[])
+        prob = pulp.LpProblem("CollateralTransfers", pulp.LpMinimize)
+        model = cls._add_collateral_transfers(prob, fixed, [], [], {}, cfg["n_spots"])
+        prob += model["cost"]
+        prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=10))
+        if prob.status != pulp.LpStatusOptimal:
+            print(f"Collateral transfer plan failed: {pulp.LpStatus[prob.status]}")
+            return None
+        return cls._collateral_transfer_report(model, np.zeros(0), fixed)
+
+    @staticmethod
+    def _collateral_transfer_report(model, net_qty, cfg, verbose: bool = True) -> dict:
+        hub = cfg["hub"]
+        posted = cfg["posted"]
+        price_today = cfg["price_today"]
+        price_curves = cfg["price_curves"]
+        haircuts = cfg.get("haircuts") or {}
+        assets = model["assets"]
+        carry = float(cfg["carry_rate"])
+        fee = float(cfg["fee_usd"])
+        values = np.asarray(cfg["candidate_values"], dtype=float)
+        cp_of = cfg["candidate_cps"]
+
+        transfers = []
+        for (cp, a), o in model["out"].items():
+            for direction, var in (("out", o), ("in", model["in"][(cp, a)])):
+                q = float(pulp.value(var) or 0.0)
+                if q <= 1e-6:
+                    continue
+                src, dst = (cp, hub) if direction == "out" else (hub, cp)
+                transfers.append({"from": src, "to": dst, "asset": a, "qty": round(q, 6),
+                                  "usd": round(q * float(price_today.get(a, 0.0)), 2)})
+        transfers.sort(key=lambda t: -t["usd"])
+
+        def value_usd(cp, after: bool) -> float:
+            total = 0.0
+            for a in assets:
+                q = (pulp.value(model["qty_after"](cp, a)) if after
+                     else float(posted.get(cp, {}).get(a, 0.0) or 0.0))
+                total += float(q or 0.0) * float(price_today.get(a, 0.0))
+            return total
+
+        by_cp = {}
+        for cp in posted:
+            idx = [j for j, c in enumerate(cp_of) if c == cp]
+            curve = np.asarray(cfg["base_value_by_cp"].get(cp, np.zeros(cfg["n_spots"])), dtype=float)
+            if idx and values.size:
+                curve = curve + net_qty[idx] @ values[idx]
+            requirement = float(max(0.0, float(np.max(-curve)) if curve.size else 0.0))
+            spot_i = int(cfg.get("spot_index", 0))
+            requirement_today = float(max(0.0, -curve[spot_i])) if curve.size else 0.0
+            rates = haircuts.get(cp, {})
+            cover = sum((1.0 - rates.get(a, 0.0)) * np.asarray(price_curves[a], dtype=float)
+                        * float(pulp.value(model["qty_after"](cp, a)) or 0.0) for a in assets)
+            need = np.maximum(-curve, 0.0) + float(cfg["buffer_usd"]) if curve.size else None
+            headroom = float(np.min(cover - need)) if need is not None and np.ndim(cover) else None
+            by_cp[cp] = {
+                "posted_before_usd": round(value_usd(cp, False), 2),
+                "posted_after_usd": round(value_usd(cp, True), 2),
+                # What it would be owed at today's spot, and at the worst spot
+                # on the ladder. Compare collateral against them via
+                # min_headroom_usd, not directly: at the worst spot the
+                # book's own asset (if posted) is worth something else.
+                "requirement_today_usd": round(requirement_today, 2),
+                "requirement_usd": round(requirement, 2),
+                "min_headroom_usd": None if headroom is None else round(headroom, 2),
+                "shortfall_usd": round(float(pulp.value(model["shortfall"][cp]) or 0.0), 2),
+                "is_hub": cp == hub,
+            }
+        carry_before = sum(carry * v["posted_before_usd"] for cp, v in by_cp.items() if cp != hub)
+        carry_after = sum(carry * v["posted_after_usd"] for cp, v in by_cp.items() if cp != hub)
+        fees = fee * len({(t["from"], t["to"], t["asset"]) for t in transfers})
+        report = {
+            "hub": hub,
+            "transfers": transfers,
+            "by_counterparty": by_cp,
+            "carry_before_usd": round(carry_before, 2),
+            "carry_after_usd": round(carry_after, 2),
+            "fees_usd": round(fees, 2),
+            "horizon_days": cfg.get("horizon_days"),
+        }
+        if not verbose:
+            return report
+        print("=== Collateral transfers ===")
+        for t in transfers:
+            print(f"  {t['from']:>12s} -> {t['to']:<12s} {t['qty']:>16,.2f} {t['asset']:<5s} (${t['usd']:,.0f})")
+        for cp, v in by_cp.items():
+            print(f"  {cp:20s} posted {v['posted_before_usd']:>14,.0f} -> {v['posted_after_usd']:>14,.0f}"
+                  f"  req today {v['requirement_today_usd']:>14,.0f} worst {v['requirement_usd']:>14,.0f}"
+                  f"  headroom {v['min_headroom_usd'] or 0:>14,.0f}  shortfall {v['shortfall_usd']:>12,.0f}")
+        print(f"  carry over horizon {carry_before:,.0f} -> {carry_after:,.0f}  fees {fees:,.0f}")
+        return report
+
+    def _solve_problem(self, prob, algo, time_limit=1):
         if algo == "PULP_CBC_CMD":
-            prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=1))
+            prob.solve(pulp.PULP_CBC_CMD(msg=False, timeLimit=time_limit))
         elif algo == "HiGHS":
-            prob.solve(pulp.HiGHS(msg=False, timeLimit=1))
+            prob.solve(pulp.HiGHS(msg=False, timeLimit=time_limit))
         else:
             raise ValueError(f"Invalid algo: {algo}")
         return prob.status

@@ -153,6 +153,12 @@ class OptimizerRunParams:
     # Opt-in: when true, the collateral-derived floor above also constrains the LP's trade choices
     # (not just reported). Off (default) = informational only, matching pre-existing behavior.
     enforce_collateral_cap: bool = False
+    # Collateral transfer model (see CollateralOptimization._add_collateral_transfers):
+    # {"hub", "posted": {cp: {asset: qty}} for this book, "prices": {asset: usd},
+    #  "carry_pct" (annual %), "horizon_days", "buffer_usd", "fee_usd"}. Collateral away
+    # from the hub carries a cost; the LP keeps each counterparty covered (+ buffer) at
+    # every spot and proposes moving the rest to the hub. None (default) = off.
+    collateral_transfer: dict | None = None
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None

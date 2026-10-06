@@ -1801,6 +1801,25 @@
           <input type="number" id="optv2-delta-band" value="150000" step="1000" min="0" style="width:6.5rem"
             title="Mismatches within this many dollars of notional are left alone (converted to underlying tokens via spot when the band is checked) — dollar-denominated so the same tolerance means the same real risk on ETH and FIL alike, and stays meaningful as either spot moves.">
         </label>
+        <label class="toggle-label" style="margin:0" title="Collateral posted against this book anywhere but the hub costs carry (% a year, over the horizon). Each counterparty must keep what it would be owed at every spot on the ladder plus the buffer; the run proposes moving the rest to the hub, at a fixed fee per transfer. Trades that add liability at a non-hub counterparty pay for the collateral they pin there.">
+          <input type="checkbox" id="optv2-coll-xfer">
+          Collateral Transfers
+        </label>
+        <label class="pf-filter-label">Hub
+          <input type="text" id="optv2-coll-hub" value="Flowdesk" style="width:6.5rem">
+        </label>
+        <label class="pf-filter-label">Carry (%/yr)
+          <input type="number" id="optv2-coll-carry" value="0.1" step="0.05" min="0" style="width:4.5rem">
+        </label>
+        <label class="pf-filter-label">Horizon (d)
+          <input type="number" id="optv2-coll-horizon" value="90" step="1" min="1" style="width:4rem">
+        </label>
+        <label class="pf-filter-label">Buffer ($)
+          <input type="number" id="optv2-coll-buffer" value="500000" step="50000" min="0" style="width:6.5rem">
+        </label>
+        <label class="pf-filter-label">Fee/transfer ($)
+          <input type="number" id="optv2-coll-fee" value="10" step="1" min="0" style="width:4rem">
+        </label>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="optv2-save-usecase">
           Save usecase snapshot
@@ -2000,6 +2019,9 @@
           <tbody id="optv2-cash-flow-tbody"></tbody>
         </table>
       </div>
+
+      <!-- Collateral transfers: where this book's collateral should sit after the run's trades. -->
+      <div id="optv2-coll-xfer-section" style="margin:1rem 0 1.5rem;display:none"></div>
 
       <!-- Worst-case stress P&L by counterparty: each counterparty's own book
            (existing non-rolled positions + its own trades from this run) at
@@ -2281,6 +2303,13 @@
           <label class="optv3-toggle"><input type="checkbox" id="optv3-enable-delta-rehedge" checked> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holdings, still sits outside the band, propose one perp trade per counterparty, booked with that counterparty, flattening its own delta to zero (nets against its options for collateral; a Binance Futures hedge is unwound as they take over). Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself.</p>
           <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv3-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv3-coll-xfer"> Collateral transfers</label>
+          <p class="optv3-hint">Collateral posted against this book anywhere but the hub costs carry. Each counterparty keeps what it would be owed at every spot on the ladder plus the buffer; the run proposes moving the rest to the hub, at a fixed fee per transfer, and trades that add liability at a non-hub counterparty pay for the collateral they pin there.</p>
+          <div class="optv3-field"><label>Hub<input type="text" id="optv3-coll-hub" value="Flowdesk" style="width:6.5rem"></label></div>
+          <div class="optv3-field"><label>Carry (%/yr)<input type="number" id="optv3-coll-carry" value="0.1" step="0.05" min="0" style="width:4.5rem"></label></div>
+          <div class="optv3-field"><label>Horizon (days)<input type="number" id="optv3-coll-horizon" value="90" step="1" min="1" style="width:4.5rem"></label></div>
+          <div class="optv3-field"><label>Buffer ($)<input type="number" id="optv3-coll-buffer" value="500000" step="50000" min="0" style="width:6.5rem"></label></div>
+          <div class="optv3-field"><label>Fee per transfer ($)<input type="number" id="optv3-coll-fee" value="10" step="1" min="0" style="width:4.5rem"></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv3-save-usecase"> Save run snapshot</label>
           <p class="optv3-hint">Persist this run (inputs + result) to the Saved Runs list below.</p>
         </div>
@@ -2513,6 +2542,9 @@
               </table>
             </div>
             <div id="optv3-cash-empty" class="optv3-empty">Run the optimizer to see cash flow.</div>
+
+            <!-- Collateral transfers: where this book's collateral should sit after the run's trades. -->
+            <div id="optv3-coll-xfer-section" style="margin:1rem 0 1.5rem;display:none"></div>
           </div>
         </section>
 
@@ -2702,6 +2734,13 @@
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holdings, still sits outside the band, propose one perp trade per counterparty, booked with that counterparty, flattening its own delta to zero (nets against its options for collateral; a Binance Futures hedge is unwound as they take over). Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
           <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv4-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-coll-xfer"> Collateral transfers</label>
+          <p class="optv3-hint">Collateral posted against this book anywhere but the hub costs carry. Each counterparty keeps what it would be owed at every spot on the ladder plus the buffer; the run proposes moving the rest to the hub, at a fixed fee per transfer, and trades that add liability at a non-hub counterparty pay for the collateral they pin there.</p>
+          <div class="optv3-field"><label>Hub<input type="text" id="optv4-coll-hub" value="Flowdesk" style="width:6.5rem"></label></div>
+          <div class="optv3-field"><label>Carry (%/yr)<input type="number" id="optv4-coll-carry" value="0.1" step="0.05" min="0" style="width:4.5rem"></label></div>
+          <div class="optv3-field"><label>Horizon (days)<input type="number" id="optv4-coll-horizon" value="90" step="1" min="1" style="width:4.5rem"></label></div>
+          <div class="optv3-field"><label>Buffer ($)<input type="number" id="optv4-coll-buffer" value="500000" step="50000" min="0" style="width:6.5rem"></label></div>
+          <div class="optv3-field"><label>Fee per transfer ($)<input type="number" id="optv4-coll-fee" value="10" step="1" min="0" style="width:4.5rem"></label></div>
           <div class="optv3-field">
             <label for="optv4-custom-spot">Custom spot <input type="number" id="optv4-custom-spot" step="1" min="0" style="width:6.5rem"></label>
             <p class="optv3-hint">Run the whole optimization as if spot were this price instead of the live mark — candidate strikes, greeks, the target-profile anchor and the payoff ladder all re-center on it (existing positions repriced sticky-strike). Useful for deciding what you'd trade if spot gapped. Blank = live spot.</p>
@@ -3078,6 +3117,9 @@
               </table>
             </div>
             <div id="optv4-cash-empty" class="optv3-empty">Run the optimizer to see cash flow.</div>
+
+            <!-- Collateral transfers: where this book's collateral should sit after the run's trades. -->
+            <div id="optv4-coll-xfer-section" style="margin:1rem 0 1.5rem;display:none"></div>
           </div>
 
           <!-- CP Stress — the server returns cp_worst_case_stress / cp_worst_case_net
