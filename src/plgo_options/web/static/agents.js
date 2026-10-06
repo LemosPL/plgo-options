@@ -533,6 +533,34 @@
         "judged at T+" + t.days + "d</span>" : "");
   }
 
+  // The agent's own pricing of the trade (agents/validate.py): what the
+  // Pricing tab would show, plus the floor and max-loss tests.
+  function pricingBlock(p) {
+    const v = (p.proposal || {}).validation;
+    if (!v) return '<div style="font-size:.64rem;color:#f59e0b;margin:.15rem 0">Not priced by the agent (made before validation existed).</div>';
+    if (v.net_premium_usd == null) {
+      return '<div style="font-size:.64rem;color:#ef4444;margin:.15rem 0">' +
+        (v.findings || []).map((f) => esc(f[1])).join("<br>") + "</div>";
+    }
+    const sgn = (x) => x == null ? "—" : (x < 0 ? "-" : "+") + money(Math.abs(x));
+    const H = v.horizon_days;
+    const cell = (k, val, col) => '<div><span style="color:var(--muted)">' + k + '</span><br><b' +
+      (col ? ' style="color:' + col + '"' : "") + ">" + val + "</b></div>";
+    const red = (x) => x != null && x < 0 ? "#ef4444" : null;
+    return '<div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.2rem .5rem;font-size:.64rem;' +
+      'margin:.25rem 0;padding:.3rem .4rem;border-radius:4px;background:rgba(148,163,184,.07)">' +
+      cell("Net premium", v.net_premium_usd > 0 ? "pay " + money(v.net_premium_usd) : "receive " + money(-v.net_premium_usd)) +
+      cell("Dealing cost", money(v.dealing_cost_usd)) +
+      cell("Cost to run", money(v.cost_to_run_usd)) +
+      cell("P&L at spot, now", sgn(v.pnl_at_spot_now_usd), red(v.pnl_at_spot_now_usd)) +
+      cell("P&L at spot, T+" + H + "d", sgn(v.pnl_at_spot_horizon_usd), red(v.pnl_at_spot_horizon_usd)) +
+      cell("Floor " + (v.floor != null ? px(p.asset, v.floor) : ""), sgn(v.floor_worst_change_usd), red(v.floor_worst_change_usd)) +
+      (v.worst_before_usd != null ? '<div style="grid-column:1/-1"><span style="color:var(--muted)">Worst loss, floor to +85%, T+' + H +
+        "d:</span> " + money(v.worst_before_usd) + " → <b" + (v.worst_after_usd < v.worst_before_usd ? ' style="color:#ef4444"' : "") + ">" +
+        money(v.worst_after_usd) + '</b> <span style="color:var(--muted)">(approved ' + money(v.max_loss_limit_usd) + ")</span></div>" : "") +
+      "</div>";
+  }
+
   function renderProposals() {
     const live = PROPS.filter((p) => p.status === "open");
     const n = (r) => live.filter((p) => r === "all" || p.route === r ||
@@ -562,6 +590,7 @@
             esc(p.created_at.slice(5, 16).replace("T", " ")) + " · " + esc(p.kind || "") + '</span>' +
         '</div>' +
         '<div style="margin:.2rem 0 0">' + targetChip(p) + '</div>' +
+        pricingBlock(p) +
         '<div style="font-size:.72rem;margin:.2rem 0">' + esc(p.summary) + '</div>' +
         (legs.length ? '<div style="font-size:.66rem;line-height:1.4;margin:.15rem 0 .3rem">' +
           legs.map((l) => "• " + legLine(l)).join("<br>") + '</div>' : "") +
@@ -640,13 +669,13 @@
         sel("agents-gl-period", GPERIOD, [["today", "Today"], ["week", "This week"], ["all", "All"]]) +
       "</div>" +
       (rows.length ? '<div style="overflow:auto"><table class="data-table" style="width:100%;font-size:.7rem"><thead><tr>' +
-        "<th>When (UTC)</th><th>#</th><th>Asset</th><th>Agent</th><th>Trade</th><th>Net cost</th><th>Gate</th>" +
+        "<th>When (UTC)</th><th>#</th><th>Asset</th><th>Agent</th><th>Trade</th><th>Agent's pricing</th><th>Gate</th>" +
         "<th>Justification</th><th>Status</th><th></th></tr></thead><tbody>" +
         rows.map((p) => { const nc = (p.proposal || {}).net_cost_usd;
           return "<tr><td style=\"white-space:nowrap\">" + esc(String(p.created_at).slice(5, 16).replace("T", " ")) + "</td><td>" + p.id +
             "</td><td>" + esc(p.asset) + "</td><td>" + esc(p.agent) + " · " + esc(p.kind || "") +
             '</td><td style="min-width:16rem"><div>' + targetChip(p) + '</div><div>' + esc(p.summary) + '</div><div style="color:var(--muted);font-size:.64rem">' + legsShort(p) + "</div>" +
-            "</td><td style=\"white-space:nowrap\">" + (nc == null ? "—" : (nc > 0 ? "pay " : "receive ") + money(Math.abs(nc))) +
+            '</td><td style="min-width:15rem">' + pricingBlock(p) +
             "</td><td>" + route(p.route) + '</td><td style="min-width:18rem;line-height:1.35">' + gateWhy(p) +
             "</td><td>" + esc(p.status) + (p.decided_by ? ' <span style="color:var(--muted)">' + esc(p.decided_by) + "</span>" : "") +
             '</td><td><button class="btn-secondary" style="width:auto;font-size:.62rem;padding:.12rem .35rem" data-v4="' + p.id + '">v4</button></td></tr>';

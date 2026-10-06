@@ -16,6 +16,7 @@ order or writes a trade.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback
 from datetime import datetime, timedelta
@@ -136,6 +137,28 @@ def _header(pols: list[AssetPolicy]) -> str:
     return "\n".join(lines)
 
 
+async def get_validation_book(asset: str) -> dict:
+    """The full book payload the v4 engine prices against (same as a sweep)."""
+    pnl, _ = await opt_mod.gather_book(asset)
+    return pnl
+
+
+async def _validated(prop: dict, pol: AssetPolicy, book_payload: dict | None = None) -> dict:
+    """Price the proposal and run the policy tests (agents/validate.py) before
+    the gate. A proposal the agent could not price is never shown as viable."""
+    from plgo_options.agents import validate as val_mod
+    if not prop.get("legs"):
+        return prop
+    try:
+        pnl = book_payload if book_payload is not None else await get_validation_book(pol.asset)
+        v = await asyncio.to_thread(val_mod.validate, pnl, pol, prop["legs"])
+        val_mod.apply_to_proposal(prop, v)
+    except Exception as e:
+        prop["validation"] = {"findings": [("chris", f"Not validated - the agent could not price it "
+                                                     f"({type(e).__name__}: {str(e)[:120]})", "B3")]}
+    return prop
+
+
 # ── 1. Row watcher ────────────────────────────────────────────────────────
 
 def _row_trade(asset: str, row, spot: float, book: dict, pol: AssetPolicy) -> dict:
@@ -214,7 +237,7 @@ async def row_watcher(ctx: dict) -> dict:
             wake.append(f"{asset} row {row.key} at {_p(asset, spot)}: {row.action}")
         book, _ = await _safe(get_book(asset), {"delta": 0, "positions": [], "mtm": None})
         perp, _ = await _safe(get_perp(asset), {})
-        prop = _row_trade(asset, row, spot, book, pol)
+        prop = await _validated(_row_trade(asset, row, spot, book, pol), pol)
         gctx = await _gate_ctx(pol, spot, book, perp)
         gctx.fired_this_week.discard(row.key)       # we just fired it ourselves
         res = gate_mod.evaluate(prop, gctx)
@@ -358,6 +381,7 @@ async def optimizer(ctx: dict) -> dict:
             prop["variant"] = v
             prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, v, s["target"])
             prop["target"] = s["target"]
+            await _validated(prop, pol, res.get("book"))
             perp, _ = await _safe(get_perp(asset), {})
             gres = gate_mod.evaluate(prop, await _gate_ctx(pol, s["spot"], None, perp))
             pid = await store.add_proposal(

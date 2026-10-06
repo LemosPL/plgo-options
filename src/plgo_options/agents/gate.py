@@ -193,11 +193,24 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
             to_chris.append(f"Roll {t.replace('_', ' ')}: {desc}. Nobody rolls alone (A5).")
             check("roll", True, desc + " -> Chris", "A5")
 
-    # 4. Floor (A2, A5 test 1).
-    ok, note = _floor_ok(p, pol, pol.cost_tolerance_usd)
-    if not ok:
-        reject.append(f"Floor test failed: {note} (A2).")
-    check("floor", ok, note, "A2 / A5-1")
+    # 4. Floor (A2, A5 test 1) and the approved max loss - from the agent's own
+    #    pricing of the trade (agents/validate.py) when it ran, else the curves.
+    val = p.get("validation") or {}
+    if val.get("findings") is not None:
+        for kind, text, rule in val["findings"]:
+            name = {"A2": "floor", "A3": "max loss / cost", "B3": "priced"}.get(rule, rule)
+            if kind == "fail":
+                reject.append(f"{text} ({rule}).")
+            elif kind == "chris":
+                to_chris.append(f"{text} ({rule}).")
+            check(name, kind != "fail", text, rule)
+        if not any(r == "A2" for _, _, r in val["findings"]):
+            check("floor", True, "not testable (no curves)", "A2")
+    else:
+        ok, note = _floor_ok(p, pol, pol.cost_tolerance_usd)
+        if not ok:
+            reject.append(f"Floor test failed: {note} (A2).")
+        check("floor", ok, note, "A2 / A5-1")
 
     # 5. Cost (A3, A5 test 2). Box legs count: they are real fills.
     if net_cost > pol.cost_tolerance_usd:

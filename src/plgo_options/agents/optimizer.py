@@ -345,6 +345,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "pareto": pareto(summaries),
         "best": best,
         "spot": float(pnl.get("spot") or pnl.get("eth_spot") or 0),
+        "book": pnl,                          # for the validation pass; not stored
         "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
     }
 

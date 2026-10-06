@@ -45,6 +45,12 @@ def stub(monkeypatch, spot_box):
     monkeypatch.setattr(desk, "get_collateral", collateral)
     monkeypatch.setattr(desk, "get_open_orders", orders)
 
+    # Pricing each trade needs the full engine book; that pass has its own
+    # tests (test_validate.py). Here it is skipped so the week runs offline.
+    async def no_validation(prop, pol, book_payload=None):
+        return prop
+    monkeypatch.setattr(desk, "_validated", no_validation)
+
 
 def test_example_week(tmp_path, monkeypatch):
     setup_db(tmp_path)
