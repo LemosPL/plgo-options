@@ -293,9 +293,9 @@ async def optimizer(ctx: dict) -> dict:
         pols.append(pol)
         res = await opt_mod.sweep(pol)
         best = res["best"]
-        out.append(f"== {asset} Optimizer v4 sweep ({label}) - {res['runs']} runs, target "
+        out.append(f"== {asset} Optimizer v4 sweep ({label}) - {res['runs']} runs, "
                    f"{res['target']['expiry']} {','.join(res['target']['counterparties'] or ['all'])}, "
-                   f"V {_m(res['target']['trough'])} / {res['target']['down']:.0%} down / {res['target']['up']:.0%} up ==")
+                   f"{len(res['targets'])} target profiles: {'; '.join(res['targets'])} ==")
         if res["errors"]:
             out.append(f"{len(res['errors'])} runs failed.")
         if not best:
@@ -306,24 +306,28 @@ async def optimizer(ctx: dict) -> dict:
             prop = opt_mod.to_proposal(asset, s)
             # What "Validate in v4" replays: the page's own run parameters.
             prop["variant"] = v
-            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, v)
+            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, v, s["target"])
+            prop["target"] = s["target"]
             perp, _ = await _safe(get_perp(asset), {})
             gres = gate_mod.evaluate(prop, await _gate_ctx(pol, s["spot"], None, perp))
             pid = await store.add_proposal(
                 "optimizer", asset, f"v4 {label} #{i}",
                 f"λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} max {v['max_trades']} "
                 f"trades / {v['max_qty']:g} qty: fit +{s['fit_gain_pct']}%, {s['option_lines']} lines, "
-                f"cost {_m(s['cost_usd'])}", gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
-            out.append(f"{i}. λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
+                f"cost {_m(s['cost_usd'])} | target {s['target']['name']}", gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
+            out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
                        f"max{v['max_trades']}/{v['max_qty']:g}: fit +{s['fit_gain_pct']}%, "
                        f"{s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
                        f"{_m(s['net_premium_usd'])} | vs book: {ch} | proposal #{pid} -> {gres.route.upper()}")
         # Two-curve check against the previous run today.
         top = best[0] if best else None
         if top:
-            prev = [c for c in await store.recent_curves(asset, 3)
-                    if c["created_at"][:10] == store.now_iso()[:10]]
-            await store.save_curve(asset, label, top["spot"], top["variant"],
+            # Same day and same target only: curves fitted to different targets differ by design.
+            tname = top["target"]["name"]
+            prev = [c for c in await store.recent_curves(asset, 10)
+                    if c["created_at"][:10] == store.now_iso()[:10]
+                    and (c["params"] or {}).get("target") == tname]
+            await store.save_curve(asset, label, top["spot"], {**top["variant"], "target": tname},
                                    {k: top[k] for k in ("fit_gain_pct", "cost_usd", "option_lines", "trades")})
             if prev:
                 p0 = prev[0]

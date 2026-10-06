@@ -36,6 +36,8 @@ It follows the manual routine on the v4 page: load the book, set the parametric 
 
 Score = fit gain % − 10 × (cost ÷ $100k) − 1.5 × option lines. Disqualified: not converged, or gives back more than $250k versus today's book at −45%, −20%, spot, +35% or +85%.
 
+**Target profiles (6 Oct 2026).** Each sweep tests several targets: the agreed parametric V first (the default), then every saved target-profile CSV for the asset (`ETH - target`, `ETH - target shifted`, `ETH - target shifted v2`; `FIL - target`, `v2`, `v3`), up to `max_targets` (4). The grid (λ 0.3/0.4/0.5 × max 5/7 trades, κ 1.1, T+90 0.5) runs against each target, and each target is ranked on its own, because a fit gain against one target says nothing about another. The best run per target becomes a proposal, labelled with its target. The two-curve check compares runs against the same target only. Pin a list with `optimizer.target_grid` (e.g. `["parametric", "ETH - target.csv"]`). One scheduler job per asset, since each sweep is ~24 runs.
+
 Defaults come from the 28 Sep 2026 sweep (ETH, 25DEC26, Flowdesk):
 
 | Target V (max loss / down / up) | Best settings | Fit gain | Cost | Option lines | Change vs book at −45% / +85% |

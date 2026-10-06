@@ -44,8 +44,11 @@ def build_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
     return grid[: max(1, preset.max_runs)]
 
 
-def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any]) -> dict[str, Any]:
-    """OptimizerRunParams kwargs - the same fields the v4 page posts."""
+def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any],
+               target: dict[str, Any] | None = None) -> dict[str, Any]:
+    """OptimizerRunParams kwargs - the same fields the v4 page posts. ``target``
+    is one of preset.targets(); None keeps the preset's own target."""
+    target_file = target["file"] if target is not None else preset.target_profile_file
     return dict(
         asset=asset.upper(),
         lam_factor=variant["lam_factor"],
@@ -73,7 +76,7 @@ def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any]) -> 
         parametric_trough_payoff=preset.target_trough_payoff,
         parametric_high_plateau_ratio=preset.target_up_ratio,
         bid_ask_vol_pts=DEFAULT_VOL_PTS.get(asset.upper(), 5.0),
-        target_profile_file=preset.target_profile_file,
+        target_profile_file=target_file,
         enable_composite_unwind=preset.enable_composite_unwind,
     )
 
@@ -213,25 +216,38 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         pnl["spot"] = custom_spot
         pnl["eth_spot"] = custom_spot
     grid = variants or build_grid(preset)
+    targets = preset.targets(policy.asset)
     summaries, errors = [], []
-    for v in grid:
-        kw = run_kwargs(policy.asset, preset, v)
-        try:
-            result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
-            summaries.append(summarize(result, v, preset))
-        except Exception as e:                      # one bad combination must not stop the sweep
-            errors.append({"variant": v, "error": f"{type(e).__name__}: {e}"[:300]})
+    for tgt in targets:
+        for v in grid:
+            kw = run_kwargs(policy.asset, preset, v, tgt)
+            try:
+                result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
+                s = summarize(result, v, preset)
+                s["target"] = tgt
+                summaries.append(s)
+            except Exception as e:                  # one bad combination must not stop the sweep
+                errors.append({"variant": v, "target": tgt["name"],
+                               "error": f"{type(e).__name__}: {e}"[:300]})
     ranked = rank(summaries)
+    # Fit gains are only comparable against the same target, so each target is
+    # ranked on its own and contributes its best run; the default target first.
+    best = []
+    for tgt in targets:
+        mine = [s for s in ranked if s["target"]["name"] == tgt["name"] and not s["disqualified"]]
+        if mine:
+            best.append(mine[0])
     return {
         "asset": policy.asset,
         "target": {"expiry": preset.effective_expiry(), "counterparties": preset.counterparties,
                    "trough": preset.target_trough_payoff, "down": preset.target_down_ratio,
                    "up": preset.target_up_ratio, "file": preset.target_profile_file},
-        "runs": len(grid),
+        "targets": [t["name"] for t in targets],
+        "runs": len(grid) * len(targets),
         "errors": errors,
         "ranked": ranked,
         "pareto": pareto(summaries),
-        "best": [s for s in ranked if not s["disqualified"]][:3],
+        "best": best,
         "spot": float(pnl.get("spot") or pnl.get("eth_spot") or 0),
         "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
     }

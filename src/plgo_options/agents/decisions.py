@@ -65,7 +65,23 @@ SHEET_2026_10_05: dict[str, dict[str, Any]] = {
             "optimizer": dict(_OPT_COMMON)},
 }
 
-SHEETS: dict[str, dict[str, dict[str, Any]]] = {"2026-10-05": SHEET_2026_10_05}
+# 6 Oct 2026, Lucas: the sweep must test target profiles (the agreed V plus the
+# saved ones), λ across 0.3-0.5, and FIL in FIL-sized quantities (it was capped
+# at 5,000 FIL, v4's ETH default; the v4 page uses 5,000,000 for FIL).
+_SWEEP_GRID: dict[str, Any] = {
+    "target_grid": [], "max_targets": 4,
+    "lam_grid": [0.3, 0.4, 0.5], "downside_grid": [1.1], "t90_grid": [0.5],
+    "max_trades_grid": [5, 7],
+}
+SWEEP_2026_10_06: dict[str, dict[str, Any]] = {
+    "ETH": {"optimizer": {**_SWEEP_GRID, "max_qty_grid": [5_000.0]}},
+    "FIL": {"optimizer": {**_SWEEP_GRID, "max_qty_grid": [5_000_000.0]}},
+}
+
+SHEETS: dict[str, dict[str, dict[str, Any]]] = {
+    "2026-10-05": SHEET_2026_10_05,
+    "2026-10-06-sweep": SWEEP_2026_10_06,
+}
 
 
 def apply_sheet(pol: AssetPolicy, patch: dict[str, Any]) -> AssetPolicy:

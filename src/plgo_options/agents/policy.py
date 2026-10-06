@@ -38,16 +38,26 @@ class OptimizerPreset:
     target_up_ratio: float = 0.75
     target_profile_file: str | None = None      # a saved CSV wins over the V
 
+    # Target profiles the sweep tests, each ranked on its own (a fit gain
+    # against one target says nothing about another); the best run for each
+    # becomes a proposal. "parametric" is the V above; anything else is a saved
+    # target-profile CSV, as in v4's Target dropdown. Empty = the V first, then
+    # every saved profile for the asset, up to max_targets.
+    target_grid: list[str] = field(default_factory=list)
+    max_targets: int = 4
+
     # Sweep grid (Lucas: λ 0.3-0.5, κ 1-1.1, T+90 0.2 or 0.5, 5-8 trades).
     # 28 Sep 2026 sweep (ETH, 25DEC26, Flowdesk, V -17.5M/85%/75%): λ 0.3 barely
     # moved the book (+3.8% fit); λ 0.5 κ 1.1 T+90 0.5 with max 5 trades won
     # (+59% fit, $108k cost, 5 lines, better at every key spot). Allowing 7
     # trades added 4.5 points of fit for $45k more - not worth it.
-    lam_grid: list[float] = field(default_factory=lambda: [0.4, 0.5])
-    downside_grid: list[float] = field(default_factory=lambda: [1.0, 1.1])
-    t90_grid: list[float] = field(default_factory=lambda: [0.2, 0.5])
+    # 6 Oct 2026: with several targets per sweep, κ and T+90 are held at that
+    # winner and λ gets its full 0.3-0.5 range: 6 runs per target.
+    lam_grid: list[float] = field(default_factory=lambda: [0.3, 0.4, 0.5])
+    downside_grid: list[float] = field(default_factory=lambda: [1.1])
+    t90_grid: list[float] = field(default_factory=lambda: [0.5])
     max_trades_grid: list[int] = field(default_factory=lambda: [5, 7])
-    max_qty_grid: list[float] = field(default_factory=lambda: [5000.0])
+    max_qty_grid: list[float] = field(default_factory=lambda: [5000.0])   # FIL: 5,000,000
 
     # Fixed engine settings (the v4 page's current values, 28 Sep 2026).
     mu_factor: float = 2.3
@@ -68,7 +78,30 @@ class OptimizerPreset:
     score_per_option_line: float = 1.5
     # A run may not give back more than this at any key spot vs today's book.
     max_giveback_usd: float = 250_000.0
-    max_runs: int = 16
+    max_runs: int = 16              # per target
+
+    def targets(self, asset: str) -> list[dict[str, Any]]:
+        """[{"name", "file"}] in test order; file None = the parametric V."""
+        names = list(self.target_grid)
+        if not names:
+            if self.target_profile_file:
+                names = [self.target_profile_file]
+            else:
+                from plgo_options.optimization.misc_utils import list_target_profiles
+                try:
+                    saved = [p["file"] for p in list_target_profiles(asset.upper())]
+                except Exception:
+                    saved = []
+                names = ["parametric"] + saved
+        out = []
+        for n in names[: max(1, self.max_targets)]:
+            if n == "parametric":
+                out.append({"name": f"V {self.target_trough_payoff / 1e6:+.1f}M "
+                                    f"{self.target_down_ratio:.0%}/{self.target_up_ratio:.0%}",
+                            "file": None})
+            else:
+                out.append({"name": n.removesuffix(".csv"), "file": n})
+        return out
 
     def effective_expiry(self, today: date | None = None) -> str:
         """The maturity the sweep targets today: next_expiry once target_expiry
@@ -149,7 +182,7 @@ def default_policy(asset: str) -> AssetPolicy:
                                     "Binance Futures"],
             optimizer=OptimizerPreset(
                 target_trough_payoff=-15_750_000.0, target_down_ratio=1.0,
-                target_up_ratio=1.75, counterparties=[]),
+                target_up_ratio=1.75, counterparties=[], max_qty_grid=[5_000_000.0]),
         )
     return AssetPolicy(
         asset="ETH", row_steps_pct=[10, 20, 30],
