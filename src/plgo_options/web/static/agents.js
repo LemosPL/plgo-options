@@ -693,13 +693,14 @@
     }
     $("agents-decisions").innerHTML =
       '<table class="data-table" style="width:100%"><thead><tr><th>When</th><th>#</th><th>Asset</th>' +
-      '<th>What</th><th>Route</th><th>Outcome</th><th>By</th></tr></thead><tbody>' +
+      '<th>What</th><th>Route</th><th>Why (the gate)</th><th>Agent&rsquo;s pricing</th><th>Outcome</th><th>By</th></tr></thead><tbody>' +
       done.map((p) => {
         const col = p.status === "rejected" ? "#f59e0b"
           : p.status === "executed" ? "#10b981" : "#94a3b8";
         return "<tr><td>" + esc(p.created_at.slice(5, 16).replace("T", " ")) + "</td><td>" + p.id +
-          "</td><td>" + esc(p.asset) + '</td><td style="font-size:.74rem">' + esc(p.summary) +
-          "</td><td>" + esc(p.route.toUpperCase()) + '</td><td style="color:' + col +
+          "</td><td>" + esc(p.asset) + '</td><td style="font-size:.74rem"><div>' + targetChip(p) + "</div>" + esc(p.summary) +
+          "</td><td>" + esc(p.route.toUpperCase()) + '</td><td style="min-width:16rem;font-size:.68rem;line-height:1.35">' +
+          gateWhy(p) + '</td><td style="min-width:14rem">' + pricingBlock(p) + '</td><td style="color:' + col +
           ';font-weight:600">' + esc(p.status) + "</td><td>" + esc(p.decided_by || "gate") + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
