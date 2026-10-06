@@ -402,7 +402,8 @@ async def optimizer(ctx: dict) -> dict:
             out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
                        f"max{v['max_trades']}/{v['max_qty']:g}: fit +{s['fit_gain_pct']}%, "
                        f"{s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
-                       f"{_m(s['net_premium_usd'])} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | proposal #{pid} -> {gres.route.upper()}")
+                       f"{_m(s['net_premium_usd'])} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | proposal #{pid} -> {gres.route.upper()}"
+                       + (": " + " / ".join(gres.rejected_by or gres.needs_chris) if gres.route != gate_mod.LUCAS else ""))
         # Two-curve check against the previous run today.
         top = best[0] if best else None
         if top:
