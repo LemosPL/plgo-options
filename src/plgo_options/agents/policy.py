@@ -13,6 +13,11 @@ from datetime import date, datetime
 from typing import Any
 
 
+TRADES_GRID = (5, 7, 9, 11, 13, 15)
+ETH_QTY_GRID = (1_000.0, 2_000.0, 3_000.0, 4_000.0, 5_000.0)
+FIL_QTY_GRID = (1_000_000.0, 2_000_000.0, 3_000_000.0, 4_000_000.0, 5_000_000.0)
+
+
 @dataclass
 class OptimizerPreset:
     """The locked Optimizer v4 settings the agents run, plus the sweep grid.
@@ -59,8 +64,10 @@ class OptimizerPreset:
     lam_refine_step: float | None = 0.1          # None = coarse grid only
     downside_grid: list[float] = field(default_factory=lambda: [1.1])
     t90_grid: list[float] = field(default_factory=lambda: [0.5])
-    max_trades_grid: list[int] = field(default_factory=lambda: [5, 7])
-    max_qty_grid: list[float] = field(default_factory=lambda: [5000.0])   # FIL: 5,000,000
+    # 6 Oct 2026 (Lucas): a proposal can be 5-15 trades and ETH 1k-5k / FIL
+    # 1M-5M per line. Searched one axis at a time after λ (see sweep()).
+    max_trades_grid: list[int] = field(default_factory=lambda: list(TRADES_GRID))
+    max_qty_grid: list[float] = field(default_factory=lambda: list(ETH_QTY_GRID))
 
     # Fixed engine settings (the v4 page's current values, 28 Sep 2026).
     mu_factor: float = 2.3
@@ -185,7 +192,7 @@ def default_policy(asset: str) -> AssetPolicy:
                                     "Binance Futures"],
             optimizer=OptimizerPreset(
                 target_trough_payoff=-15_750_000.0, target_down_ratio=1.0,
-                target_up_ratio=1.75, counterparties=[], max_qty_grid=[5_000_000.0]),
+                target_up_ratio=1.75, counterparties=[], max_qty_grid=list(FIL_QTY_GRID)),
         )
     return AssetPolicy(
         asset="ETH", row_steps_pct=[10, 20, 30],

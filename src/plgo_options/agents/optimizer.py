@@ -5,7 +5,7 @@ What Lucas does by hand on the v4 page:
   2. Tune the parametric target (downside / upside).
   3. Pick the maturity (e.g. 25 Dec) and the counterparty (e.g. Flowdesk).
   4. Try λ 0.3-0.5, κ 1-1.1, T+90 0.2 or 0.5.
-  5. Squeeze max trades (5, 7, 8) and max qty, looking for a better profile
+  5. Squeeze max trades (5-15) and max qty, looking for a better profile
      with fewer, smaller trades - every line pays a counterparty spread.
 
 This module does exactly that with the same engine the page calls
@@ -45,18 +45,25 @@ def build_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
     return grid[: max(1, preset.max_runs)]
 
 
-def _variants(preset: OptimizerPreset, lams, trades) -> list[dict[str, Any]]:
+def _one(preset: OptimizerPreset, lams, trades, qtys) -> list[dict[str, Any]]:
     return [{"lam_factor": round(l, 4), "downside_factor": k, "t90_weight": t, "max_trades": m, "max_qty": q}
-            for l, k, t, m, q in itertools.product(lams, preset.downside_grid, preset.t90_grid,
-                                                   trades, preset.max_qty_grid)]
+            for l, k, t, m, q in itertools.product(lams, preset.downside_grid, preset.t90_grid, trades, qtys)]
 
 
 def coarse_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
-    """Pass 1: every lam_grid value at the first max_trades (the full grid when
-    no refinement is configured)."""
+    """Pass 1: every lam_grid value at the first max_trades and the largest
+    max_qty (the full grid when no refinement is configured)."""
     if not preset.lam_refine_step:
         return build_grid(preset)
-    return _variants(preset, preset.lam_grid, preset.max_trades_grid[:1])
+    return _one(preset, preset.lam_grid, preset.max_trades_grid[:1], [max(preset.max_qty_grid)])
+
+
+def best_variant(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The best-scoring run's variant. Disqualified runs still show where the
+    engine works best, so when every run is out they are ranked on fit alone."""
+    if not runs:
+        return None
+    return max(runs, key=lambda s: s["score"] if not s["disqualified"] else s["fit_gain_pct"] - 1e6)["variant"]
 
 
 def refine_lams(preset: OptimizerPreset, score_by_lam: dict[float, float]) -> list[float]:
@@ -139,7 +146,7 @@ def variant_for(proposal_row: dict[str, Any], preset: OptimizerPreset) -> tuple[
         return ({"lam_factor": float(m["lam"]), "downside_factor": float(m["kappa"]),
                  "t90_weight": float(m["t90"]), "max_trades": int(m["trades"]),
                  "max_qty": float(m["qty"].replace(",", ""))}, "summary")
-    return build_grid(preset)[0], "policy preset"
+    return coarse_grid(preset)[0], "policy preset"
 
 
 def _nearest(ladder: list[float], x: float) -> int:
@@ -289,7 +296,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         pnl["spot"] = custom_spot
         pnl["eth_spot"] = custom_spot
     targets = preset.targets(policy.asset)
-    summaries, errors, refined = [], [], {}
+    summaries, errors, refined, sized = [], [], {}, {}
 
     async def run_all(tgt: dict, vs: list[dict], done: set) -> list[dict]:
         out = []
@@ -313,17 +320,31 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         if variants:
             summaries += await run_all(tgt, variants, done)
             continue
-        coarse = await run_all(tgt, coarse_grid(preset), done)
-        summaries += coarse
+        mine = await run_all(tgt, coarse_grid(preset), done)
+        if not preset.lam_refine_step:
+            summaries += mine
+            continue
         # Disqualified runs still tell us where λ works best, so score them on fit.
         by_lam: dict[float, float] = {}
-        for s in coarse:
+        for s in mine:
             sc = s["score"] if not s["disqualified"] else s["fit_gain_pct"] - 1e6
             by_lam[s["variant"]["lam_factor"]] = max(by_lam.get(s["variant"]["lam_factor"], -1e18), sc)
         fine = refine_lams(preset, by_lam)
         refined[tgt["name"]] = fine
-        if fine:
-            summaries += await run_all(tgt, _variants(preset, fine, preset.max_trades_grid), done)
+        # λ first (first max_trades, largest qty), then max trades at the best λ,
+        # then max qty at the best (λ, trades): one axis at a time, so 5-15
+        # trades x 1k-5k qty adds ~9 runs instead of multiplying the λ runs.
+        qmax = max(preset.max_qty_grid)
+        mine += await run_all(tgt, _one(preset, fine, preset.max_trades_grid[:1], [qmax]), done)
+        b = best_variant(mine)
+        if b:
+            mine += await run_all(tgt, _one(preset, [b["lam_factor"]], preset.max_trades_grid, [qmax]), done)
+            b = best_variant(mine)
+            mine += await run_all(tgt, _one(preset, [b["lam_factor"]], [b["max_trades"]], preset.max_qty_grid), done)
+            b = best_variant(mine)
+            sized[tgt["name"]] = {"lam_factor": b["lam_factor"], "max_trades": b["max_trades"],
+                                  "max_qty": b["max_qty"]}
+        summaries += mine
     ranked = rank(summaries)
     # Fit gains are only comparable against the same target, so each target is
     # ranked on its own and contributes its best run; the default target first.
@@ -340,6 +361,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "targets": [t["name"] for t in targets],
         "runs": len(summaries) + len(errors),
         "lam_refined": refined,
+        "sized": sized,
         "errors": errors,
         "ranked": ranked,
         "pareto": pareto(summaries),

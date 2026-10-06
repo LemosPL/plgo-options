@@ -13,7 +13,7 @@
 # actually completed (HTTP 200), and would have retried it. 600s covers it.
 #
 # Cloud Run: give the service a request timeout of 3600s so the optimizer
-# sweep (two-pass λ search over up to 4 target profiles, ~20 min) completes:
+# sweep (λ, then max trades, then max qty, per target profile, ~20-25 min) completes:
 #   gcloud run services update plgo-options --timeout=3600 --region=$REGION
 set -euo pipefail
 
@@ -41,7 +41,8 @@ job() {  # name  cron  agent  [deadline]  [body]
 job agents-row-watcher     "*/5 * * * *"  row-watcher   180s
 job agents-morning-open    "0 9 * * 1-5"  morning-open
 # One optimizer job per asset, 30 minutes apart: each sweep is up to 4 target
-# profiles x (8 coarse + ~10 fine λ runs), ~20 min on one instance, so the two
+# profiles x (8 coarse + ~5 fine λ + 5 max-trades + 4 max-qty runs), ~20-25 min
+# on one instance, so the two
 # must not share the CPU. Needs the Cloud Run request timeout at 3600s.
 job agents-optimizer-am     "30 9 * * 1-5"  optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["ETH"]}}'
 job agents-optimizer-am-fil "0 10 * * 1-5"  optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["FIL"]}}'

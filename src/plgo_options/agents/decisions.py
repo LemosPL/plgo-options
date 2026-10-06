@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from plgo_options.agents import store
-from plgo_options.agents.policy import AssetPolicy
+from plgo_options.agents.policy import ETH_QTY_GRID, FIL_QTY_GRID, TRADES_GRID, AssetPolicy
 
 # 5 Oct 2026 decision sheet (Chris's feedback, section 4). Sheet line in brackets.
 # Interpretation agreed with Lucas the same day:
@@ -85,10 +85,18 @@ GIVEBACK_2026_10_06: dict[str, dict[str, Any]] = {
     "ETH": {"optimizer": {"max_giveback_usd": 1_000_000.0}},
 }
 
+# 6 Oct 2026, Lucas: the sweep only tried 5 and 7 trades at the full size cap.
+# A proposal can be 5-15 trades, ETH 1k-5k and FIL 1M-5M per line.
+SIZE_2026_10_06: dict[str, dict[str, Any]] = {
+    "ETH": {"optimizer": {"max_trades_grid": list(TRADES_GRID), "max_qty_grid": list(ETH_QTY_GRID)}},
+    "FIL": {"optimizer": {"max_trades_grid": list(TRADES_GRID), "max_qty_grid": list(FIL_QTY_GRID)}},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
     "2026-10-06-giveback": GIVEBACK_2026_10_06,
+    "2026-10-06-size": SIZE_2026_10_06,
 }
 
 

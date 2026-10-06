@@ -34,10 +34,19 @@ def test_run_kwargs_carries_the_target_file():
 def test_coarse_pass_spans_lambda_and_fil_trades_in_fil_size():
     c = opt.coarse_grid(OptimizerPreset())
     assert [v["lam_factor"] for v in c] == [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
-    assert {v["max_trades"] for v in c} == {5}
-    assert default_policy("FIL").optimizer.max_qty_grid == [5_000_000.0]
+    assert {v["max_trades"] for v in c} == {5} and {v["max_qty"] for v in c} == {5_000.0}
+    assert default_policy("FIL").optimizer.max_qty_grid[-1] == 5_000_000.0
     fil = decisions.apply_sheet(default_policy("FIL"), decisions.SWEEP_2026_10_06["FIL"])
     assert fil.optimizer.max_qty_grid == [5_000_000.0] and fil.optimizer.lam_grid[-1] == 3.5
+
+
+def test_size_sheet_widens_trades_and_qty():
+    eth = decisions.apply_sheet(default_policy("ETH"), decisions.SWEEP_2026_10_06["ETH"])
+    eth = decisions.apply_sheet(eth, decisions.SIZE_2026_10_06["ETH"])
+    assert eth.optimizer.max_trades_grid == [5, 7, 9, 11, 13, 15]
+    assert eth.optimizer.max_qty_grid == [1_000.0, 2_000.0, 3_000.0, 4_000.0, 5_000.0]
+    fil = decisions.apply_sheet(default_policy("FIL"), decisions.SIZE_2026_10_06["FIL"])
+    assert fil.optimizer.max_qty_grid == [1e6, 2e6, 3e6, 4e6, 5e6]
 
 
 def test_refine_between_best_and_better_neighbour():
@@ -67,9 +76,10 @@ async def test_sweep_returns_the_best_run_per_target(monkeypatch):
     monkeypatch.setattr(opt, "gather_book", book)
     monkeypatch.setattr(opt, "_run_one", run_one)
     res = await opt.sweep(pol)
-    # Fit rises with λ here, so each target refines 3.0-3.5: 8 coarse + 6 λ x 2 caps - 2 already run.
+    # Fit rises with λ here, so each target refines 3.0-3.5 (8 coarse + 4 new),
+    # then 5 more max-trades and 4 more max-qty runs at λ 3.5.
     assert res["lam_refined"] == {t: [3.0, 3.1, 3.2, 3.3, 3.4, 3.5] for t in res["targets"]}
-    assert res["runs"] == 2 * (8 + 12 - 2) and len(res["best"]) == 2
+    assert res["runs"] == 2 * (8 + 4 + 5 + 4) and len(res["best"]) == 2
     assert res["best"][0]["target"]["file"] is None
     assert res["best"][1]["target"]["file"] == "ETH - target.csv"
     assert all(b["variant"]["lam_factor"] == 3.5 for b in res["best"])
@@ -98,3 +108,28 @@ def test_runs_are_judged_on_the_target_expiry_curve_not_now():
     s = opt.summarize(res, opt.build_grid(p)[0], p)
     assert s["judged_on_days"] == 90 and not s["disqualified"]
     assert s["after_payoff"] == [1e5, 0, 1e5, 1e5] and s["now_after_payoff"] == [-1e6, 0, 0, 0]
+
+
+@pytest.mark.asyncio
+async def test_size_search_finds_trades_and_qty_off_the_defaults(monkeypatch):
+    pol = default_policy("ETH")
+    pol.optimizer.target_grid = ["parametric"]
+
+    async def book(asset):
+        return {"spot": 2700, "totals": {}}, {}
+
+    def run_one(pnl, collateral, kw):
+        # Fit peaks at λ 1.0 and 11 trades; a 3,000 cap fits as well as 5,000 for less cost.
+        fit = 50 - 10 * abs(kw["lam_factor"] - 1.0) - 2 * abs(kw["max_trades"] - 11)
+        cost = 50_000 + 30 * max(0, kw["max_qty"] - 3_000) - 10 * min(0, kw["max_qty"] - 3_000) * 20
+        return {"status": "ok", "optimizer_converged": True, "spot": 2700,
+                "fit_error_before": 100.0, "fit_error_after": 100.0 - fit,
+                "total_cost_usd": cost, "trades": [], "spot_ladder": [], "before_payoff": [],
+                "after_payoff": []}
+
+    monkeypatch.setattr(opt, "gather_book", book)
+    monkeypatch.setattr(opt, "_run_one", run_one)
+    res = await opt.sweep(pol)
+    (sized,) = res["sized"].values()
+    assert sized == {"lam_factor": 1.0, "max_trades": 11, "max_qty": 3_000.0}
+    assert res["best"][0]["variant"]["max_trades"] == 11 and res["best"][0]["variant"]["max_qty"] == 3_000.0

@@ -355,6 +355,10 @@ async def optimizer(ctx: dict) -> dict:
         if fine:
             out.append("λ fine search: " + "; ".join(
                 f"{k} {v[0]:g}-{v[-1]:g}" for k, v in fine.items()))
+        if res.get("sized"):
+            out.append("Size search (best λ, max trades, max qty): " + "; ".join(
+                f"{k} λ{v['lam_factor']:g} {v['max_trades']} trades / {v['max_qty']:,.0f}"
+                for k, v in res["sized"].items()))
         if res["errors"]:
             out.append(f"{len(res['errors'])} runs failed.")
         if not best:
