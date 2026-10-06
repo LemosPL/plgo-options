@@ -78,9 +78,17 @@ SWEEP_2026_10_06: dict[str, dict[str, Any]] = {
     "FIL": {"optimizer": {**_SWEEP_GRID, "max_qty_grid": [5_000_000.0]}},
 }
 
+# 6 Oct 2026, Lucas: judged at the expiry curve, every ETH run gave back more
+# than $250k at some key spot (closest: -$700k at spot for +$3.2M at -45%).
+# Allow up to $1M versus today's book at any key spot.
+GIVEBACK_2026_10_06: dict[str, dict[str, Any]] = {
+    "ETH": {"optimizer": {"max_giveback_usd": 1_000_000.0}},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
+    "2026-10-06-giveback": GIVEBACK_2026_10_06,
 }
 
 
