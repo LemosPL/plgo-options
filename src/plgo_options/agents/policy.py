@@ -44,16 +44,19 @@ class OptimizerPreset:
     # target-profile CSV, as in v4's Target dropdown. Empty = the V first, then
     # every saved profile for the asset, up to max_targets.
     target_grid: list[str] = field(default_factory=list)
-    max_targets: int = 4
+    max_targets: int = 3
 
     # Sweep grid (Lucas: λ 0.3-0.5, κ 1-1.1, T+90 0.2 or 0.5, 5-8 trades).
     # 28 Sep 2026 sweep (ETH, 25DEC26, Flowdesk, V -17.5M/85%/75%): λ 0.3 barely
     # moved the book (+3.8% fit); λ 0.5 κ 1.1 T+90 0.5 with max 5 trades won
     # (+59% fit, $108k cost, 5 lines, better at every key spot). Allowing 7
     # trades added 4.5 points of fit for $45k more - not worth it.
-    # 6 Oct 2026: with several targets per sweep, κ and T+90 are held at that
-    # winner and λ gets its full 0.3-0.5 range: 6 runs per target.
-    lam_grid: list[float] = field(default_factory=lambda: [0.3, 0.4, 0.5])
+    # 6 Oct 2026 (Lucas): λ is searched in two passes per target. Coarse: every
+    # lam_grid value at the first max_trades. Fine: every lam_refine_step between
+    # the best coarse λ and its better neighbour, at every max_trades - e.g. best
+    # between 2.5 and 3 -> 2.5, 2.6 ... 3.0. κ and T+90 held at the 28 Sep winner.
+    lam_grid: list[float] = field(default_factory=lambda: [0.1, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+    lam_refine_step: float | None = 0.1          # None = coarse grid only
     downside_grid: list[float] = field(default_factory=lambda: [1.1])
     t90_grid: list[float] = field(default_factory=lambda: [0.5])
     max_trades_grid: list[int] = field(default_factory=lambda: [5, 7])
@@ -78,7 +81,7 @@ class OptimizerPreset:
     score_per_option_line: float = 1.5
     # A run may not give back more than this at any key spot vs today's book.
     max_giveback_usd: float = 250_000.0
-    max_runs: int = 16              # per target
+    max_runs: int = 40              # per target, both passes
 
     def targets(self, asset: str) -> list[dict[str, Any]]:
         """[{"name", "file"}] in test order; file None = the parametric V."""

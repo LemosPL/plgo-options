@@ -44,6 +44,43 @@ def build_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
     return grid[: max(1, preset.max_runs)]
 
 
+def _variants(preset: OptimizerPreset, lams, trades) -> list[dict[str, Any]]:
+    return [{"lam_factor": round(l, 4), "downside_factor": k, "t90_weight": t, "max_trades": m, "max_qty": q}
+            for l, k, t, m, q in itertools.product(lams, preset.downside_grid, preset.t90_grid,
+                                                   trades, preset.max_qty_grid)]
+
+
+def coarse_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
+    """Pass 1: every lam_grid value at the first max_trades (the full grid when
+    no refinement is configured)."""
+    if not preset.lam_refine_step:
+        return build_grid(preset)
+    return _variants(preset, preset.lam_grid, preset.max_trades_grid[:1])
+
+
+def refine_lams(preset: OptimizerPreset, score_by_lam: dict[float, float]) -> list[float]:
+    """Pass 2: every lam_refine_step between the best coarse λ and its better
+    neighbour in lam_grid - best 2.5, neighbours 2.0 / 3.0, 3.0 scored higher ->
+    2.5, 2.6 ... 3.0."""
+    step = preset.lam_refine_step
+    lams = sorted(l for l in preset.lam_grid if l in score_by_lam)
+    if not step or not lams:
+        return []
+    best = max(lams, key=lambda l: score_by_lam[l])
+    i = lams.index(best)
+    nbs = [lams[j] for j in (i - 1, i + 1) if 0 <= j < len(lams)]
+    if not nbs:
+        return [best]
+    nb = max(nbs, key=lambda l: score_by_lam[l])
+    lo, hi = min(best, nb), max(best, nb)
+    n = int(round((hi - lo) / step))
+    return [round(lo + k * step, 4) for k in range(n + 1)]
+
+
+def _vkey(v: dict[str, Any]) -> tuple:
+    return (round(v["lam_factor"], 4), v["downside_factor"], v["t90_weight"], v["max_trades"], v["max_qty"])
+
+
 def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any],
                target: dict[str, Any] | None = None) -> dict[str, Any]:
     """OptimizerRunParams kwargs - the same fields the v4 page posts. ``target``
@@ -215,20 +252,42 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
     if custom_spot:
         pnl["spot"] = custom_spot
         pnl["eth_spot"] = custom_spot
-    grid = variants or build_grid(preset)
     targets = preset.targets(policy.asset)
-    summaries, errors = [], []
-    for tgt in targets:
-        for v in grid:
+    summaries, errors, refined = [], [], {}
+
+    async def run_all(tgt: dict, vs: list[dict], done: set) -> list[dict]:
+        out = []
+        for v in vs:
+            if _vkey(v) in done or len(done) >= max(1, preset.max_runs):
+                continue
+            done.add(_vkey(v))
             kw = run_kwargs(policy.asset, preset, v, tgt)
             try:
                 result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
                 s = summarize(result, v, preset)
                 s["target"] = tgt
-                summaries.append(s)
+                out.append(s)
             except Exception as e:                  # one bad combination must not stop the sweep
                 errors.append({"variant": v, "target": tgt["name"],
                                "error": f"{type(e).__name__}: {e}"[:300]})
+        return out
+
+    for tgt in targets:
+        done: set = set()
+        if variants:
+            summaries += await run_all(tgt, variants, done)
+            continue
+        coarse = await run_all(tgt, coarse_grid(preset), done)
+        summaries += coarse
+        # Disqualified runs still tell us where λ works best, so score them on fit.
+        by_lam: dict[float, float] = {}
+        for s in coarse:
+            sc = s["score"] if not s["disqualified"] else s["fit_gain_pct"] - 1e6
+            by_lam[s["variant"]["lam_factor"]] = max(by_lam.get(s["variant"]["lam_factor"], -1e18), sc)
+        fine = refine_lams(preset, by_lam)
+        refined[tgt["name"]] = fine
+        if fine:
+            summaries += await run_all(tgt, _variants(preset, fine, preset.max_trades_grid), done)
     ranked = rank(summaries)
     # Fit gains are only comparable against the same target, so each target is
     # ranked on its own and contributes its best run; the default target first.
@@ -243,7 +302,8 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
                    "trough": preset.target_trough_payoff, "down": preset.target_down_ratio,
                    "up": preset.target_up_ratio, "file": preset.target_profile_file},
         "targets": [t["name"] for t in targets],
-        "runs": len(grid) * len(targets),
+        "runs": len(summaries) + len(errors),
+        "lam_refined": refined,
         "errors": errors,
         "ranked": ranked,
         "pareto": pareto(summaries),

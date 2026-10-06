@@ -134,6 +134,12 @@
       { label: "Target exposure (delta)", v: (a) => P(a).reference_delta == null ? ""
           : Number(P(a).reference_delta).toLocaleString(), miss: (a) => P(a).reference_delta == null },
       { label: "Rows", v: rowLevels, miss: () => false, wide: true },
+      { sec: "Optimizer sweep" },
+      { label: "Target profiles", v: (a) => {
+          const g = ((P(a).optimizer || {}).target_grid || []);
+          return g.length ? g.map((x) => esc(x === "parametric" ? "Agreed V" : x.replace(/\.csv$/i, ""))).join(" · ")
+                          : '<span style="color:var(--muted)">Auto (agreed V + saved profiles)</span>';
+        }, miss: () => false, wide: true },
       { sec: "B3 · how we deal" },
       { label: "Quote tolerance vs model", v: (a) => money(P(a).cost_tolerance_usd),
         miss: (a) => !P(a).cost_tolerance_usd },
@@ -241,7 +247,27 @@
         { k: "cost_tolerance_usd", label: "Quote tolerance vs our model ($)", type: "num",
           help: "If the quote is wider than our number plus this, we do not trade." },
       ] },
+    { id: "OPT", title: "Optimizer · target profiles for the sweep",
+      blurb: "Pick the three targets the 09:30 and 16:00 sweeps test, before 09:00. Each is ranked " +
+             "on its own and its best run becomes a proposal. Left on Auto, the sweep uses the agreed " +
+             "V and then the saved profiles in name order. Save new profiles on the v4 page.",
+      fields: [
+        { k: "target_1", label: "Target 1 (default)", type: "target" },
+        { k: "target_2", label: "Target 2", type: "target" },
+        { k: "target_3", label: "Target 3", type: "target" },
+      ] },
   ];
+
+  // Saved target profiles per asset, for the sweep's target dropdowns.
+  const TARGETS = {};
+  async function loadTargets(a) {
+    if (TARGETS[a]) return;
+    try {
+      const r = await api("/api/optimization/target-profiles?asset=" + encodeURIComponent(a));
+      TARGETS[a] = (r.profiles || []).map((p) => p.file);
+    } catch (e) { TARGETS[a] = []; }
+    if (a === asset() && !$("agents-policy-form").contains(document.activeElement)) renderPolicyForm(POLICY);
+  }
 
   function renderPolicyForm(pol) {
     const val = (k) => {
@@ -257,7 +283,17 @@
       g.fields.map((f) => {
         const id = "pol-" + f.k;
         let input;
-        if (f.type === "select" || f.type === "bool") {
+        if (f.type === "target") {
+          const i = +f.k.slice(-1) - 1;
+          const cur = ((pol.optimizer || {}).target_grid || [])[i] || "";
+          const files = TARGETS[asset()] || [];
+          const opts = [["", "Auto"], ["parametric", "Agreed V (parametric)"]]
+            .concat(files.map((x) => [x, x.replace(/\.csv$/i, "")]));
+          if (cur && !opts.some((o) => o[0] === cur)) opts.push([cur, cur + " (not found)"]);
+          input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="target">' +
+            opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ">" +
+              esc(o[1]) + "</option>").join("") + "</select>";
+        } else if (f.type === "select" || f.type === "bool") {
           const opts = f.type === "bool" ? [["true", "Yes"], ["false", "No"]] : f.opts;
           input = '<select id="' + id + '" data-pk="' + f.k + '" data-pt="' + f.type + '">' +
             opts.map((o) => '<option value="' + o[0] + '"' +
@@ -275,9 +311,12 @@
 
   function readPolicyForm(base) {
     const out = { ...base };
+    const targets = [];
     document.querySelectorAll("#agents-policy-form [data-pk]").forEach((el) => {
       const k = el.dataset.pk, t = el.dataset.pt, raw = el.value.trim();
-      if (t === "num") {
+      if (t === "target") {
+        if (raw && !targets.includes(raw)) targets.push(raw);
+      } else if (t === "num") {
         out[k] = raw === "" ? null : Number(raw);
       } else if (t === "list") {
         const parts = raw ? raw.split(",").map((x) => x.trim()).filter(Boolean) : [];
@@ -290,6 +329,8 @@
         out[k] = raw;
       }
     });
+    // An empty list means Auto (the agreed V, then the saved profiles).
+    out.optimizer = { ...(base.optimizer || {}), target_grid: targets };
     return out;
   }
 
@@ -459,6 +500,7 @@
         renderPolicyForm(POLICY);
         $("agents-policy-json").value = JSON.stringify(POLICY, null, 2);
       }
+      loadTargets(asset());
     } catch (e) {
       $("agents-warn").style.display = "";
       $("agents-warn").textContent = "Agents API: " + e.message;

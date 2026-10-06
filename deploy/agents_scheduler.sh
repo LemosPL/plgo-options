@@ -12,9 +12,9 @@
 # default - Scheduler recorded DEADLINE_EXCEEDED on a request the app had
 # actually completed (HTTP 200), and would have retried it. 600s covers it.
 #
-# Cloud Run: give the service a request timeout of at least 900s so the
-# optimizer sweep (16 runs of ~15s) completes:
-#   gcloud run services update plgo-options --timeout=900 --region=$REGION
+# Cloud Run: give the service a request timeout of 3600s so the optimizer
+# sweep (two-pass λ search over up to 4 target profiles, ~20 min) completes:
+#   gcloud run services update plgo-options --timeout=3600 --region=$REGION
 set -euo pipefail
 
 : "${SERVICE_URL:?set SERVICE_URL}"
@@ -40,13 +40,14 @@ job() {  # name  cron  agent  [deadline]  [body]
 
 job agents-row-watcher     "*/5 * * * *"  row-watcher   180s
 job agents-morning-open    "0 9 * * 1-5"  morning-open
-# One optimizer job per asset: each sweep tests up to 4 target profiles x 6
-# runs (~6 min), so ETH and FIL together would crowd Cloud Run's 900s limit.
-job agents-optimizer-am     "30 9 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["ETH"]}}'
-job agents-optimizer-am-fil "31 9 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["FIL"]}}'
+# One optimizer job per asset, 30 minutes apart: each sweep is up to 4 target
+# profiles x (8 coarse + ~10 fine λ runs), ~20 min on one instance, so the two
+# must not share the CPU. Needs the Cloud Run request timeout at 3600s.
+job agents-optimizer-am     "30 9 * * 1-5"  optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["ETH"]}}'
+job agents-optimizer-am-fil "0 10 * * 1-5"  optimizer 1800s '{"deliver":true,"ctx":{"label":"am","assets":["FIL"]}}'
 job agents-handover         "30 15 * * 1-5" handover
-job agents-optimizer-pm     "0 16 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["ETH"]}}'
-job agents-optimizer-pm-fil "1 16 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["FIL"]}}'
+job agents-optimizer-pm     "0 16 * * 1-5"  optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["ETH"]}}'
+job agents-optimizer-pm-fil "30 16 * * 1-5" optimizer 1800s '{"deliver":true,"ctx":{"label":"pm","assets":["FIL"]}}'
 job agents-night-desk      "0 23 * * 1-5" night-desk
 job agents-close-check     "0 2 * * 2-6"  close-check
 job agents-monday-pack     "30 7 * * 1"   monday-pack

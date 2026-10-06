@@ -84,6 +84,14 @@ async def mtm_on(asset: str, day: str) -> dict | None:
     return dict(r) if r else None
 
 
+def _saved_profiles(asset: str) -> set[str]:
+    from plgo_options.optimization.misc_utils import list_target_profiles
+    try:
+        return {p["file"] for p in list_target_profiles(asset.upper())}
+    except Exception:
+        return set()
+
+
 def _m(v: float | None) -> str:
     if v is None:
         return "n/a"
@@ -269,6 +277,12 @@ async def morning_open(ctx: dict) -> dict:
             out.append(f"Perp {perp.get('venue')}: {perp.get('net_qty')} ({_m(perp.get('notional_usd'))}), "
                        f"funding 30d {_m(f.get('last_30d_usd'))}"
                        + (f" | ERROR {perp.get('market_error')}" if perp.get("market_error") else ""))
+        # The sweep reads its targets at 09:30; set them in Agents > Policy before then.
+        tg = pol.optimizer.targets(asset)
+        missing = [t["name"] for t in tg if t["file"] and t["file"] not in _saved_profiles(asset)]
+        out.append(("Sweep targets today (" + ("set" if pol.optimizer.target_grid else "auto") + "): "
+                    + "; ".join(t["name"] for t in tg))
+                   + (f" | MISSING: {', '.join(missing)}" if missing else ""))
         props = [p for p in await store.list_proposals("open") if p["asset"] == asset]
         if props:
             out.append(f"Open proposals: " + "; ".join(f"#{p['id']} {p['kind']} -> {p['route']}" for p in props[:6]))
@@ -296,6 +310,10 @@ async def optimizer(ctx: dict) -> dict:
         out.append(f"== {asset} Optimizer v4 sweep ({label}) - {res['runs']} runs, "
                    f"{res['target']['expiry']} {','.join(res['target']['counterparties'] or ['all'])}, "
                    f"{len(res['targets'])} target profiles: {'; '.join(res['targets'])} ==")
+        fine = {k: v for k, v in (res.get("lam_refined") or {}).items() if v}
+        if fine:
+            out.append("λ fine search: " + "; ".join(
+                f"{k} {v[0]:g}-{v[-1]:g}" for k, v in fine.items()))
         if res["errors"]:
             out.append(f"{len(res['errors'])} runs failed.")
         if not best:
