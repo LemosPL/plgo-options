@@ -7,6 +7,7 @@ People-facing (the Agents tab):
     GET  /api/agents/status            policies, flags, last run of each agent
     GET  /api/agents/runs              run history (text of every brief)
     GET  /api/agents/proposals         proposals and where the gate routed them
+    GET  /api/agents/proposals/{id}/v4 v4 run parameters + designed legs, for "Validate in v4"
     POST /api/agents/proposals/{id}    mark executed / declined (records who)
     GET  /api/agents/policy/{asset}    Monday's settings
     PUT  /api/agents/policy/{asset}    save Monday's settings (floor only goes up)
@@ -80,6 +81,29 @@ async def runs(agent: str | None = None, limit: int = 30):
 @router.get("/proposals")
 async def proposals(status: str | None = None, limit: int = 100):
     return {"proposals": await store.list_proposals(status, limit)}
+
+
+@router.get("/proposals/{pid}/v4")
+async def proposal_v4(pid: int):
+    """Everything the v4 page needs to replay a proposal: the run parameters
+    (stored on optimizer proposals, else rebuilt from today's policy preset)
+    and the legs the agent designed, so the page can show both."""
+    row = await store.get_proposal(pid)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No proposal #{pid}")
+    pol = await store.get_policy(row["asset"])
+    p = row["proposal"] or {}
+    params = p.get("v4_params")
+    variant, source = opt_mod.variant_for(row, pol.optimizer)
+    if params:
+        source = "stored"
+    else:
+        params = opt_mod.run_kwargs(row["asset"], pol.optimizer, variant)
+    return {"id": pid, "asset": row["asset"], "agent": row["agent"], "kind": row["kind"],
+            "summary": row["summary"], "route": row["route"], "reasons": row["reasons"],
+            "params": params, "variant": variant, "params_source": source,
+            "legs": p.get("legs") or [], "net_cost_usd": p.get("net_cost_usd"),
+            "spot": p.get("spot")}
 
 
 class Decision(BaseModel):

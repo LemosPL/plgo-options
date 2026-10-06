@@ -304,6 +304,9 @@ async def optimizer(ctx: dict) -> dict:
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
             prop = opt_mod.to_proposal(asset, s)
+            # What "Validate in v4" replays: the page's own run parameters.
+            prop["variant"] = v
+            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, v)
             perp, _ = await _safe(get_perp(asset), {})
             gres = gate_mod.evaluate(prop, await _gate_ctx(pol, s["spot"], None, perp))
             pid = await store.add_proposal(

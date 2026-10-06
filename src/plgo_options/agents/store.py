@@ -223,6 +223,18 @@ async def list_proposals(status: str | None = None, limit: int = 100) -> list[di
     return out
 
 
+async def get_proposal(pid: int) -> dict[str, Any] | None:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM agent_proposals WHERE id=?", (pid,))
+    r = await cur.fetchone()
+    if not r:
+        return None
+    d = dict(r)
+    d["reasons"] = json.loads(d.pop("reasons_json") or "[]")
+    d["proposal"] = json.loads(d.pop("proposal_json") or "{}")
+    return d
+
+
 async def decide_proposal(pid: int, status: str, by: str) -> None:
     db = await get_db()
     await db.execute("UPDATE agent_proposals SET status=?, decided_by=?, decided_at=? WHERE id=?",

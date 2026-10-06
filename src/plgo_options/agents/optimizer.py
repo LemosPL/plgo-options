@@ -25,6 +25,7 @@ import asyncio
 import copy
 import itertools
 import math
+import re
 from typing import Any
 
 from plgo_options.agents.policy import AssetPolicy, OptimizerPreset
@@ -75,6 +76,29 @@ def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any]) -> 
         target_profile_file=preset.target_profile_file,
         enable_composite_unwind=preset.enable_composite_unwind,
     )
+
+
+_SUMMARY_RE = re.compile(
+    r"λ\s*(?P<lam>[\d.]+)\s*κ\s*(?P<kappa>[\d.]+)\s*T\+90\s*(?P<t90>[\d.]+)\s*max\s*(?P<trades>\d+)"
+    r"(?:\s*trades)?\s*/\s*(?P<qty>[\d.,]+)")
+
+
+def variant_for(proposal_row: dict[str, Any], preset: OptimizerPreset) -> tuple[dict[str, Any], str]:
+    """The sweep variant behind a stored proposal, and where it came from.
+
+    New optimizer proposals carry it; older ones only have it in the summary
+    line ("λ0.5 κ1.1 T+90 0.5 max 5 trades / 5000 qty"); row and manual
+    proposals never had one, so they get the policy preset's first grid point.
+    """
+    p = proposal_row.get("proposal") or {}
+    if p.get("variant"):
+        return dict(p["variant"]), "stored"
+    m = _SUMMARY_RE.search(proposal_row.get("summary") or "")
+    if m:
+        return ({"lam_factor": float(m["lam"]), "downside_factor": float(m["kappa"]),
+                 "t90_weight": float(m["t90"]), "max_trades": int(m["trades"]),
+                 "max_qty": float(m["qty"].replace(",", ""))}, "summary")
+    return build_grid(preset)[0], "policy preset"
 
 
 def _nearest(ladder: list[float], x: float) -> int:

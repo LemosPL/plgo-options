@@ -554,20 +554,172 @@
       (skipped ? "; " + skipped + " perp leg(s) skipped (A4)" : ""));
   }
 
-  // The v4 sweep produced these numbers; send the operator back with the exact
-  // preset so the run can be reproduced and the shape checked against the book.
-  function validateInV4(p) {
-    const v = (p.proposal || {}).variant || (p.proposal || {}).params || null;
+  // Replay a proposal on the v4 page the way Lucas does it by hand: pick the
+  // asset, Load Risk Profile, set the run's parameters, Run Optimizer. Then
+  // lay the agent's own legs on top as what-if legs so both can be compared on
+  // the same chart: an optimizer proposal shows the fresh run ticked and the
+  // agent's legs off; a row/manual proposal shows the agent's legs on and the
+  // optimizer's suggestions unticked.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function v4Set(id, v) {
+    const el = document.getElementById(id);
+    if (!el || v == null) return;
+    el.value = String(v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function v4Check(id, on) {
+    const el = document.getElementById(id);
+    if (!el || on == null || el.checked === !!on) return;
+    el.checked = !!on;
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function v4Status(html) {
+    const el = document.getElementById("optv4-pricing-back-status");
+    if (!el) return;
+    el.innerHTML = html;
+    el.style.display = "";
+  }
+
+  // An agent leg -> a v4 what-if leg (same shape optv4AddManualLeg builds).
+  function v4ManualLeg(l, S0, on) {
+    const code = toDeribitExpiry(l.expiry);
+    const m = String(l.expiry || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+    let expDate = m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 8)) : null;
+    if (!expDate && code) {
+      const c = code.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/);
+      if (c) expDate = new Date(Date.UTC(2000 + +c[3], MON.indexOf(c[2]), +c[1], 8));
+    }
+    if (!expDate) return null;
+    const dte = Math.max((expDate - Date.now()) / 86400000, 0);
+    const K = Number(l.strike), qAbs = Math.abs(Number(l.qty));
+    if (!(K > 0) || !(qAbs > 0)) return null;
+    const side = String(l.side || (Number(l.qty) < 0 ? "Sell" : "Buy")).toLowerCase() === "sell" ? "Sell" : "Buy";
+    const opt = String(l.opt || "C").toUpperCase();
+    const iv = optv4IvForExpiry(code);
+    const T = dte / 365.25;
+    const price = T > 0 ? bsPrice(S0, K, T, 0, iv / 100, opt)
+      : (opt === "C" ? Math.max(S0 - K, 0) : Math.max(K - S0, 0));
+    return { _mid: ++optv4LegSeq, _on: on, side, opt, strike: K,
+             qty: side === "Buy" ? qAbs : -qAbs, dte, iv_pct: iv, expiry_code: code,
+             bs_price_usd: price };
+  }
+
+  async function validateInV4(p) {
+    if (typeof optv4Load !== "function") { alert("The v4 page isn't loaded."); return; }
+    let d;
+    try { d = await api("/api/agents/proposals/" + p.id + "/v4"); }
+    catch (e) { alert("Could not load proposal #" + p.id + ": " + e.message); return; }
+    const P = d.params || {};
+    const fromOptimizer = d.agent === "optimizer";
+    const notes = [];
+
+    // 1. Asset, then the page, then its own first step: Load Risk Profile.
+    if (currentAsset !== d.asset) {
+      const ab = document.querySelector('.asset-btn[data-asset="' + d.asset + '"]');
+      if (ab) ab.click();
+    }
     const nav = document.querySelector('.nav-item[data-page="optv4"]');
     if (nav) nav.click();
-    const bits = v ? Object.keys(v).map((k) => k + "=" + v[k]).join("  ") : p.summary;
-    console.log("agents → optv4: reproduce proposal #" + p.id + " with " + bits);
-    const el = document.getElementById("optv4-pricing-back-status");
-    if (el) {
-      el.textContent = "From Agents proposal #" + p.id + " (" + p.asset + "): " + bits +
-        ". Run the sweep with these settings to check the shape against the book.";
-      el.style.display = "";
+    v4Status("Agents proposal #" + d.id + " (" + esc(d.asset) + "): loading the risk profile…");
+    try { await optv4Load(); } catch (e) { v4Status("Load Risk Profile failed: " + esc(e.message)); return; }
+    if (!optv4Data) { v4Status("Load Risk Profile returned no book."); return; }
+
+    // 2. The run's settings, field by field as the page posts them.
+    optv4ManualTarget = null;
+    v4Set("optv4-target-select", P.target_profile_file || "");
+    v4Set("optv4-target-trough-payoff", P.parametric_trough_payoff);
+    v4Check("optv4-target-asymmetric-toggle", true);
+    if (P.parametric_low_floor_ratio != null) v4Set("optv4-target-down-pct", +(P.parametric_low_floor_ratio * 100).toFixed(2));
+    if (P.parametric_high_plateau_ratio != null) v4Set("optv4-target-up-pct", +(P.parametric_high_plateau_ratio * 100).toFixed(2));
+    if (typeof optv4UpdateTargetShapeReadouts === "function") optv4UpdateTargetShapeReadouts();
+
+    const te = document.getElementById("optv4-target-expiry");
+    if (te && P.target_expiry) {
+      if (![...te.options].some((o) => o.value === P.target_expiry)) {
+        te.add(new Option(P.target_expiry + " (from agents)", P.target_expiry));
+        notes.push(P.target_expiry + " is not on today's vol surface; added it to the list");
+      }
+      v4Set("optv4-target-expiry", P.target_expiry);
     }
+    const cs = document.getElementById("optv4-counterparties");
+    if (cs) {
+      const want = (P.counterparties || []).map((c) => String(c).toLowerCase());
+      [...cs.options].forEach((o) => { o.selected = want.length ? want.includes(o.value.toLowerCase()) : false; });
+      cs.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    const nums = {
+      "optv4-lam-factor": P.lam_factor, "optv4-downside-factor": P.downside_factor,
+      "optv4-t90-weight": P.t90_weight, "optv4-atm-concentration": P.atm_concentration,
+      "optv4-mu-factor": P.mu_factor, "optv4-cash-neutrality-factor": P.cash_neutrality_factor,
+      "optv4-unwind-discount": P.unwind_discount, "optv4-new-position-penalty": P.new_position_penalty,
+      "optv4-roll-dte-threshold": P.roll_dte_threshold, "optv4-collateral-budget-pct": P.collateral_budget_pct,
+      "optv4-max-qty": P.max_qty, "optv4-max-trades": P.max_trades, "optv4-delta-band": P.delta_band_usd,
+      "optv4-custom-spot": "",
+    };
+    Object.keys(nums).forEach((id) => v4Set(id, nums[id]));
+    v4Check("optv4-roll-itm-only", P.roll_itm_only);
+    v4Check("optv4-enable-box-neutralizer", P.enable_box_neutralizer);
+    v4Check("optv4-enable-composite-unwind", P.enable_composite_unwind);
+    v4Check("optv4-enable-delta-rehedge", P.enable_delta_rehedge);
+    v4Check("optv4-roll-use-ticked", false);
+    v4Check("optv4-exclude-collar-loans", true);
+    if (typeof P.bid_ask_vol_pts === "number") {
+      document.querySelectorAll("#optv4-volpts-list .opt-volpts-input").forEach((i) => { i.value = P.bid_ask_vol_pts; });
+    }
+    // The agents run on the whole book with no forced rolls; say so if the page
+    // would scope it differently.
+    if (tmSelected && tmSelected.size) notes.push(tmSelected.size + " Trade Management selection(s) will be sent as forced rolls - clear them for an exact replay");
+    if (optv2BaseIds()) notes.push("a Deals scope is active, so the run covers only part of the book");
+
+    // 3. Run Optimizer and wait for the result (the page's own handler).
+    optv4SyncRunEnabled();
+    const runBtn = document.getElementById("btn-run-optv4");
+    if (!runBtn || runBtn.disabled) { v4Status("Run Optimizer is disabled - check the target expiry."); return; }
+    v4Status("Agents proposal #" + d.id + ": running the optimizer with the agent's settings…");
+    optv4OptResult = null;
+    optv4HideError();                       // an old error must not end the wait
+    runBtn.click();
+    const errBox = document.getElementById("optv4-error");
+    const t0 = Date.now();
+    while (!optv4OptResult && !(errBox && errBox.offsetParent) && Date.now() - t0 < 15 * 60 * 1000) await sleep(500);
+    if (!optv4OptResult) { v4Status("The run did not finish - see the error above."); return; }
+
+    // 4. The agent's legs as what-if legs on the same chart.
+    const S0 = optv4Data.eth_spot || 0;
+    const legsIn = d.legs || [];
+    const optLegs = legsIn.filter((l) => (l.kind || "option") === "option" && !/BOX/i.test(String(l.strategy || "")));
+    const perps = legsIn.filter((l) => l.kind === "perp" || String(l.opt).toUpperCase() === "F");
+    optv4ManualLegs = optv4ManualLegs.filter((l) => !l._agents);
+    optLegs.forEach((l) => {
+      const m = v4ManualLeg(l, S0, !fromOptimizer);
+      if (m) { m._agents = d.id; optv4ManualLegs.push(m); }
+    });
+    if (!fromOptimizer && optLegs.length) {
+      optv4ReplDeselected = new Set((optv4Replacements || []).map((t) => t._idx));
+      document.querySelectorAll(".optv4-repl-cb").forEach((cb) => { cb.checked = false; });
+      const all = document.getElementById("optv4-repl-all");
+      if (all) all.checked = false;
+    }
+    optv4RenderManualLegs();
+    optv4RefreshAfterWhatIf();
+    if (perps.length) notes.push(perps.length + " perp leg(s) are not plotted: what-if legs are options only (A4: perps change direction, not shape)");
+
+    v4Status("<b>Agents proposal #" + d.id + "</b> (" + esc(d.asset) + ", " + esc(d.kind) + ", routed " +
+      esc(String(d.route).toUpperCase()) + ") replayed: risk profile loaded, settings " +
+      (d.params_source === "stored" ? "as the agent ran them" : d.params_source === "summary"
+        ? "read from the proposal summary" : "from today's policy preset") +
+      " (λ " + P.lam_factor + ", κ " + P.downside_factor + ", T+90 " + P.t90_weight + ", max " + P.max_trades +
+      " trades, " + esc(P.target_expiry || "") + ").<br>" +
+      (fromOptimizer
+        ? "The trade table is today's fresh run. The agent's " + optLegs.length +
+          " leg(s) are in What-if legs, switched off - tick them to compare with what it proposed."
+        : "The agent's " + optLegs.length + " designed leg(s) are on as What-if legs; the optimizer's own " +
+          "suggestions are unticked for comparison.") +
+      (notes.length ? '<br><span style="color:#f59e0b">' + notes.map(esc).join("; ") + "</span>" : ""));
   }
 
   document.addEventListener("click", async (ev) => {
