@@ -680,9 +680,10 @@ class CollateralOptimization:
     # Collateral posted with a counterparty other than the hub (Flowdesk)
     # carries a holding cost; at the hub it is free. Each counterparty must
     # keep enough to cover what we would owe it at every spot on the ladder,
-    # plus a buffer. The LP may move collateral between each counterparty and
-    # the hub, per asset, at a fixed fee per transfer. So it sends whatever a
-    # counterparty does not need to the hub, and — the part that touches the
+    # plus a buffer. The LP may move collateral directly between any two
+    # counterparties, per asset, at a fixed fee per transfer. So whatever a
+    # counterparty does not need goes to the hub, a counterparty that is short
+    # is topped up straight from whoever has spare, and — the part that touches the
     # trades — every dollar of liability a trade adds at a non-hub
     # counterparty is collateral that must stay there and keep costing carry.
     #
@@ -716,37 +717,40 @@ class CollateralOptimization:
         shortfall_cost = float(cfg["shortfall_cost"])
 
         assets = sorted({a for by in posted.values() for a, q in by.items() if q})
-        totals = {a: sum(float(by.get(a, 0.0) or 0.0) for by in posted.values()) for a in assets}
         others = [cp for cp in posted if cp != hub]
 
-        out_vars, in_vars, bin_vars = {}, {}, {}
-        for cp in others:
+        # Direct transfers between any two counterparties, per asset, sent only
+        # from what the sender holds now: no relaying through the hub (or
+        # anyone), which would pay the fee and settle twice for one move.
+        cps = list(posted)
+        flows, bin_vars = {}, {}
+        for src in cps:
             for a in assets:
-                at_cp = float(posted[cp].get(a, 0.0) or 0.0)
-                at_hub = float(posted.get(hub, {}).get(a, 0.0) or 0.0)
-                if at_cp <= 0 and at_hub <= 0 and totals[a] <= 0:
+                held = float(posted[src].get(a, 0.0) or 0.0)
+                if held <= 0:
                     continue
-                tag = f"{cp}_{a}".replace(" ", "_")
-                o = pulp.LpVariable(f"xfer_out_{tag}", lowBound=0, upBound=max(at_cp, 0.0))
-                i_ = pulp.LpVariable(f"xfer_in_{tag}", lowBound=0, upBound=max(totals[a], 0.0))
-                out_vars[(cp, a)], in_vars[(cp, a)] = o, i_
-                if fee > 0:
-                    z = pulp.LpVariable(f"xfer_on_{tag}", cat="Binary")
-                    prob += o + i_ <= max(totals[a], 1e-9) * z, f"xfer_fee_link_{tag}"
-                    bin_vars[(cp, a)] = z
+                for dst in cps:
+                    if dst == src:
+                        continue
+                    tag = f"{src}_{dst}_{a}".replace(" ", "_")
+                    f = pulp.LpVariable(f"xfer_{tag}", lowBound=0, upBound=held)
+                    flows[(src, dst, a)] = f
+                    if fee > 0:
+                        z = pulp.LpVariable(f"xfer_on_{tag}", cat="Binary")
+                        prob += f <= held * z, f"xfer_fee_link_{tag}"
+                        bin_vars[(src, dst, a)] = z
 
         def qty_after(cp, a):
             q = float(posted.get(cp, {}).get(a, 0.0) or 0.0)
-            if cp == hub:
-                return q + pulp.lpSum(out_vars[(k, b)] - in_vars[(k, b)]
-                                      for (k, b) in out_vars if b == a)
-            if (cp, a) in out_vars:
-                return q - out_vars[(cp, a)] + in_vars[(cp, a)]
-            return q
+            return (q + pulp.lpSum(f for (s_, d, b), f in flows.items() if d == cp and b == a)
+                    - pulp.lpSum(f for (s_, d, b), f in flows.items() if s_ == cp and b == a))
 
-        # The hub cannot send what it does not hold.
-        for a in assets:
-            prob += qty_after(hub, a) >= 0, f"xfer_hub_nonneg_{a}"
+        # A counterparty cannot send more than it holds.
+        for cp in cps:
+            for a in assets:
+                if float(posted[cp].get(a, 0.0) or 0.0) > 0:
+                    prob += (pulp.lpSum(f for (s_, d, b), f in flows.items() if s_ == cp and b == a)
+                             <= float(posted[cp][a])), f"xfer_held_{cp}_{a}".replace(" ", "_")
 
         shortfall_vars = {}
         for cp in posted:
@@ -776,11 +780,11 @@ class CollateralOptimization:
         # A vanishing per-$ charge on every move, so a zero fee never lets the
         # solver send collateral out and straight back in (a free wash). 1e-6,
         # not smaller: CBC treats coefficients much below that as zero.
-        churn = 1e-6 * pulp.lpSum(float(price_today.get(a, 0.0)) * (out_vars[k] + in_vars[k])
-                                  for k in out_vars for a in [k[1]])
+        churn = 1e-6 * pulp.lpSum(float(price_today.get(a, 0.0)) * f
+                                  for (_, _, a), f in flows.items())
         cost = (carry_cost + fee * pulp.lpSum(bin_vars.values())
                 + shortfall_cost * pulp.lpSum(shortfall_vars.values()) + churn)
-        return {"cost": cost, "out": out_vars, "in": in_vars, "binaries": bin_vars,
+        return {"cost": cost, "flows": flows, "binaries": bin_vars,
                 "shortfall": shortfall_vars, "assets": assets, "qty_after": qty_after}
 
     @classmethod
@@ -815,14 +819,12 @@ class CollateralOptimization:
         cp_of = cfg["candidate_cps"]
 
         transfers = []
-        for (cp, a), o in model["out"].items():
-            for direction, var in (("out", o), ("in", model["in"][(cp, a)])):
-                q = float(pulp.value(var) or 0.0)
-                if q <= 1e-6:
-                    continue
-                src, dst = (cp, hub) if direction == "out" else (hub, cp)
-                transfers.append({"from": src, "to": dst, "asset": a, "qty": round(q, 6),
-                                  "usd": round(q * float(price_today.get(a, 0.0)), 2)})
+        for (src, dst, a), var in model["flows"].items():
+            q = float(pulp.value(var) or 0.0)
+            if q <= 1e-6:
+                continue
+            transfers.append({"from": src, "to": dst, "asset": a, "qty": round(q, 6),
+                              "usd": round(q * float(price_today.get(a, 0.0)), 2)})
         transfers.sort(key=lambda t: -t["usd"])
 
         def value_usd(cp, after: bool) -> float:

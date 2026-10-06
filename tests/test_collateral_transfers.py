@@ -90,6 +90,16 @@ def test_counterparty_without_exposure_sends_everything():
     assert _moves(report) == {("G20", "Flowdesk", "USDC"): pytest.approx(2_000_000.0)}
 
 
+def test_spare_collateral_goes_straight_to_the_short_counterparty():
+    # G20 has no exposure and spare USDC; KeyRock is short. One direct move,
+    # not G20 -> hub -> KeyRock (two fees, two settlements).
+    cfg = _cfg({"Flowdesk": {}, "G20": {"USDC": 2_000_000.0}, "KeyRock": {"USDC": 1_000_000.0}})
+    report = CollateralOptimization.plan_transfers(cfg, {"KeyRock": np.full(3, -1_800_000.0)})
+    assert _moves(report) == {("G20", "KeyRock", "USDC"): pytest.approx(1_300_000.0),
+                              ("G20", "Flowdesk", "USDC"): pytest.approx(700_000.0)}
+    assert report["fees_usd"] == 20.0
+
+
 def test_uncoverable_counterparty_reports_a_shortfall_instead_of_failing():
     cfg = _cfg({"Flowdesk": {"USDC": 1_000_000.0}, "Wave": {"USDC": 1_000_000.0}})
     report = CollateralOptimization.plan_transfers(cfg, {"Wave": np.full(3, -4_000_000.0)})
