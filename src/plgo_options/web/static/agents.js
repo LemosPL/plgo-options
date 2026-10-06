@@ -171,6 +171,77 @@
       }).join("") + "</tbody></table>";
   }
 
+  // Morning open (B2, 09:00): the last morning-open run laid out like
+  // "Strategy in force" - one column per asset - so the 09:00 check reads at a
+  // glance: where spot is against the rows, the hedge, and what is waiting.
+  async function renderMorning() {
+    const box = $("agents-morning"), when = $("agents-morning-when");
+    if (!box) return;
+    let run = null;
+    try { run = ((await api("/api/agents/runs?agent=morning-open&limit=1")).runs || [])[0] || null; }
+    catch (e) { box.innerHTML = '<p style="color:var(--muted)">Could not load: ' + esc(e.message) + "</p>"; return; }
+    let data = null;
+    try { data = run ? (JSON.parse(run.data_json || "{}").data || null) : null; } catch (e) { data = null; }
+    if (!run) { when.textContent = "No morning open has run yet."; box.innerHTML = ""; return; }
+    const t = String(run.started_at || "").replace("T", " ").slice(0, 16);
+    const today = new Date().toISOString().slice(0, 10) === String(run.started_at).slice(0, 10);
+    when.innerHTML = "Last run " + esc(t) + " UTC" + (today ? "" : ' <span style="color:#f59e0b">- not today</span>') +
+      (run.status !== "ok" ? ' <span style="color:#ef4444">(' + esc(run.status) + ")</span>" : "") +
+      (run.delivered ? " · sent to Slack" : "");
+    if (!data) {
+      box.innerHTML = '<p style="color:var(--muted);font-size:.75rem;margin:0">This run predates the panel - ' +
+        'press Run next to morning-open for a fresh one. Text:</p><pre style="white-space:pre-wrap;font-size:.7rem;margin:.3rem 0 0">' +
+        esc(run.text || "") + "</pre>";
+      return;
+    }
+    const assets = Object.keys(data).filter((k) => k !== "_all");
+    const D = (a) => data[a] || {};
+    const pct = (v) => v == null ? "" : ' <span style="color:var(--muted)">(' + (v >= 0 ? "+" : "") + Number(v).toFixed(1) + "%)</span>";
+    const row = (a, r) => r ? esc(r.key) + " at " + px(a, r.price) + pct(r.pct) : "—";
+    const near = (r) => r && Math.abs(r.pct) < 2 ? ' <span style="color:#f59e0b">close</span>' : "";
+    const num = (v, dp) => v == null ? "—" : Number(v).toLocaleString(undefined, { maximumFractionDigits: dp || 0 });
+    const ROWS = [
+      { sec: "Book" },
+      { label: "Spot", v: (a) => px(a, D(a).spot) },
+      { label: "Mark (MTM)", v: (a) => money(D(a).mtm) },
+      { label: "Delta", v: (a) => D(a).delta == null ? "—" : num(D(a).delta) + ' <span style="color:var(--muted)">' + money(D(a).delta_usd) + "</span>" },
+      { label: "Theta / day", v: (a) => money(D(a).theta) },
+      { label: "Vega", v: (a) => money(D(a).vega) },
+      { sec: "B1 · the rows" },
+      { label: "Reference", v: (a) => px(a, D(a).reference) },
+      { label: "Next row down", v: (a) => row(a, D(a).row_down) + near(D(a).row_down) },
+      { label: "Next row up", v: (a) => row(a, D(a).row_up) + near(D(a).row_up) },
+      { label: "Fired this week", v: (a) => (D(a).fired || []).length ? esc(D(a).fired.join(", ")) : "none" },
+      { label: "Stop", v: (a) => D(a).stop == null ? "—" : px(a, D(a).stop) + pct(D(a).stop_pct) +
+          (D(a).stop_pct != null && D(a).stop_pct < 5 ? ' <span style="color:#ef4444">near</span>' : "") },
+      { sec: "Hedge" },
+      { label: "Perp", v: (a) => D(a).perp_usd == null ? "—" : num(D(a).perp_qty, 2) + " (" + money(D(a).perp_usd) + ")" +
+          (D(a).perp_venue ? ' <span style="color:var(--muted)">@' + esc(D(a).perp_venue) + "</span>" : "") +
+          (D(a).perp_error ? ' <span style="color:#ef4444">' + esc(D(a).perp_error) + "</span>" : "") },
+      { label: "Funding, 30 days", v: (a) => money(D(a).funding_30d) },
+      { sec: "Today" },
+      { label: "Sweep targets", wide: true, v: (a) => (D(a).targets || []).map(esc).join(" · ") +
+          ' <span style="color:var(--muted)">(' + (D(a).targets_set ? "set" : "auto") + ")</span>" +
+          ((D(a).targets_missing || []).length ? ' <span style="color:#ef4444">missing: ' + esc(D(a).targets_missing.join(", ")) + "</span>" : "") },
+      { label: "Open proposals", v: (a) => { const o = D(a).open_proposals || {};
+          return '<span style="color:#10b981">Lucas ' + (o.lucas || 0) + '</span> · <span style="color:#3b82f6">Chris ' +
+            (o.chris || 0) + '</span> · <span style="color:#ef4444">Rejected ' + (o.rejected || 0) + "</span>"; } },
+    ];
+    const all = data._all || {};
+    box.innerHTML = '<table class="ag-strat"><thead><tr><th></th>' + assets.map((a) => "<th>" + esc(a) + "</th>").join("") +
+      "</tr></thead><tbody>" + ROWS.map((r) => r.sec
+        ? '<tr class="ag-strat-sec"><td colspan="' + (assets.length + 1) + '">' + esc(r.sec) + "</td></tr>"
+        : "<tr><td>" + esc(r.label) + "</td>" + assets.map((a) => "<td" + (r.wide ? ' style="white-space:normal"' : "") + ">" +
+            (D(a).error ? '<span style="color:#ef4444">' + esc(D(a).error) + "</span>" : r.v(a)) + "</td>").join("") + "</tr>").join("") +
+      '<tr class="ag-strat-sec"><td colspan="' + (assets.length + 1) + '">Desk</td></tr>' +
+      "<tr><td>Resting orders</td><td colspan=\"" + assets.length + "\">" +
+        (all.resting_orders == null ? '<span style="color:#f59e0b">unavailable ' + esc(all.orders_error || "") + "</span>" : all.resting_orders) + "</td></tr>" +
+      "<tr><td>Margin shortfall (haircut)</td><td colspan=\"" + assets.length + "\">" +
+        (all.shortfall == null ? "—" : (Number(all.shortfall) > 0 ? '<span style="color:#ef4444">' + money(all.shortfall) + "</span>" : money(all.shortfall))) +
+        ' <span style="color:var(--muted)">liability ' + money(all.liability) + "</span></td></tr>" +
+      "</tbody></table>";
+  }
+
   // The Monday policy as a form rather than raw JSON, grouped the way the
   // manual is and captioned in its own words so the number being typed and the
   // rule it enforces sit next to each other.
@@ -536,6 +607,7 @@
 
       renderTasks(st, counts);
       renderStrategy(st.policies);
+      renderMorning();
       renderProposals();
       renderDecisions();
 

@@ -241,7 +241,7 @@ async def row_watcher(ctx: dict) -> dict:
 # ── 2. Morning open ───────────────────────────────────────────────────────
 
 async def morning_open(ctx: dict) -> dict:
-    out, pols = [], []
+    out, pols, data = [], [], {}
     since = (datetime.now(UK) - timedelta(hours=10)).astimezone().isoformat()
     for asset in ASSETS:
         pol = await store.get_policy(asset)
@@ -252,18 +252,26 @@ async def morning_open(ctx: dict) -> dict:
         if not spot:
             spot, serr = await _safe(get_spot(asset))
         out.append(f"== {asset} ==")
+        d = data.setdefault(asset, {})          # the same figures, for the Agents page panel
         if not spot:
+            d["error"] = f"No spot ({berr or serr})"
             out.append(f"No spot available ({berr or serr}). Check market data before trading.")
             continue
         if book:
+            d.update(spot=spot, mtm=book["mtm"], delta=book["delta"], delta_usd=book["delta"] * spot,
+                     theta=book["theta"], vega=book["vega"])
             out.append(f"Spot {_p(asset, spot)} | MTM {_m(book['mtm'])} | delta {book['delta']:,.0f} "
                        f"({_m(book['delta'] * spot)}) | theta {_m(book['theta'])}/day | vega {_m(book['vega'])}")
         else:
+            d.update(spot=spot, book_error=berr)
             out.append(f"Book unavailable: {berr}")
         if pol.reference_price:
             rows = build_rows(asset, pol.reference_price, pol.row_steps_pct)
             b, a = next_rows(rows, spot)
             fired = sorted(await store.fired_rows(asset, week_key()))
+            d.update(reference=pol.reference_price, fired=fired,
+                     row_down={"key": b.key, "price": b.price, "pct": (b.price / spot - 1) * 100} if b else None,
+                     row_up={"key": a.key, "price": a.price, "pct": (a.price / spot - 1) * 100} if a else None)
             out.append(f"Ref {_p(asset, pol.reference_price)}. Next row down {b.key if b else '-'} at "
                        f"{_p(asset, b.price if b else None)} ({(b.price / spot - 1) * 100 if b else 0:+.1f}%), "
                        f"up {a.key if a else '-'} at {_p(asset, a.price if a else None)} "
@@ -271,29 +279,39 @@ async def morning_open(ctx: dict) -> dict:
         else:
             out.append("No Monday reference set - rows inactive.")
         if pol.stop_price:
+            d.update(stop=pol.stop_price, stop_pct=(spot / pol.stop_price - 1) * 100)
             out.append(f"Stop {_p(asset, pol.stop_price)}: spot is {(spot / pol.stop_price - 1) * 100:+.1f}% away.")
         if perp:
             f = perp.get("funding") or {}
+            d.update(perp_venue=perp.get("venue"), perp_qty=perp.get("net_qty"),
+                     perp_usd=perp.get("notional_usd"), funding_30d=f.get("last_30d_usd"),
+                     perp_error=perp.get("market_error"))
             out.append(f"Perp {perp.get('venue')}: {perp.get('net_qty')} ({_m(perp.get('notional_usd'))}), "
                        f"funding 30d {_m(f.get('last_30d_usd'))}"
                        + (f" | ERROR {perp.get('market_error')}" if perp.get("market_error") else ""))
         # The sweep reads its targets at 09:30; set them in Agents > Policy before then.
         tg = pol.optimizer.targets(asset)
         missing = [t["name"] for t in tg if t["file"] and t["file"] not in _saved_profiles(asset)]
+        d.update(targets=[t["name"] for t in tg], targets_set=bool(pol.optimizer.target_grid),
+                 targets_missing=missing)
         out.append(("Sweep targets today (" + ("set" if pol.optimizer.target_grid else "auto") + "): "
                     + "; ".join(t["name"] for t in tg))
                    + (f" | MISSING: {', '.join(missing)}" if missing else ""))
         props = [p for p in await store.list_proposals("open") if p["asset"] == asset]
+        d["open_proposals"] = {r: sum(1 for p in props if p["route"] == r) for r in ("lucas", "chris", "rejected")}
         if props:
             out.append(f"Open proposals: " + "; ".join(f"#{p['id']} {p['kind']} -> {p['route']}" for p in props[:6]))
     oo, oerr = await _safe(get_open_orders(), None)
+    data["_all"] = {"resting_orders": len((oo or {}).get("orders") or []) if oo else None,
+                    "orders_error": None if oo else oerr}
     out.append(f"Resting orders: {len((oo or {}).get('orders') or []) if oo else 'unavailable (' + str(oerr) + ')'}")
     col, _ = await _safe(get_collateral(), {})
     tot = (col or {}).get("totals") or {}
     if tot:
+        data["_all"].update(shortfall=tot.get("shortfall_haircut"), liability=tot.get("liability_usd"))
         out.append(f"Collateral: shortfall (haircut) {_m(tot.get('shortfall_haircut'))}, "
                    f"liability {_m(tot.get('liability_usd'))}.")
-    return {"facts": _header(pols) + "\n" + "\n".join(out), "deliver": True}
+    return {"facts": _header(pols) + "\n" + "\n".join(out), "deliver": True, "data": data}
 
 
 # ── 3. Optimizer (+ two-curve check) ──────────────────────────────────────
