@@ -81,3 +81,20 @@ def test_three_targets_by_default_and_manual_pick_wins():
     pick = ["ETH - target shifted v2.csv", "parametric", "ETH - target.csv"]
     assert [t["file"] for t in OptimizerPreset(target_grid=pick).targets("ETH")] == \
         ["ETH - target shifted v2.csv", None, "ETH - target.csv"]
+
+
+def test_runs_are_judged_on_the_target_expiry_curve_not_now():
+    from datetime import date, timedelta
+    p = OptimizerPreset(target_expiry=(date.today() + timedelta(days=80)).strftime("%d%b%y").upper(),
+                        next_expiry=None)
+    ladder = [2000.0, 2700.0, 3600.0, 5000.0]
+    res = {"status": "ok", "optimizer_converged": True, "spot": 2700, "spot_ladder": ladder,
+           "fit_error_before": 100, "fit_error_after": 50, "total_cost_usd": 0, "trades": [],
+           # Now: gives back $1M on the downside; at T+90 it is better everywhere.
+           "before_payoff": [0, 0, 0, 0], "after_payoff": [-1e6, 0, 0, 0],
+           "before": {"payoff_by_horizon": {"0": [0, 0, 0, 0], "30": [0, 0, 0, 0], "90": [0, 0, 0, 0]}},
+           "after": {"payoff_by_horizon": {"0": [-1e6, 0, 0, 0], "30": [-5e5, 0, 0, 0], "90": [1e5, 0, 1e5, 1e5]}}}
+    assert opt.judge_horizon(res, p) == "90"
+    s = opt.summarize(res, opt.build_grid(p)[0], p)
+    assert s["judged_on_days"] == 90 and not s["disqualified"]
+    assert s["after_payoff"] == [1e5, 0, 1e5, 1e5] and s["now_after_payoff"] == [-1e6, 0, 0, 0]

@@ -26,6 +26,7 @@ import copy
 import itertools
 import math
 import re
+from datetime import date, datetime
 from typing import Any
 
 from plgo_options.agents.policy import AssetPolicy, OptimizerPreset
@@ -145,14 +146,46 @@ def _nearest(ladder: list[float], x: float) -> int:
     return min(range(len(ladder)), key=lambda i: abs(ladder[i] - x))
 
 
+def days_to_expiry(code: str, today: date | None = None) -> int | None:
+    try:
+        return (datetime.strptime(code, "%d%b%y").date() - (today or date.today())).days
+    except (TypeError, ValueError):
+        return None
+
+
+def judge_horizon(result: dict[str, Any], preset: OptimizerPreset) -> str | None:
+    """The P&L curve the sweep is judged on: the engine horizon nearest the
+    target expiry (25DEC26 is ~80 days out today, so the 90-day curve), not
+    the Now curve. None when the engine returned no horizon curves."""
+    keys = [k for k in ((result.get("after") or {}).get("payoff_by_horizon") or {})
+            if k in ((result.get("before") or {}).get("payoff_by_horizon") or {})]
+    nums = [k for k in keys if str(k).lstrip("-").isdigit()]
+    if not nums:
+        return None
+    dte = days_to_expiry(preset.effective_expiry())
+    want = dte if dte is not None and dte > 0 else 90
+    return min(nums, key=lambda k: (abs(int(k) - want), -int(k)))
+
+
 def summarize(result: dict[str, Any], variant: dict[str, Any], preset: OptimizerPreset) -> dict[str, Any]:
-    """Reduce one engine result to what the ranking and the handover need."""
+    """Reduce one engine result to what the ranking and the handover need.
+
+    Key-spot changes, the giveback filter and the gate's floor test all use the
+    target-expiry curve (judge_horizon), because that is when the structure
+    pays; the Now curve is kept alongside for reference.
+    """
     trades = result.get("trades") or []
     opt_lines = [t for t in trades if "BOX" not in str(t.get("strategy") or "").upper()]
     spot = float(result.get("spot") or 0)
     ladder = [float(x) for x in (result.get("spot_ladder") or [])]
-    before = result.get("before_payoff") or []
-    after = result.get("after_payoff") or []
+    now_before = result.get("before_payoff") or []
+    now_after = result.get("after_payoff") or []
+    h = judge_horizon(result, preset)
+    if h is not None:
+        before = result["before"]["payoff_by_horizon"][h]
+        after = result["after"]["payoff_by_horizon"][h]
+    else:
+        before, after = now_before, now_after
     deltas = []
     if ladder and before and after and spot:
         for m in KEY_MONEYNESS:
@@ -191,6 +224,9 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         "spot_ladder": ladder,
         "before_payoff": before,
         "after_payoff": after,
+        "judged_on_days": int(h) if h is not None else 0,
+        "now_before_payoff": now_before,
+        "now_after_payoff": now_after,
         "target_payoff": result.get("target_payoff") or [],
     }
 
@@ -331,6 +367,8 @@ def to_proposal(asset: str, s: dict[str, Any]) -> dict[str, Any]:
         "notional_usd": s["gross_notional_usd"], "spot": s["spot"],
         "spot_ladder": s["spot_ladder"], "before_payoff": s["before_payoff"],
         "after_payoff": s["after_payoff"],
+        "judged_on_days": s.get("judged_on_days", 0),
+        "target": s.get("target"),
         "reason": f"Optimizer v4 sweep: fit +{s['fit_gain_pct']}% with {s['option_lines']} lines",
     }
 

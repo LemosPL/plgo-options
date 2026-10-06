@@ -516,6 +516,23 @@
     return h;
   }
 
+  // Which target profile (and P&L horizon) a proposal was computed against.
+  function propTarget(p) {
+    const pr = p.proposal || {};
+    let name = (pr.target && pr.target.name) || null;
+    if (!name) { const m = String(p.summary || "").match(/\|\s*target\s+([^|]+?)\s*(\||$)/); if (m) name = m[1]; }
+    if (!name && pr.v4_params) name = pr.v4_params.target_profile_file ? pr.v4_params.target_profile_file.replace(/\.csv$/i, "") : "parametric V";
+    return { name, days: pr.judged_on_days };
+  }
+  function targetChip(p) {
+    const t = propTarget(p);
+    if (!t.name) return "";
+    return '<span class="ag-chip" style="background:rgba(168,85,247,.15);color:#a855f7" title="Target profile the optimizer fitted">' +
+      "Target: " + esc(t.name) + "</span>" +
+      (t.days ? ' <span class="ag-chip" style="background:rgba(148,163,184,.15);color:var(--muted)" title="P&L curve used for the giveback and floor tests">' +
+        "judged at T+" + t.days + "d</span>" : "");
+  }
+
   function renderProposals() {
     const live = PROPS.filter((p) => p.status === "open");
     const n = (r) => live.filter((p) => r === "all" || p.route === r ||
@@ -533,17 +550,18 @@
         (live.length ? "Nothing in this filter." : "No open proposals.") + "</p>";
       return;
     }
-    $("agents-props").innerHTML = bar + shown.map((p) => {
+    const card = (p) => {
       const col = p.route === "rejected" ? "#ef4444" : p.route === "lucas" ? "#10b981" : "#3b82f6";
       const legs = (p.proposal || {}).legs || [];
       const nOpt = legs.filter((l) => (l.kind || "option") === "option").length;
-      return '<div style="border-left:2px solid ' + col + ';background:rgba(148,163,184,.05);border-radius:5px;padding:.4rem .55rem;margin-bottom:.35rem">' +
+      return '<div style="border-left:2px solid ' + col + ';background:rgba(148,163,184,.05);border-radius:5px;padding:.4rem .55rem;min-width:0">' +
         '<div style="display:flex;gap:.45rem;align-items:baseline;flex-wrap:wrap">' +
           '<span class="ag-chip" style="background:' + col + '22;color:' + col + '">' + esc(p.route.toUpperCase()) + '</span>' +
           '<b style="font-size:.74rem">#' + p.id + " " + esc(p.asset) + '</b>' +
           '<span style="color:var(--muted);font-size:.65rem">' + esc(p.agent) + " · " +
             esc(p.created_at.slice(5, 16).replace("T", " ")) + " · " + esc(p.kind || "") + '</span>' +
         '</div>' +
+        '<div style="margin:.2rem 0 0">' + targetChip(p) + '</div>' +
         '<div style="font-size:.72rem;margin:.2rem 0">' + esc(p.summary) + '</div>' +
         (legs.length ? '<div style="font-size:.66rem;line-height:1.4;margin:.15rem 0 .3rem">' +
           legs.map((l) => "• " + legLine(l)).join("<br>") + '</div>' : "") +
@@ -556,7 +574,86 @@
           '<button class="btn-secondary" style="width:auto;font-size:.64rem;padding:.15rem .4rem" data-decide="' + p.id + '" data-status="declined">Decline</button>' +
         '</div>' +
       '</div>';
-    }).join("");
+    };
+    // Live proposals side by side; rejected ones folded underneath (full reasons in the Gate log).
+    const grid = (xs) => '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:.45rem">' +
+      xs.map(card).join("") + "</div>";
+    const live2 = shown.filter((p) => p.route !== "rejected"), rej = shown.filter((p) => p.route === "rejected");
+    $("agents-props").innerHTML = bar + (live2.length ? grid(live2) : "") +
+      (rej.length ? (PFILTER === "rejected" ? grid(rej)
+        : '<details style="margin-top:.45rem"><summary style="cursor:pointer;font-size:.72rem;color:#ef4444">Rejected (' +
+          rej.length + ") - why each was refused</summary>" + grid(rej) + "</details>") : "");
+  }
+
+  // Gate log: every proposal the agents made, split by what the gate said,
+  // with the justification on each line - why it was approved, why Chris, or
+  // which rule it broke.
+  let GTAB = "approved", GAGENT = "", GPERIOD = "today";
+  const GROUTES = { approved: ["lucas", "lucas_tell_chris"], chris: ["chris"], rejected: ["rejected"] };
+
+  function gateWhy(p) {
+    const g = (p.proposal || {}).gate || {};
+    const list = (xs, mark) => (xs || []).map((r) => mark + " " + esc(r) + ruleWords(r)).join("<br>");
+    if (p.route === "rejected") {
+      const rej = g.rejected_by || p.reasons || [];
+      const fails = (g.checks || []).filter((c) => c.ok === false);
+      return '<span style="color:#ef4444">' + list(rej, "✕") + "</span>" +
+        (fails.length ? '<div style="color:var(--muted)">failed: ' +
+          fails.map((c) => esc(c.check) + " - " + esc(c.note)).join("; ") + "</div>" : "");
+    }
+    if (p.route === "chris") return '<span style="color:#3b82f6">' + list(g.needs_chris || p.reasons, "•") + "</span>";
+    // Approved: say what it passed, not just "inside mandate".
+    const keep = ["instrument", "size", "cost", "floor", "roll", "perp caps", "stop"];
+    const ok = (g.checks || []).filter((c) => c.ok && keep.includes(c.check));
+    return '<span style="color:#10b981">' + (p.route === "lucas_tell_chris" ? "Lucas acts, tells Chris the same day (B1)" :
+      "Inside Lucas's mandate") + "</span>" +
+      (ok.length ? '<div style="color:var(--muted)">' + ok.map((c) => esc(c.check) + ": " + esc(c.note)).join("; ") + "</div>" : "");
+  }
+
+  function renderGateLog() {
+    const box = $("agents-gatelog");
+    if (!box) return;
+    const now = new Date();
+    const monday = new Date(now); monday.setUTCDate(now.getUTCDate() - ((now.getUTCDay() + 6) % 7));
+    const since = GPERIOD === "today" ? now.toISOString().slice(0, 10)
+      : GPERIOD === "week" ? monday.toISOString().slice(0, 10) : "";
+    const inScope = PROPS.filter((p) => (!since || String(p.created_at) >= since) &&
+      (!GAGENT || p.agent === GAGENT));
+    const count = (k) => k === "all" ? inScope.length : inScope.filter((p) => GROUTES[k].includes(p.route)).length;
+    const rows = inScope.filter((p) => GTAB === "all" || GROUTES[GTAB].includes(p.route));
+    const tab = (k, label, col) => '<button class="btn-secondary" data-gtab="' + k + '" style="width:auto;font-size:.68rem;' +
+      "padding:.2rem .55rem;" + (GTAB === k ? "border-color:" + col + ";color:" + col + ";font-weight:600" : "") + '">' +
+      label + " " + count(k) + "</button>";
+    const agents = [...new Set(PROPS.map((p) => p.agent))].sort();
+    const sel = (id, cur, opts) => '<select id="' + id + '" style="width:auto;font-size:.68rem;padding:.1rem .3rem">' +
+      opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>").join("") + "</select>";
+    const legsShort = (p) => ((p.proposal || {}).legs || []).filter((l) => !/BOX/i.test(String(l.strategy || "")))
+      .slice(0, 6).map((l) => legLine(l)).join("<br>");
+    const route = (r) => { const c = r === "rejected" ? "#ef4444" : r === "chris" ? "#3b82f6" : "#10b981";
+      return '<span class="ag-chip" style="background:' + c + '22;color:' + c + '">' + esc(String(r).replace(/_/g, " ").toUpperCase()) + "</span>"; };
+    box.innerHTML =
+      '<div style="display:flex;gap:.35rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">' +
+        tab("approved", "Approved", "#10b981") + tab("chris", "Needs Chris", "#3b82f6") +
+        tab("rejected", "Rejected", "#ef4444") + tab("all", "All", "#94a3b8") +
+        '<span style="flex:1"></span>' +
+        sel("agents-gl-agent", GAGENT, [["", "All agents"]].concat(agents.map((a) => [a, a]))) +
+        sel("agents-gl-period", GPERIOD, [["today", "Today"], ["week", "This week"], ["all", "All"]]) +
+      "</div>" +
+      (rows.length ? '<div style="overflow:auto"><table class="data-table" style="width:100%;font-size:.7rem"><thead><tr>' +
+        "<th>When (UTC)</th><th>#</th><th>Asset</th><th>Agent</th><th>Trade</th><th>Net cost</th><th>Gate</th>" +
+        "<th>Justification</th><th>Status</th><th></th></tr></thead><tbody>" +
+        rows.map((p) => { const nc = (p.proposal || {}).net_cost_usd;
+          return "<tr><td style=\"white-space:nowrap\">" + esc(String(p.created_at).slice(5, 16).replace("T", " ")) + "</td><td>" + p.id +
+            "</td><td>" + esc(p.asset) + "</td><td>" + esc(p.agent) + " · " + esc(p.kind || "") +
+            '</td><td style="min-width:16rem"><div>' + targetChip(p) + '</div><div>' + esc(p.summary) + '</div><div style="color:var(--muted);font-size:.64rem">' + legsShort(p) + "</div>" +
+            "</td><td style=\"white-space:nowrap\">" + (nc == null ? "—" : (nc > 0 ? "pay " : "receive ") + money(Math.abs(nc))) +
+            "</td><td>" + route(p.route) + '</td><td style="min-width:18rem;line-height:1.35">' + gateWhy(p) +
+            "</td><td>" + esc(p.status) + (p.decided_by ? ' <span style="color:var(--muted)">' + esc(p.decided_by) + "</span>" : "") +
+            '</td><td><button class="btn-secondary" style="width:auto;font-size:.62rem;padding:.12rem .35rem" data-v4="' + p.id + '">v4</button></td></tr>';
+        }).join("") + "</tbody></table></div>"
+        : '<p style="color:var(--muted);font-size:.78rem;margin:0">Nothing here for this filter.</p>');
+    $("agents-gl-agent").onchange = (e) => { GAGENT = e.target.value; renderGateLog(); };
+    $("agents-gl-period").onchange = (e) => { GPERIOD = e.target.value; renderGateLog(); };
   }
 
   function renderDecisions() {
@@ -599,7 +696,7 @@
       const badge = $("nav-badge-agents");
       if (badge) badge.textContent = st.open_proposals || "";
 
-      PROPS = (await api("/api/agents/proposals?limit=60")).proposals || [];
+      PROPS = (await api("/api/agents/proposals?limit=400")).proposals || [];
       const counts = {};
       PROPS.filter((p) => p.status === "open").forEach((p) => {
         counts[p.agent] = (counts[p.agent] || 0) + 1;
@@ -610,6 +707,7 @@
       renderMorning();
       renderProposals();
       renderDecisions();
+      renderGateLog();
 
       $("agents-policy-asset").textContent = asset();
       POLICY = st.policies[asset()] || {};
@@ -792,7 +890,17 @@
 
     // 2. The run's settings, field by field as the page posts them.
     optv4ManualTarget = null;
-    v4Set("optv4-target-select", P.target_profile_file || "");
+    // Load the exact target profile the agent fitted, then wait for v4 to fetch it.
+    const tf = P.target_profile_file || "";
+    const ts = document.getElementById("optv4-target-select");
+    if (ts && tf && ![...ts.options].some((o) => o.value === tf)) {
+      ts.add(new Option(tf.replace(/\.csv$/i, "") + " (from agents)", tf));
+    }
+    v4Set("optv4-target-select", tf);
+    optv4TargetProfileFile = tf;
+    if (typeof optv4SyncTargetControls === "function") optv4SyncTargetControls();
+    try { if (typeof optv4FetchTargetProfile === "function") await optv4FetchTargetProfile(); }
+    catch (e) { notes.push("target profile " + tf + " did not load: " + e.message); }
     v4Set("optv4-target-trough-payoff", P.parametric_trough_payoff);
     v4Check("optv4-target-asymmetric-toggle", true);
     if (P.parametric_low_floor_ratio != null) v4Set("optv4-target-down-pct", +(P.parametric_low_floor_ratio * 100).toFixed(2));
@@ -874,6 +982,7 @@
       esc(String(d.route).toUpperCase()) + ") replayed: risk profile loaded, settings " +
       (d.params_source === "stored" ? "as the agent ran them" : d.params_source === "summary"
         ? "read from the proposal summary" : "from today's policy preset") +
+      ". <b>Target: " + esc(tf ? tf.replace(/\.csv$/i, "") : "parametric V " + P.parametric_trough_payoff / 1e6 + "M") + "</b>" +
       " (λ " + P.lam_factor + ", κ " + P.downside_factor + ", T+90 " + P.t90_weight + ", max " + P.max_trades +
       " trades, " + esc(P.target_expiry || "") + ").<br>" +
       (fromOptimizer
@@ -886,6 +995,8 @@
 
   document.addEventListener("click", async (ev) => {
     if (!(ev.target instanceof HTMLElement)) return;
+    const gt = ev.target.closest("[data-gtab]");
+    if (gt) { GTAB = gt.dataset.gtab; renderGateLog(); return; }
     const pf = ev.target.closest("[data-pfilter]");
     if (pf) { PFILTER = pf.dataset.pfilter; renderProposals(); return; }
     const t = ev.target.closest("[data-show],[data-run],[data-price],[data-v4],[data-decide],button");

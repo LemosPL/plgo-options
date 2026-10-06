@@ -364,11 +364,12 @@ async def optimizer(ctx: dict) -> dict:
                 "optimizer", asset, f"v4 {label} #{i}",
                 f"λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} max {v['max_trades']} "
                 f"trades / {v['max_qty']:g} qty: fit +{s['fit_gain_pct']}%, {s['option_lines']} lines, "
-                f"cost {_m(s['cost_usd'])} | target {s['target']['name']}", gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
+                f"cost {_m(s['cost_usd'])} | target {s['target']['name']} | judged at T+{s.get('judged_on_days', 0)}d",
+                gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
             out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
                        f"max{v['max_trades']}/{v['max_qty']:g}: fit +{s['fit_gain_pct']}%, "
                        f"{s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
-                       f"{_m(s['net_premium_usd'])} | vs book: {ch} | proposal #{pid} -> {gres.route.upper()}")
+                       f"{_m(s['net_premium_usd'])} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | proposal #{pid} -> {gres.route.upper()}")
         # Two-curve check against the previous run today.
         top = best[0] if best else None
         if top:
