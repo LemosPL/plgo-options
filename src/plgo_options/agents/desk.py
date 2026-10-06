@@ -318,6 +318,20 @@ async def optimizer(ctx: dict) -> dict:
             out.append(f"{len(res['errors'])} runs failed.")
         if not best:
             out.append("No run passed the filters (converged, no giveback beyond limit).")
+        # Say why a target produced nothing, so a bad target is visible, not silent.
+        got = {s["target"]["name"] for s in best}
+        for tname in res["targets"]:
+            if tname in got:
+                continue
+            why: dict[str, int] = {}
+            for s in res["ranked"]:
+                if s["target"]["name"] == tname:
+                    for d in s["disqualified"]:
+                        k = "gives back at a key spot" if d.startswith("gives back") else d
+                        why[k] = why.get(k, 0) + 1
+            n_err = sum(1 for e in res["errors"] if e.get("target") == tname)
+            out.append(f"[{tname}] no run passed: " + (", ".join(f"{k} x{v}" for k, v in why.items()) or "-")
+                       + (f", {n_err} errors" if n_err else ""))
         for i, s in enumerate(best, 1):
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
