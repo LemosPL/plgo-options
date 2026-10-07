@@ -145,6 +145,8 @@
       { sec: "B3 · how we deal" },
       { label: "Quote tolerance vs model", v: (a) => money(P(a).cost_tolerance_usd),
         miss: (a) => !P(a).cost_tolerance_usd },
+      { label: "Optimizer reshape tolerance", v: (a) => money(P(a).reshape_tolerance_usd),
+        miss: (a) => !P(a).reshape_tolerance_usd },
     ];
 
     // How much of the mandate is actually decided.
@@ -320,7 +322,9 @@
       blurb: "Price it ourselves first, two quotes minimum, quote the whole package never the legs.",
       fields: [
         { k: "cost_tolerance_usd", label: "Quote tolerance vs our model ($)", type: "num",
-          help: "If the quote is wider than our number plus this, we do not trade." },
+          help: "If the quote is wider than our number plus this, we do not trade. Also how much worse a row trade may make the floor / max loss." },
+        { k: "reshape_tolerance_usd", label: "Optimizer reshape tolerance ($)", type: "num",
+          help: "How much worse an optimizer reshape may make the book below the floor, at its worst loss, or on the upside (view up)." },
       ] },
     { id: "OPT", title: "Optimizer · target profiles for the sweep",
       blurb: "Pick the three targets the 09:30 and 16:00 sweeps test, before 09:00. Each is ranked " +

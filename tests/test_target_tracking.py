@@ -168,3 +168,35 @@ async def test_supersede_clears_old_open_proposals_even_when_nothing_new(tmp_pat
     rows = dict(await (await db.execute("SELECT id, status FROM agent_proposals")).fetchall())
     assert rows == {1: "superseded", 2: "superseded", 3: "open", 4: "open"}
     await db.close()
+
+
+def test_reshape_tolerance_applies_to_optimizer_trades_only():
+    from plgo_options.agents.validate import tolerance_for
+    pol = policy()
+    pol.floor_price, pol.reshape_tolerance_usd = 2000.0, 500_000.0
+    # $300k worse below the floor: inside the reshape tolerance, outside the row one.
+    s = opt.summarize(result(lambda x: (-3e5 if x < 2000 else 0.6e6 * abs(x / SPOT - 1) * 100), cost=0.0),
+                      VAR, pol.optimizer, pol)
+    assert not any("floor" in d for d in s["disqualified"])
+    assert tolerance_for(pol, "optimizer") == 500_000.0 and tolerance_for(pol, "row") == 50_000.0
+
+
+@pytest.mark.asyncio
+async def test_floor_sheet_lowers_the_floor_through_the_guard(monkeypatch):
+    from plgo_options.agents import decisions, store
+    cur = default_policy("ETH")
+    cur.floor_price, cur.is_example = 2300.0, False
+    saved = []
+
+    async def get_policy(a):
+        return cur
+
+    monkeypatch.setattr(store, "get_policy", get_policy)
+    monkeypatch.setattr(store, "get_db", lambda: (_ for _ in ()).throw(RuntimeError("stop before writing")))
+    patch = decisions.FLOOR_2026_10_07["ETH"]
+    new = decisions.apply_sheet(cur, patch)
+    assert new.floor_price == 2000.0 and new.reshape_tolerance_usd == 500_000.0
+    with pytest.raises(ValueError):                     # the guard still stands for everyone else
+        await store.save_policy(new, by="desk")
+    with pytest.raises(RuntimeError, match="stop before writing"):   # the sheet gets past it
+        await store.save_policy(new, by="sheet", allow_floor_down=True)

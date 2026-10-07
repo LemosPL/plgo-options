@@ -153,7 +153,7 @@ async def _validated(prop: dict, pol: AssetPolicy, book_payload: dict | None = N
         return prop
     try:
         pnl = book_payload if book_payload is not None else await get_validation_book(pol.asset)
-        v = await asyncio.to_thread(val_mod.validate, pnl, pol, prop["legs"])
+        v = await asyncio.to_thread(val_mod.validate, pnl, pol, prop["legs"], prop.get("source"))
         val_mod.apply_to_proposal(prop, v)
     except Exception as e:
         prop["validation"] = {"findings": [("chris", f"Not validated - the agent could not price it "

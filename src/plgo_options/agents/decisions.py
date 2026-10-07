@@ -103,19 +103,30 @@ SHAPE_2026_10_07: dict[str, dict[str, Any]] = {
     "FIL": {"floor_price": 0.89, "upside_target_price": 4.00},
 }
 
+# 7 Oct 2026, Lucas: with the floor at 2,300 and a $50k tolerance no ETH
+# reshape passed (every closest run cost $250-450k around -20% and at spot).
+# Floor down to 2,000 (an explicit decision, so the "only rises" guard is
+# waived for this sheet) and optimizer reshape trades get $500k of tolerance
+# on the floor / max-loss / view tests; row trades keep the $50k.
+FLOOR_2026_10_07: dict[str, dict[str, Any]] = {
+    "ETH": {"floor_price": 2_000.0, "reshape_tolerance_usd": 500_000.0, "_allow_floor_down": True},
+    "FIL": {"reshape_tolerance_usd": 500_000.0},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
     "2026-10-06-giveback": GIVEBACK_2026_10_06,
     "2026-10-06-size": SIZE_2026_10_06,
     "2026-10-07-shape": SHAPE_2026_10_07,
+    "2026-10-07-floor": FLOOR_2026_10_07,
 }
 
 
 def apply_sheet(pol: AssetPolicy, patch: dict[str, Any]) -> AssetPolicy:
     """The stored policy with the sheet's fields written over it."""
     d = pol.to_dict()
-    patch = dict(patch)
+    patch = {k: v for k, v in patch.items() if not k.startswith("_")}   # "_" = how to apply, not a field
     opt = patch.pop("optimizer", None) or {}
     d.update(patch)
     d["optimizer"] = {**d["optimizer"], **opt}
@@ -135,7 +146,8 @@ async def apply_pending() -> list[str]:
             continue
         for asset, patch in sheet.items():
             pol = await store.get_policy(asset)
-            await store.save_policy(apply_sheet(pol, patch), by=f"decision-sheet {day}")
+            await store.save_policy(apply_sheet(pol, patch), by=f"decision-sheet {day}",
+                                    allow_floor_down=bool(patch.get("_allow_floor_down")))
         await store.set_flag(flag, "applied", "startup")
         done.append(day)
     return done

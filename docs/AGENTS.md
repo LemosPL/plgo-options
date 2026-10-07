@@ -76,3 +76,5 @@ Pause everything with the **Kill switch** on the Agents page.
 ## Tests
 
 `PYTHONPATH=src python -m pytest tests/` covers rows, every gate rule, the ranking, v4 parameter parity, and the manual's example week end to end.
+
+**Floor and reshape tolerance (7 Oct 2026, decision sheet `2026-10-07-floor`).** With the floor at 2,300 and $50k of tolerance no ETH reshape passed. ETH floor moved to 2,000 (the sheet explicitly waives the "floor only rises" guard; the Policy form still enforces it), and optimizer reshape trades get `reshape_tolerance_usd` = $500k on the floor, max-loss and view tests. Row trades keep `cost_tolerance_usd` ($50k).

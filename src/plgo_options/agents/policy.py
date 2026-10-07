@@ -167,6 +167,9 @@ class AssetPolicy:
     perp_venue: str = "Binance Futures"    # where row perps trade
     rolls_need_chris: bool = True          # A5; False = Lucas rolls inside his limits
     cost_tolerance_usd: float = 50_000.0   # B1a ±US$50k
+    # Optimizer reshape trades: how much worse the floor / max-loss / view
+    # tests allow (7 Oct 2026: $500k). Row trades use cost_tolerance_usd.
+    reshape_tolerance_usd: float = 50_000.0
     allowed_counterparties: list[str] = field(default_factory=list)
     optimizer: OptimizerPreset = field(default_factory=OptimizerPreset)
     is_example: bool = True

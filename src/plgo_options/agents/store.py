@@ -99,11 +99,13 @@ async def get_policy(asset: str) -> AssetPolicy:
     return AssetPolicy.from_dict(json.loads(row["policy_json"]))
 
 
-async def save_policy(policy: AssetPolicy, by: str = "") -> AssetPolicy:
-    """Save Monday's settings. Enforces "the floor only goes up" (A2)."""
+async def save_policy(policy: AssetPolicy, by: str = "", allow_floor_down: bool = False) -> AssetPolicy:
+    """Save Monday's settings. Enforces "the floor only goes up" (A2), except
+    for a decision sheet that explicitly lowers it (recorded under its name)."""
     current = await get_policy(policy.asset)
     if (current.floor_price is not None and policy.floor_price is not None
-            and policy.floor_price < current.floor_price and not current.is_example):
+            and policy.floor_price < current.floor_price and not current.is_example
+            and not allow_floor_down):
         raise ValueError(
             f"Floor can only go up: {current.floor_price:g} -> {policy.floor_price:g} refused (A2).")
     db = await get_db()

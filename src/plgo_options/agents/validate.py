@@ -102,8 +102,9 @@ def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict
     return trades, rows
 
 
-def validate(pnl: dict, policy: AssetPolicy, legs: list[dict]) -> dict[str, Any]:
-    """Price `legs` against today's book and run the policy tests.
+def validate(pnl: dict, policy: AssetPolicy, legs: list[dict], source: str | None = None) -> dict[str, Any]:
+    """Price `legs` against today's book and run the policy tests. Optimizer
+    reshapes (source "optimizer") are tested at policy.reshape_tolerance_usd.
 
     Returns the Pricing-tab figures (premium, dealing cost, P&L at spot now and
     at the horizon), the floor and max-loss tests with dollar amounts, and a
@@ -143,7 +144,7 @@ def validate(pnl: dict, policy: AssetPolicy, legs: list[dict]) -> dict[str, Any]
                    for m in KEY_MONEYNESS],
         spot_ladder=ladder.tolist(), before_payoff=bH.tolist(), after_payoff=aH.tolist(),
     )
-    t = curve_tests(ladder, bH, aH, S, dealing, policy, H)
+    t = curve_tests(ladder, bH, aH, S, dealing, policy, H, tolerance_for(policy, source))
     find.extend(t.pop("findings"))
     out.update(t)
 
@@ -165,8 +166,14 @@ def floor_for(policy: AssetPolicy, spot: float) -> tuple[float, bool]:
     return spot * (1 - steps[-1] / 100), False
 
 
+def tolerance_for(policy: AssetPolicy, source: str | None) -> float:
+    """How much worse the curve tests allow: optimizer reshapes get
+    reshape_tolerance_usd, everything else the B1a quote tolerance."""
+    return policy.reshape_tolerance_usd if source == "optimizer" else policy.cost_tolerance_usd
+
+
 def curve_tests(ladder, before, after, spot: float, dealing: float,
-                policy: AssetPolicy, horizon: int) -> dict[str, Any]:
+                policy: AssetPolicy, horizon: int, tol: float | None = None) -> dict[str, Any]:
     """The policy tests on a before/after curve pair at the target-expiry
     horizon. One implementation for the sweep (engine curves, engine cost) and
     for the validation (our pricing), so the sweep never ranks first a run the
@@ -178,7 +185,7 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
     bH, aH = np.asarray(before, dtype=float), np.asarray(after, dtype=float)
     chg = aH - bH
     at = lambda arr, x: float(np.interp(x, ladder, arr))
-    tol = policy.cost_tolerance_usd
+    tol = policy.cost_tolerance_usd if tol is None else tol
     find: list[tuple[str, str, str]] = []
     out: dict[str, Any] = {"findings": find}
 

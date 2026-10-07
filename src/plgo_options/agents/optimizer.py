@@ -39,7 +39,7 @@ from datetime import date, datetime
 from typing import Any
 
 from plgo_options.agents.policy import AssetPolicy, OptimizerPreset
-from plgo_options.agents.validate import curve_tests
+from plgo_options.agents.validate import curve_tests, tolerance_for
 
 KEY_MONEYNESS = (-0.45, -0.20, 0.0, 0.35, 0.85)
 # Where the result is compared with the target (spot itself is the anchor).
@@ -270,7 +270,8 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
     policy_findings = []
     if policy is not None and ladder and before and after and spot:
         h_days = int(h) if h is not None else 0
-        policy_findings = curve_tests(ladder, before, after, spot, cost, policy, h_days)["findings"]
+        policy_findings = curve_tests(ladder, before, after, spot, cost, policy, h_days,
+                                      tolerance_for(policy, "optimizer"))["findings"]
         disq += [f"{text} ({rule})" for kind, text, rule in policy_findings if kind == "fail"]
     score = (track_gain - preset.score_cost_per_100k * cost / 100_000
              - preset.score_per_option_line * len(opt_lines))
