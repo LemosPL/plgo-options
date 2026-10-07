@@ -42,7 +42,7 @@ Score = target tracking gain % − 10 × (cost ÷ $100k) − 1.5 × option lines
 - ends up further from the target than today's book at any of those key spots, by more than max($250k, 10% of today's distance) (`track_tolerance_usd`, `track_tolerance_pct`);
 - fails a policy test the gate applies, run with the same code as the validation (`validate.curve_tests`): the floor (A2), the approved max loss (A3), and under view "up" the upside at +35%, +85% and the upside target price (A1).
 
-Each target's passing runs (one per distinct trade list) then go through our pricing and the gate best first; the first one accepted becomes the proposal, up to `gate_retries` (4) deep. If all are rejected, the top one is filed with its reasons. At most 5 proposals per sweep; a new sweep marks the asset's older open optimizer proposals `superseded`. The Agents page shows the top 5 open proposals, and every card folds with +/−.
+Each target's passing runs (one per distinct trade list) then go through our pricing and the gate best first; the first one accepted becomes the proposal, up to `gate_retries` (4) deep. If all are rejected, the top one is filed with its reasons. At most 5 proposals per sweep; each sweep marks the asset's older open optimizer proposals `superseded`, even when it files none itself. The Agents page shows the top 5 open proposals, and every card folds with +/−.
 
 Decision sheet `2026-10-07-shape` writes the floor and the upside target instead of leaving them to defaults: floor = the stop (ETH 2,300, FIL 0.89), upside target ETH 3,500 (top of the expected range), FIL 4.00 (the view note). Change them in Agents > Policy (the floor only rises).
 

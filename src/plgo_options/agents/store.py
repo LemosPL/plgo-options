@@ -246,10 +246,10 @@ async def supersede_open(asset: str, agent: str, keep_ids: list[int]) -> int:
     """Close the agent's still-open proposals for ``asset`` that a newer run
     replaced, so the screen only carries the latest sweep. Returns how many."""
     db = await get_db()
-    marks = ",".join("?" * len(keep_ids)) or "NULL"
+    keep = f" AND id NOT IN ({','.join('?' * len(keep_ids))})" if keep_ids else ""
     cur = await db.execute(
-        f"UPDATE agent_proposals SET status='superseded', decided_by='newer run', decided_at=? "
-        f"WHERE asset=? AND agent=? AND status='open' AND id NOT IN ({marks})",
+        "UPDATE agent_proposals SET status='superseded', decided_by='newer run', decided_at=? "
+        "WHERE asset=? AND agent=? AND status='open'" + keep,
         (now_iso(), asset, agent, *keep_ids))
     await db.commit()
     return cur.rowcount or 0

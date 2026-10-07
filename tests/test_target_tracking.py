@@ -145,3 +145,26 @@ async def test_desk_walks_down_the_ranking_until_the_gate_accepts(monkeypatch):
     assert [(r, m) for r, m, _ in filed] == [(gate.CHRIS, 7)]
     assert "rank 2" in filed[0][2] and superseded == [[1]]
     assert "superseded" in out["facts"]
+
+
+@pytest.mark.asyncio
+async def test_supersede_clears_old_open_proposals_even_when_nothing_new(tmp_path, monkeypatch):
+    import aiosqlite
+    from plgo_options.agents import store
+    db = await aiosqlite.connect(tmp_path / "t.db")
+    await db.execute("CREATE TABLE agent_proposals (id INTEGER PRIMARY KEY, asset TEXT, agent TEXT, "
+                     "status TEXT, decided_by TEXT, decided_at TEXT)")
+    await db.executemany("INSERT INTO agent_proposals (id, asset, agent, status) VALUES (?,?,?,?)",
+                         [(1, "ETH", "optimizer", "open"), (2, "ETH", "optimizer", "open"),
+                          (3, "FIL", "optimizer", "open"), (4, "ETH", "row_watcher", "open")])
+    await db.commit()
+
+    async def get_db():
+        return db
+
+    monkeypatch.setattr(store, "get_db", get_db)
+    assert await store.supersede_open("ETH", "optimizer", [2]) == 1
+    assert await store.supersede_open("ETH", "optimizer", []) == 1
+    rows = dict(await (await db.execute("SELECT id, status FROM agent_proposals")).fetchall())
+    assert rows == {1: "superseded", 2: "superseded", 3: "open", 4: "open"}
+    await db.close()
