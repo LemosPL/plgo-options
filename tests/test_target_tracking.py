@@ -200,3 +200,43 @@ async def test_floor_sheet_lowers_the_floor_through_the_guard(monkeypatch):
         await store.save_policy(new, by="desk")
     with pytest.raises(RuntimeError, match="stop before writing"):   # the sheet gets past it
         await store.save_policy(new, by="sheet", allow_floor_down=True)
+
+
+def test_reshape_may_pay_around_spot_inside_the_approved_max_loss():
+    pol = policy()
+    pol.floor_price = 2000.0
+    before = [-1.7e6 + 1e3 * abs(x - SPOT) for x in LADDER]
+    worse_at_spot = [b - (6e5 if abs(x / SPOT - 1) < 0.15 else 0.0) for b, x in zip(before, LADDER)]
+    fails = lambda **kw: [f[1] for f in curve_tests(LADDER, before, worse_at_spot, SPOT, 0.0, pol, 79, **kw)["findings"]
+                          if f[0] == "fail"]
+    assert not fails(tol=500_000.0, reshape=True)          # -2.3M is inside the approved -20M
+    assert any("Worsens the book's worst loss" in t for t in fails())   # row trades keep the old test
+    pol.optimizer.target_trough_payoff = -2_000_000.0       # approved max loss tighter than the result
+    assert any("beyond the approved" in t for t in fails(tol=500_000.0, reshape=True))
+
+
+@pytest.mark.asyncio
+async def test_sweep_judges_on_the_exact_expiry_horizon(monkeypatch):
+    from plgo_options.agents.validate import horizon_days
+    pol = policy()
+    pol.optimizer.target_grid = ["parametric"]
+    pol.optimizer.lam_grid, pol.optimizer.lam_refine_step = [1.0], None
+    pol.optimizer.max_trades_grid, pol.optimizer.max_qty_grid = [5], [5000.0]
+    seen = []
+
+    async def book(asset):
+        return {"spot": SPOT, "totals": {}, "chart_horizons": [0, 30, 90]}, {}
+
+    def run_one(pnl, collateral, kw):
+        seen.append(list(pnl["chart_horizons"]))
+        r = result(lambda x: 0.5e6 * abs(x / SPOT - 1) * 100)
+        h = str(horizon_days(pol.optimizer.effective_expiry()))
+        for side in ("before", "after"):
+            r[side]["payoff_by_horizon"][h] = r[side]["payoff_by_horizon"].pop("80")
+        return r
+
+    monkeypatch.setattr(opt, "gather_book", book)
+    monkeypatch.setattr(opt, "_run_one", run_one)
+    res = await opt.sweep(pol)
+    h = horizon_days(pol.optimizer.effective_expiry())
+    assert h in seen[0] and res["ranked"][0]["judged_on_days"] == h

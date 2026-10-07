@@ -122,9 +122,7 @@ def validate(pnl: dict, policy: AssetPolicy, legs: list[dict], source: str | Non
     if not trades:
         return out
 
-    preset = policy.optimizer
-    exp = _expiry_dt(preset.effective_expiry())
-    H = max(int(round((exp - datetime.now()).total_seconds() / 86400.0)), 1) if exp else 90
+    H = horizon_days(policy.optimizer.effective_expiry())
     ladder = np.array(opt.spot_ladder, dtype=float)
     before, after, _ = opt.build_payoffs([0, H], ladder, trades)
     b0, a0 = np.array(before["0"]), np.array(after["0"])
@@ -144,7 +142,8 @@ def validate(pnl: dict, policy: AssetPolicy, legs: list[dict], source: str | Non
                    for m in KEY_MONEYNESS],
         spot_ladder=ladder.tolist(), before_payoff=bH.tolist(), after_payoff=aH.tolist(),
     )
-    t = curve_tests(ladder, bH, aH, S, dealing, policy, H, tolerance_for(policy, source))
+    t = curve_tests(ladder, bH, aH, S, dealing, policy, H, tolerance_for(policy, source),
+                    reshape=source == "optimizer")
     find.extend(t.pop("findings"))
     out.update(t)
 
@@ -166,6 +165,14 @@ def floor_for(policy: AssetPolicy, spot: float) -> tuple[float, bool]:
     return spot * (1 - steps[-1] / 100), False
 
 
+def horizon_days(expiry: str) -> int:
+    """Days from now to the target expiry (08:00), at least 1; 90 when the
+    code does not parse. The sweep adds this horizon to the engine's curves
+    and judges on it, so the sweep and the validation test the same curve."""
+    exp = _expiry_dt(expiry)
+    return max(int(round((exp - datetime.now()).total_seconds() / 86400.0)), 1) if exp else 90
+
+
 def tolerance_for(policy: AssetPolicy, source: str | None) -> float:
     """How much worse the curve tests allow: optimizer reshapes get
     reshape_tolerance_usd, everything else the B1a quote tolerance."""
@@ -173,11 +180,15 @@ def tolerance_for(policy: AssetPolicy, source: str | None) -> float:
 
 
 def curve_tests(ladder, before, after, spot: float, dealing: float,
-                policy: AssetPolicy, horizon: int, tol: float | None = None) -> dict[str, Any]:
+                policy: AssetPolicy, horizon: int, tol: float | None = None,
+                reshape: bool = False) -> dict[str, Any]:
     """The policy tests on a before/after curve pair at the target-expiry
     horizon. One implementation for the sweep (engine curves, engine cost) and
     for the validation (our pricing), so the sweep never ranks first a run the
     gate is going to reject.
+
+    ``reshape`` (optimizer trades): the max-loss test only fails beyond the
+    approved max loss - paying for the wings costs around spot by design.
 
     Returns the numbers plus findings: ("fail" | "ok", text, rule).
     """
@@ -210,7 +221,7 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
         wb, wa = float(bH[zone].min()), float(aH[zone].min()) - dealing
         limit = policy.optimizer.target_trough_payoff
         out.update(worst_before_usd=wb, worst_after_usd=wa, max_loss_limit_usd=limit)
-        if wa < wb - tol:
+        if wa < wb - tol and not reshape:
             find.append(("fail", f"Worsens the book's worst loss at T+{horizon}d: ${wb:,.0f} -> ${wa:,.0f}", "A3"))
         elif wa < limit and wa < wb:
             find.append(("fail", f"Book's worst loss ${wa:,.0f} at T+{horizon}d is beyond the approved ${limit:,.0f}", "A3"))

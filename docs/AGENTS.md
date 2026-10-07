@@ -78,3 +78,5 @@ Pause everything with the **Kill switch** on the Agents page.
 `PYTHONPATH=src python -m pytest tests/` covers rows, every gate rule, the ranking, v4 parameter parity, and the manual's example week end to end.
 
 **Floor and reshape tolerance (7 Oct 2026, decision sheet `2026-10-07-floor`).** With the floor at 2,300 and $50k of tolerance no ETH reshape passed. ETH floor moved to 2,000 (the sheet explicitly waives the "floor only rises" guard; the Policy form still enforces it), and optimizer reshape trades get `reshape_tolerance_usd` = $500k on the floor, max-loss and view tests. Row trades keep `cost_tolerance_usd` ($50k).
+
+**Max loss for reshapes, and one horizon (7 Oct 2026).** An optimizer reshape now fails the max-loss test (A3) only if it takes the book beyond the approved max loss (`target_trough_payoff`, −$20M); paying for the wings costs around spot by design. Row trades keep "no worse than today". The sweep adds the exact target-expiry horizon (`validate.horizon_days`) to the engine's curves, so the sweep and the validation judge the same T+N-day curve (before, the sweep used the nearest matrix column, e.g. T+90 against T+79).

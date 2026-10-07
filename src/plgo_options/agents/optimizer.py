@@ -39,7 +39,7 @@ from datetime import date, datetime
 from typing import Any
 
 from plgo_options.agents.policy import AssetPolicy, OptimizerPreset
-from plgo_options.agents.validate import curve_tests, tolerance_for
+from plgo_options.agents.validate import curve_tests, horizon_days, tolerance_for
 
 KEY_MONEYNESS = (-0.45, -0.20, 0.0, 0.35, 0.85)
 # Where the result is compared with the target (spot itself is the anchor).
@@ -178,15 +178,14 @@ def days_to_expiry(code: str, today: date | None = None) -> int | None:
 
 def judge_horizon(result: dict[str, Any], preset: OptimizerPreset) -> str | None:
     """The P&L curve the sweep is judged on: the engine horizon nearest the
-    target expiry (25DEC26 is ~80 days out today, so the 90-day curve), not
-    the Now curve. None when the engine returned no horizon curves."""
+    target expiry - exactly it, since gather_book adds that horizon - not the
+    Now curve. None when the engine returned no horizon curves."""
     keys = [k for k in ((result.get("after") or {}).get("payoff_by_horizon") or {})
             if k in ((result.get("before") or {}).get("payoff_by_horizon") or {})]
     nums = [k for k in keys if str(k).lstrip("-").isdigit()]
     if not nums:
         return None
-    dte = days_to_expiry(preset.effective_expiry())
-    want = dte if dte is not None and dte > 0 else 90
+    want = horizon_days(preset.effective_expiry())
     return min(nums, key=lambda k: (abs(int(k) - want), -int(k)))
 
 
@@ -271,7 +270,7 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
     if policy is not None and ladder and before and after and spot:
         h_days = int(h) if h is not None else 0
         policy_findings = curve_tests(ladder, before, after, spot, cost, policy, h_days,
-                                      tolerance_for(policy, "optimizer"))["findings"]
+                                      tolerance_for(policy, "optimizer"), reshape=True)["findings"]
         disq += [f"{text} ({rule})" for kind, text, rule in policy_findings if kind == "fail"]
     score = (track_gain - preset.score_cost_per_100k * cost / 100_000
              - preset.score_per_option_line * len(opt_lines))
@@ -360,6 +359,12 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
     if custom_spot:
         pnl["spot"] = custom_spot
         pnl["eth_spot"] = custom_spot
+    # Have the engine draw the exact target-expiry curve (its own horizons are
+    # the matrix columns, e.g. 90d when expiry is 79d out), so the sweep and
+    # the validation judge the same curve.
+    h_exp = horizon_days(preset.effective_expiry())
+    if isinstance(pnl.get("chart_horizons"), list) and h_exp not in pnl["chart_horizons"]:
+        pnl["chart_horizons"] = sorted(pnl["chart_horizons"] + [h_exp])
     targets = preset.targets(policy.asset)
     summaries, errors, refined, sized = [], [], {}, {}
 
