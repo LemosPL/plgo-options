@@ -678,36 +678,36 @@ class CollateralOptimization:
     # ── Collateral transfers ──────────────────────────────────────────────
     #
     # Collateral posted with a counterparty other than the hub (Flowdesk)
-    # carries a holding cost; at the hub it is free. Each counterparty must
-    # keep enough to cover what we would owe it at every spot on the ladder,
-    # plus a buffer. The LP may move collateral directly between any two
-    # counterparties, per asset, at a fixed fee per transfer. So whatever a
-    # counterparty does not need goes to the hub, a counterparty that is short
-    # is topped up straight from whoever has spare, and — the part that touches the
-    # trades — every dollar of liability a trade adds at a non-hub
-    # counterparty is collateral that must stay there and keep costing carry.
+    # carries a holding cost; at the hub it is free. Each counterparty with
+    # exposure in this book must keep what we would owe it at today's spot,
+    # plus a buffer — how counterparties actually call margin. The LP may move
+    # collateral directly between any two counterparties, per asset, at a
+    # fixed fee per transfer. So whatever a counterparty does not need goes to
+    # the hub, a counterparty that is short is topped up straight from
+    # whoever has spare, and — the part that touches the trades — every dollar
+    # a trade adds to what we owe a non-hub counterparty is collateral that
+    # must stay there and keep costing carry.
     #
-    # Requirement at spot i = max(0, -V_cp(i)), V_cp = market value of that
-    # counterparty's book (existing + this run's trades) at that spot: what a
-    # counterparty margins against is the value it would owe or be owed, not
-    # our P&L since entry. Coverage, linear in the trades and transfers:
-    #     Σ_a (1 - h_a) · P_a · price_a(i)  ≥  -V_cp(i) + buffer    (each i)
-    #     Σ_a (1 - h_a) · P_a · price_a(i)  ≥  buffer
-    # with P_a the post-transfer quantity, for every counterparty with exposure
-    # in this book (one without has no requirement). Price curves move with the ladder
-    # for the book's own asset (wrong-way risk), are 1 for USD/USDC and flat
-    # at today's price for anything else. Haircuts are fixed at today's
-    # blended rate (a concentration tier makes the true rate depend on the
-    # quantity, which is not linear). A counterparty that cannot be covered
-    # with what the book holds gets a shortfall at `shortfall_cost` per $ —
-    # "post new collateral" — rather than making the whole run infeasible.
+    # Owed = max(0, -V_cp(spot)), V_cp = market value of that counterparty's
+    # book (existing + this run's trades) at today's spot: what a counterparty
+    # margins against is the value it would owe or be owed, not our P&L since
+    # entry. Coverage, linear in the trades and transfers, collateral at
+    # today's prices less today's blended haircut (a concentration tier makes
+    # the true rate depend on the quantity, which is not linear):
+    #     Σ_a (1 - h_a) · P_a · price_a  ≥  -V_cp(spot) + buffer
+    #     Σ_a (1 - h_a) · P_a · price_a  ≥  buffer
+    # with P_a the post-transfer quantity. A counterparty without exposure in
+    # this book has no requirement. One that cannot be covered with what the
+    # book holds gets a shortfall at `shortfall_cost` per $ ("post new
+    # collateral") rather than making the whole run infeasible — and a
+    # counterparty left short may not send anything: a shortfall is new
+    # collateral to post, never something to reshuffle between counterparties.
 
     @staticmethod
     def _add_collateral_transfers(prob, cfg, buy_vars, sell_vars, cp_indices, n_spots):
         hub = cfg["hub"]
         posted = cfg["posted"]                       # {cp: {asset: qty}} — this book's allocation
         price_today = cfg["price_today"]             # {asset: usd}
-        price_curves = cfg["price_curves"]           # {asset: np.ndarray(n_spots)}
         haircuts = cfg.get("haircuts") or {}         # {cp: {asset: rate}}
         base_value = cfg["base_value_by_cp"]         # {cp: np.ndarray(n_spots)}
         values = cfg["candidate_values"]             # np.ndarray(n_candidates, n_spots)
@@ -752,7 +752,8 @@ class CollateralOptimization:
                     prob += (pulp.lpSum(f for (s_, d, b), f in flows.items() if s_ == cp and b == a)
                              <= float(posted[cp][a])), f"xfer_held_{cp}_{a}".replace(" ", "_")
 
-        shortfall_vars = {}
+        spot_i = int(cfg.get("spot_index", 0))
+        shortfall_vars, sending_bins = {}, {}
         for cp in posted:
             idx = cp_indices.get(cp, [])
             base = base_value.get(cp)
@@ -763,15 +764,34 @@ class CollateralOptimization:
             if base is None and not idx:
                 continue
             rates = haircuts.get(cp, {})
-            after = {a: qty_after(cp, a) for a in assets}
-            prob += (pulp.lpSum((1.0 - rates.get(a, 0.0)) * float(price_today.get(a, 0.0)) * after[a]
-                                for a in assets) + sf >= buffer), f"xfer_buffer_{cp}".replace(" ", "_")
-            for i in range(n_spots):
-                cover_i = pulp.lpSum((1.0 - rates.get(a, 0.0)) * float(price_curves[a][i]) * after[a]
-                                     for a in assets)
-                value_i = (float(base[i]) if base is not None else 0.0) + pulp.lpSum(
-                    (buy_vars[j] - sell_vars[j]) * float(values[j][i]) for j in idx)
-                prob += cover_i + sf >= -value_i + buffer, f"xfer_cover_{cp}_{i}".replace(" ", "_")
+            cover = pulp.lpSum((1.0 - rates.get(a, 0.0)) * float(price_today.get(a, 0.0)) * qty_after(cp, a)
+                               for a in assets)
+            value_now = (float(base[spot_i]) if base is not None else 0.0) + pulp.lpSum(
+                (buy_vars[j] - sell_vars[j]) * float(values[j][spot_i]) for j in idx)
+            tag = str(cp).replace(" ", "_")
+            prob += cover + sf >= buffer, f"xfer_buffer_{tag}"
+            prob += cover + sf >= -value_now + buffer, f"xfer_cover_{tag}"
+
+        # Short means no sending: a per-counterparty "sends" switch. Big-M is
+        # far above any shortfall this book can produce (everything posted,
+        # everything owed today, the buffer — times ten for this run's trades).
+        big_m = 10.0 * (
+            sum(float(price_today.get(a, 0.0)) * float(q or 0.0)
+                for by in posted.values() for a, q in by.items())
+            + sum(abs(float(np.asarray(v)[spot_i])) for v in base_value.values())
+            + buffer * max(len(posted), 1)
+        )
+        for cp in cps:
+            out_cp = [(f, a) for (s_, d, a), f in flows.items() if s_ == cp]
+            if not out_cp:
+                continue
+            held_usd = sum(float(price_today.get(a, 0.0)) * float(q or 0.0)
+                           for a, q in posted[cp].items())
+            sends = pulp.LpVariable(f"xfer_sends_{cp}".replace(" ", "_"), cat="Binary")
+            sending_bins[cp] = sends
+            prob += (pulp.lpSum(float(price_today.get(a, 0.0)) * f for f, a in out_cp)
+                     <= max(held_usd, 1e-9) * sends), f"xfer_sends_link_{cp}".replace(" ", "_")
+            prob += shortfall_vars[cp] <= big_m * (1 - sends), f"xfer_short_no_send_{cp}".replace(" ", "_")
 
         carry_cost = pulp.lpSum(
             carry * float(price_today.get(a, 0.0)) * qty_after(cp, a)
@@ -784,7 +804,7 @@ class CollateralOptimization:
                                   for (_, _, a), f in flows.items())
         cost = (carry_cost + fee * pulp.lpSum(bin_vars.values())
                 + shortfall_cost * pulp.lpSum(shortfall_vars.values()) + churn)
-        return {"cost": cost, "flows": flows, "binaries": bin_vars,
+        return {"cost": cost, "flows": flows, "binaries": {**bin_vars, **sending_bins},
                 "shortfall": shortfall_vars, "assets": assets, "qty_after": qty_after}
 
     @classmethod
@@ -810,7 +830,6 @@ class CollateralOptimization:
         hub = cfg["hub"]
         posted = cfg["posted"]
         price_today = cfg["price_today"]
-        price_curves = cfg["price_curves"]
         haircuts = cfg.get("haircuts") or {}
         assets = model["assets"]
         carry = float(cfg["carry_rate"])
@@ -835,30 +854,29 @@ class CollateralOptimization:
                 total += float(q or 0.0) * float(price_today.get(a, 0.0))
             return total
 
+        spot_i = int(cfg.get("spot_index", 0))
+        exposed = set(cfg["base_value_by_cp"]) | set(cp_of)
         by_cp = {}
         for cp in posted:
             idx = [j for j, c in enumerate(cp_of) if c == cp]
-            curve = np.asarray(cfg["base_value_by_cp"].get(cp, np.zeros(cfg["n_spots"])), dtype=float)
+            value_now = float(np.asarray(cfg["base_value_by_cp"].get(cp, np.zeros(cfg["n_spots"])),
+                                         dtype=float)[spot_i])
             if idx and values.size:
-                curve = curve + net_qty[idx] @ values[idx]
-            requirement = float(max(0.0, float(np.max(-curve)) if curve.size else 0.0))
-            spot_i = int(cfg.get("spot_index", 0))
-            requirement_today = float(max(0.0, -curve[spot_i])) if curve.size else 0.0
+                value_now += float(net_qty[idx] @ values[idx][:, spot_i])
+            owed = max(0.0, -value_now)
             rates = haircuts.get(cp, {})
-            cover = sum((1.0 - rates.get(a, 0.0)) * np.asarray(price_curves[a], dtype=float)
+            cover = sum((1.0 - rates.get(a, 0.0)) * float(price_today.get(a, 0.0))
                         * float(pulp.value(model["qty_after"](cp, a)) or 0.0) for a in assets)
-            need = np.maximum(-curve, 0.0) + float(cfg["buffer_usd"]) if curve.size else None
-            headroom = float(np.min(cover - need)) if need is not None and np.ndim(cover) else None
             by_cp[cp] = {
                 "posted_before_usd": round(value_usd(cp, False), 2),
                 "posted_after_usd": round(value_usd(cp, True), 2),
-                # What it would be owed at today's spot, and at the worst spot
-                # on the ladder. Compare collateral against them via
-                # min_headroom_usd, not directly: at the worst spot the
-                # book's own asset (if posted) is worth something else.
-                "requirement_today_usd": round(requirement_today, 2),
-                "requirement_usd": round(requirement, 2),
-                "min_headroom_usd": None if headroom is None else round(headroom, 2),
+                "posted_after_qty": {a: round(float(pulp.value(model["qty_after"](cp, a)) or 0.0), 6)
+                                     for a in assets},
+                # What we would owe it at today's spot — the requirement.
+                "requirement_today_usd": round(owed, 2),
+                # Haircut collateral after transfers minus (owed + buffer).
+                # None for a counterparty with no exposure in this book.
+                "headroom_usd": round(cover - owed - float(cfg["buffer_usd"]), 2) if cp in exposed else None,
                 "shortfall_usd": round(float(pulp.value(model["shortfall"][cp]) or 0.0), 2),
                 "is_hub": cp == hub,
             }
@@ -881,8 +899,8 @@ class CollateralOptimization:
             print(f"  {t['from']:>12s} -> {t['to']:<12s} {t['qty']:>16,.2f} {t['asset']:<5s} (${t['usd']:,.0f})")
         for cp, v in by_cp.items():
             print(f"  {cp:20s} posted {v['posted_before_usd']:>14,.0f} -> {v['posted_after_usd']:>14,.0f}"
-                  f"  req today {v['requirement_today_usd']:>14,.0f} worst {v['requirement_usd']:>14,.0f}"
-                  f"  headroom {v['min_headroom_usd'] or 0:>14,.0f}  shortfall {v['shortfall_usd']:>12,.0f}")
+                  f"  owed today {v['requirement_today_usd']:>14,.0f}"
+                  f"  headroom {v['headroom_usd'] or 0:>14,.0f}  shortfall {v['shortfall_usd']:>12,.0f}")
         print(f"  carry over horizon {carry_before:,.0f} -> {carry_after:,.0f}  fees {fees:,.0f}")
         return report
 

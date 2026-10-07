@@ -10778,9 +10778,9 @@ function optCollateralTransferParams(prefix) {
 }
 
 // Render data.collateral_transfers: the moves, then each counterparty's
-// collateral before/after against what it would be owed. Headroom is the
-// cushion left at the worst spot on the ladder, after the buffer, with the
-// book's own asset marked at that spot — the column to read for safety.
+// collateral before/after against what we would owe it at today's spot.
+// Headroom = haircut collateral after transfers − (owed + buffer); a
+// shortfall is new collateral to post (a short counterparty never sends).
 function optRenderCollateralTransfers(prefix, data) {
   const box = document.getElementById(`${prefix}-coll-xfer-section`);
   if (!box) return;
@@ -10804,14 +10804,13 @@ function optRenderCollateralTransfers(prefix, data) {
     </table>` : `<p style="font-size:.8rem;margin:0 0 .75rem">No transfers: every counterparty already holds about what it needs.</p>`}
     <table class="pf-table" style="max-width:820px">
       <thead><tr><th>Counterparty</th><th class="num">Posted before</th><th class="num">Posted after</th>
-        <th class="num" title="What we would owe it at today's spot">Owed today</th>
-        <th class="num" title="What we would owe it at the worst spot on the ladder">Owed worst</th>
-        <th class="num" title="Collateral minus (owed + buffer) at the tightest spot, own-asset collateral marked at that spot">Min headroom</th>
-        <th class="num" title="Short even after transfers — new collateral needed">Shortfall</th></tr></thead>
+        <th class="num" title="What we would owe it at today's spot — the requirement">Owed today</th>
+        <th class="num" title="Haircut collateral after transfers minus (owed today + buffer)">Headroom</th>
+        <th class="num" title="Short even after transfers — new collateral to post. A short counterparty never sends collateral elsewhere.">Shortfall</th></tr></thead>
       <tbody>${rows.map(([cp, v]) => `<tr><td>${cp}${v.is_hub ? " <span style=\"color:var(--muted)\">(hub)</span>" : ""}</td>
         <td class="num">${usd(v.posted_before_usd)}</td><td class="num">${usd(v.posted_after_usd)}</td>
-        <td class="num">${usd(v.requirement_today_usd)}</td><td class="num">${usd(v.requirement_usd)}</td>
-        <td class="num" style="color:${(v.min_headroom_usd || 0) >= 0 ? "var(--green)" : "var(--red)"}">${v.min_headroom_usd == null ? "—" : usd(v.min_headroom_usd)}</td>
+        <td class="num">${usd(v.requirement_today_usd)}</td>
+        <td class="num" style="color:${(v.headroom_usd || 0) >= 0 ? "var(--green)" : "var(--red)"}">${v.headroom_usd == null ? "—" : usd(v.headroom_usd)}</td>
         <td class="num" style="color:${v.shortfall_usd > 0 ? "var(--red)" : ""}">${v.shortfall_usd > 0 ? usd(v.shortfall_usd) : "—"}</td></tr>`).join("")}</tbody>
     </table>`;
 }

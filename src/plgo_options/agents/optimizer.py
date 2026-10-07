@@ -340,7 +340,7 @@ async def gather_book(asset: str) -> tuple[dict, dict]:
     ids = compute_composite_ids(positions, None)
     for p in positions:
         p["composite_id"] = ids.get(p.get("id"))
-    collateral = await _fetch_collateral_by_cp()
+    collateral = await _fetch_collateral_by_cp(asset.upper())
     return pnl, collateral
 
 

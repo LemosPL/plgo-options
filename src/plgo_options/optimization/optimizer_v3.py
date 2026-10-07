@@ -1305,6 +1305,7 @@ class OptimizerV3(BaseOptimizer):
                  collateral_by_cp: "dict[str, dict[str, float]] | None" = None,
                  enforce_collateral_cap: bool = False,
                  collateral_transfer: dict | None = None,
+                 collateral_prices: "dict[str, float] | None" = None,
                  enable_composite_unwind: bool = True,
                  atm_concentration: float = 0.0,
                  # Parametric (auto) target-profile shape — see
@@ -2076,7 +2077,17 @@ class OptimizerV3(BaseOptimizer):
         collateral_transfers = None
         if transfer_cfg:
             collateral_transfers = CollateralOptimization.plan_transfers(
-                transfer_cfg, self._final_value_by_cp(transfer_cfg, base_payoff_by_cp, spot_arr, trades))
+                transfer_cfg, self._final_value_by_cp(
+                    [cp for cp in transfer_cfg["posted"] if self._is_exposed(cp, trades)],
+                    base_payoff_by_cp, spot_arr, trades))
+        # After the plan's transfers when there is one, so the ladder view and
+        # the transfers table describe the same collateral.
+        headroom_collateral = collateral_by_cp
+        if collateral_transfers:
+            headroom_collateral = {cp: v["posted_after_qty"]
+                                   for cp, v in collateral_transfers["by_counterparty"].items()}
+        cp_collateral_headroom = self._cp_collateral_headroom(
+            headroom_collateral, collateral_prices, base_payoff_by_cp, spot_arr, trades)
         roll_unwind_output = [t for t in trades if t.get("strategy") == "ROLL_UNWIND"]
         replacement_output = [t for t in trades if t.get("strategy") != "ROLL_UNWIND"]
 
@@ -2199,7 +2210,7 @@ class OptimizerV3(BaseOptimizer):
             # moves with the same stress. Only populated for counterparties
             # with collateral data (see collateral_by_cp); always computed
             # when available, independent of enforce_collateral_cap.
-            "cp_worst_case_net": lp_result.get("cp_worst_case_net", {}),
+            "cp_worst_case_net": cp_collateral_headroom,
             # Collateral to move between each counterparty and the hub so every
             # counterparty holds what this book needs there (+ buffer) and the
             # rest sits at the hub, where it carries no cost. None when off.
@@ -3336,13 +3347,63 @@ class OptimizerV3(BaseOptimizer):
             "spot_index": int(np.argmin(np.abs(np.asarray(spot_arr, dtype=float) - self.spot))),
         }
 
-    def _final_value_by_cp(self, cfg, base_payoff_by_cp, spot_arr, trades) -> dict:
-        """Each collateral counterparty's market value on the ladder after the
-        run's final trades. Roll unwinds are skipped: the rolled positions are
-        already out of base_payoff_by_cp."""
+    def _cp_collateral_headroom(self, collateral_by_cp, collateral_prices, base_payoff_by_cp,
+                                spot_arr, trades) -> dict:
+        """Per counterparty with exposure in this book: the tightest point on
+        the ladder of (this book's posted collateral, haircut) minus (what we
+        would owe it there) — the same collateral and the same "owed" as the
+        collateral transfer table, which checks today's spot only.
+
+        Collateral in the book's own asset is marked at each ladder spot (it
+        falls with the stress), USD/USDC at 1, anything else at today's price
+        when known (left out otherwise). Computed on the final trades.
+        """
+        if not collateral_by_cp:
+            return {}
+        spot_arr = np.asarray(spot_arr, dtype=float)
+        prices = {str(a).upper(): float(v or 0.0) for a, v in (collateral_prices or {}).items()}
+        cps = [cp for cp in collateral_by_cp if self._is_exposed(cp, trades)]
+        values = self._final_value_by_cp(cps, base_payoff_by_cp, spot_arr, trades)
+        out = {}
+        for cp in cps:
+            coll = np.zeros_like(spot_arr)
+            for a, q in (collateral_by_cp.get(cp) or {}).items():
+                a = str(a).upper()
+                q = float(q or 0.0)
+                if not q:
+                    continue
+                if a == self.asset:
+                    px = spot_arr
+                elif a in ("USD", "USDC"):
+                    px = 1.0
+                elif a in prices:
+                    px = prices[a]
+                else:
+                    continue
+                coll = coll + q * (1.0 - effective_haircut_rate(cp, "USDC" if a == "USD" else a, q)) * px
+            owed = np.maximum(-values[cp], 0.0)
+            net = coll - owed
+            i = int(np.argmin(net))
+            out[cp] = {"spot": float(spot_arr[i]), "net": float(net[i]),
+                       "pnl": float(values[cp][i]), "collateral": float(coll[i])}
+        return out
+
+    def _is_exposed(self, cp: str, trades) -> bool:
+        """Whether this book holds a position or proposes a trade with ``cp``
+        (case-insensitive). Without either it owes or is owed nothing here."""
+        k = str(cp or "").strip().lower()
+        return (any(str(getattr(p, "counterparty", "") or "").strip().lower() == k for p in self.positions)
+                or any(str(t.get("counterparty") or "").strip().lower() == k
+                       for t in trades if t.get("strategy") != "ROLL_UNWIND"))
+
+    def _final_value_by_cp(self, cps, base_payoff_by_cp, spot_arr, trades) -> dict:
+        """Market value on the ladder of each counterparty in ``cps`` after the
+        run's final trades (names matched case-insensitively). Roll unwinds are
+        skipped: the rolled positions are already out of base_payoff_by_cp."""
         n = len(spot_arr)
-        out = {cp: np.asarray(cfg["base_value_by_cp"].get(cp, np.zeros(n)), dtype=float).copy()
-               for cp in cfg["posted"]}
+        base_lower = {str(cp).strip().lower(): arr for cp, arr in base_payoff_by_cp.items()}
+        out = {cp: np.asarray(base_lower.get(cp.strip().lower(), np.zeros(n)), dtype=float).copy()
+               for cp in cps}
         by_lower = {cp.strip().lower(): cp for cp in out}
         for t in trades:
             if t.get("strategy") == "ROLL_UNWIND":

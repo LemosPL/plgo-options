@@ -29,7 +29,7 @@ def test_agent_params_match_v4_page(monkeypatch):
     async def fake_perp(asset, pnl):
         return None
 
-    async def fake_coll():
+    async def fake_coll(*_args, **_kwargs):
         return {}
 
     class FakeUseCase:

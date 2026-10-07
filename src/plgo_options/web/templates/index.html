@@ -2043,15 +2043,16 @@
           Per-counterparty view of the same stress ladder used elsewhere — for each counterparty, its own book
           (existing non-rolled positions + its own trades from this run) at the worst spot for it, relative to today.
           A large loss here can be masked in the fleet-wide summary above by an offsetting gain at another counterparty.
-          "Min Collateral Headroom" is how much cushion (P&L + haircut-adjusted posted collateral) is left at that
-          counterparty's single worst point — since native-asset collateral moves with the stress too, its worst point
-          can differ from the P&L-only one. Big/green = comfortable cushion; small or negative/red = at risk.
+          "Min Collateral Headroom" is the collateral posted against this book (haircut) minus what we would owe that
+          counterparty, at the tightest spot on the ladder — the same collateral and the same "owed" as the Collateral
+          Transfers table, which checks today's spot only. Collateral in the book's own asset is marked at each spot,
+          so its tightest point can differ from the P&amp;L-only one. Big/green = comfortable; negative/red = short there.
         </p>
         <table class="pf-table" style="max-width:780px">
           <thead>
             <tr>
               <th>Counterparty</th><th>Worst P&amp;L ($)</th><th>At Spot</th>
-              <th title="Cushion left (P&L + haircut-adjusted posted collateral) at this counterparty's worst point across the ladder — '—' when no collateral data exists for it. Big/green = safe, small or negative/red = at risk.">Min Collateral Headroom ($)</th>
+              <th title="This book's posted collateral (haircut) minus what we would owe this counterparty, at the tightest spot on the ladder — '—' when no collateral data exists for it. Big/green = safe, small or negative/red = at risk.">Min Collateral Headroom ($)</th>
               <th title="FIL spot price this Min Collateral Headroom figure occurs at — a price level, not a dollar amount (same kind of column as the 'At Spot' next to Worst P&L).">At Spot</th>
             </tr>
           </thead>
@@ -3132,9 +3133,11 @@
               (existing non-rolled positions + its own trades from this run) at the worst spot <i>for it</i>,
               relative to today. A large loss here can be masked in the fleet-wide summary by an offsetting
               gain at another counterparty — which that counterparty cannot see and would not accept.
-              &ldquo;Min collateral headroom&rdquo; is the cushion left (P&amp;L + haircut-adjusted posted
-              collateral) at that counterparty's single worst point; because native-asset collateral moves
-              with the stress, its worst point can differ from the P&amp;L-only one.
+              &ldquo;Min collateral headroom&rdquo; is the collateral posted against this book (haircut) minus
+              what we would owe that counterparty, at the tightest spot on the ladder &mdash; the same
+              collateral and &ldquo;owed&rdquo; as the Collateral Transfers table, which checks today's spot
+              only. Own-asset collateral is marked at each spot, so its tightest point can differ from the
+              P&amp;L-only one.
               Big/green = comfortable, small or negative/red = at risk.
             </p>
             <div class="chain-wrapper" style="max-height:420px">
@@ -3144,7 +3147,7 @@
                     <th>Counterparty</th>
                     <th class="num">Worst P&amp;L ($)</th>
                     <th class="num">At spot</th>
-                    <th class="num" title="Cushion left (P&L + haircut-adjusted posted collateral) at this counterparty's worst point across the ladder. '--' when no collateral data exists for it.">Min collateral headroom ($)</th>
+                    <th class="num" title="This book's posted collateral (haircut) minus what we would owe this counterparty, at the tightest spot on the ladder. '--' when no collateral data exists for it.">Min collateral headroom ($)</th>
                     <th class="num" title="Spot price this headroom figure occurs at — a price level, not a dollar amount.">At spot</th>
                   </tr>
                 </thead>

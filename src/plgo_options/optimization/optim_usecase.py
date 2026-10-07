@@ -145,9 +145,10 @@ class OptimizerRunParams:
     parametric_high_plateau_ratio: float | None = None
     parametric_high_plateau_payoff: float | None = None
     max_cp_loss_usd: float | dict[str, float] | None = None
-    # Posted collateral per counterparty, per asset (e.g. {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}),
-    # sourced from the Collateral tab (always fetched by the route; only USD + this run's own asset are
-    # used, see optimizer_v3.run_lp). Drives the cp_worst_case_net diagnostic regardless of
+    # Collateral posted against THIS book, per counterparty, per asset (e.g.
+    # {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}), from the Collateral tab
+    # (counterparty_collateral.book; always fetched by the route). The LP's
+    # collateral floor uses USD + this run's own asset (see optimizer_v3.run_lp). Drives the cp_worst_case_net diagnostic regardless of
     # enforce_collateral_cap, and additionally constrains the LP's own trade choices when that's on.
     collateral_by_cp: dict[str, dict[str, float]] | None = None
     # Opt-in: when true, the collateral-derived floor above also constrains the LP's trade choices
@@ -159,6 +160,10 @@ class OptimizerRunParams:
     # from the hub carries a cost; the LP keeps each counterparty covered (+ buffer) at
     # every spot and proposes moving the rest to the hub. None (default) = off.
     collateral_transfer: dict | None = None
+    # USD price of each collateral asset that is neither USD/USDC nor the book's
+    # own asset (e.g. ETH or BTC posted against the FIL book), so the
+    # per-counterparty collateral headroom can count it. None = left out.
+    collateral_prices: dict[str, float] | None = None
     manual_target: list[dict] | None = None
     bid_ask_atm_pct: float | dict[str, float] | None = None
     bid_ask_vol_pts: float | dict[str, float] | None = None

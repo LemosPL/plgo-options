@@ -48,32 +48,14 @@ def _resolve_snapshot_root() -> Path:
 SNAPSHOT_ROOT = _resolve_snapshot_root()
 
 
-async def _fetch_collateral_by_cp() -> dict[str, dict[str, float]]:
-    """Posted collateral per counterparty per asset, summed across books —
-    same query/table the Collateral tab and reconciliation already use
-    (counterparty_collateral). Always fetched; feeds the reported
-    cp_worst_case_net diagnostic, and additionally constrains the LP's own
-    trade choices when use_collateral_cap is set."""
-    db = await get_db()
-    result: dict[str, dict[str, float]] = {}
-    try:
-        cur = await db.execute(
-            "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset"
-        )
-        for row in await cur.fetchall():
-            cp = str(row["counterparty"])
-            asset = str(row["asset"]).upper()
-            result.setdefault(cp, {})[asset] = float(row["qty"] or 0.0)
-    except Exception:
-        result = {}  # table may not exist yet — treat as no collateral data
-    return result
-
-
-async def _fetch_book_collateral(book: str, include_collar_loans: bool) -> dict[str, dict[str, float]]:
+async def _fetch_collateral_by_cp(book: str, include_collar_loans: bool = False) -> dict[str, dict[str, float]]:
     """Collateral posted against ONE options book, per counterparty per asset
-    (counterparty_collateral.book) — the allocation the transfer model may move
-    between counterparties without touching what backs the other book. Collar
-    loans stay out unless the run includes them, matching the positions."""
+    (counterparty_collateral.book, the same table the Collateral tab edits).
+    Per book because that is what backs this book's positions: the headroom
+    diagnostic, the collateral floor and the transfer model all read it, and
+    the transfer model moves it without touching what backs the other book.
+    Collar loans stay out unless the run includes them, matching the
+    positions."""
     from plgo_options.data.collar_loans import drop_collar_loans
     db = await get_db()
     try:
@@ -92,18 +74,26 @@ async def _fetch_book_collateral(book: str, include_collar_loans: bool) -> dict[
     return out
 
 
-async def _collateral_transfer_config(params: "OptimizationParams") -> dict | None:
-    if not params.enable_collateral_transfers:
+async def _collateral_prices(collateral_by_cp: dict, asset: str) -> dict[str, float] | None:
+    """USD prices for collateral assets other than USD/USDC and the book's own
+    asset (whose price is the run's spot). None when there are none."""
+    others = sorted({a for by in collateral_by_cp.values() for a in by}
+                    - {"USD", "USDC", asset.upper()})
+    if not others:
         return None
     from plgo_options.web.routes.collateral import _effective_prices
-    asset = params.asset.upper()
-    posted = await _fetch_book_collateral(asset, params.include_collar_loans)
-    assets = sorted({a for by in posted.values() for a in by})
-    prices, _, _ = await _effective_prices(assets)
+    prices, _, _ = await _effective_prices(others)
+    return {a: float(prices.get(a, 0.0)) for a in others}
+
+
+def _collateral_transfer_config(params: "OptimizationParams", posted: dict,
+                                prices: dict | None) -> dict | None:
+    if not params.enable_collateral_transfers:
+        return None
     return {
         "hub": params.collateral_hub,
         "posted": posted,
-        "prices": prices,
+        "prices": prices or {},
         "carry_pct": params.collateral_carry_pct,
         "horizon_days": params.collateral_horizon_days,
         "buffer_usd": params.collateral_buffer_usd,
@@ -446,7 +436,8 @@ async def run_optimizer(params: OptimizationParams):
     # Always fetched — drives the cp_worst_case_net diagnostic in the response
     # regardless of use_collateral_cap; that flag only controls whether it
     # additionally constrains the LP's own trade choices (see below).
-    collateral_by_cp = await _fetch_collateral_by_cp()
+    collateral_by_cp = await _fetch_collateral_by_cp(params.asset.upper(), params.include_collar_loans)
+    collateral_prices = await _collateral_prices(collateral_by_cp, params.asset)
 
     print(params)
     run_params = OptimizerRunParams(
@@ -485,7 +476,8 @@ async def run_optimizer(params: OptimizationParams):
         max_cp_loss_usd=params.max_cp_loss_usd,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
-        collateral_transfer=await _collateral_transfer_config(params),
+        collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),
+        collateral_prices=collateral_prices,
         manual_target=params.manual_target,
         bid_ask_atm_pct=params.bid_ask_atm_pct,
         bid_ask_vol_pts=params.bid_ask_vol_pts,
