@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import traceback
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
@@ -31,6 +32,7 @@ from plgo_options.agents.rows import UK, build_rows, crossed_rows, month_key, ne
 from plgo_options.data.database import get_db
 
 ASSETS = ("ETH", "FIL")
+MAX_PROPOSALS = 5           # per sweep and asset; older open sweep proposals are superseded
 
 
 # ── data helpers (each one survives a failing upstream) ─────────────────────
@@ -362,7 +364,8 @@ async def optimizer(ctx: dict) -> dict:
         if res["errors"]:
             out.append(f"{len(res['errors'])} runs failed.")
         if not best:
-            out.append("No run passed the filters (converged, no giveback beyond limit).")
+            out.append("No run passed the filters (converged, follows the target, floor / max loss / view, "
+                       "no giveback beyond limit).")
         # Say why a target produced nothing, so a bad target is visible, not silent.
         got = {s["target"]["name"] for s in best}
         for tname in res["targets"]:
@@ -372,42 +375,71 @@ async def optimizer(ctx: dict) -> dict:
             for s in res["ranked"]:
                 if s["target"]["name"] == tname:
                     for d in s["disqualified"]:
-                        k = "gives back at a key spot" if d.startswith("gives back") else d
+                        k = re.sub(r"\$[-\d,.]+M?", "$..", d.split(":")[0])
                         why[k] = why.get(k, 0) + 1
             n_err = sum(1 for e in res["errors"] if e.get("target") == tname)
             mine = [s for s in res["ranked"] if s["target"]["name"] == tname and s["key_spot_changes"]]
-            near = max(mine, key=lambda s: s["worst_change_usd"], default=None)
+            near = max(mine, key=lambda s: s["track_gain_pct"] - 1e3 * len(s["disqualified"]), default=None)
             detail = ""
             if near:
                 w = min(near["key_spot_changes"], key=lambda d: d["change_usd"])
                 nv = near["variant"]
-                detail = (f" | closest: λ{nv['lam_factor']} max{nv['max_trades']} fit +{near['fit_gain_pct']}%, "
-                          f"worst {_m(w['change_usd'])} at {w['moneyness']:+.0%} (T+{near.get('judged_on_days', 0)}d) - "
+                detail = (f" | closest: λ{nv['lam_factor']} max{nv['max_trades']} target {near['track_gain_pct']:+.1f}%, "
+                          f"out for: {'; '.join(near['disqualified'])} | worst {_m(w['change_usd'])} at "
+                          f"{w['moneyness']:+.0%} (T+{near.get('judged_on_days', 0)}d) - "
                           + ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in near["key_spot_changes"]))
             out.append(f"[{tname}] no run passed: " + (", ".join(f"{k} x{v}" for k, v in why.items()) or "-")
                        + (f", {n_err} errors" if n_err else "") + detail)
-        for i, s in enumerate(best, 1):
+
+        # Each target's passing runs, best first, through the validation and the
+        # gate: the first one they accept is the proposal. If every one tried is
+        # rejected, the top one is still filed so the reason is on screen.
+        perp, _ = await _safe(get_perp(asset), {})
+        gctx = await _gate_ctx(pol, res["spot"], None, perp)
+        picks = []
+        for tname in res["targets"]:
+            cands = (res.get("candidates") or {}).get(tname) or []
+            tried, first = 0, None
+            for s in cands[: max(1, pol.optimizer.gate_retries)]:
+                tried += 1
+                prop = opt_mod.to_proposal(asset, s)
+                # What "Validate in v4" replays: the page's own run parameters.
+                prop["variant"] = s["variant"]
+                prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, s["variant"], s["target"])
+                prop["target"] = s["target"]
+                await _validated(prop, pol, res.get("book"))
+                gres = gate_mod.evaluate(prop, gctx)
+                first = first or (s, prop, gres, tried)
+                if gres.route != gate_mod.REJECTED:
+                    picks.append((s, prop, gres, tried))
+                    break
+            else:
+                if first:
+                    picks.append(first)
+                    out.append(f"[{tname}] the gate rejected all {tried} runs tried; filing the top one with its reasons.")
+        new_ids = []
+        for i, (s, prop, gres, tried) in enumerate(picks[:MAX_PROPOSALS], 1):
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
-            prop = opt_mod.to_proposal(asset, s)
-            # What "Validate in v4" replays: the page's own run parameters.
-            prop["variant"] = v
-            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, v, s["target"])
-            prop["target"] = s["target"]
-            await _validated(prop, pol, res.get("book"))
-            perp, _ = await _safe(get_perp(asset), {})
-            gres = gate_mod.evaluate(prop, await _gate_ctx(pol, s["spot"], None, perp))
+            rank_note = f" (rank {tried}: the {tried - 1} above it were rejected)" if tried > 1 else ""
             pid = await store.add_proposal(
                 "optimizer", asset, f"v4 {label} #{i}",
                 f"λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} max {v['max_trades']} "
-                f"trades / {v['max_qty']:g} qty: fit +{s['fit_gain_pct']}%, {s['option_lines']} lines, "
-                f"cost {_m(s['cost_usd'])} | target {s['target']['name']} | judged at T+{s.get('judged_on_days', 0)}d",
+                f"trades / {v['max_qty']:g} qty: target {s['track_gain_pct']:+.1f}% closer, fit +{s['fit_gain_pct']}%, "
+                f"{s['option_lines']} lines, cost {_m(s['cost_usd'])} | target {s['target']['name']} | "
+                f"judged at T+{s.get('judged_on_days', 0)}d{rank_note}",
                 gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
+            new_ids.append(pid)
             out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
-                       f"max{v['max_trades']}/{v['max_qty']:g}: fit +{s['fit_gain_pct']}%, "
-                       f"{s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
-                       f"{_m(s['net_premium_usd'])} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | proposal #{pid} -> {gres.route.upper()}"
+                       f"max{v['max_trades']}/{v['max_qty']:g}: target {s['track_gain_pct']:+.1f}% closer "
+                       f"(fit +{s['fit_gain_pct']}%), {s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
+                       f"{_m(s['net_premium_usd'])}{rank_note} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | "
+                       f"proposal #{pid} -> {gres.route.upper()}"
                        + (": " + " / ".join(gres.rejected_by or gres.needs_chris) if gres.route != gate_mod.LUCAS else ""))
+        if new_ids:
+            n_old = await store.supersede_open(asset, "optimizer", new_ids)
+            if n_old:
+                out.append(f"{n_old} older open sweep proposal(s) for {asset} superseded by this run.")
         # Two-curve check against the previous run today.
         top = best[0] if best else None
         if top:
@@ -428,10 +460,10 @@ async def optimizer(ctx: dict) -> dict:
                     await store.set_flag(f"curves_frozen_{asset}", "on", "optimizer")
                     out.append("Curves DISAGREE: trading frozen until inputs are checked (B2a). "
                                "Clear in Agents > Flags once found.")
-        data[asset] = {"best": [{k: s[k] for k in ("variant", "fit_gain_pct", "cost_usd", "option_lines",
+        data[asset] = {"best": [{k: s[k] for k in ("variant", "track_gain_pct", "fit_gain_pct", "cost_usd", "option_lines",
                                                   "net_premium_usd", "key_spot_changes", "score")}
                                 for s in best],
-                       "pareto": [{k: s[k] for k in ("variant", "fit_gain_pct", "cost_usd", "option_lines")}
+                       "pareto": [{k: s[k] for k in ("variant", "track_gain_pct", "fit_gain_pct", "cost_usd", "option_lines")}
                                   for s in res["pareto"]]}
     return {"facts": _header(pols) + "\n" + "\n".join(out), "deliver": True, "data": data}
 

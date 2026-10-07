@@ -92,11 +92,23 @@ SIZE_2026_10_06: dict[str, dict[str, Any]] = {
     "FIL": {"optimizer": {"max_trades_grid": list(TRADES_GRID), "max_qty_grid": list(FIL_QTY_GRID)}},
 }
 
+# 7 Oct 2026, Lucas: proposals must follow the target and the long-term
+# decisions, so the floor and the upside are written down instead of left to
+# defaults. Floor = the stop (below it we only close, so the book must not get
+# worse there); upside target = where the "up" view says the price goes (ETH:
+# top of the expected range; FIL: "$4 is the target" from the view note).
+# Proposed values - change them on the Policy form (the floor only rises).
+SHAPE_2026_10_07: dict[str, dict[str, Any]] = {
+    "ETH": {"floor_price": 2_300.0, "upside_target_price": 3_500.0},
+    "FIL": {"floor_price": 0.89, "upside_target_price": 4.00},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
     "2026-10-06-giveback": GIVEBACK_2026_10_06,
     "2026-10-06-size": SIZE_2026_10_06,
+    "2026-10-07-shape": SHAPE_2026_10_07,
 }
 
 

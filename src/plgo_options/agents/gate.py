@@ -198,7 +198,7 @@ def evaluate(p: dict, ctx: GateContext) -> GateResult:
     val = p.get("validation") or {}
     if val.get("findings") is not None:
         for kind, text, rule in val["findings"]:
-            name = {"A2": "floor", "A3": "max loss / cost", "B3": "priced"}.get(rule, rule)
+            name = {"A1": "view", "A2": "floor", "A3": "max loss / cost", "B3": "priced"}.get(rule, rule)
             if kind == "fail":
                 reject.append(f"{text} ({rule}).")
             elif kind == "chris":

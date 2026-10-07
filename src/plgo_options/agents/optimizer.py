@@ -10,13 +10,22 @@ What Lucas does by hand on the v4 page:
 
 This module does exactly that with the same engine the page calls
 (``OptimizerUseCase``), gathering the book ONCE and running every combination
-in a worker thread so the web app stays responsive. Each run is scored:
+in a worker thread so the web app stays responsive. Each run is scored on the
+curve the P&L matrix shows - the target-expiry horizon, in dollars:
 
-    score = fit gain %  -  cost_per_100k × (cost / $100k)  -  per_line × option lines
+    score = track gain %  -  cost_per_100k × (cost / $100k)  -  per_line × option lines
 
-and any run that gives back more than ``max_giveback_usd`` versus today's book
-at a key spot (-45%, -20%, spot, +35%, +85%) is disqualified. The top three go
-to the gate, then the handover. Nothing is traded.
+where track gain is how much closer the after-curve's shape gets to the
+target's than today's book, summed over the tracking spots. (The engine's own
+fit gain is measured on today's curve, level-free and density-weighted, so a
+run can score well on it while the expiry matrix drifts off the target; it is
+kept for reference only.) A run is disqualified when it:
+  - gives back more than ``max_giveback_usd`` versus today's book at a key spot,
+  - ends up further from the target than today's book at any key spot,
+  - fails a policy test the gate would apply (floor, max loss, the view) -
+    the same code as agents/validate.py.
+Each target's passing runs go to the gate best first; the first one the
+validation and the gate accept becomes the proposal. Nothing is traded.
 """
 
 from __future__ import annotations
@@ -30,8 +39,11 @@ from datetime import date, datetime
 from typing import Any
 
 from plgo_options.agents.policy import AssetPolicy, OptimizerPreset
+from plgo_options.agents.validate import curve_tests
 
 KEY_MONEYNESS = (-0.45, -0.20, 0.0, 0.35, 0.85)
+# Where the result is compared with the target (spot itself is the anchor).
+TRACK_MONEYNESS = (-0.45, -0.30, -0.20, -0.10, 0.10, 0.20, 0.35, 0.60, 0.85)
 DEFAULT_VOL_PTS = {"ETH": 5.0, "FIL": 40.0}
 
 
@@ -60,10 +72,14 @@ def coarse_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
 
 def best_variant(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
     """The best-scoring run's variant. Disqualified runs still show where the
-    engine works best, so when every run is out they are ranked on fit alone."""
+    engine works best, so when every run is out they are ranked on tracking alone."""
     if not runs:
         return None
-    return max(runs, key=lambda s: s["score"] if not s["disqualified"] else s["fit_gain_pct"] - 1e6)["variant"]
+    return max(runs, key=_search_score)["variant"]
+
+
+def _search_score(s: dict[str, Any]) -> float:
+    return s["score"] if not s["disqualified"] else s["track_gain_pct"] - 1e6
 
 
 def refine_lams(preset: OptimizerPreset, score_by_lam: dict[float, float]) -> list[float]:
@@ -174,12 +190,47 @@ def judge_horizon(result: dict[str, Any], preset: OptimizerPreset) -> str | None
     return min(nums, key=lambda k: (abs(int(k) - want), -int(k)))
 
 
-def summarize(result: dict[str, Any], variant: dict[str, Any], preset: OptimizerPreset) -> dict[str, Any]:
+def track_target(ladder: list[float], spot: float, before, after, target,
+                 preset: OptimizerPreset) -> dict[str, Any] | None:
+    """How the after-curve follows the target's shape, against today's book.
+
+    The target is a shape (the V's -$20M trough at spot is not a mark the book
+    can be at), so both curves are compared with it relative to their own
+    value at spot: distance(x) = (curve(x) - curve(spot)) - (target(x) - target(spot)).
+    Returns None when the engine gave no target.
+    """
+    if not (ladder and before and after and target and spot):
+        return None
+    i0 = _nearest(ladder, spot)
+    lo, hi = ladder[0], ladder[-1]
+    pts, away = [], []
+    for m in TRACK_MONEYNESS:
+        x = spot * (1 + m)
+        if not (lo <= x <= hi):
+            continue
+        i = _nearest(ladder, x)
+        tgt = float(target[i]) - float(target[i0])
+        db = (float(before[i]) - float(before[i0])) - tgt
+        da = (float(after[i]) - float(after[i0])) - tgt
+        pts.append({"moneyness": m, "spot": ladder[i], "before_usd": round(db, 0), "after_usd": round(da, 0)})
+        allow = max(preset.track_tolerance_usd, preset.track_tolerance_pct * abs(db))
+        if m in KEY_MONEYNESS and abs(da) > abs(db) + allow:
+            away.append(f"{m:+.0%} ${(abs(da) - abs(db)) / 1e6:,.2f}M further")
+    tot_b = sum(abs(p["before_usd"]) for p in pts)
+    tot_a = sum(abs(p["after_usd"]) for p in pts)
+    gain = 100.0 * (tot_b - tot_a) / tot_b if tot_b else 0.0
+    return {"gain_pct": gain, "points": pts, "away": away,
+            "distance_before_usd": tot_b, "distance_after_usd": tot_a}
+
+
+def summarize(result: dict[str, Any], variant: dict[str, Any], preset: OptimizerPreset,
+              policy: AssetPolicy | None = None) -> dict[str, Any]:
     """Reduce one engine result to what the ranking and the handover need.
 
-    Key-spot changes, the giveback filter and the gate's floor test all use the
-    target-expiry curve (judge_horizon), because that is when the structure
-    pays; the Now curve is kept alongside for reference.
+    Everything is judged on the target-expiry curve (judge_horizon), because
+    that is when the structure pays and it is what the P&L matrix shows; the
+    Now curve is kept alongside for reference. With ``policy`` the gate's own
+    curve tests (floor, max loss, view) run here too, on the engine's cost.
     """
     trades = result.get("trades") or []
     opt_lines = [t for t in trades if "BOX" not in str(t.get("strategy") or "").upper()]
@@ -204,6 +255,9 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
     cost = float(result.get("total_cost_usd") or 0)
     gross_contracts = sum(abs(float(t.get("qty") or 0)) for t in opt_lines)
     worst = min([d["change_usd"] for d in deltas], default=0.0)
+    track = track_target(ladder, spot, before, after, result.get("target_payoff"), preset)
+    # No target from the engine: fall back to its own fit gain.
+    track_gain = track["gain_pct"] if track else fit_gain
     disq = []
     if not result.get("optimizer_converged"):
         disq.append("did not converge")
@@ -211,10 +265,20 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         disq.append(result.get("message") or "no result")
     if worst < -preset.max_giveback_usd:
         disq.append(f"gives back ${-worst:,.0f} at a key spot")
-    score = (fit_gain - preset.score_cost_per_100k * cost / 100_000
+    if track and track["away"]:
+        disq.append("moves away from the target: " + ", ".join(track["away"]))
+    policy_findings = []
+    if policy is not None and ladder and before and after and spot:
+        h_days = int(h) if h is not None else 0
+        policy_findings = curve_tests(ladder, before, after, spot, cost, policy, h_days)["findings"]
+        disq += [f"{text} ({rule})" for kind, text, rule in policy_findings if kind == "fail"]
+    score = (track_gain - preset.score_cost_per_100k * cost / 100_000
              - preset.score_per_option_line * len(opt_lines))
     return {
         "variant": variant,
+        "track_gain_pct": round(track_gain, 2),
+        "track": track,
+        "policy_findings": policy_findings,
         "fit_gain_pct": round(fit_gain, 2),
         "cost_usd": round(cost, 0),
         "net_premium_usd": round(float(result.get("net_premium_generated") or 0), 0),
@@ -244,15 +308,15 @@ def rank(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def pareto(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Runs no other run beats on fit, cost and line count at once."""
+    """Runs no other run beats on tracking, cost and line count at once."""
     ok = [s for s in summaries if not s["disqualified"]]
     front = []
     for s in ok:
         dominated = any(
-            o is not s and o["fit_gain_pct"] >= s["fit_gain_pct"] and o["cost_usd"] <= s["cost_usd"]
+            o is not s and o["track_gain_pct"] >= s["track_gain_pct"] and o["cost_usd"] <= s["cost_usd"]
             and o["option_lines"] <= s["option_lines"]
-            and (o["fit_gain_pct"], -o["cost_usd"], -o["option_lines"])
-            != (s["fit_gain_pct"], -s["cost_usd"], -s["option_lines"])
+            and (o["track_gain_pct"], -o["cost_usd"], -o["option_lines"])
+            != (s["track_gain_pct"], -s["cost_usd"], -s["option_lines"])
             for o in ok)
         if not dominated:
             front.append(s)
@@ -307,7 +371,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
             kw = run_kwargs(policy.asset, preset, v, tgt)
             try:
                 result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
-                s = summarize(result, v, preset)
+                s = summarize(result, v, preset, policy)
                 s["target"] = tgt
                 out.append(s)
             except Exception as e:                  # one bad combination must not stop the sweep
@@ -324,10 +388,10 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         if not preset.lam_refine_step:
             summaries += mine
             continue
-        # Disqualified runs still tell us where λ works best, so score them on fit.
+        # Disqualified runs still tell us where λ works best, so score them on tracking.
         by_lam: dict[float, float] = {}
         for s in mine:
-            sc = s["score"] if not s["disqualified"] else s["fit_gain_pct"] - 1e6
+            sc = _search_score(s)
             by_lam[s["variant"]["lam_factor"]] = max(by_lam.get(s["variant"]["lam_factor"], -1e18), sc)
         fine = refine_lams(preset, by_lam)
         refined[tgt["name"]] = fine
@@ -346,11 +410,23 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
                                   "max_qty": b["max_qty"]}
         summaries += mine
     ranked = rank(summaries)
-    # Fit gains are only comparable against the same target, so each target is
-    # ranked on its own and contributes its best run; the default target first.
-    best = []
+    # Gains are only comparable against the same target, so each target is
+    # ranked on its own; the default target first. ``candidates`` holds each
+    # target's passing runs best first (one per distinct trade list), which the
+    # desk walks through the validation and the gate; ``best`` is the head.
+    best, candidates = [], {}
     for tgt in targets:
-        mine = [s for s in ranked if s["target"]["name"] == tgt["name"] and not s["disqualified"]]
+        seen, mine = set(), []
+        for s in ranked:
+            if s["target"]["name"] != tgt["name"] or s["disqualified"]:
+                continue
+            key = tuple(sorted(f"{t.get('counterparty')}|{t.get('opt')}|{t.get('strike')}|{t.get('expiry')}|"
+                               f"{t.get('side')}|{round(float(t.get('qty') or 0))}" for t in s["trades"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            mine.append(s)
+        candidates[tgt["name"]] = mine
         if mine:
             best.append(mine[0])
     return {
@@ -366,6 +442,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "ranked": ranked,
         "pareto": pareto(summaries),
         "best": best,
+        "candidates": candidates,
         "spot": float(pnl.get("spot") or pnl.get("eth_spot") or 0),
         "book": pnl,                          # for the validation pass; not stored
         "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
@@ -392,7 +469,9 @@ def to_proposal(asset: str, s: dict[str, Any]) -> dict[str, Any]:
         "after_payoff": s["after_payoff"],
         "judged_on_days": s.get("judged_on_days", 0),
         "target": s.get("target"),
-        "reason": f"Optimizer v4 sweep: fit +{s['fit_gain_pct']}% with {s['option_lines']} lines",
+        "reason": (f"Optimizer v4 sweep: {s['track_gain_pct']:+.1f}% closer to the target at T+"
+                   f"{s.get('judged_on_days', 0)}d with {s['option_lines']} lines"),
+        "track": s.get("track"),
     }
 
 

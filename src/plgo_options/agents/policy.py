@@ -82,12 +82,22 @@ class OptimizerPreset:
     enable_delta_rehedge: bool = False
     delta_band_usd: float = 150_000.0
 
-    # Ranking: fit gain (%) minus penalties. Tuned so one extra option line has
-    # to buy ~1.5 points of fit and $100k of dealing cost ~10 points.
+    # Ranking: target tracking gain (%) minus penalties. Tuned so one extra
+    # option line has to buy ~1.5 points and $100k of dealing cost ~10 points.
     score_cost_per_100k: float = 10.0
     score_per_option_line: float = 1.5
     # A run may not give back more than this at any key spot vs today's book.
     max_giveback_usd: float = 250_000.0
+    # 7 Oct 2026 (Lucas): the result must follow the target. A run is ranked on
+    # how much closer its target-expiry curve gets to the target's shape, and is
+    # out if at any key spot it ends up further from the target than today's
+    # book by more than max(track_tolerance_usd, track_tolerance_pct x today's
+    # distance there).
+    track_tolerance_usd: float = 250_000.0
+    track_tolerance_pct: float = 0.10
+    # How far down each target's ranking the desk goes for a run the validation
+    # and the gate accept, before it reports the target as empty.
+    gate_retries: int = 4
     max_runs: int = 40              # per target, both passes
 
     def targets(self, asset: str) -> list[dict[str, Any]]:
@@ -142,6 +152,9 @@ class AssetPolicy:
     stop_price: float | None = None
     stop_loss_usd: float | None = None     # further loss vs Monday MTM
     floor_price: float | None = None       # only ever goes up (A2)
+    # Where the "up" view says the price goes (A1). Under view "up" no proposal
+    # may make the book worse at +35%, +85% or at this price.
+    upside_target_price: float | None = None
     book_notional_usd: float = 0.0
     max_single_trade_usd: float = 0.0      # Lucas alone (A3)
     max_cost_per_trade_usd: float = 0.0

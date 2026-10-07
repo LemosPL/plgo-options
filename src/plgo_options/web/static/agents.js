@@ -101,6 +101,8 @@
         miss: (a) => P(a).view_range_low == null || P(a).view_range_high == null },
       { label: "Right or wrong by", v: (a) => day(P(a).view_check_date),
         miss: (a) => !P(a).view_check_date },
+      { label: "Upside target (view \"up\")", v: (a) => px(a, P(a).upside_target_price),
+        miss: (a) => P(a).view === "up" && P(a).upside_target_price == null },
       { sec: "A2 · the floor" },
       { label: "Floor (only ever rises)", v: (a) => px(a, P(a).floor_price),
         miss: (a) => P(a).floor_price == null },
@@ -259,6 +261,8 @@
         { k: "view_range_low",  label: "Expected range low",  type: "num",
           help: "The price range we expect over 90 days." },
         { k: "view_range_high", label: "Expected range high", type: "num" },
+        { k: "upside_target_price", label: "Upside target price", type: "num",
+          help: "Under view \"up\" no proposal may make the book worse at +35%, +85% or this price." },
         { k: "view_check_date", label: "Say we were right by", type: "date",
           help: "The date by which we call the view right or wrong." },
         { k: "view_note", label: "Reasoning", type: "text",
@@ -488,7 +492,8 @@
     const m = String(txt).match(/\((A\d|B\d[ab]?)[^)]*\)\s*\.?$/);
     return m && RULES[m[1]] ? " <span style=\"color:var(--muted)\">— " + m[1] + " " + RULES[m[1]] + "</span>" : "";
   };
-  let PFILTER = "all";
+  let PFILTER = "all", PALL = false;
+  const PTOP = 5;
 
   function whyBlock(p) {
     const g = (p.proposal || {}).gate || {};
@@ -607,11 +612,18 @@
     // Live proposals side by side; rejected ones folded underneath (full reasons in the Gate log).
     const grid = (xs) => '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:.45rem">' +
       xs.map(card).join("") + "</div>";
-    const live2 = shown.filter((p) => p.route !== "rejected"), rej = shown.filter((p) => p.route === "rejected");
+    // Only the top PTOP: actionable first (Lucas, then Chris), newest first.
+    const order = (p) => p.route === "lucas" || p.route === "lucas_tell_chris" ? 0 : p.route === "chris" ? 1 : 2;
+    const ranked = shown.slice().sort((a, b) => order(a) - order(b) || b.id - a.id);
+    const top = PALL ? ranked : ranked.slice(0, PTOP);
+    const more = ranked.length - top.length;
+    const toggle = ranked.length > PTOP ? '<button class="btn-secondary" data-pall="1" style="width:auto;font-size:.64rem;' +
+      'padding:.12rem .45rem;margin-top:.45rem">' + (PALL ? "− Top " + PTOP + " only" : "+ Show " + more + " more") + "</button>" : "";
+    const live2 = top.filter((p) => p.route !== "rejected"), rej = top.filter((p) => p.route === "rejected");
     $("agents-props").innerHTML = bar + (live2.length ? grid(live2) : "") +
       (rej.length ? (PFILTER === "rejected" ? grid(rej)
         : '<details style="margin-top:.45rem"><summary style="cursor:pointer;font-size:.72rem;color:#ef4444">Rejected (' +
-          rej.length + ") - why each was refused</summary>" + grid(rej) + "</details>") : "");
+          rej.length + ") - why each was refused</summary>" + grid(rej) + "</details>") : "") + toggle;
   }
 
   // Gate log: every proposal the agents made, split by what the gate said,
@@ -686,7 +698,8 @@
   }
 
   function renderDecisions() {
-    const done = PROPS.filter((p) => p.status !== "open");
+    // Superseded = replaced by a newer sweep, not a decision anyone took.
+    const done = PROPS.filter((p) => p.status !== "open" && p.status !== "superseded");
     if (!done.length) {
       $("agents-decisions").innerHTML = '<p style="color:var(--muted);font-size:.8rem;margin:0">Nothing decided yet.</p>';
       return;
@@ -705,7 +718,58 @@
       }).join("") + "</tbody></table>";
   }
 
+  // Every card folds with +/−, so the screen shows only what is being worked
+  // on. What is folded is remembered per browser; by default only the
+  // proposals and the timetable are open.
+  const FOLD_KEY = "agents-folded";
+  const FOLD_DEFAULT = ["strategy", "morning", "gatelog", "note", "decisions", "policy"];
+
+  function folded() {
+    try {
+      const v = JSON.parse(localStorage.getItem(FOLD_KEY));
+      return Array.isArray(v) ? v : FOLD_DEFAULT;
+    } catch (e) { return FOLD_DEFAULT; }
+  }
+
+  function applyFolds() {
+    const f = folded();
+    document.querySelectorAll("#page-agents section[data-fold-id]").forEach((sec) => {
+      const shut = f.includes(sec.dataset.foldId);
+      sec.classList.toggle("ag-folded", shut);
+      const b = sec.querySelector(":scope > .ag-head > [data-fold]");
+      if (b) { b.textContent = shut ? "+" : "−"; b.title = shut ? "Open" : "Close"; }
+    });
+  }
+
+  function setupFolds() {
+    document.querySelectorAll("#page-agents section[data-fold-id]").forEach((sec) => {
+      if (sec.querySelector(":scope > .ag-head")) return;
+      let head = sec.firstElementChild;
+      if (head.tagName === "H3") {
+        const wrap = document.createElement("div");
+        sec.insertBefore(wrap, head);
+        wrap.appendChild(head);
+        head = wrap;
+      }
+      head.classList.add("ag-head");
+      const b = document.createElement("button");
+      b.className = "btn-secondary ag-fold";
+      b.dataset.fold = "1";
+      head.appendChild(b);
+    });
+    applyFolds();
+  }
+
+  function toggleFold(sec) {
+    if (!sec) return;
+    const id = sec.dataset.foldId, f = folded().filter((x) => x !== id);
+    if (!sec.classList.contains("ag-folded")) f.push(id);
+    localStorage.setItem(FOLD_KEY, JSON.stringify(f));
+    applyFolds();
+  }
+
   async function load() {
+    setupFolds();
     try {
       const st = await api("/api/agents/status");
       const kill = st.kill_switch === "on";
@@ -1029,6 +1093,9 @@
     if (gt) { GTAB = gt.dataset.gtab; renderGateLog(); return; }
     const pf = ev.target.closest("[data-pfilter]");
     if (pf) { PFILTER = pf.dataset.pfilter; renderProposals(); return; }
+    if (ev.target.closest("[data-pall]")) { PALL = !PALL; renderProposals(); return; }
+    const fold = ev.target.closest("[data-fold]");
+    if (fold) { toggleFold(fold.closest("section")); return; }
     const t = ev.target.closest("[data-show],[data-run],[data-price],[data-v4],[data-decide],button");
     if (!t) return;
 

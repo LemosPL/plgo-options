@@ -3416,6 +3416,12 @@
                       color:var(--muted);font-weight:600;margin:0 0 .35rem}
       #page-agents p{font-size:.71rem;line-height:1.35;margin:.1rem 0 .45rem}
       #page-agents .data-table{font-size:.72rem}
+      /* +/- folding (agents.js setupFolds) */
+      .ag-head{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.3rem}
+      .ag-head h3{margin:0 !important}
+      .ag-fold{margin-left:auto;width:auto;min-width:1.6rem;font-size:.8rem;line-height:1;padding:.1rem .4rem}
+      #page-agents section.ag-folded > :not(.ag-head){display:none !important}
+      #page-agents section.ag-folded > .ag-head{margin-bottom:0}
       .ag-grid{display:grid;grid-template-columns:262px minmax(0,1fr);gap:.55rem;align-items:start}
       @media(max-width:1100px){.ag-grid{grid-template-columns:1fr}}
       .ag-rail{position:sticky;top:.5rem}
@@ -3504,7 +3510,7 @@
 
     <div class="ag-grid">
       <aside class="ag-rail">
-        <section class="card" style="padding:.75rem">
+        <section class="card" data-fold-id="timetable" style="padding:.75rem">
           <h3 style="margin:0 0 .1rem">Desk timetable</h3>
           <p style="margin:0 0 .4rem">Part B2, UK time.</p>
           <div id="agents-tasklist"></div>
@@ -3512,25 +3518,25 @@
       </aside>
 
       <main style="min-width:0">
-        <section class="card">
+        <section class="card" data-fold-id="proposals">
           <h3 style="margin-top:0">Proposals</h3>
-          <p>Newest first. Rejected trades say which rule they broke; B3: our model first, then two quotes.</p>
+          <p>Top 5: what Lucas can act on first, then Chris, newest first. Each sweep replaces the last one's open proposals. Rejected trades say which rule they broke; B3: our model first, then two quotes.</p>
           <div id="agents-props"></div>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="strategy">
           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap">
             <h3 style="margin:0">Strategy in force</h3>
             <button id="btn-agents-doc" class="btn-secondary" style="width:auto;font-size:.7rem">Read the manual</button>
           </div>
           <p>What the gate enforces right now.</p>
-          <div id="agents-strategy"></div></div>
+          <div id="agents-strategy"></div>
           <div id="agents-doc" style="display:none;margin-top:.75rem;border-top:1px solid rgba(148,163,184,.25);padding-top:.6rem">
             <div id="agents-doc-body" class="ag-md"></div>
           </div>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="morning">
           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap">
             <h3 style="margin:0">Morning open</h3>
             <span id="agents-morning-when" style="color:var(--muted);font-size:.7rem"></span>
@@ -3539,24 +3545,24 @@
           <div id="agents-morning"></div>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="gatelog">
           <h3 style="margin-top:0">Gate log</h3>
           <p>Every trade the agents proposed and what the mandate gate said: approved (inside Lucas's mandate), needs Chris, or rejected &mdash; with the reason and the rule.</p>
           <div id="agents-gatelog"></div>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="note">
           <h3 style="margin-top:0">Agent note <span id="agents-output-name" style="color:var(--muted);font-weight:400"></span></h3>
           <pre id="agents-output" style="white-space:pre-wrap;font-size:.72rem;line-height:1.35;max-height:460px;overflow:auto;margin:0">Select an agent on the left.</pre>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="decisions">
           <h3 style="margin-top:0">Decisions</h3>
           <p>What the gate routed or refused, and what we did.</p>
           <div id="agents-decisions"></div>
         </section>
 
-        <section class="card">
+        <section class="card" data-fold-id="policy">
           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:1rem;flex-wrap:wrap">
             <h3 style="margin:0">Monday policy &mdash; <span id="agents-policy-asset">ETH</span></h3>
             <span id="agents-policy-example" class="ag-ex" style="display:none">running the manual&rsquo;s EXAMPLE numbers</span>
@@ -3962,6 +3968,6 @@
 </div>
 
 <script src="/static/app.js?v=183"></script>
-<script src="/static/agents.js?v=18"></script>
+<script src="/static/agents.js?v=19"></script>
 </body>
 </html>

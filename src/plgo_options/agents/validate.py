@@ -143,37 +143,12 @@ def validate(pnl: dict, policy: AssetPolicy, legs: list[dict]) -> dict[str, Any]
                    for m in KEY_MONEYNESS],
         spot_ladder=ladder.tolist(), before_payoff=bH.tolist(), after_payoff=aH.tolist(),
     )
+    t = curve_tests(ladder, bH, aH, S, dealing, policy, H)
+    find.extend(t.pop("findings"))
+    out.update(t)
 
-    # 1. The floor (A2): no worse below it, beyond the quote tolerance.
-    steps = policy.row_steps_pct or [30]
-    floor = policy.floor_price or S * (1 - steps[-1] / 100)
-    below = ladder <= floor
-    worst_below = float((chg[below]).min()) - dealing if below.any() else 0.0
-    out.update(floor=floor, floor_change_usd=at(chg, floor) - dealing, floor_worst_change_usd=worst_below)
-    tol = policy.cost_tolerance_usd
-    if worst_below < -tol:
-        find.append(("fail", f"Pushes the floor down: ${-worst_below:,.0f} worse below {floor:,.4g} at T+{H}d "
-                             f"(tolerance ${tol:,.0f})", "A2"))
-    else:
-        find.append(("ok", f"Floor {floor:,.4g} held at T+{H}d (worst change below it ${worst_below:,.0f})", "A2"))
-
-    # 2. Approved max loss (decision sheet line 5): the book's worst P&L from
-    #    the floor up to +85% must not get worse, and must stay inside the
-    #    approved max loss unless it was already outside and this improves it.
-    zone = (ladder >= floor) & (ladder <= S * 1.85)
-    if zone.any():
-        wb, wa = float(bH[zone].min()), float(aH[zone].min()) - dealing
-        limit = preset.target_trough_payoff
-        out.update(worst_before_usd=wb, worst_after_usd=wa, max_loss_limit_usd=limit)
-        if wa < wb - tol:
-            find.append(("fail", f"Worsens the book's worst loss at T+{H}d: ${wb:,.0f} -> ${wa:,.0f}", "A3"))
-        elif wa < limit and wa < wb:
-            find.append(("fail", f"Book's worst loss ${wa:,.0f} at T+{H}d is beyond the approved ${limit:,.0f}", "A3"))
-        else:
-            find.append(("ok", f"Worst loss at T+{H}d ${wb:,.0f} -> ${wa:,.0f} (approved {limit:,.0f})", "A3"))
-
-    # 3. What it costs to run. Routing on it is the gate's cost check (A3),
-    #    which reads net_cost_usd as set from these numbers.
+    # What it costs to run. Routing on it is the gate's cost check (A3),
+    # which reads net_cost_usd as set from these numbers.
     cost_out = max(premium, 0.0) + dealing
     find.append(("info", f"Costs ${cost_out:,.0f} to run (net premium ${premium:,.0f}, dealing ${dealing:,.0f}); "
                          f"P&L at spot now ${out['pnl_at_spot_now_usd']:,.0f}, at T+{H}d "
@@ -182,12 +157,86 @@ def validate(pnl: dict, policy: AssetPolicy, legs: list[dict]) -> dict[str, Any]
     return out
 
 
+def floor_for(policy: AssetPolicy, spot: float) -> tuple[float, bool]:
+    """(floor, decided): the policy's floor, else spot less the last row step."""
+    if policy.floor_price:
+        return float(policy.floor_price), True
+    steps = policy.row_steps_pct or [30]
+    return spot * (1 - steps[-1] / 100), False
+
+
+def curve_tests(ladder, before, after, spot: float, dealing: float,
+                policy: AssetPolicy, horizon: int) -> dict[str, Any]:
+    """The policy tests on a before/after curve pair at the target-expiry
+    horizon. One implementation for the sweep (engine curves, engine cost) and
+    for the validation (our pricing), so the sweep never ranks first a run the
+    gate is going to reject.
+
+    Returns the numbers plus findings: ("fail" | "ok", text, rule).
+    """
+    ladder = np.asarray(ladder, dtype=float)
+    bH, aH = np.asarray(before, dtype=float), np.asarray(after, dtype=float)
+    chg = aH - bH
+    at = lambda arr, x: float(np.interp(x, ladder, arr))
+    tol = policy.cost_tolerance_usd
+    find: list[tuple[str, str, str]] = []
+    out: dict[str, Any] = {"findings": find}
+
+    # 1. The floor (A2): no worse below it, beyond the quote tolerance.
+    floor, decided = floor_for(policy, spot)
+    label = f"{floor:,.4g}" + ("" if decided else " (no floor decided: last row step)")
+    below = ladder <= floor
+    worst_below = float((chg[below]).min()) - dealing if below.any() else 0.0
+    out.update(floor=floor, floor_decided=decided, floor_change_usd=at(chg, floor) - dealing,
+               floor_worst_change_usd=worst_below)
+    if worst_below < -tol:
+        find.append(("fail", f"Pushes the floor down: ${-worst_below:,.0f} worse below {label} at T+{horizon}d "
+                             f"(tolerance ${tol:,.0f})", "A2"))
+    else:
+        find.append(("ok", f"Floor {label} held at T+{horizon}d (worst change below it ${worst_below:,.0f})", "A2"))
+
+    # 2. Approved max loss (decision sheet line 5): the book's worst P&L from
+    #    the floor up to +85% must not get worse, and must stay inside the
+    #    approved max loss unless it was already outside and this improves it.
+    zone = (ladder >= floor) & (ladder <= spot * 1.85)
+    if zone.any():
+        wb, wa = float(bH[zone].min()), float(aH[zone].min()) - dealing
+        limit = policy.optimizer.target_trough_payoff
+        out.update(worst_before_usd=wb, worst_after_usd=wa, max_loss_limit_usd=limit)
+        if wa < wb - tol:
+            find.append(("fail", f"Worsens the book's worst loss at T+{horizon}d: ${wb:,.0f} -> ${wa:,.0f}", "A3"))
+        elif wa < limit and wa < wb:
+            find.append(("fail", f"Book's worst loss ${wa:,.0f} at T+{horizon}d is beyond the approved ${limit:,.0f}", "A3"))
+        else:
+            find.append(("ok", f"Worst loss at T+{horizon}d ${wb:,.0f} -> ${wa:,.0f} (approved {limit:,.0f})", "A3"))
+
+    # 3. The view (A1). "up" means the upside is what we are paid for: no
+    #    proposal may give it away at +35%, +85% or the upside target. Shape
+    #    only (dealing is already charged by the floor and cost tests).
+    if policy.view == "up":
+        pts = [(f"+35% ({spot * 1.35:,.4g})", spot * 1.35), (f"+85% ({spot * 1.85:,.4g})", spot * 1.85)]
+        up = policy.upside_target_price
+        if up and up > spot and up <= ladder[-1]:
+            pts.append((f"the upside target {up:,.4g}", float(up)))
+        changes = [(name, at(chg, x)) for name, x in pts]
+        name, worst_up = min(changes, key=lambda c: c[1])
+        out.update(upside_changes={n: c for n, c in changes})
+        if worst_up < -tol:
+            find.append(("fail", f"Gives away upside under the 'up' view: ${-worst_up:,.0f} worse at {name} "
+                                 f"at T+{horizon}d", "A1"))
+        else:
+            find.append(("ok", "Upside kept under the 'up' view: " +
+                         ", ".join(f"{n} {c:+,.0f}" for n, c in changes), "A1"))
+    return out
+
+
 def apply_to_proposal(prop: dict, v: dict) -> dict:
     """Write the validated numbers onto a proposal so the gate tests them."""
     prop["validation"] = {k: v.get(k) for k in (
         "horizon_days", "net_premium_usd", "dealing_cost_usd", "cost_to_run_usd", "pnl_at_spot_now_usd",
         "pnl_at_spot_horizon_usd", "key_spots", "floor", "floor_change_usd", "floor_worst_change_usd",
-        "worst_before_usd", "worst_after_usd", "max_loss_limit_usd", "legs", "findings")}
+        "worst_before_usd", "worst_after_usd", "max_loss_limit_usd", "floor_decided", "upside_changes",
+        "legs", "findings")}
     if v.get("spot_ladder"):
         prop["spot_ladder"], prop["before_payoff"], prop["after_payoff"] = (
             v["spot_ladder"], v["before_payoff"], v["after_payoff"])

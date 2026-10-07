@@ -242,6 +242,19 @@ async def decide_proposal(pid: int, status: str, by: str) -> None:
     await db.commit()
 
 
+async def supersede_open(asset: str, agent: str, keep_ids: list[int]) -> int:
+    """Close the agent's still-open proposals for ``asset`` that a newer run
+    replaced, so the screen only carries the latest sweep. Returns how many."""
+    db = await get_db()
+    marks = ",".join("?" * len(keep_ids)) or "NULL"
+    cur = await db.execute(
+        f"UPDATE agent_proposals SET status='superseded', decided_by='newer run', decided_at=? "
+        f"WHERE asset=? AND agent=? AND status='open' AND id NOT IN ({marks})",
+        (now_iso(), asset, agent, *keep_ids))
+    await db.commit()
+    return cur.rowcount or 0
+
+
 async def month_to_date_cost(asset: str, month: str) -> float:
     """Net premium paid this month on proposals people marked executed."""
     db = await get_db()
