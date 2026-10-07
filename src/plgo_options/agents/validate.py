@@ -58,9 +58,11 @@ def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict
     trades, rows = [], []
     now = datetime.now()
     for l in legs:
-        if "BOX" in str(l.get("strategy") or "").upper():
-            continue
-        side = str(l.get("side") or ("Buy" if float(l.get("qty") or 0) > 0 else "Sell")).lower()
+        # A box neutralizer is how the engine pays for a package (e.g. buying
+        # back deep ITM shorts): its legs carry the cash. Priced at mid with no
+        # spread, as the engine does (box fee 0 bps); payoff flat by parity.
+        is_box = "BOX" in str(l.get("strategy") or "").upper()
+        side =str(l.get("side") or ("Buy" if float(l.get("qty") or 0) > 0 else "Sell")).lower()
         sign = 1.0 if side == "buy" else -1.0
         qty = abs(float(l.get("qty") or 0))
         if qty <= 0:
@@ -86,8 +88,10 @@ def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict
             rows.append({"leg": f"{side} {o} {K:g}", "error": "no vol for this expiry/strike"})
             continue
         mid = bs_price(S, K, T, 0.0, sigma, o)
-        cp = resolve_price(str(l.get("counterparty") or ""), asset.upper(), S, K, T, o, side)
-        if cp is not None:
+        cp = None if is_box else resolve_price(str(l.get("counterparty") or ""), asset.upper(), S, K, T, o, side)
+        if is_box:
+            px, by = mid, "box leg at mid (moves cash)"
+        elif cp is not None:
             px, by = float(cp[0]), f"{l.get('counterparty')} methodology"
         else:
             vega_pt = abs(bs_price(S, K, T, 0.0, sigma + 0.01, o) - bs_price(S, K, T, 0.0, max(sigma - 0.01, 1e-4), o)) / 2

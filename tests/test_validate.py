@@ -74,3 +74,18 @@ def test_buying_protection_holds_the_floor_and_reports_cost_and_pnl_at_spot(monk
 def test_unpriceable_leg_is_a_failure(monkeypatch):
     r = run(monkeypatch, [{"kind": "option", "side": "Buy", "opt": "P", "strike": 2700, "expiry": "", "qty": 1}])
     assert any(k == "fail" and rule == "B3" for k, _, rule in r["findings"])
+
+
+def test_box_legs_pay_for_a_buyback(monkeypatch):
+    """#100 (7 Oct): buying back deep ITM shorts is funded by a box; the box
+    legs used to be skipped, so the package showed a $10.9M debit."""
+    box = lambda side, opt, k: dict(leg(side, opt, k, 1000), strategy="BOX_NEUTRALIZER")
+    buyback = dict(leg("Buy", "C", 1400, 1000), is_unwind=True, strategy="REDUCE")
+    alone = run(monkeypatch, [buyback])
+    funded = run(monkeypatch, [buyback, box("Sell", "C", 1900), box("Buy", "P", 1900),
+                               box("Buy", "C", 3200), box("Sell", "P", 3200)])
+    assert alone["net_premium_usd"] > 1_000_000
+    # The 1900/3200 box brings in ~$1,300 a unit at mid: most of the C1400's ~$1,600.
+    assert funded["net_premium_usd"] < alone["net_premium_usd"] - 1_200_000
+    assert abs(funded["dealing_cost_usd"] - alone["dealing_cost_usd"]) < 1e-3   # box at mid, no spread
+    assert [r["priced_by"] for r in funded["legs"][1:]] == ["box leg at mid (moves cash)"] * 4
