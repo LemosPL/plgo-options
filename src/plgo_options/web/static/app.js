@@ -15963,6 +15963,8 @@ async function collatLoad() {
   }
 }
 
+const totMarketAll = cps => cps.reduce((s, c) => s + (c.total_usd || 0), 0);
+
 function collatRenderMap() {
   if (!collatMap) return;
   const haircutOn = document.getElementById("collat-haircut-toggle")?.checked ?? true;
@@ -15983,6 +15985,11 @@ function collatRenderMap() {
   document.getElementById("collat-total-market").textContent = _collatFmtUsd(m.grand_total_usd);
   document.getElementById("collat-total-haircut").textContent = _collatFmtUsd(totHc);
   document.getElementById("collat-total-liability").textContent = _collatFmtUsd(m.total_liability_usd);
+  const $liabNet = document.getElementById("collat-total-liability-netted");
+  if ($liabNet) {
+    const nb = m.total_balance_netted_usd || 0;
+    $liabNet.textContent = `netted per counterparty: ${_collatFmtUsd(m.total_liability_netted_usd || 0)} · balance ${nb > 0 ? "+" : ""}${_collatFmtUsd(nb)}`;
+  }
   const $bal = document.getElementById("collat-total-balance");
   $bal.textContent = `${m.total_balance_usd > 0 ? "+" : ""}${_collatFmtUsd(m.total_balance_usd)}`;
   $bal.className = "collat-metric-value " + (m.total_balance_usd >= 0 ? "collat-ratio-good" : "collat-ratio-bad");
@@ -16056,14 +16063,21 @@ function collatRenderMap() {
   document.getElementById("collat-balance-tbody").innerHTML = cps.map(c => {
     const bal = haircutOn ? c.balance_usd : (c.total_usd - c.liability_usd);
     const balCls = bal > 0 ? "collat-diff-pos" : bal < 0 ? "collat-diff-neg" : "collat-diff-zero";
+    const netLiab = c.liability_netted_usd || 0;
+    const balNet = haircutOn ? (c.balance_netted_usd || 0) : (c.total_usd - netLiab);
+    const balNetCls = balNet > 0 ? "collat-diff-pos" : balNet < 0 ? "collat-diff-neg" : "collat-diff-zero";
     return `<tr>
       <td style="text-align:left"><strong>${c.counterparty}</strong></td>
       <td class="num">${_collatFmtUsd(c.total_usd)}</td>
       <td class="num">${_collatFmtUsd(c.collateral_haircut_usd)}</td>
       <td class="num">${_collatFmtUsd(c.liability_usd)}</td>
       <td class="num ${balCls}" style="font-weight:600">${bal > 0 ? "+" : ""}${_collatFmtUsd(bal)}</td>
+      <td class="num">${_collatFmtUsd(netLiab)}</td>
+      <td class="num ${balNetCls}" style="font-weight:600">${balNet > 0 ? "+" : ""}${_collatFmtUsd(balNet)}</td>
     </tr>`;
   }).join("");
+  const totNetLiab = m.total_liability_netted_usd || 0;
+  const totBalNet = haircutOn ? (m.total_balance_netted_usd || 0) : (totMarketAll(cps) - totNetLiab);
   const totMarket = cps.reduce((s, c) => s + (c.total_usd || 0), 0);
   document.getElementById("collat-balance-tfoot").innerHTML = `<tr>
     <td style="text-align:left"><strong>Total</strong></td>
@@ -16071,6 +16085,8 @@ function collatRenderMap() {
     <td class="num"><strong>${_collatFmtUsd(totHc)}</strong></td>
     <td class="num"><strong>${_collatFmtUsd(m.total_liability_usd)}</strong></td>
     <td class="num ${m.total_balance_usd >= 0 ? "collat-diff-pos" : "collat-diff-neg"}" style="font-weight:600">${m.total_balance_usd > 0 ? "+" : ""}${_collatFmtUsd(m.total_balance_usd)}</td>
+    <td class="num"><strong>${_collatFmtUsd(totNetLiab)}</strong></td>
+    <td class="num ${totBalNet >= 0 ? "collat-diff-pos" : "collat-diff-neg"}" style="font-weight:600">${totBalNet > 0 ? "+" : ""}${_collatFmtUsd(totBalNet)}</td>
   </tr>`;
 
   // Fresh render from the server reflects the saved state — drop any dirty edits.

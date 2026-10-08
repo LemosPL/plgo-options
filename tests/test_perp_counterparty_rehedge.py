@@ -213,3 +213,18 @@ def test_summary_sums_venues_and_keeps_each_book(ledger):
     # Avg entry of the net reproduces the summed unrealised P&L at the mark.
     assert (2_100.0 - total["avg_entry"]) * total["net_qty"] == pytest.approx(
         total["unrealized_pnl_usd"], abs=0.05)
+
+
+def test_netted_liability_lets_winning_positions_and_otc_perp_offset():
+    data = _book(
+        [{"counterparty": "KeyRock", "current_mtm": -1_000.0},
+         {"counterparty": "KeyRock", "current_mtm": 300.0},
+         {"counterparty": "Flowdesk", "current_mtm": 200.0}],
+        [{"venue": "KeyRock", "is_exchange": False, "net_qty": -10.0,
+          "avg_entry": 2_000.0, "unrealized_pnl_usd": 400.0},
+         {"venue": "Binance Futures", "is_exchange": True, "net_qty": -5.0,
+          "avg_entry": 2_000.0, "unrealized_pnl_usd": 900.0}])
+    net = collateral._net_mtm_by_cp(data)
+    assert net == {"keyrock": pytest.approx(-300.0), "flowdesk": pytest.approx(200.0)}
+    # Gross for comparison: 1,000 − 400 perp = 600 (the +300 offsets nothing).
+    assert collateral._compute_liabilities(data)[0]["keyrock"] == pytest.approx(600.0)

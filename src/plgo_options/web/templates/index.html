@@ -3320,6 +3320,7 @@
           <div class="collat-metric-label">Liability (our calc)</div>
           <div class="collat-metric-value" id="collat-total-liability">--</div>
           <div class="collat-metric-sub">Σ max(0, −MtM) USD · BS pricing</div>
+          <div class="collat-metric-sub" id="collat-total-liability-netted" title="max(0, −Σ MtM) per counterparty, summed: each counterparty's book netted as one set">netted per counterparty: --</div>
         </div>
         <div class="collat-metric collat-metric-ratio">
           <div class="collat-metric-label">Net Balance / Debit</div>
@@ -3357,8 +3358,10 @@
               <th style="text-align:left">Counterparty</th>
               <th class="num">Collateral (market)</th>
               <th class="num" id="collat-bal-th-coll">Collateral (haircut)</th>
-              <th class="num">Liability (ours)</th>
+              <th class="num" title="Gross: Σ max(0, −MtM) per position — a winning position offsets nothing.">Liability (ours)</th>
               <th class="num" title="Post-haircut collateral − our liability. Positive = surplus balance; negative = a debit we must post.">Balance / Debit</th>
+              <th class="num" title="Netted: max(0, −Σ MtM) over the counterparty's whole book (options in both books + any perp held with it) — one netting set, as a counterparty margins it.">Liability (netted)</th>
+              <th class="num" title="Collateral − netted liability.">Balance (netted)</th>
             </tr>
           </thead>
           <tbody id="collat-balance-tbody"></tbody>

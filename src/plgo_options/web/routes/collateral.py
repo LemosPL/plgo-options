@@ -208,6 +208,24 @@ def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str,
     return liabilities, display, counts
 
 
+def _net_mtm_by_cp(data: dict | None) -> dict[str, float]:
+    """Signed MtM per counterparty (lower-cased) for a single-asset portfolio
+    response: every option position plus any OTC perp held with it. The
+    netted liability is max(0, −Σ) of this — one netting set per
+    counterparty, as an ISDA/CSA treats it — against the gross Σ max(0, −MtM)
+    of _compute_liabilities, where a winning position offsets nothing."""
+    out: dict[str, float] = {}
+    if not data:
+        return out
+    for p in data.get("positions", []):
+        cp = (p.get("counterparty") or "").strip().lower()
+        if cp:
+            out[cp] = out.get(cp, 0.0) + float(p.get("current_mtm") or 0)
+    for k, perp in _otc_perps(data).items():
+        out[k] = out.get(k, 0.0) + perp["mtm"]
+    return out
+
+
 @router.get("/summary")
 async def collateral_summary(asset: str = "all"):
     """Per-(counterparty, portfolio_asset) margin breakdown.
@@ -699,10 +717,17 @@ async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
     return prices, overrides, live
 
 
-async def _liability_by_cp() -> tuple[dict[str, float], dict[str, str]]:
-    """Per-counterparty MtM liability summed across both option books."""
+async def _liability_by_cp() -> tuple[dict[str, float], dict[str, str], dict[str, float]]:
+    """Per-counterparty MtM liability summed across both option books: gross
+    (Σ max(0, −MtM) per position), display names, and netted (max(0, −Σ MtM)
+    over the counterparty's whole book, both assets — one netting set)."""
     eth = await _gather_portfolio("ETH")
     fil = await _gather_portfolio("FIL")
+    net_mtm: dict[str, float] = {}
+    for src in (_net_mtm_by_cp(eth), _net_mtm_by_cp(fil)):
+        for k, v in src.items():
+            net_mtm[k] = net_mtm.get(k, 0.0) + v
+    netted = {k: max(0.0, -v) for k, v in net_mtm.items()}
     el, ed, _ = _compute_liabilities(eth)
     fl, fd, _ = _compute_liabilities(fil)
     liab: dict[str, float] = {}
@@ -713,7 +738,7 @@ async def _liability_by_cp() -> tuple[dict[str, float], dict[str, str]]:
     for src in (ed, fd):
         for k, n in src.items():
             disp.setdefault(k, n)
-    return liab, disp
+    return liab, disp, netted
 
 
 @router.get("/map")
@@ -757,7 +782,7 @@ async def collateral_map():
                                    "books": {b: {} for b in COLLATERAL_BOOKS}})
         entry["books"][book][(r["asset"] or "").upper()] = float(r["qty"] or 0)
 
-    liab, liab_disp = await _liability_by_cp()
+    liab, liab_disp, liab_netted = await _liability_by_cp()
     for k, n in liab_disp.items():
         cps.setdefault(k, {"display": n, "books": {b: {} for b in COLLATERAL_BOOKS}})
 
@@ -770,6 +795,7 @@ async def collateral_map():
         total = round(sum(usd.values()), 2)
         _nh, hc = _haircut_value(qtys, prices, counterparty=k)
         l = liab.get(k, 0.0)
+        ln = liab_netted.get(k, 0.0)
         out_cps.append({
             "counterparty": info["display"],
             "books": books,
@@ -779,6 +805,8 @@ async def collateral_map():
             "liability_usd": round(l, 2),
             "collateral_haircut_usd": round(hc, 2),
             "balance_usd": round(hc - l, 2),
+            "liability_netted_usd": round(ln, 2),
+            "balance_netted_usd": round(hc - ln, 2),
         })
     out_cps.sort(key=lambda c: c["total_usd"], reverse=True)
 
@@ -800,6 +828,8 @@ async def collateral_map():
         "grand_total_usd": grand_total,
         "total_liability_usd": round(sum(liab.values()), 2),
         "total_balance_usd": round(sum(c["balance_usd"] for c in out_cps), 2),
+        "total_liability_netted_usd": round(sum(c["liability_netted_usd"] for c in out_cps), 2),
+        "total_balance_netted_usd": round(sum(c["balance_netted_usd"] for c in out_cps), 2),
     }
 
 
