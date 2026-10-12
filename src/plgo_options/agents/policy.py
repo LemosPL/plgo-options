@@ -173,6 +173,10 @@ class AssetPolicy:
     # Optimizer reshape trades: how much worse the floor / max-loss / view
     # tests allow (7 Oct 2026: $500k). Row trades use cost_tolerance_usd.
     reshape_tolerance_usd: float = 50_000.0
+    # Expected-range test (view "up"): a point in the range may be at most this
+    # much worse (12 Oct 2026: $50k, #188 lost $3,591 at 3,000); the average
+    # across the range must still not be negative.
+    range_tolerance_usd: float = 50_000.0
     # The floor test alone, for optimizer reshapes (12 Oct 2026: $700k).
     # None = reshape_tolerance_usd.
     reshape_floor_tolerance_usd: float | None = None

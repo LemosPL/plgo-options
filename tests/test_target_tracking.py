@@ -303,3 +303,22 @@ def test_runs_that_did_not_qualify_order_by_cost_and_range_too():
     dear = {"track_gain_pct": 60.0, "raw_score": 20.0, "disqualified": ["floor"]}
     worse = {"track_gain_pct": 90.0, "raw_score": 80.0, "disqualified": ["floor", "giveback"]}
     assert sorted([dear, worse, cheap], key=closeness, reverse=True) == [cheap, dear, worse]
+
+
+def test_expected_range_allows_a_small_edge_dip_but_not_a_negative_average():
+    import numpy as np
+    pol = policy()
+    pol.view, pol.view_range_low, pol.view_range_high, pol.upside_target_price = "up", 3000.0, 3500.0, None
+    x = np.asarray(LADDER)
+    before = np.zeros(len(LADDER))
+    # -$3.6k at 3,000 rising to +$400k at 3,500 (#188's shape): passes with $50k tolerance
+    edge = np.interp(x, [3105, 3500], [-3_600, 400_000])          # flat -3.6k up to the ladder point past 3,000
+    t = curve_tests(LADDER, before, edge, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert not [f for f in t["findings"] if f[0] == "fail" and "expected range" in f[1]]
+    pol.range_tolerance_usd = 0.0
+    t = curve_tests(LADDER, before, edge, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert any(f[0] == "fail" and "expected range" in f[1] for f in t["findings"])
+    pol.range_tolerance_usd = 50_000.0
+    flat_loss = np.where((x >= 3000) & (x <= 3500), -20_000.0, 0.0)   # inside $50k but negative on average
+    t = curve_tests(LADDER, before, flat_loss, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert any(f[0] == "fail" and "on average" in f[1] for f in t["findings"])

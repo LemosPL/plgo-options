@@ -267,10 +267,14 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
             out.update(range_low=lo_r, range_high=hi_c,
                        range_avg_change_usd=float(rc.mean()), range_worst_change_usd=float(rc.min()))
             rng = f"{lo_r:,.4g}-{hi_c:,.4g}" + (f" (of {hi_r:,.4g}; ladder ends there)" if hi_c < hi_r else "")
-            if rc.min() < 0:
+            rtol = float(getattr(policy, "range_tolerance_usd", 0.0) or 0.0)
+            if rc.mean() < 0:
+                find.append(("fail", f"Loses in the expected range {rng}: ${-rc.mean():,.0f} worse on average "
+                                     f"at T+{horizon}d", "A1"))
+            elif rc.min() < -rtol:
                 x_w = float(xs[int(rc.argmin())])
                 find.append(("fail", f"Loses in the expected range {rng}: ${-rc.min():,.0f} worse at {x_w:,.4g} "
-                                     f"at T+{horizon}d", "A1"))
+                                     f"at T+{horizon}d (tolerance ${rtol:,.0f})", "A1"))
             else:
                 find.append(("ok", f"Adds in the expected range {rng}: avg {rc.mean():+,.0f}, "
                                    f"worst {rc.min():+,.0f} at T+{horizon}d", "A1"))
