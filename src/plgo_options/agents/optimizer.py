@@ -78,6 +78,12 @@ def best_variant(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(runs, key=_search_score)["variant"]
 
 
+def closeness(s: dict[str, Any]) -> float:
+    """How a run that did not qualify ranks: fewest reasons out first, then
+    the full score (target gain, cost, lines, expected-range gain)."""
+    return s.get("raw_score", s["track_gain_pct"]) - 1e3 * len(s["disqualified"])
+
+
 def _search_score(s: dict[str, Any]) -> float:
     return s["score"] if not s["disqualified"] else s["track_gain_pct"] - 1e6
 
@@ -326,6 +332,10 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         "worst_change_usd": round(worst, 0),
         "range_gain_usd": round(range_gain, 0),
         "score": round(score, 2) if not disq else -1e9,
+        # The same score whether or not the run qualified: orders the runs
+        # that did not (12 Oct 2026: by cost and range gain too, not only
+        # target tracking).
+        "raw_score": round(score, 2),
         "disqualified": disq,
         "spot": spot,
         "trades": trades,

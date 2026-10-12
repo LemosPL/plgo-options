@@ -399,7 +399,7 @@ async def optimizer(ctx: dict) -> dict:
                         why[k] = why.get(k, 0) + 1
             n_err = sum(1 for e in res["errors"] if e.get("target") == tname)
             mine = [s for s in res["ranked"] if s["target"]["name"] == tname and s["key_spot_changes"]]
-            near = max(mine, key=lambda s: s["track_gain_pct"] - 1e3 * len(s["disqualified"]), default=None)
+            near = max(mine, key=opt_mod.closeness, default=None)
             detail = ""
             if near:
                 w = min(near["key_spot_changes"], key=lambda d: d["change_usd"])
@@ -449,8 +449,8 @@ async def optimizer(ctx: dict) -> dict:
         filed = list(picks[:TOP_RUNS])
         seen = {sig(f[0]) for f in filed}
         # Disqualified runs all score -1e9, so order the rest the way "closest"
-        # is picked: fewest reasons out, then most target gain.
-        rest = sorted(res["ranked"], key=lambda s: -(s["track_gain_pct"] - 1e3 * len(s["disqualified"])))
+        # is picked: fewest reasons out, then the full score (cost, range gain).
+        rest = sorted(res["ranked"], key=opt_mod.closeness, reverse=True)
         for s in [c[1] for c in closest] + rest:
             if len(filed) >= TOP_RUNS:
                 break

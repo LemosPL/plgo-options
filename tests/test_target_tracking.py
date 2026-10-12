@@ -295,3 +295,11 @@ def test_calibrated_counterparty_legs_cost_their_spread_not_zero():
     assert dealing_cost_usd("FIL", S, [box]) == 0.0              # box legs move cash at mid
     other = dict(leg, counterparty="NoSuchDealer", cost_usd=1234.0)
     assert dealing_cost_usd("FIL", S, [other]) == 1234.0          # uncalibrated: engine's cost
+
+
+def test_runs_that_did_not_qualify_order_by_cost_and_range_too():
+    from plgo_options.agents.optimizer import closeness
+    cheap = {"track_gain_pct": 50.0, "raw_score": 45.0, "disqualified": ["floor"]}
+    dear = {"track_gain_pct": 60.0, "raw_score": 20.0, "disqualified": ["floor"]}
+    worse = {"track_gain_pct": 90.0, "raw_score": 80.0, "disqualified": ["floor", "giveback"]}
+    assert sorted([dear, worse, cheap], key=closeness, reverse=True) == [cheap, dear, worse]
