@@ -254,7 +254,8 @@ def dealing_cost_usd(asset: str, spot: float, trades: list[dict[str, Any]]) -> f
         except Exception:
             cp = None
         mid = float(t.get("bs_price_usd") or 0.0)
-        total += eng if cp is None or mid <= 0 else max(eng, abs(float(cp[0]) - mid) * qty)
+        sgn = 1.0 if side == "buy" else -1.0        # worse than mid only (validate.price_legs)
+        total += eng if cp is None or mid <= 0 else max(eng, max(sgn * (float(cp[0]) - mid), 0.0) * qty)
     return total
 
 

@@ -261,6 +261,7 @@ def test_up_view_must_not_lose_in_the_expected_range_and_reports_the_gain():
     import numpy as np
     pol = policy()
     pol.view, pol.view_range_low, pol.view_range_high, pol.upside_target_price = "up", 3000.0, 3500.0, None
+    pol.range_tolerance_usd = 0.0                   # the mechanism, without the $50k
     x = np.asarray(LADDER)
     before = np.zeros(len(LADDER))
     dip = np.where((x >= 3000) & (x <= 3200), -50_000.0, 0.0)       # small, inside $500k tolerance
@@ -277,6 +278,7 @@ def test_expected_range_past_the_ladder_is_tested_on_the_covered_part():
     pol = policy()
     pol.view, pol.upside_target_price = "up", None
     pol.view_range_low, pol.view_range_high = LADDER[-3], LADDER[-1] * 2
+    pol.range_tolerance_usd = 0.0                   # the mechanism, without the $50k
     before = np.zeros(len(LADDER))
     t = curve_tests(LADDER, before, before - 10_000.0, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
     assert t["range_high"] == LADDER[-1]
@@ -305,7 +307,7 @@ def test_runs_that_did_not_qualify_order_by_cost_and_range_too():
     assert sorted([dear, worse, cheap], key=closeness, reverse=True) == [cheap, dear, worse]
 
 
-def test_expected_range_allows_a_small_edge_dip_but_not_a_negative_average():
+def test_expected_range_allows_a_small_dip_within_the_tolerance():
     import numpy as np
     pol = policy()
     pol.view, pol.view_range_low, pol.view_range_high, pol.upside_target_price = "up", 3000.0, 3500.0, None
@@ -319,6 +321,6 @@ def test_expected_range_allows_a_small_edge_dip_but_not_a_negative_average():
     t = curve_tests(LADDER, before, edge, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
     assert any(f[0] == "fail" and "expected range" in f[1] for f in t["findings"])
     pol.range_tolerance_usd = 50_000.0
-    flat_loss = np.where((x >= 3000) & (x <= 3500), -20_000.0, 0.0)   # inside $50k but negative on average
+    flat_loss = np.where((x >= 3000) & (x <= 3500), -60_000.0, 0.0)   # beyond $50k everywhere in the range
     t = curve_tests(LADDER, before, flat_loss, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
-    assert any(f[0] == "fail" and "on average" in f[1] for f in t["findings"])
+    assert any(f[0] == "fail" and "tolerance $50,000" in f[1] for f in t["findings"])

@@ -169,13 +169,16 @@ class AssetPolicy:
     perp_funding_budget_month_usd: float | None = 0.0   # None = no budget set
     perp_venue: str = "Binance Futures"    # where row perps trade
     rolls_need_chris: bool = True          # A5; False = Lucas rolls inside his limits
+    # Roll sweep's default "Roll into": "target" = the optimizer's target expiry;
+    # "next_month_end" = the first month-end expiry after the legs (12 Oct 2026,
+    # FIL: roll 30OCT26 into 27NOV26, not 25DEC26 - less premium).
+    roll_into: str = "target"
     cost_tolerance_usd: float = 50_000.0   # B1a ±US$50k
     # Optimizer reshape trades: how much worse the floor / max-loss / view
     # tests allow (7 Oct 2026: $500k). Row trades use cost_tolerance_usd.
     reshape_tolerance_usd: float = 50_000.0
-    # Expected-range test (view "up"): a point in the range may be at most this
-    # much worse (12 Oct 2026: $50k, #188 lost $3,591 at 3,000); the average
-    # across the range must still not be negative.
+    # Expected-range test (view "up"): no point in the range may be more than
+    # this much worse (12 Oct 2026: $50k; #188 lost $3,591 at 3,000).
     range_tolerance_usd: float = 50_000.0
     # The floor test alone, for optimizer reshapes (12 Oct 2026: $700k).
     # None = reshape_tolerance_usd.

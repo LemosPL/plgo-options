@@ -1692,7 +1692,7 @@ function tmIntrinsic(t) {
 function tmIsPriced(t) { return t.theta != null || (t.mtm_by_horizon || []).length > 0; }
 function tmDecayLeg(t) {
   const d = tmSelectedDecay([t]);
-  return { _day: d.day, _month: d.month, _year: d.year, _tv: (t.current_mtm || 0) - tmIntrinsic(t) };
+  return { _day: d.day, _month: d.month, _year: d.year, _run: d.day * 365, _tv: (t.current_mtm || 0) - tmIntrinsic(t) };
 }
 function tmDecayGroup(list) {
   const priced = list.filter(tmIsPriced);
@@ -1705,7 +1705,7 @@ function tmDecayGroup(list) {
     tv += (t.current_mtm || 0) - tmIntrinsic(t);
   });
   return { n: list.length, unpriced: list.length - priced.length, day: d.day, month: d.month, year: d.year,
-           longs, shorts, mtm, tv, ids: list.map(t => t.db_id || t.id) };
+           run: d.day * 365, longs, shorts, mtm, tv, ids: list.map(t => t.db_id || t.id) };
 }
 function tmRenderDecay(active, totalTheta) {
   const body = document.getElementById("tm-decay-body");
@@ -1724,7 +1724,7 @@ function tmRenderDecay(active, totalTheta) {
     if (typeof a === "number" || typeof b === "number") return asc ? (a || 0) - (b || 0) : (b || 0) - (a || 0);
     return asc ? String(a || "").localeCompare(String(b || "")) : String(b || "").localeCompare(String(a || ""));
   };
-  const gKey = { _day: "day", _month: "month", _year: "year", _tv: "tv", current_mtm: "mtm" }[col];
+  const gKey = { _day: "day", _month: "month", _year: "year", _run: "run", _tv: "tv", current_mtm: "mtm" }[col];
   const groups = Object.entries(byCp).map(([cp, list]) => ({ cp, list: list.sort(cmp), ...tmDecayGroup(list) }))
     .sort((x, y) => gKey ? (asc ? x[gKey] - y[gKey] : y[gKey] - x[gKey])
                          : (col === "counterparty" && !asc ? y.cp.localeCompare(x.cp) : x.cp.localeCompare(y.cp)));
@@ -1740,7 +1740,7 @@ function tmRenderDecay(active, totalTheta) {
       `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(g.longs)}</span> / day &middot; sold legs ` +
         `<span class="${cls(g.shorts)}">${usd(g.shorts)}</span> / day` +
         (g.unpriced ? ` &middot; <span style="color:#f59e0b">${g.unpriced} not priced</span>` : "") + `</td>` +
-      money(g.day) + money(g.month) + money(g.year) + money(g.tv) + money(g.mtm) + "</tr>";
+      money(g.day) + money(g.month) + money(g.year) + money(g.run) + money(g.tv) + money(g.mtm) + "</tr>";
     if (!open) return;
     g.list.forEach(t => {
       const tid = t.db_id || t.id, priced = tmIsPriced(t);
@@ -1756,17 +1756,17 @@ function tmRenderDecay(active, totalTheta) {
         `<td>${t.expiry || ""}</td><td>${t.days_remaining || 0}</td>` +
         `<td>${num(t.strike, isFil ? 4 : 0)}</td><td class="${sideCls}">${num(t.net_qty, 0)}</td>` +
         `<td>${t.theta == null ? "--" : Number(t.theta).toFixed(4)}</td>` +
-        cell(t._day) + cell(t._month) + cell(t._year) + cell(t._tv) + money(t.current_mtm || 0) + "</tr>";
+        cell(t._day) + cell(t._month) + cell(t._year) + cell(t._run) + cell(t._tv) + money(t.current_mtm || 0) + "</tr>";
     });
   });
   if (!groups.length) {
-    html = '<tr><td colspan="15" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
+    html = '<tr><td colspan="16" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
   } else {
     const tot = tmDecayGroup(legs);
     html += `<tr class="tm-decay-total"><td></td><td style="text-align:left">Total (${tot.n})</td>` +
       `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(tot.longs)}</span> / day &middot; sold legs ` +
       `<span class="${cls(tot.shorts)}">${usd(tot.shorts)}</span> / day</td>` +
-      money(tot.day) + money(tot.month) + money(tot.year) + money(tot.tv) + money(tot.mtm) + "</tr>";
+      money(tot.day) + money(tot.month) + money(tot.year) + money(tot.run) + money(tot.tv) + money(tot.mtm) + "</tr>";
   }
   body.innerHTML = html;
   const all = document.getElementById("tm-decay-check-all");
@@ -2553,6 +2553,7 @@ function tmRenderSelectedDecay(active) {
   const d = tmSelectedDecay(active);
   const fmt = v => `<b style="color:${v < 0 ? "var(--red)" : "var(--green)"}">${v < 0 ? "-$" : "+$"}${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}</b>`;
   el.innerHTML = `${active.length} selected &middot; time decay: ${fmt(d.day)} / day &middot; ${fmt(d.month)} / month &middot; ${fmt(d.year)} / year` +
+    ` <span style="color:var(--muted)">(to expiry)</span> &middot; run-rate ${fmt(d.day * 365)} / year <span style="color:var(--muted)">(if kept)</span>` +
     (d.missing ? ` <span style="color:var(--muted)">(${d.missing} estimated as theta x days)</span>` : "");
   el.style.display = "";
 }

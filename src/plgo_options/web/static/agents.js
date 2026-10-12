@@ -78,6 +78,18 @@
   // closed and the sweep finds the best replacement (agents roll-sweep).
   // G20 legs are never listed; only the sweep's counterparties are.
   const ROLL = { data: null, dte: 20, into: "", itm: false, sel: new Set(), open: false, busy: false, msg: "" };
+  // Default "Roll into": the policy's target expiry, or (FIL) the first
+  // month-end expiry after the ticked legs - the last listed expiry of its month.
+  function rollDefaultInto(opts) {
+    if (ROLL.data && ROLL.data.roll_into === "next_month_end") {
+      const mon = (c) => String(c).slice(-5);              // "27NOV26" -> "NOV26"
+      const lastOf = new Map();
+      (ROLL.data.expiries || []).forEach((e) => lastOf.set(mon(e.code), e.code));   // sorted by DTE: last wins
+      const pick = opts.find((e) => lastOf.get(mon(e.code)) === e.code);
+      if (pick) return pick.code;
+    }
+    return (ROLL.data && ROLL.data.into) || "";
+  }
   function rollLegs() {
     return ((ROLL.data && ROLL.data.legs) || []).filter((l) => !ROLL.itm || l.itm);
   }
@@ -98,9 +110,10 @@
         'DTE &le; <input id="agents-roll-dte" type="number" min="0" max="400" value="' + ROLL.dte + '" ' + inp + ' size="3">' +
         // Same maturities as Optimizer v4's target dropdown; legs only roll out.
         'Roll into <select id="agents-roll-into" ' + inp + ">" + (ROLL.data ? (() => {
-          const cur = ROLL.into || ROLL.data.into || "";
           const last = legs.filter((l) => ROLL.sel.has(l.id)).reduce((m, l) => (l.dte > m ? l.dte : m), -1);
           const opts = (ROLL.data.expiries || []).filter((e) => e.dte > last);
+          ROLL.auto = rollDefaultInto(opts);
+          const cur = ROLL.into || ROLL.auto || "";
           if (cur && !opts.some((e) => e.code === cur)) opts.unshift({ code: cur, dte: null });
           return opts.map((e) => '<option value="' + esc(e.code) + '"' + (e.code === cur ? " selected" : "") + ">" +
             esc(e.code) + (e.dte != null ? " (" + e.dte + "d)" : "") + "</option>").join("");
@@ -1309,7 +1322,7 @@
       try {
         ROLL.data = await api("/api/agents/roll-candidates/" + asset() + "?dte=" + ROLL.dte);
         ROLL.sel = new Set(ROLL.data.legs.map((l) => l.id));
-        if (!ROLL.into) ROLL.into = ROLL.data.into || "";
+        ROLL.into = "";                                    // the default follows the ticked legs
         ROLL.msg = "";
       } catch (e) { ROLL.msg = "Could not load: " + e.message; }
       renderRoll();
@@ -1331,7 +1344,7 @@
         const r = await api("/api/agents/run/roll-sweep", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ deliver: false, use_ai: false, ctx: { assets: [asset()], roll: {
-            ids: picked.map((l) => l.id), into: ROLL.into || (ROLL.data && ROLL.data.into),
+            ids: picked.map((l) => l.id), into: ROLL.into || ROLL.auto || (ROLL.data && ROLL.data.into),
             dte: ROLL.dte, expiries: [...new Set(picked.map((l) => l.expiry))] } } }),
         });
         ROLL.busy = false;

@@ -187,6 +187,7 @@ async def roll_candidates(asset: str, dte: int = 20):
     legs, expiries = await opt_mod.roll_universe(pol, max(0, min(int(dte), 3650)))
     return {"asset": asset.upper(), "dte": dte, "into": pol.optimizer.effective_expiry(),
             "expiries": expiries,                 # v4's target-maturity choices
+            "roll_into": pol.roll_into,           # "target" | "next_month_end"
             "counterparties": list(pol.optimizer.counterparties or []),
             "excluded": sorted(opt_mod.ROLL_EXCLUDED_COUNTERPARTIES), "legs": legs}
 

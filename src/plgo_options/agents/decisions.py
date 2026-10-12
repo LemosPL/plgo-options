@@ -141,6 +141,12 @@ ROLL_DTE_2026_10_12: dict[str, dict[str, Any]] = {
     "FIL": {"optimizer": {"roll_dte_threshold": 1}},
 }
 
+# 12 Oct 2026, Lucas: FIL rolls go to the end of the closest month (30OCT26 ->
+# 27NOV26), not to DEC26 - too much premium paid for the extra time.
+FIL_ROLL_INTO_2026_10_12: dict[str, dict[str, Any]] = {
+    "FIL": {"roll_into": "next_month_end"},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
@@ -152,6 +158,7 @@ SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-12-fil-range": FIL_RANGE_2026_10_12,
     "2026-10-12-fil-no-g20": FIL_NO_G20_2026_10_12,
     "2026-10-12-roll-dte-1": ROLL_DTE_2026_10_12,
+    "2026-10-12-fil-roll-into": FIL_ROLL_INTO_2026_10_12,
 }
 
 

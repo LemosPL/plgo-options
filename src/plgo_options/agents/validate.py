@@ -102,7 +102,11 @@ def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict
         rows.append({"leg": f"{side} {o} {K:g} {exp:%d%b%y}".upper(), "qty": qty, "counterparty": l.get("counterparty"),
                      "iv_pct": round(sigma * 100, 2), "mid_usd": mid, "price_usd": px,
                      "premium_usd": sign * qty * px,              # + = we pay
-                     "dealing_cost_usd": abs(px - mid) * qty, "priced_by": by})
+                     # Only a price worse than mid is a cost (12 Oct 2026: |px - mid|
+                     # charged Flowdesk's FIL calls, 0.09 vs a 0.21 mid, $1.2M as if
+                     # dear). A better price is not booked as a gain either: it more
+                     # likely says our mid is off than that the dealer gives money away.
+                     "dealing_cost_usd": max(sign * (px - mid), 0.0) * qty, "priced_by": by})
     return trades, rows
 
 
@@ -268,10 +272,7 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
                        range_avg_change_usd=float(rc.mean()), range_worst_change_usd=float(rc.min()))
             rng = f"{lo_r:,.4g}-{hi_c:,.4g}" + (f" (of {hi_r:,.4g}; ladder ends there)" if hi_c < hi_r else "")
             rtol = float(getattr(policy, "range_tolerance_usd", 0.0) or 0.0)
-            if rc.mean() < 0:
-                find.append(("fail", f"Loses in the expected range {rng}: ${-rc.mean():,.0f} worse on average "
-                                     f"at T+{horizon}d", "A1"))
-            elif rc.min() < -rtol:
+            if rc.min() < -rtol:
                 x_w = float(xs[int(rc.argmin())])
                 find.append(("fail", f"Loses in the expected range {rng}: ${-rc.min():,.0f} worse at {x_w:,.4g} "
                                      f"at T+{horizon}d (tolerance ${rtol:,.0f})", "A1"))
