@@ -263,20 +263,24 @@
         <div style="overflow:auto;margin-top:.5rem">
           <table class="data-table" style="width:100%;font-size:.8rem">
             <thead><tr>
-              <th style="text-align:left">Counterparty</th><th>Positions</th>
+              <th style="text-align:left">Counterparty <span style="font-weight:normal;color:var(--muted)">(click to split by expiry)</span></th>
+              <th>Positions</th>
               <th title="Sum of theta x net qty: what the book makes (+) or loses (-) per day from time passing, spot and vol unchanged">Theta / day</th>
+              <th style="min-width:7rem"></th>
               <th title="Long options: the decay we pay">Long legs / day</th>
               <th title="Short options: the decay we earn">Short legs / day</th>
-              <th title="Theta x 7: a straight-line estimate (decay speeds up near expiry)">~7 days</th>
-              <th title="Theta x 30: a straight-line estimate (decay speeds up near expiry)">~30 days</th>
-              <th>Share</th><th>MtM</th>
+              <th title="Value in 30 days minus value now, at today's spot and vol (trades expiring sooner count to expiry)">Month (30d)</th>
+              <th title="Value in 360 days minus value now, at today's spot and vol (trades expiring sooner count to expiry)">Year (360d)</th>
+              <th title="MtM minus intrinsic value at today's spot: all the time value still to decay (or be earned) until expiry">Time value left</th>
+              <th>MtM</th><th></th>
             </tr></thead>
-            <tbody id="tm-decay-body"><tr><td colspan="9" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
+            <tbody id="tm-decay-body"><tr><td colspan="11" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
           </table>
         </div>
         <p style="color:var(--muted);font-size:.72rem;margin:.4rem 0 0">Active trades of this book; theta per position
-          from Deribit when listed, else Black-Scholes on our vol surface (USD per day). ~7 / ~30 days are theta &times; days -
-          real decay speeds up as expiry nears.</p>
+          from Deribit when listed, else Black-Scholes on our vol surface (USD per day). Month / year revalue each trade
+          30 / 360 days on at today's spot and vol, so faster decay near expiry counts and a trade stops at its expiry.
+          <b>Select</b> ticks that counterparty's trades in the table below (the decay bar then shows them).</p>
       </details>
     </section>
 
@@ -4001,7 +4005,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=186"></script>
+<script src="/static/app.js?v=187"></script>
 <script src="/static/agents.js?v=27"></script>
 </body>
 </html>

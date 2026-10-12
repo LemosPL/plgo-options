@@ -1676,37 +1676,100 @@ function tmRenderSummary() {
 }
 
 // Daily decay by counterparty (12 Oct 2026): the Theta tile split by
-// counterparty, long legs (decay we pay) vs short legs (decay we earn).
+// counterparty - long legs (decay we pay) vs short legs (decay we earn), the
+// month / year revalued (tmSelectedDecay), the time value still to decay, a
+// split by expiry on click, and Select to tick a counterparty's trades.
+const tmDecayOpen = new Set();
+function tmIntrinsic(t) {
+  const S = ethSpot || 0, K = t.strike || 0, q = t.net_qty || 0;
+  const o = String(t.opt || (t.option_type || "")[0] || "").toUpperCase();
+  if (o === "C") return q * Math.max(S - K, 0);
+  if (o === "P") return q * Math.max(K - S, 0);
+  return t.current_mtm || 0;                        // perps / forwards: no time value
+}
+function tmDecayGroup(list) {
+  const priced = list.filter(t => t.theta != null || (t.mtm_by_horizon || []).length);
+  const d = tmSelectedDecay(priced);
+  let longs = 0, shorts = 0, mtm = 0, tv = 0;
+  priced.forEach(t => {
+    const th = (t.theta || 0) * (t.net_qty || 0);
+    if ((t.net_qty || 0) > 0) longs += th; else shorts += th;
+    mtm += t.current_mtm || 0;
+    tv += (t.current_mtm || 0) - tmIntrinsic(t);
+  });
+  return { n: list.length, unpriced: list.length - priced.length, day: d.day, month: d.month, year: d.year,
+           longs, shorts, mtm, tv, ids: list.map(t => t.db_id || t.id) };
+}
 function tmRenderDecay(active, totalTheta) {
   const body = document.getElementById("tm-decay-body");
   if (!body) return;
   const usd = v => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const col = v => v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "inherit";
-  const by = {};
-  active.forEach(t => {
-    const cp = t.counterparty || "(none)";
-    const th = (t.theta || 0) * (t.net_qty || 0);
-    const r = by[cp] || (by[cp] = { cp, n: 0, theta: 0, longs: 0, shorts: 0, mtm: 0 });
-    r.n += 1; r.theta += th; r.mtm += (t.current_mtm || 0);
-    if ((t.net_qty || 0) > 0) r.longs += th; else r.shorts += th;
-  });
-  const rows = Object.values(by).sort((a, b) => Math.abs(b.theta) - Math.abs(a.theta));
-  const gross = rows.reduce((s, r) => s + Math.abs(r.theta), 0);
   const cell = v => `<td style="text-align:right;color:${col(v)}">${usd(v)}</td>`;
-  const line = (r, bold) => `<tr${bold ? ' style="font-weight:600;border-top:2px solid var(--border)"' : ""}>` +
-    `<td style="text-align:left">${r.cp}</td><td style="text-align:right">${r.n}</td>` +
-    cell(r.theta) + cell(r.longs) + cell(r.shorts) + cell(r.theta * 7) + cell(r.theta * 30) +
-    `<td style="text-align:right">${bold || !gross ? "" : Math.round(100 * Math.abs(r.theta) / gross) + "%"}</td>` + cell(r.mtm) + "</tr>";
-  if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
+  const byCp = {};
+  active.forEach(t => { (byCp[t.counterparty || "(none)"] = byCp[t.counterparty || "(none)"] || []).push(t); });
+  const groups = Object.entries(byCp).map(([cp, list]) => ({ cp, list, ...tmDecayGroup(list) }))
+    .sort((x, y) => x.day - y.day);                  // biggest cost first
+  const maxAbs = Math.max(1, ...groups.map(g => Math.abs(g.day)));
+  const bar = v => `<td><div style="height:.55rem;border-radius:3px;background:${v < 0 ? "var(--red)" : "var(--green)"};` +
+    `opacity:.75;width:${Math.max(2, Math.round(100 * Math.abs(v) / maxAbs))}%"></div></td>`;
+  const row = (g, opts) => `<tr${opts.style ? ` style="${opts.style}"` : ""}>` +
+    `<td style="text-align:left;${opts.indent ? "padding-left:1.6rem;color:var(--muted)" : ""}">` +
+      (opts.toggle ? `<span data-decay-cp="${opts.toggle}" style="cursor:pointer">${tmDecayOpen.has(opts.toggle) ? "&#9662;" : "&#9656;"} ${g.cp}</span>` : g.cp) +
+      (g.unpriced ? ` <span style="color:#f59e0b;font-size:.7rem" title="No theta / revaluation on these trades (e.g. collar loans are not priced on this screen)">${g.unpriced} not priced</span>` : "") +
+    `</td><td style="text-align:right">${g.n}</td>` + cell(g.day) + (opts.bar ? bar(g.day) : "<td></td>") +
+    cell(g.longs) + cell(g.shorts) + cell(g.month) + cell(g.year) + cell(g.tv) + cell(g.mtm) +
+    `<td>${opts.select ? `<button class="btn-secondary" style="width:auto;font-size:.68rem;padding:.1rem .4rem" data-decay-select="${opts.select}">Select</button>` : ""}</td></tr>`;
+  if (!groups.length) {
+    body.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
   } else {
-    const tot = rows.reduce((a, r) => ({ cp: "Total", n: a.n + r.n, theta: a.theta + r.theta, longs: a.longs + r.longs,
-      shorts: a.shorts + r.shorts, mtm: a.mtm + r.mtm }), { cp: "Total", n: 0, theta: 0, longs: 0, shorts: 0, mtm: 0 });
-    body.innerHTML = rows.map(r => line(r, false)).join("") + line(tot, true);
+    let html = "";
+    tmDecayRows = {};
+    groups.forEach((g, gi) => {
+      const key = "cp" + gi;
+      tmDecayRows[key] = g.ids;
+      html += row(g, { toggle: g.cp, bar: true, select: key });
+      if (tmDecayOpen.has(g.cp)) {
+        const byExp = {};
+        g.list.forEach(t => { (byExp[t.expiry || "-"] = byExp[t.expiry || "-"] || []).push(t); });
+        Object.keys(byExp).sort().forEach((e, ei) => {
+          const sub = { cp: e, ...tmDecayGroup(byExp[e]) };
+          const sk = key + "e" + ei;
+          tmDecayRows[sk] = sub.ids;
+          html += row(sub, { indent: true, select: sk });
+        });
+      }
+    });
+    const tot = { cp: "Total", ...tmDecayGroup(active) };
+    tmDecayRows.all = tot.ids;
+    html += row(tot, { style: "font-weight:600;border-top:2px solid var(--border)", select: "all" });
+    body.innerHTML = html;
   }
   const t = document.getElementById("tm-decay-total");
   if (t) t.textContent = `- ${usd(totalTheta)} / day for the ${currentAsset} book`;
+  if (!body.dataset.wired) {
+    body.dataset.wired = "1";
+    body.addEventListener("click", ev => {
+      const tg = ev.target.closest("[data-decay-cp]");
+      if (tg) {
+        const cp = tg.dataset.decayCp;
+        if (tmDecayOpen.has(cp)) tmDecayOpen.delete(cp); else tmDecayOpen.add(cp);
+        const act = tmEnriched.filter(x => x.db_status === "active");
+        tmRenderDecay(act, act.reduce((a, x) => a + (x.theta || 0) * (x.net_qty || 0), 0));
+        return;
+      }
+      const sel = ev.target.closest("[data-decay-select]");
+      if (sel) {
+        tmSelected.clear();
+        (tmDecayRows[sel.dataset.decaySelect] || []).forEach(id => tmSelected.add(id));
+        tmRenderTable();
+        tmUpdateBulkUI();
+        document.getElementById("tm-sel-decay")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+  }
 }
+let tmDecayRows = {};
 
 function tmRenderTable() {
   const tbody = document.getElementById("tm-body");
