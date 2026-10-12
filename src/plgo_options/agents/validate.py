@@ -252,6 +252,24 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
         else:
             find.append(("ok", "Upside kept under the 'up' view: " +
                          ", ".join(f"{n} {c:+,.0f}" for n, c in changes), "A1"))
+
+        # The expected range (12 Oct 2026, Lucas: ETH 3,000-3,500): where the
+        # view says the price goes, so a trade must not lose anywhere in it -
+        # no tolerance - and the sweep ranks on what it adds there.
+        lo_r, hi_r = policy.view_range_low, policy.view_range_high
+        if lo_r and hi_r and hi_r > lo_r and lo_r >= ladder[0] and hi_r <= ladder[-1]:
+            xs = np.linspace(float(lo_r), float(hi_r), 11)
+            rc = np.array([at(chg, x) for x in xs])
+            out.update(range_low=float(lo_r), range_high=float(hi_r),
+                       range_avg_change_usd=float(rc.mean()), range_worst_change_usd=float(rc.min()))
+            rng = f"{lo_r:,.4g}-{hi_r:,.4g}"
+            if rc.min() < 0:
+                x_w = float(xs[int(rc.argmin())])
+                find.append(("fail", f"Loses in the expected range {rng}: ${-rc.min():,.0f} worse at {x_w:,.4g} "
+                                     f"at T+{horizon}d", "A1"))
+            else:
+                find.append(("ok", f"Adds in the expected range {rng}: avg {rc.mean():+,.0f}, "
+                                   f"worst {rc.min():+,.0f} at T+{horizon}d", "A1"))
     return out
 
 
@@ -261,7 +279,7 @@ def apply_to_proposal(prop: dict, v: dict) -> dict:
         "horizon_days", "net_premium_usd", "dealing_cost_usd", "cost_to_run_usd", "pnl_at_spot_now_usd",
         "pnl_at_spot_horizon_usd", "key_spots", "floor", "floor_change_usd", "floor_worst_change_usd",
         "worst_before_usd", "worst_after_usd", "max_loss_limit_usd", "floor_decided", "upside_changes",
-        "legs", "findings")}
+        "legs", "findings", "range_low", "range_high", "range_avg_change_usd", "range_worst_change_usd")}
     if v.get("spot_ladder"):
         prop["spot_ladder"], prop["before_payoff"], prop["after_payoff"] = (
             v["spot_ladder"], v["before_payoff"], v["after_payoff"])

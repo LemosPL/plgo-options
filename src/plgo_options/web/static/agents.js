@@ -567,6 +567,8 @@
       cell("P&L at spot, now", sgn(v.pnl_at_spot_now_usd), red(v.pnl_at_spot_now_usd)) +
       cell("P&L at spot, T+" + H + "d", sgn(v.pnl_at_spot_horizon_usd), red(v.pnl_at_spot_horizon_usd)) +
       cell("Floor " + (v.floor != null ? px(p.asset, v.floor) : ""), sgn(v.floor_worst_change_usd), red(v.floor_worst_change_usd)) +
+      (v.range_low != null ? cell("Range " + px(p.asset, v.range_low) + "-" + px(p.asset, v.range_high) + " avg / worst",
+        sgn(v.range_avg_change_usd) + " / " + sgn(v.range_worst_change_usd), red(v.range_worst_change_usd)) : "") +
       (v.worst_before_usd != null ? '<div style="grid-column:1/-1"><span style="color:var(--muted)">Worst loss, floor to +85%, T+' + H +
         "d:</span> " + money(v.worst_before_usd) + " → <b" + (v.worst_after_usd < v.worst_before_usd ? ' style="color:#ef4444"' : "") + ">" +
         money(v.worst_after_usd) + '</b> <span style="color:var(--muted)">(approved ' + money(v.max_loss_limit_usd) + ")</span></div>" : "") +

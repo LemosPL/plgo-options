@@ -255,3 +255,18 @@ def test_reshape_floor_tolerance_is_separate_from_max_loss_and_view():
     fails = [f[1] for f in curve_tests(LADDER, before, after, SPOT, 0.0, pol, 79, 500_000.0)["findings"]
              if f[0] == "fail"]
     assert any("floor" in f for f in fails)       # row trades keep the plain tolerance
+
+
+def test_up_view_must_not_lose_in_the_expected_range_and_reports_the_gain():
+    import numpy as np
+    pol = policy()
+    pol.view, pol.view_range_low, pol.view_range_high, pol.upside_target_price = "up", 3000.0, 3500.0, None
+    x = np.asarray(LADDER)
+    before = np.zeros(len(LADDER))
+    dip = np.where((x >= 3000) & (x <= 3200), -50_000.0, 0.0)       # small, inside $500k tolerance
+    t = curve_tests(LADDER, before, dip, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert any(k == "fail" and "expected range" in txt for k, txt, _ in t["findings"])
+    gain = np.where(x >= 3000, 200_000.0, 0.0)
+    t = curve_tests(LADDER, before, gain, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert not [f for f in t["findings"] if f[0] == "fail"]
+    assert 150_000 < t["range_avg_change_usd"] <= 200_000      # interpolated between ladder points

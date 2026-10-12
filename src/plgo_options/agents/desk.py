@@ -490,8 +490,9 @@ async def optimizer(ctx: dict) -> dict:
             out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
                        f"max{v['max_trades']}/{v['max_qty']:g}: target {s['track_gain_pct']:+.1f}% closer "
                        f"(fit +{s['fit_gain_pct']}%), {s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
-                       f"{_m(s['net_premium_usd'])}{rank_note} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | "
-                       f"proposal #{pid} -> {route.upper()}"
+                       f"{_m(s['net_premium_usd'])}{rank_note} | vs book at T+{s.get('judged_on_days', 0)}d: {ch}"
+                       + (f", expected range avg {_m(s['range_gain_usd'])}" if s.get("range_gain_usd") else "")
+                       + f" | proposal #{pid} -> {route.upper()}"
                        + (": " + " / ".join(gate["rejected_by"] or gate["needs_chris"]) if route != gate_mod.LUCAS else ""))
         # Older proposals were judged on an older book (and maybe older rules):
         # this sweep replaces them even when it files nothing itself.

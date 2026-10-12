@@ -266,14 +266,17 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         disq.append(f"gives back ${-worst:,.0f} at a key spot")
     if track and track["away"]:
         disq.append("moves away from the target: " + ", ".join(track["away"]))
-    policy_findings = []
+    policy_findings, range_gain = [], 0.0
     if policy is not None and ladder and before and after and spot:
         h_days = int(h) if h is not None else 0
-        policy_findings = curve_tests(ladder, before, after, spot, cost, policy, h_days,
-                                      tolerance_for(policy, "optimizer"), reshape=True)["findings"]
+        tests = curve_tests(ladder, before, after, spot, cost, policy, h_days,
+                            tolerance_for(policy, "optimizer"), reshape=True)
+        policy_findings = tests["findings"]
+        range_gain = float(tests.get("range_avg_change_usd") or 0.0)
         disq += [f"{text} ({rule})" for kind, text, rule in policy_findings if kind == "fail"]
     score = (track_gain - preset.score_cost_per_100k * cost / 100_000
-             - preset.score_per_option_line * len(opt_lines))
+             - preset.score_per_option_line * len(opt_lines)
+             + preset.score_range_per_100k * range_gain / 100_000)
     return {
         "variant": variant,
         "track_gain_pct": round(track_gain, 2),
@@ -288,6 +291,7 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         "gross_notional_usd": round(gross_contracts * spot, 0),
         "key_spot_changes": deltas,
         "worst_change_usd": round(worst, 0),
+        "range_gain_usd": round(range_gain, 0),
         "score": round(score, 2) if not disq else -1e9,
         "disqualified": disq,
         "spot": spot,

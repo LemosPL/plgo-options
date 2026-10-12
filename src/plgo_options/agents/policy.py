@@ -86,6 +86,9 @@ class OptimizerPreset:
     # option line has to buy ~1.5 points and $100k of dealing cost ~10 points.
     score_cost_per_100k: float = 10.0
     score_per_option_line: float = 1.5
+    # Under view "up", $100k of average gain across the expected range is worth
+    # the same 10 points as $100k of cost (12 Oct 2026).
+    score_range_per_100k: float = 10.0
     # A run may not give back more than this at any key spot vs today's book.
     max_giveback_usd: float = 250_000.0
     # 7 Oct 2026 (Lucas): the result must follow the target. A run is ranked on
