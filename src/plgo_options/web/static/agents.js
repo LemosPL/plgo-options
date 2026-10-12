@@ -583,7 +583,7 @@
       const dn = Number(vp.parametric_low_floor_ratio), up = Number(vp.parametric_high_plateau_ratio);
       const be = (r) => S ? px(p.asset, Math.round(S * r * 10000) / 10000) : "—";
       return box('<b style="color:#a855f7">Target profile: parametric V</b> (' + esc(t.name) + ")" + judged + "<br>" +
-        "Max loss " + money(Number(vp.parametric_trough_payoff)) + " at spot" + (S ? " " + px(p.asset, S) : "") +
+        "Max loss −" + money(Math.abs(Number(vp.parametric_trough_payoff))) + " at spot" + (S ? " " + px(p.asset, S) : "") +
         "; breaks even at " + be(1 - dn) + " (−" + Math.round(dn * 100) + "%) and " + be(1 + up) +
         " (+" + Math.round(up * 100) + "%); straight lines between.", "#a855f7");
     }
