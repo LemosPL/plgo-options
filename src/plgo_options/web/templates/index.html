@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="stylesheet" href="/static/style.css?v=15">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -260,27 +260,35 @@
       <details id="tm-decay-details" open>
         <summary style="cursor:pointer"><h2 style="display:inline;font-size:1rem">Daily decay by counterparty
           <small id="tm-decay-total" style="color:var(--muted);font-weight:normal"></small></h2></summary>
-        <div style="overflow:auto;margin-top:.5rem">
-          <table class="data-table" style="width:100%;font-size:.8rem">
-            <thead><tr>
-              <th style="text-align:left">Counterparty <span style="font-weight:normal;color:var(--muted)">(click to split by expiry)</span></th>
-              <th>Positions</th>
-              <th title="Sum of theta x net qty: what the book makes (+) or loses (-) per day from time passing, spot and vol unchanged">Theta / day</th>
-              <th style="min-width:7rem"></th>
-              <th title="Long options: the decay we pay">Long legs / day</th>
-              <th title="Short options: the decay we earn">Short legs / day</th>
-              <th title="Value in 30 days minus value now, at today's spot and vol (trades expiring sooner count to expiry)">Month (30d)</th>
-              <th title="Value in 360 days minus value now, at today's spot and vol (trades expiring sooner count to expiry)">Year (360d)</th>
-              <th title="MtM minus intrinsic value at today's spot: all the time value still to decay (or be earned) until expiry">Time value left</th>
-              <th>MtM</th><th></th>
-            </tr></thead>
-            <tbody id="tm-decay-body"><tr><td colspan="11" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
+        <div class="chain-wrapper" style="max-height:520px;margin-top:.5rem">
+          <table id="tm-decay-table">
+            <thead>
+              <tr>
+                <th style="width:30px"><input type="checkbox" id="tm-decay-check-all" title="Select all active trades"></th>
+                <th class="sortable" data-dcol="counterparty" style="text-align:left" title="Click a counterparty row to open / close its trades">Counterparty</th>
+                <th class="sortable" data-dcol="side" style="text-align:left">Side</th>
+                <th class="sortable" data-dcol="option_type" style="text-align:left">Type</th>
+                <th class="sortable" data-dcol="instrument" style="text-align:left">Instrument</th>
+                <th class="sortable" data-dcol="expiry">Expiry</th>
+                <th class="sortable" data-dcol="days_remaining">DTE</th>
+                <th class="sortable" data-dcol="strike">Strike</th>
+                <th class="sortable" data-dcol="net_qty">Qty</th>
+                <th class="sortable" data-dcol="theta" title="Theta per contract (the trades table's &Theta;): negative for every option, bought or sold">&Theta; / contract</th>
+                <th class="sortable" data-dcol="_day" title="Theta x signed qty: bought options cost (-), sold options earn (+)">Decay / day</th>
+                <th class="sortable" data-dcol="_month" title="Value in 30 days minus value now, at today's spot and vol">Month (30d)</th>
+                <th class="sortable" data-dcol="_year" title="Value in 360 days minus value now, at today's spot and vol (to expiry if sooner)">Year (360d)</th>
+                <th class="sortable" data-dcol="_tv" title="MTM minus intrinsic at today's spot: time value still to decay (or to earn) until expiry">Time value left</th>
+                <th class="sortable" data-dcol="current_mtm">MTM</th>
+              </tr>
+            </thead>
+            <tbody id="tm-decay-body"><tr><td colspan="15" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
           </table>
         </div>
         <p style="color:var(--muted);font-size:.72rem;margin:.4rem 0 0">Active trades of this book; theta per position
           from Deribit when listed, else Black-Scholes on our vol surface (USD per day). Month / year revalue each trade
           30 / 360 days on at today's spot and vol, so faster decay near expiry counts and a trade stops at its expiry.
-          <b>Select</b> ticks that counterparty's trades in the table below (the decay bar then shows them).</p>
+          Bought legs cost (red), sold legs earn (green); &Theta; / contract is negative for every option, the side sets the sign.
+          Ticks here and in the trades table are the same selection, so the decay bar above the trades shows them.</p>
       </details>
     </section>
 
@@ -4005,7 +4013,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=187"></script>
+<script src="/static/app.js?v=188"></script>
 <script src="/static/agents.js?v=27"></script>
 </body>
 </html>

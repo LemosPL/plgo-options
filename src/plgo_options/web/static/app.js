@@ -1675,11 +1675,13 @@ function tmRenderSummary() {
   tmRenderDecay(active, totalTheta);
 }
 
-// Daily decay by counterparty (12 Oct 2026): the Theta tile split by
-// counterparty - long legs (decay we pay) vs short legs (decay we earn), the
-// month / year revalued (tmSelectedDecay), the time value still to decay, a
-// split by expiry on click, and Select to tick a counterparty's trades.
+// Daily decay by counterparty (12 Oct 2026), laid out like the trades table:
+// one row per active trade grouped under its counterparty's subtotal. Decay /
+// day = theta x signed qty, so bought legs cost and sold legs earn; month /
+// year revalue at today's spot and vol (tmSelectedDecay); time value left =
+// MTM - intrinsic. Ticks share tmSelected with the trades table.
 const tmDecayOpen = new Set();
+let tmDecaySort = { col: "_day", asc: true };
 function tmIntrinsic(t) {
   const S = ethSpot || 0, K = t.strike || 0, q = t.net_qty || 0;
   const o = String(t.opt || (t.option_type || "")[0] || "").toUpperCase();
@@ -1687,8 +1689,13 @@ function tmIntrinsic(t) {
   if (o === "P") return q * Math.max(K - S, 0);
   return t.current_mtm || 0;                        // perps / forwards: no time value
 }
+function tmIsPriced(t) { return t.theta != null || (t.mtm_by_horizon || []).length > 0; }
+function tmDecayLeg(t) {
+  const d = tmSelectedDecay([t]);
+  return { _day: d.day, _month: d.month, _year: d.year, _tv: (t.current_mtm || 0) - tmIntrinsic(t) };
+}
 function tmDecayGroup(list) {
-  const priced = list.filter(t => t.theta != null || (t.mtm_by_horizon || []).length);
+  const priced = list.filter(tmIsPriced);
   const d = tmSelectedDecay(priced);
   let longs = 0, shorts = 0, mtm = 0, tv = 0;
   priced.forEach(t => {
@@ -1703,73 +1710,119 @@ function tmDecayGroup(list) {
 function tmRenderDecay(active, totalTheta) {
   const body = document.getElementById("tm-decay-body");
   if (!body) return;
+  const isFil = currentAsset === "FIL";
   const usd = v => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
-  const col = v => v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "inherit";
-  const cell = v => `<td style="text-align:right;color:${col(v)}">${usd(v)}</td>`;
+  const cls = v => v > 0 ? "mtm-pos" : v < 0 ? "mtm-neg" : "";
+  const money = v => `<td class="${cls(v)}">${usd(v)}</td>`;
+  const num = (v, d) => v == null || v === "" ? "--" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+  const legs = active.map(t => Object.assign({}, t, tmDecayLeg(t)));
   const byCp = {};
-  active.forEach(t => { (byCp[t.counterparty || "(none)"] = byCp[t.counterparty || "(none)"] || []).push(t); });
-  const groups = Object.entries(byCp).map(([cp, list]) => ({ cp, list, ...tmDecayGroup(list) }))
-    .sort((x, y) => x.day - y.day);                  // biggest cost first
-  const maxAbs = Math.max(1, ...groups.map(g => Math.abs(g.day)));
-  const bar = v => `<td><div style="height:.55rem;border-radius:3px;background:${v < 0 ? "var(--red)" : "var(--green)"};` +
-    `opacity:.75;width:${Math.max(2, Math.round(100 * Math.abs(v) / maxAbs))}%"></div></td>`;
-  const row = (g, opts) => `<tr${opts.style ? ` style="${opts.style}"` : ""}>` +
-    `<td style="text-align:left;${opts.indent ? "padding-left:1.6rem;color:var(--muted)" : ""}">` +
-      (opts.toggle ? `<span data-decay-cp="${opts.toggle}" style="cursor:pointer">${tmDecayOpen.has(opts.toggle) ? "&#9662;" : "&#9656;"} ${g.cp}</span>` : g.cp) +
-      (g.unpriced ? ` <span style="color:#f59e0b;font-size:.7rem" title="No theta / revaluation on these trades (e.g. collar loans are not priced on this screen)">${g.unpriced} not priced</span>` : "") +
-    `</td><td style="text-align:right">${g.n}</td>` + cell(g.day) + (opts.bar ? bar(g.day) : "<td></td>") +
-    cell(g.longs) + cell(g.shorts) + cell(g.month) + cell(g.year) + cell(g.tv) + cell(g.mtm) +
-    `<td>${opts.select ? `<button class="btn-secondary" style="width:auto;font-size:.68rem;padding:.1rem .4rem" data-decay-select="${opts.select}">Select</button>` : ""}</td></tr>`;
-  if (!groups.length) {
-    body.innerHTML = '<tr><td colspan="11" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
-  } else {
-    let html = "";
-    tmDecayRows = {};
-    groups.forEach((g, gi) => {
-      const key = "cp" + gi;
-      tmDecayRows[key] = g.ids;
-      html += row(g, { toggle: g.cp, bar: true, select: key });
-      if (tmDecayOpen.has(g.cp)) {
-        const byExp = {};
-        g.list.forEach(t => { (byExp[t.expiry || "-"] = byExp[t.expiry || "-"] || []).push(t); });
-        Object.keys(byExp).sort().forEach((e, ei) => {
-          const sub = { cp: e, ...tmDecayGroup(byExp[e]) };
-          const sk = key + "e" + ei;
-          tmDecayRows[sk] = sub.ids;
-          html += row(sub, { indent: true, select: sk });
-        });
-      }
+  legs.forEach(t => { (byCp[t.counterparty || "(none)"] = byCp[t.counterparty || "(none)"] || []).push(t); });
+  const { col, asc } = tmDecaySort;
+  const cmp = (x, y) => {
+    let a = x[col], b = y[col];
+    if (typeof a === "number" || typeof b === "number") return asc ? (a || 0) - (b || 0) : (b || 0) - (a || 0);
+    return asc ? String(a || "").localeCompare(String(b || "")) : String(b || "").localeCompare(String(a || ""));
+  };
+  const gKey = { _day: "day", _month: "month", _year: "year", _tv: "tv", current_mtm: "mtm" }[col];
+  const groups = Object.entries(byCp).map(([cp, list]) => ({ cp, list: list.sort(cmp), ...tmDecayGroup(list) }))
+    .sort((x, y) => gKey ? (asc ? x[gKey] - y[gKey] : y[gKey] - x[gKey])
+                         : (col === "counterparty" && !asc ? y.cp.localeCompare(x.cp) : x.cp.localeCompare(y.cp)));
+  const allIds = legs.map(t => t.db_id || t.id);
+  const ticked = ids => ids.length > 0 && ids.every(id => tmSelected.has(id));
+  const some = ids => ids.some(id => tmSelected.has(id));
+  let html = "";
+  groups.forEach(g => {
+    const open = tmDecayOpen.has(g.cp);
+    html += `<tr class="tm-decay-group" data-decay-cp="${g.cp}">` +
+      `<td><input type="checkbox" class="tm-decay-gcheck" data-cp="${g.cp}" ${ticked(g.ids) ? "checked" : ""}></td>` +
+      `<td style="text-align:left">${open ? "&#9662;" : "&#9656;"} ${g.cp} <span style="font-weight:400;color:var(--muted)">(${g.n})</span></td>` +
+      `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(g.longs)}</span> / day &middot; sold legs ` +
+        `<span class="${cls(g.shorts)}">${usd(g.shorts)}</span> / day` +
+        (g.unpriced ? ` &middot; <span style="color:#f59e0b">${g.unpriced} not priced</span>` : "") + `</td>` +
+      money(g.day) + money(g.month) + money(g.year) + money(g.tv) + money(g.mtm) + "</tr>";
+    if (!open) return;
+    g.list.forEach(t => {
+      const tid = t.db_id || t.id, priced = tmIsPriced(t);
+      const side = (t.side || "").toLowerCase();
+      const sideCls = side.includes("buy") || side.includes("long") ? "qty-long" : "qty-short";
+      const cell = v => priced ? money(v) : '<td style="color:#f59e0b">not priced</td>';
+      html += `<tr class="${tmSelected.has(tid) ? "tm-row-selected" : ""}">` +
+        `<td><input type="checkbox" class="tm-decay-check" data-tid="${tid}" ${tmSelected.has(tid) ? "checked" : ""}></td>` +
+        `<td style="text-align:left;padding-left:1.4rem;color:var(--muted)">${t.counterparty || ""}</td>` +
+        `<td style="text-align:left" class="${sideCls}">${t.side || ""}</td>` +
+        `<td style="text-align:left">${t.option_type || ""}</td>` +
+        `<td style="text-align:left">${t.instrument || ""}</td>` +
+        `<td>${t.expiry || ""}</td><td>${t.days_remaining || 0}</td>` +
+        `<td>${num(t.strike, isFil ? 4 : 0)}</td><td class="${sideCls}">${num(t.net_qty, 0)}</td>` +
+        `<td>${t.theta == null ? "--" : Number(t.theta).toFixed(4)}</td>` +
+        cell(t._day) + cell(t._month) + cell(t._year) + cell(t._tv) + money(t.current_mtm || 0) + "</tr>";
     });
-    const tot = { cp: "Total", ...tmDecayGroup(active) };
-    tmDecayRows.all = tot.ids;
-    html += row(tot, { style: "font-weight:600;border-top:2px solid var(--border)", select: "all" });
-    body.innerHTML = html;
+  });
+  if (!groups.length) {
+    html = '<tr><td colspan="15" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
+  } else {
+    const tot = tmDecayGroup(legs);
+    html += `<tr class="tm-decay-total"><td></td><td style="text-align:left">Total (${tot.n})</td>` +
+      `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(tot.longs)}</span> / day &middot; sold legs ` +
+      `<span class="${cls(tot.shorts)}">${usd(tot.shorts)}</span> / day</td>` +
+      money(tot.day) + money(tot.month) + money(tot.year) + money(tot.tv) + money(tot.mtm) + "</tr>";
   }
+  body.innerHTML = html;
+  const all = document.getElementById("tm-decay-check-all");
+  if (all) { all.checked = ticked(allIds); all.indeterminate = !all.checked && some(allIds); }
+  document.querySelectorAll("#tm-decay-table th[data-dcol]").forEach(th => {
+    th.classList.toggle("sort-asc", th.dataset.dcol === col && asc);
+    th.classList.toggle("sort-desc", th.dataset.dcol === col && !asc);
+  });
   const t = document.getElementById("tm-decay-total");
   if (t) t.textContent = `- ${usd(totalTheta)} / day for the ${currentAsset} book`;
-  if (!body.dataset.wired) {
-    body.dataset.wired = "1";
-    body.addEventListener("click", ev => {
-      const tg = ev.target.closest("[data-decay-cp]");
-      if (tg) {
-        const cp = tg.dataset.decayCp;
-        if (tmDecayOpen.has(cp)) tmDecayOpen.delete(cp); else tmDecayOpen.add(cp);
-        const act = tmEnriched.filter(x => x.db_status === "active");
-        tmRenderDecay(act, act.reduce((a, x) => a + (x.theta || 0) * (x.net_qty || 0), 0));
-        return;
-      }
-      const sel = ev.target.closest("[data-decay-select]");
-      if (sel) {
-        tmSelected.clear();
-        (tmDecayRows[sel.dataset.decaySelect] || []).forEach(id => tmSelected.add(id));
-        tmRenderTable();
-        tmUpdateBulkUI();
-        document.getElementById("tm-sel-decay")?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    });
-  }
+  tmDecayGroupIds = Object.fromEntries(groups.map(g => [g.cp, g.ids]));
+  tmDecayAllIds = allIds;
+  tmWireDecay();
 }
-let tmDecayRows = {};
+let tmDecayGroupIds = {}, tmDecayAllIds = [];
+function tmRedrawDecay() {
+  const act = tmEnriched.filter(x => x.db_status === "active");
+  tmRenderDecay(act, act.reduce((a, x) => a + (x.theta || 0) * (x.net_qty || 0), 0));
+}
+function tmDecaySelectionChanged() {
+  tmRenderTable();
+  tmUpdateBulkUI();                                   // redraws this table too
+}
+function tmWireDecay() {
+  const table = document.getElementById("tm-decay-table");
+  if (!table || table.dataset.wired) return;
+  table.dataset.wired = "1";
+  table.addEventListener("change", ev => {
+    const c = ev.target;
+    if (c.classList.contains("tm-decay-check")) {
+      const id = Number(c.dataset.tid);
+      if (c.checked) tmSelected.add(id); else tmSelected.delete(id);
+    } else if (c.classList.contains("tm-decay-gcheck")) {
+      (tmDecayGroupIds[c.dataset.cp] || []).forEach(id => { if (c.checked) tmSelected.add(id); else tmSelected.delete(id); });
+    } else if (c.id === "tm-decay-check-all") {
+      tmDecayAllIds.forEach(id => { if (c.checked) tmSelected.add(id); else tmSelected.delete(id); });
+    } else return;
+    tmDecaySelectionChanged();
+  });
+  table.addEventListener("click", ev => {
+    if (ev.target.closest("input")) return;
+    const th = ev.target.closest("th[data-dcol]");
+    if (th) {
+      const c = th.dataset.dcol;
+      tmDecaySort = { col: c, asc: tmDecaySort.col === c ? !tmDecaySort.asc : c.startsWith("_") || c === "current_mtm" };
+      tmRedrawDecay();
+      return;
+    }
+    const gr = ev.target.closest("tr.tm-decay-group");
+    if (gr) {
+      const cp = gr.dataset.decayCp;
+      if (tmDecayOpen.has(cp)) tmDecayOpen.delete(cp); else tmDecayOpen.add(cp);
+      tmRedrawDecay();
+    }
+  });
+}
 
 function tmRenderTable() {
   const tbody = document.getElementById("tm-body");
@@ -2508,6 +2561,7 @@ function tmUpdateBulkUI() {
   const n = tmSelected.size;
   const { active, expired } = tmSelectedByStatus();
   tmRenderSelectedDecay(active);
+  if (typeof tmRedrawDecay === "function" && tmLoaded) tmRedrawDecay();
   const $expire = document.getElementById("btn-tm-bulk-expire");
   const $delete = document.getElementById("btn-tm-bulk-delete");
   const $react = document.getElementById("btn-tm-bulk-reactivate");

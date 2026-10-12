@@ -566,6 +566,7 @@ select { margin-bottom: .5rem; }
 .pf-toolbar-spacer { flex: 1; }
 
 /* ── Shared data table styles ─────────────────────────────── */
+#tm-decay-table,
 #tm-table,
 #positions-table,
 #trades-table,
@@ -579,6 +580,7 @@ select { margin-bottom: .5rem; }
   font-size: .78rem;
 }
 
+#tm-decay-table th,
 #tm-table th,
 #positions-table th, #trades-table th,
 #pf-positions-table th,
@@ -597,6 +599,7 @@ select { margin-bottom: .5rem; }
   white-space: nowrap;
 }
 
+#tm-decay-table td,
 #tm-table td,
 #positions-table td, #trades-table td,
 #pf-positions-table td,
@@ -610,6 +613,7 @@ select { margin-bottom: .5rem; }
   white-space: nowrap;
 }
 
+#tm-decay-table tr:hover,
 #tm-table tr:hover,
 #positions-table tr:hover, #trades-table tr:hover,
 #pf-positions-table tr:hover,
@@ -829,6 +833,10 @@ select { margin-bottom: .5rem; }
 
 /* ── Trade Management specific ────────────────────────────── */
 #tm-table th:first-child, #tm-table td:first-child { text-align: center; width: 10px; }
+#tm-decay-table th:first-child, #tm-decay-table td:first-child { text-align: center; width: 10px; }
+#tm-decay-table tr.tm-decay-group td { background: var(--hover-bg); font-weight: 600; cursor: pointer; }
+#tm-decay-table tr.tm-decay-total td { font-weight: 700; border-top: 2px solid var(--border); }
+#tm-decay-table td.tm-decay-note { text-align: left; font-weight: 400; color: var(--muted); }
 
 /* Status dot */
 .status-dot {
