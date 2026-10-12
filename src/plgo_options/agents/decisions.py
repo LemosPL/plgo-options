@@ -121,6 +121,12 @@ FLOOR_TOL_2026_10_12: dict[str, dict[str, Any]] = {
     "FIL": {"reshape_floor_tolerance_usd": 700_000.0},
 }
 
+# 12 Oct 2026, Lucas: FIL's expected range is 2.5-4 (was 2.0-2.5). Under the
+# "up" view a FIL trade must not lose anywhere in it and ranks on its gain there.
+FIL_RANGE_2026_10_12: dict[str, dict[str, Any]] = {
+    "FIL": {"view_range_low": 2.5, "view_range_high": 4.0},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
@@ -129,6 +135,7 @@ SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-07-shape": SHAPE_2026_10_07,
     "2026-10-07-floor": FLOOR_2026_10_07,
     "2026-10-12-floor-tol": FLOOR_TOL_2026_10_12,
+    "2026-10-12-fil-range": FIL_RANGE_2026_10_12,
 }
 
 

@@ -256,13 +256,17 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
         # The expected range (12 Oct 2026, Lucas: ETH 3,000-3,500): where the
         # view says the price goes, so a trade must not lose anywhere in it -
         # no tolerance - and the sweep ranks on what it adds there.
+        # A range past the ladder's top (FIL 2.5-4 vs a ladder to ~2.94) is
+        # tested on the part the ladder covers, and the label says so.
         lo_r, hi_r = policy.view_range_low, policy.view_range_high
-        if lo_r and hi_r and hi_r > lo_r and lo_r >= ladder[0] and hi_r <= ladder[-1]:
-            xs = np.linspace(float(lo_r), float(hi_r), 11)
+        if lo_r and hi_r and hi_r > lo_r:
+            lo_r, hi_c = max(float(lo_r), float(ladder[0])), min(float(hi_r), float(ladder[-1]))
+        if lo_r and hi_r and hi_c > lo_r:
+            xs = np.linspace(lo_r, hi_c, 11)
             rc = np.array([at(chg, x) for x in xs])
-            out.update(range_low=float(lo_r), range_high=float(hi_r),
+            out.update(range_low=lo_r, range_high=hi_c,
                        range_avg_change_usd=float(rc.mean()), range_worst_change_usd=float(rc.min()))
-            rng = f"{lo_r:,.4g}-{hi_r:,.4g}"
+            rng = f"{lo_r:,.4g}-{hi_c:,.4g}" + (f" (of {hi_r:,.4g}; ladder ends there)" if hi_c < hi_r else "")
             if rc.min() < 0:
                 x_w = float(xs[int(rc.argmin())])
                 find.append(("fail", f"Loses in the expected range {rng}: ${-rc.min():,.0f} worse at {x_w:,.4g} "

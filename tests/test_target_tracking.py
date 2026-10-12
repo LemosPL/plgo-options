@@ -270,3 +270,14 @@ def test_up_view_must_not_lose_in_the_expected_range_and_reports_the_gain():
     t = curve_tests(LADDER, before, gain, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
     assert not [f for f in t["findings"] if f[0] == "fail"]
     assert 150_000 < t["range_avg_change_usd"] <= 200_000      # interpolated between ladder points
+
+
+def test_expected_range_past_the_ladder_is_tested_on_the_covered_part():
+    import numpy as np
+    pol = policy()
+    pol.view, pol.upside_target_price = "up", None
+    pol.view_range_low, pol.view_range_high = LADDER[-3], LADDER[-1] * 2
+    before = np.zeros(len(LADDER))
+    t = curve_tests(LADDER, before, before - 10_000.0, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
+    assert t["range_high"] == LADDER[-1]
+    assert any(k == "fail" and "ladder ends there" in txt for k, txt, _ in t["findings"])

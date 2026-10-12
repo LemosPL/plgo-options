@@ -117,7 +117,7 @@ async def test_apply_pending_runs_once(monkeypatch):
         monkeypatch.setattr(decisions.store, name, fn)
     assert await decisions.apply_pending() == ["2026-10-05", "2026-10-06-sweep", "2026-10-06-giveback",
                                               "2026-10-06-size", "2026-10-07-shape", "2026-10-07-floor",
-                                              "2026-10-12-floor-tol"]
+                                              "2026-10-12-floor-tol", "2026-10-12-fil-range"]
     assert saved[:2] == [("ETH", "decision-sheet 2026-10-05"), ("FIL", "decision-sheet 2026-10-05")]
     assert await decisions.apply_pending() == []
 
