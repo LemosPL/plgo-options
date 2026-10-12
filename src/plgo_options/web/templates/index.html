@@ -243,7 +243,7 @@
           <span class="risk-label">&Gamma; Gamma</span>
           <span class="risk-value" id="tm-gamma">--</span>
         </div>
-        <div class="risk-metric">
+        <div class="risk-metric risk-metric-clickable" id="tm-theta-card" title="Daily decay by counterparty">
           <span class="risk-label">&Theta; Theta</span>
           <span class="risk-value" id="tm-theta">--</span>
         </div>
@@ -252,6 +252,32 @@
           <span class="risk-value" id="tm-vega">--</span>
         </div>
       </div>
+    </section>
+
+    <!-- Daily decay (theta) by counterparty: same active trades and the same
+         theta x net qty as the Theta tile, so the total matches it. -->
+    <section class="card" id="tm-decay">
+      <details id="tm-decay-details" open>
+        <summary style="cursor:pointer"><h2 style="display:inline;font-size:1rem">Daily decay by counterparty
+          <small id="tm-decay-total" style="color:var(--muted);font-weight:normal"></small></h2></summary>
+        <div style="overflow:auto;margin-top:.5rem">
+          <table class="data-table" style="width:100%;font-size:.8rem">
+            <thead><tr>
+              <th style="text-align:left">Counterparty</th><th>Positions</th>
+              <th title="Sum of theta x net qty: what the book makes (+) or loses (-) per day from time passing, spot and vol unchanged">Theta / day</th>
+              <th title="Long options: the decay we pay">Long legs / day</th>
+              <th title="Short options: the decay we earn">Short legs / day</th>
+              <th title="Theta x 7: a straight-line estimate (decay speeds up near expiry)">~7 days</th>
+              <th title="Theta x 30: a straight-line estimate (decay speeds up near expiry)">~30 days</th>
+              <th>Share</th><th>MtM</th>
+            </tr></thead>
+            <tbody id="tm-decay-body"><tr><td colspan="9" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
+          </table>
+        </div>
+        <p style="color:var(--muted);font-size:.72rem;margin:.4rem 0 0">Active trades of this book; theta per position
+          from Deribit when listed, else Black-Scholes on our vol surface (USD per day). ~7 / ~30 days are theta &times; days -
+          real decay speeds up as expiry nears.</p>
+      </details>
     </section>
 
     <!-- Toolbar -->
@@ -3973,7 +3999,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=184"></script>
+<script src="/static/app.js?v=185"></script>
 <script src="/static/agents.js?v=27"></script>
 </body>
 </html>

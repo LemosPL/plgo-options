@@ -1671,6 +1671,41 @@ function tmRenderSummary() {
 
   const $vega = document.getElementById("tm-vega");
   $vega.textContent = totalVega.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  tmRenderDecay(active, totalTheta);
+}
+
+// Daily decay by counterparty (12 Oct 2026): the Theta tile split by
+// counterparty, long legs (decay we pay) vs short legs (decay we earn).
+function tmRenderDecay(active, totalTheta) {
+  const body = document.getElementById("tm-decay-body");
+  if (!body) return;
+  const usd = v => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+  const col = v => v > 0 ? "var(--green)" : v < 0 ? "var(--red)" : "inherit";
+  const by = {};
+  active.forEach(t => {
+    const cp = t.counterparty || "(none)";
+    const th = (t.theta || 0) * (t.net_qty || 0);
+    const r = by[cp] || (by[cp] = { cp, n: 0, theta: 0, longs: 0, shorts: 0, mtm: 0 });
+    r.n += 1; r.theta += th; r.mtm += (t.current_mtm || 0);
+    if ((t.net_qty || 0) > 0) r.longs += th; else r.shorts += th;
+  });
+  const rows = Object.values(by).sort((a, b) => Math.abs(b.theta) - Math.abs(a.theta));
+  const gross = rows.reduce((s, r) => s + Math.abs(r.theta), 0);
+  const cell = v => `<td style="text-align:right;color:${col(v)}">${usd(v)}</td>`;
+  const line = (r, bold) => `<tr${bold ? ' style="font-weight:600;border-top:2px solid var(--border)"' : ""}>` +
+    `<td style="text-align:left">${r.cp}</td><td style="text-align:right">${r.n}</td>` +
+    cell(r.theta) + cell(r.longs) + cell(r.shorts) + cell(r.theta * 7) + cell(r.theta * 30) +
+    `<td style="text-align:right">${bold || !gross ? "" : Math.round(100 * Math.abs(r.theta) / gross) + "%"}</td>` + cell(r.mtm) + "</tr>";
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
+  } else {
+    const tot = rows.reduce((a, r) => ({ cp: "Total", n: a.n + r.n, theta: a.theta + r.theta, longs: a.longs + r.longs,
+      shorts: a.shorts + r.shorts, mtm: a.mtm + r.mtm }), { cp: "Total", n: 0, theta: 0, longs: 0, shorts: 0, mtm: 0 });
+    body.innerHTML = rows.map(r => line(r, false)).join("") + line(tot, true);
+  }
+  const t = document.getElementById("tm-decay-total");
+  if (t) t.textContent = `- ${usd(totalTheta)} / day for the ${currentAsset} book`;
 }
 
 function tmRenderTable() {
@@ -15847,6 +15882,13 @@ function mtmhCloseModal() {
 // Wire up MTM history UI once DOM is ready
 (function initMtmHistoryUi() {
   const setup = () => {
+    const thetaCard = document.getElementById("tm-theta-card");
+    if (thetaCard) thetaCard.addEventListener("click", () => {
+      const d = document.getElementById("tm-decay-details");
+      if (!d) return;
+      d.open = true;
+      document.getElementById("tm-decay").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
     const card = document.getElementById("tm-mtm-card");
     if (card) card.addEventListener("click", mtmhOpenModal);
 
