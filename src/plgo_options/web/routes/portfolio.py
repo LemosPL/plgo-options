@@ -504,7 +504,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
     # 3. Enrich each trade
     enriched = []
     # Use correct spot ladder for payoff computation per asset
-    FIL_SPOT_LADDER = [round(0.2 + i * 0.1, 2) for i in range(29)]  # $0.20 to $3.00 at $0.10
+    # $0.20 to $4.50 at $0.10. Was $3.00: the FIL view's range (2.5-4) and
+    # upside target ($4) sat past the top, so nothing could test them.
+    FIL_SPOT_LADDER = [round(0.2 + i * 0.1, 2) for i in range(44)]
     active_ladder = FIL_SPOT_LADDER if is_fil else SPOT_LADDER
     spot_arr = np.array(active_ladder, dtype=float)
     all_horizons = sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0]))
