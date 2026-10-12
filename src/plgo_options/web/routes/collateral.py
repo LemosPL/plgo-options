@@ -717,28 +717,31 @@ async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
     return prices, overrides, live
 
 
-async def _liability_by_cp() -> tuple[dict[str, float], dict[str, str], dict[str, float]]:
-    """Per-counterparty MtM liability summed across both option books: gross
-    (Σ max(0, −MtM) per position), display names, and netted (max(0, −Σ MtM)
-    over the counterparty's whole book, both assets — one netting set)."""
-    eth = await _gather_portfolio("ETH")
-    fil = await _gather_portfolio("FIL")
-    net_mtm: dict[str, float] = {}
-    for src in (_net_mtm_by_cp(eth), _net_mtm_by_cp(fil)):
-        for k, v in src.items():
-            net_mtm[k] = net_mtm.get(k, 0.0) + v
-    netted = {k: max(0.0, -v) for k, v in net_mtm.items()}
-    el, ed, _ = _compute_liabilities(eth)
-    fl, fd, _ = _compute_liabilities(fil)
-    liab: dict[str, float] = {}
-    for src in (el, fl):
-        for k, v in src.items():
-            liab[k] = liab.get(k, 0.0) + v
+async def _liability_by_cp() -> tuple[dict[str, dict[str, float]], dict[str, str], dict[str, int], dict[str, float]]:
+    """Per-counterparty MtM liability, per option book: {cp: {"ETH": x, "FIL": y}}.
+
+    Each book's liability is computed on its own (an OTC perp nets only within
+    its own book), so ETH + FIL is the counterparty's total. Also returns the
+    display names, the open position count per counterparty, and the netted
+    liability (max(0, −Σ MtM) over the counterparty's whole book, both assets —
+    one netting set)."""
+    liab: dict[str, dict[str, float]] = {}
     disp: dict[str, str] = {}
-    for src in (ed, fd):
-        for k, n in src.items():
-            disp.setdefault(k, n)
-    return liab, disp, netted
+    counts: dict[str, int] = {}
+    net_mtm: dict[str, float] = {}
+    for book in COLLATERAL_BOOKS:
+        port = await _gather_portfolio(book)
+        for k, v in _net_mtm_by_cp(port).items():
+            net_mtm[k] = net_mtm.get(k, 0.0) + v
+        l, d, n = _compute_liabilities(port)
+        for k, v in l.items():
+            liab.setdefault(k, {b: 0.0 for b in COLLATERAL_BOOKS})[book] = v
+        for k, name in d.items():
+            disp.setdefault(k, name)
+        for k, c in n.items():
+            counts[k] = counts.get(k, 0) + c
+    netted = {k: max(0.0, -v) for k, v in net_mtm.items()}
+    return liab, disp, counts, netted
 
 
 @router.get("/map")
@@ -782,7 +785,7 @@ async def collateral_map():
                                    "books": {b: {} for b in COLLATERAL_BOOKS}})
         entry["books"][book][(r["asset"] or "").upper()] = float(r["qty"] or 0)
 
-    liab, liab_disp, liab_netted = await _liability_by_cp()
+    liab, liab_disp, pos_counts, liab_netted = await _liability_by_cp()
     for k, n in liab_disp.items():
         cps.setdefault(k, {"display": n, "books": {b: {} for b in COLLATERAL_BOOKS}})
 
@@ -794,7 +797,21 @@ async def collateral_map():
         usd = {a: round(qtys[a] * prices[a], 2) for a in assets}
         total = round(sum(usd.values()), 2)
         _nh, hc = _haircut_value(qtys, prices, counterparty=k)
-        l = liab.get(k, 0.0)
+        lb = liab.get(k, {})
+        l = sum(lb.values())
+        # Per book: the collateral posted against that book (map rows) vs that
+        # book's liability. The concentration haircut rate depends on the
+        # counterparty's TOTAL holding, so each book's slice gets that same
+        # blended rate and the two books add up to the counterparty total.
+        by_book = {}
+        for b in COLLATERAL_BOOKS:
+            mkt = sum(books[b][a] * prices[a] for a in assets)
+            hcb = sum(books[b][a] * prices[a] * (1 - effective_haircut_rate(k, a, qtys[a]))
+                      for a in assets if books[b][a])
+            lbb = float(lb.get(b, 0.0))
+            by_book[b] = {"collateral_usd": round(mkt, 2), "collateral_haircut_usd": round(hcb, 2),
+                          "liability_usd": round(lbb, 2), "balance_usd": round(hcb - lbb, 2),
+                          "usd": {a: round(books[b][a] * prices[a], 2) for a in assets}}
         ln = liab_netted.get(k, 0.0)
         out_cps.append({
             "counterparty": info["display"],
@@ -807,8 +824,14 @@ async def collateral_map():
             "balance_usd": round(hc - l, 2),
             "liability_netted_usd": round(ln, 2),
             "balance_netted_usd": round(hc - ln, 2),
+            "by_book": by_book,
+            "positions": pos_counts.get(k, 0),
         })
     out_cps.sort(key=lambda c: c["total_usd"], reverse=True)
+    book_totals = {
+        b: {f: round(sum(c["by_book"][b][f] for c in out_cps), 2)
+            for f in ("collateral_usd", "collateral_haircut_usd", "liability_usd", "balance_usd")}
+        for b in COLLATERAL_BOOKS}
 
     asset_totals = {a: round(sum(c["usd"][a] for c in out_cps), 2) for a in assets}
     grand_total = round(sum(asset_totals.values()), 2)
@@ -826,7 +849,8 @@ async def collateral_map():
         "counterparties": out_cps,
         "asset_totals": asset_totals,
         "grand_total_usd": grand_total,
-        "total_liability_usd": round(sum(liab.values()), 2),
+        "total_liability_usd": round(sum(sum(v.values()) for v in liab.values()), 2),
+        "book_totals": book_totals,
         "total_balance_usd": round(sum(c["balance_usd"] for c in out_cps), 2),
         "total_liability_netted_usd": round(sum(c["liability_netted_usd"] for c in out_cps), 2),
         "total_balance_netted_usd": round(sum(c["balance_netted_usd"] for c in out_cps), 2),
