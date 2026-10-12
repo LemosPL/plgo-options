@@ -24,7 +24,9 @@ def book(monkeypatch):
                  _pos(5, "Flowdesk", "F", 0, 18)]
 
     async def portfolio_pnl(asset="FIL", include_expired=False):
-        return {"spot": 1.25, "positions": positions}
+        return {"spot": 1.25, "positions": positions, "vol_surface": [
+            {"expiry_code": "25DEC26", "dte": 74}, {"expiry_code": "30OCT26", "dte": 18},
+            {"expiry_code": "09OCT26", "dte": 0}]}
 
     import plgo_options.web.routes.portfolio as port
     monkeypatch.setattr(port, "portfolio_pnl", portfolio_pnl)
@@ -75,3 +77,11 @@ async def test_roll_sweep_drops_legs_it_may_not_roll(book, monkeypatch):
     assert seen["roll"]["ids"] == [1]                          # G20 leg 3 and unknown 99 dropped
     out = await desk.roll_sweep({"assets": ["FIL"], "roll": {"ids": [3]}})
     assert "no legs to roll" in out["facts"]
+
+
+@pytest.mark.asyncio
+async def test_roll_into_choices_are_v4s_maturities(book):
+    pol = default_policy("FIL")
+    pol.optimizer.counterparties = []
+    _, expiries = await opt.roll_universe(pol, 20)
+    assert expiries == [{"code": "30OCT26", "dte": 18}, {"code": "25DEC26", "dte": 74}]

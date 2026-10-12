@@ -406,8 +406,18 @@ async def roll_candidates(policy: AssetPolicy, dte_max: int) -> list[dict[str, A
     """Option legs of the managed book expiring within ``dte_max`` days that
     the roll sweep may roll: not G20, and inside the sweep's counterparties
     when some are selected. Collar loans are already out of the book."""
+    return (await roll_universe(policy, dte_max))[0]
+
+
+async def roll_universe(policy: AssetPolicy, dte_max: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(roll candidates, expiries a roll can go into). The expiries are the
+    ones Optimizer v4's target-maturity dropdown offers: the book's vol
+    surface, DTE > 0, nearest first."""
     from plgo_options.web.routes.portfolio import portfolio_pnl
     pnl = await portfolio_pnl(asset=policy.asset.upper(), include_expired=False)
+    expiries = [{"code": s.get("expiry_code"), "dte": s.get("dte")}
+                for s in sorted(pnl.get("vol_surface") or [], key=lambda s: s.get("dte") or 0)
+                if (s.get("dte") or 0) > 0 and s.get("expiry_code")]
     spot = float(pnl.get("spot") or pnl.get("eth_spot") or 0)
     allowed = {c.lower() for c in (policy.optimizer.counterparties or [])}
     today = date.today()
@@ -433,7 +443,7 @@ async def roll_candidates(policy: AssetPolicy, dte_max: int) -> list[dict[str, A
             "qty": float(p.get("net_qty") or 0), "mtm_usd": float(p.get("current_mtm") or 0),
             "itm": (opt == "C" and k < spot) or (opt == "P" and k > spot),
         })
-    return sorted(out, key=lambda r: (r["expiry"], r["counterparty"].lower(), r["opt"], r["strike"]))
+    return sorted(out, key=lambda r: (r["expiry"], r["counterparty"].lower(), r["opt"], r["strike"])), expiries
 
 
 def _run_one(pnl: dict, collateral: dict, kwargs: dict) -> dict:

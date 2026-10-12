@@ -184,8 +184,9 @@ async def roll_candidates(asset: str, dte: int = 20):
     days, inside the sweep's counterparties, never G20. ``into`` defaults to
     the policy's target expiry."""
     pol = await store.get_policy(asset)
-    legs = await opt_mod.roll_candidates(pol, max(0, min(int(dte), 3650)))
+    legs, expiries = await opt_mod.roll_universe(pol, max(0, min(int(dte), 3650)))
     return {"asset": asset.upper(), "dte": dte, "into": pol.optimizer.effective_expiry(),
+            "expiries": expiries,                 # v4's target-maturity choices
             "counterparties": list(pol.optimizer.counterparties or []),
             "excluded": sorted(opt_mod.ROLL_EXCLUDED_COUNTERPARTIES), "legs": legs}
 

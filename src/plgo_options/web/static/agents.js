@@ -96,7 +96,15 @@
         (ROLL.data ? ": " + picked.length + " of " + legs.length + " legs ticked" : ": pick legs by days to expiry") + "</summary>" +
       '<div style="display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin:.3rem 0">' +
         'DTE &le; <input id="agents-roll-dte" type="number" min="0" max="400" value="' + ROLL.dte + '" ' + inp + ' size="3">' +
-        'Roll into <input id="agents-roll-into" value="' + esc(ROLL.into || (ROLL.data && ROLL.data.into) || "") + '" ' + inp + ' size="8" placeholder="25DEC26">' +
+        // Same maturities as Optimizer v4's target dropdown; legs only roll out.
+        'Roll into <select id="agents-roll-into" ' + inp + ">" + (ROLL.data ? (() => {
+          const cur = ROLL.into || ROLL.data.into || "";
+          const last = legs.filter((l) => ROLL.sel.has(l.id)).reduce((m, l) => (l.dte > m ? l.dte : m), -1);
+          const opts = (ROLL.data.expiries || []).filter((e) => e.dte > last);
+          if (cur && !opts.some((e) => e.code === cur)) opts.unshift({ code: cur, dte: null });
+          return opts.map((e) => '<option value="' + esc(e.code) + '"' + (e.code === cur ? " selected" : "") + ">" +
+            esc(e.code) + (e.dte != null ? " (" + e.dte + "d)" : "") + "</option>").join("");
+        })() : '<option value="">Find legs first</option>') + "</select>" +
         '<label style="cursor:pointer"><input type="checkbox" id="agents-roll-itm"' + (ROLL.itm ? " checked" : "") + "> ITM only</label>" +
         "<button " + btn + ' id="btn-agents-roll-find">Find legs</button>' +
       "</div>" +
@@ -122,7 +130,7 @@
       const id = Number(c.value); if (c.checked) ROLL.sel.add(id); else ROLL.sel.delete(id); renderRoll();
     }));
     $("agents-roll-itm").addEventListener("change", (e) => { ROLL.itm = e.target.checked; renderRoll(); });
-    $("agents-roll-into").addEventListener("change", (e) => { ROLL.into = e.target.value.trim().toUpperCase(); });
+    $("agents-roll-into").addEventListener("change", (e) => { ROLL.into = e.target.value; });
     $("agents-roll-dte").addEventListener("change", (e) => { ROLL.dte = Math.max(0, parseInt(e.target.value, 10) || 0); });
   }
 
