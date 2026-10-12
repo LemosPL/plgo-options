@@ -448,7 +448,10 @@ async def optimizer(ctx: dict) -> dict:
                                 f"{t.get('side')}|{round(float(t.get('qty') or 0))}" for t in s["trades"]))
         filed = list(picks[:TOP_RUNS])
         seen = {sig(f[0]) for f in filed}
-        for s in [c[1] for c in closest] + res["ranked"]:
+        # Disqualified runs all score -1e9, so order the rest the way "closest"
+        # is picked: fewest reasons out, then most target gain.
+        rest = sorted(res["ranked"], key=lambda s: -(s["track_gain_pct"] - 1e3 * len(s["disqualified"])))
+        for s in [c[1] for c in closest] + rest:
             if len(filed) >= TOP_RUNS:
                 break
             if not (s.get("trades") and s.get("key_spot_changes")) or sig(s) in seen:
