@@ -67,8 +67,36 @@
             (last ? ' <span style="color:var(--muted)">· ' + last + '</span>' : "") + '</div>' +
         '</span>' +
         '<button class="btn-secondary ag-run" data-run="' + n + '">Run</button>' +
-      '</div>';
+      '</div>' + (n === "optimizer" ? '<div id="agents-cpty-box"></div>' : "");
     }).join("");
+    loadCptys();
+  }
+
+  // Which counterparties the optimizer sweep may trade with, per asset. Saved
+  // on the policy, so the scheduled sweeps use it too. Ticked = in the sweep.
+  let CPTY = null;
+  async function loadCptys() {
+    const box = $("agents-cpty-box");
+    if (!box) return;
+    try { CPTY = await api("/api/agents/counterparties/" + asset()); }
+    catch (e) { box.innerHTML = '<div class="ag-task-w" style="padding:.2rem .6rem">Counterparties: ' + esc(e.message) + "</div>"; return; }
+    renderCptys();
+  }
+  function renderCptys(msg) {
+    const box = $("agents-cpty-box");
+    if (!box || !CPTY) return;
+    const sel = new Set((CPTY.selected || []).map((c) => c.toLowerCase()));
+    const on = (c) => !sel.size || sel.has(c.toLowerCase());
+    const n = CPTY.available.filter(on).length;
+    box.innerHTML = '<details style="margin:.1rem .4rem .4rem 1.4rem;font-size:.68rem"' + (msg ? " open" : "") + '>' +
+      '<summary style="cursor:pointer;color:var(--muted)">' + esc(CPTY.asset) + " sweep counterparties: " +
+        (sel.size ? n + " of " + CPTY.available.length : "all " + CPTY.available.length) + "</summary>" +
+      '<div style="display:flex;flex-wrap:wrap;gap:.2rem .7rem;margin:.3rem 0">' +
+        CPTY.available.map((c) => '<label style="white-space:nowrap;cursor:pointer"><input type="checkbox" class="ag-cpty" value="' +
+          esc(c) + '"' + (on(c) ? " checked" : "") + "> " + esc(c) + "</label>").join("") + "</div>" +
+      '<button class="btn-secondary" id="btn-agents-cpty-all" style="width:auto;font-size:.62rem;padding:.12rem .4rem">All</button> ' +
+      '<button class="btn-secondary" id="btn-agents-cpty-save" style="width:auto;font-size:.62rem;padding:.12rem .4rem">Save</button>' +
+      (msg ? ' <span style="color:var(--muted)">' + esc(msg) + "</span>" : "") + "</details>";
   }
 
   // A1-A5 and B1/B3 as the gate will actually apply them today. One table with
@@ -1135,7 +1163,9 @@
       try {
         const r = await api("/api/agents/run/" + n, {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ deliver: false, use_ai: true }),
+          // The optimizer sweeps the asset on screen (it defaulted to ETH).
+          body: JSON.stringify({ deliver: false, use_ai: true,
+                                 ctx: n === "optimizer" ? { assets: [asset()] } : null }),
         });
         selected = n;
         $("agents-output-name").textContent = "— " + n;
@@ -1164,6 +1194,22 @@
     }
     if (t.dataset.show) { show(t.dataset.show); return; }
 
+    if (t.id === "btn-agents-cpty-all") {
+      document.querySelectorAll(".ag-cpty").forEach((c) => { c.checked = true; });
+      return;
+    }
+    if (t.id === "btn-agents-cpty-save") {
+      const picked = [...document.querySelectorAll(".ag-cpty")].filter((c) => c.checked).map((c) => c.value);
+      if (!picked.length) { renderCptys("Tick at least one."); return; }
+      try {
+        CPTY = await api("/api/agents/counterparties/" + asset(), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ counterparties: picked, by: "desk" }),
+        });
+        renderCptys("Saved - the next sweep uses " + (CPTY.selected.length ? CPTY.selected.join(", ") : "all") + ".");
+      } catch (e) { renderCptys("Not saved: " + e.message); }
+      return;
+    }
     if (t.id === "btn-agents-refresh") load();
     if (t.id === "btn-agents-doc") {
       const box = $("agents-doc");

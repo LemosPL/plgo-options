@@ -136,6 +136,48 @@ async def put_policy(asset: str, body: dict[str, Any], by: str = ""):
     return pol.to_dict()
 
 
+async def book_counterparties(asset: str) -> list[str]:
+    """Counterparties with live trades in the managed book (no collar loans) -
+    the ones a sweep can trade with."""
+    from plgo_options.data.collar_loans import split_collar_loans
+    from plgo_options.data.database import get_db
+    from plgo_options.data.trade_repository import list_trades
+    rows, _ = split_collar_loans(await list_trades(await get_db(), asset=asset.upper()))
+    return sorted({str(r.get("counterparty") or "").strip() for r in rows} - {""}, key=str.lower)
+
+
+@router.get("/counterparties/{asset}")
+async def sweep_counterparties(asset: str):
+    """What the optimizer sweep may trade with: the book's counterparties and
+    the policy's selection ([] = all of them)."""
+    pol = await store.get_policy(asset)
+    return {"asset": asset.upper(), "available": await book_counterparties(asset),
+            "selected": list(pol.optimizer.counterparties or [])}
+
+
+class CptyReq(BaseModel):
+    counterparties: list[str]
+    by: str = ""
+
+
+@router.put("/counterparties/{asset}")
+async def set_sweep_counterparties(asset: str, req: CptyReq):
+    """Choose which counterparties the sweep (scheduled and manual) uses.
+    Every one ticked, or none, is saved as [] = all."""
+    avail = await book_counterparties(asset)
+    by_lower = {c.lower(): c for c in avail}
+    unknown = [c for c in req.counterparties if c.lower() not in by_lower]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Not in the {asset.upper()} book: {', '.join(unknown)}")
+    chosen = sorted({by_lower[c.lower()] for c in req.counterparties}, key=str.lower)
+    if len(chosen) == len(avail):
+        chosen = []
+    pol = await store.get_policy(asset)
+    pol.optimizer.counterparties = chosen
+    await store.save_policy(pol, req.by or "agents page: sweep counterparties")
+    return {"asset": asset.upper(), "available": avail, "selected": chosen}
+
+
 class FlagReq(BaseModel):
     key: str                # kill_switch | curves_frozen_ETH | curves_frozen_FIL
     value: str              # on | off
