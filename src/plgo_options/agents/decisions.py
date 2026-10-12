@@ -134,6 +134,13 @@ FIL_NO_G20_2026_10_12: dict[str, dict[str, Any]] = {
     "FIL": {"optimizer": {"counterparties": ["Flowdesk", "KeyRock"]}},
 }
 
+# 12 Oct 2026, Lucas: the regular sweeps roll only legs expiring within 1 day
+# (was 7). Rolls are chosen on the Agents page's roll sweep instead.
+ROLL_DTE_2026_10_12: dict[str, dict[str, Any]] = {
+    "ETH": {"optimizer": {"roll_dte_threshold": 1}},
+    "FIL": {"optimizer": {"roll_dte_threshold": 1}},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
@@ -144,6 +151,7 @@ SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-12-floor-tol": FLOOR_TOL_2026_10_12,
     "2026-10-12-fil-range": FIL_RANGE_2026_10_12,
     "2026-10-12-fil-no-g20": FIL_NO_G20_2026_10_12,
+    "2026-10-12-roll-dte-1": ROLL_DTE_2026_10_12,
 }
 
 
