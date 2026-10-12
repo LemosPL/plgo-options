@@ -222,6 +222,36 @@ def track_target(ladder: list[float], spot: float, before, after, target,
             "distance_before_usd": tot_b, "distance_after_usd": tot_a}
 
 
+def dealing_cost_usd(asset: str, spot: float, trades: list[dict[str, Any]]) -> float:
+    """What the trades cost to deal, leg by leg, the way validate.price_legs
+    prices a proposal. The engine reports zero cost on a leg priced at a
+    calibrated counterparty's own bid/ask (the spread is inside its premium,
+    optimizer_v3._structure_leg_costs_usd), and a cash-neutral package nets
+    that premium to ~0 - so on 12 Oct the FIL sweep ranked KeyRock packages
+    as free while their spread vs mid was $1.8M. Here such a leg costs
+    |counterparty price - mid| x qty; box legs (mid, no spread), perps and
+    uncalibrated legs keep the engine's own cost."""
+    from plgo_options.pricing.cpty_pricing import resolve_price
+    total = 0.0
+    for t in trades:
+        eng = abs(float(t.get("cost_usd") or 0.0))
+        opt = str(t.get("opt") or "").upper()
+        qty = abs(float(t.get("qty") or 0.0))
+        T = max(float(t.get("dte") or 0.0), 0.0) / 365.25
+        if opt not in ("C", "P") or "BOX" in str(t.get("strategy") or "").upper() or not qty or T <= 0:
+            total += eng
+            continue
+        side = "buy" if float(t.get("qty") or 0.0) > 0 else "sell"
+        try:
+            cp = resolve_price(str(t.get("counterparty") or ""), asset.upper(), float(spot),
+                               float(t.get("strike") or 0.0), T, opt, side)
+        except Exception:
+            cp = None
+        mid = float(t.get("bs_price_usd") or 0.0)
+        total += eng if cp is None or mid <= 0 else max(eng, abs(float(cp[0]) - mid) * qty)
+    return total
+
+
 def summarize(result: dict[str, Any], variant: dict[str, Any], preset: OptimizerPreset,
               policy: AssetPolicy | None = None) -> dict[str, Any]:
     """Reduce one engine result to what the ranking and the handover need.
@@ -251,7 +281,9 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
                            "change_usd": float(after[i]) - float(before[i])})
     fb, fa = result.get("fit_error_before"), result.get("fit_error_after")
     fit_gain = 100.0 * (fb - fa) / fb if fb else 0.0
-    cost = float(result.get("total_cost_usd") or 0)
+    engine_cost = float(result.get("total_cost_usd") or 0)
+    asset = str(result.get("asset") or (policy.asset if policy else "") or "ETH")
+    cost = max(engine_cost, dealing_cost_usd(asset, spot, trades)) if spot else engine_cost
     gross_contracts = sum(abs(float(t.get("qty") or 0)) for t in opt_lines)
     worst = min([d["change_usd"] for d in deltas], default=0.0)
     track = track_target(ladder, spot, before, after, result.get("target_payoff"), preset)
@@ -284,6 +316,7 @@ def summarize(result: dict[str, Any], variant: dict[str, Any], preset: Optimizer
         "policy_findings": policy_findings,
         "fit_gain_pct": round(fit_gain, 2),
         "cost_usd": round(cost, 0),
+        "engine_cost_usd": round(engine_cost, 0),
         "net_premium_usd": round(float(result.get("net_premium_generated") or 0), 0),
         "option_lines": len(opt_lines),
         "all_lines": len(trades),

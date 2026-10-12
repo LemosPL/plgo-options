@@ -281,3 +281,17 @@ def test_expected_range_past_the_ladder_is_tested_on_the_covered_part():
     t = curve_tests(LADDER, before, before - 10_000.0, SPOT, 0.0, pol, 74, 500_000.0, reshape=True)
     assert t["range_high"] == LADDER[-1]
     assert any(k == "fail" and "ladder ends there" in txt for k, txt, _ in t["findings"])
+
+
+def test_calibrated_counterparty_legs_cost_their_spread_not_zero():
+    from plgo_options.agents.optimizer import dealing_cost_usd
+    from plgo_options.optimization.math_utils import bs_price
+    S, K, dte = 1.22, 1.30, 74.0
+    mid = bs_price(S, K, dte / 365.25, 0.0, 1.0, "C")
+    leg = {"counterparty": "KeyRock", "opt": "C", "strike": K, "dte": dte, "qty": 3_000_000,
+           "bs_price_usd": mid, "cost_usd": 0.0, "strategy": "NAKED"}
+    assert dealing_cost_usd("FIL", S, [leg]) > 10_000
+    box = dict(leg, strategy="BOX_NEUTRALIZER")
+    assert dealing_cost_usd("FIL", S, [box]) == 0.0              # box legs move cash at mid
+    other = dict(leg, counterparty="NoSuchDealer", cost_usd=1234.0)
+    assert dealing_cost_usd("FIL", S, [other]) == 1234.0          # uncalibrated: engine's cost
