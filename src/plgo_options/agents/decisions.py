@@ -127,6 +127,13 @@ FIL_RANGE_2026_10_12: dict[str, dict[str, Any]] = {
     "FIL": {"view_range_low": 2.5, "view_range_high": 4.0},
 }
 
+# 12 Oct 2026, Lucas: G20 out of the FIL sweep. The managed FIL book is
+# Flowdesk, G20, KeyRock (FalconX / Galaxy are collar loans), so the sweep
+# trades with Flowdesk and KeyRock. Change it on the Agents page from now on.
+FIL_NO_G20_2026_10_12: dict[str, dict[str, Any]] = {
+    "FIL": {"optimizer": {"counterparties": ["Flowdesk", "KeyRock"]}},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
@@ -136,6 +143,7 @@ SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-07-floor": FLOOR_2026_10_07,
     "2026-10-12-floor-tol": FLOOR_TOL_2026_10_12,
     "2026-10-12-fil-range": FIL_RANGE_2026_10_12,
+    "2026-10-12-fil-no-g20": FIL_NO_G20_2026_10_12,
 }
 
 
