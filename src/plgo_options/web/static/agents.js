@@ -26,6 +26,9 @@
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const asset = () => (typeof currentAsset !== "undefined" ? currentAsset : "ETH");
   let selected = null, PROPS = [], DOC = null, POLICY = {};
+  // Proposals, gate log and decisions follow the ETH / FIL selector like every
+  // other page; the strategy table and timetable still show both assets.
+  const mine = () => PROPS.filter((p) => String(p.asset || "").toUpperCase() === asset());
 
   async function api(url, opts) {
     const r = await fetch(url, opts);
@@ -571,7 +574,7 @@
   }
 
   function renderProposals() {
-    const live = PROPS.filter((p) => p.status === "open");
+    const live = mine().filter((p) => p.status === "open");
     const n = (r) => live.filter((p) => r === "all" || p.route === r ||
       (r === "chris" && p.route === "lucas_tell_chris")).length;
     const chip = (r, label, col) => '<button class="btn-secondary" data-pfilter="' + r + '" style="width:auto;' +
@@ -618,16 +621,20 @@
       xs.map(card).join("") + "</div>";
     // Only the top PTOP: actionable first (Lucas, then Chris), newest first.
     const order = (p) => p.route === "lucas" || p.route === "lucas_tell_chris" ? 0 : p.route === "chris" ? 1 : 2;
-    const ranked = shown.slice().sort((a, b) => order(a) - order(b) || b.id - a.id);
+    // Within a route: newest sweep first, then the sweep's own rank.
+    const rk = (p) => (p.proposal || {}).sweep_rank || 99;
+    const ranked = shown.slice().sort((a, b) => order(a) - order(b) ||
+      String(b.created_at).slice(0, 16).localeCompare(String(a.created_at).slice(0, 16)) || rk(a) - rk(b) || b.id - a.id);
     const top = PALL ? ranked : ranked.slice(0, PTOP);
     const more = ranked.length - top.length;
     const toggle = ranked.length > PTOP ? '<button class="btn-secondary" data-pall="1" style="width:auto;font-size:.64rem;' +
       'padding:.12rem .45rem;margin-top:.45rem">' + (PALL ? "− Top " + PTOP + " only" : "+ Show " + more + " more") + "</button>" : "";
     const live2 = top.filter((p) => p.route !== "rejected"), rej = top.filter((p) => p.route === "rejected");
+    // The sweep's top runs that did not qualify stay in view, best first, each
+    // with why - open them in v4 / Pricing from the card.
     $("agents-props").innerHTML = bar + (live2.length ? grid(live2) : "") +
-      (rej.length ? (PFILTER === "rejected" ? grid(rej)
-        : '<details style="margin-top:.45rem"><summary style="cursor:pointer;font-size:.72rem;color:#ef4444">Rejected (' +
-          rej.length + ") - why each was refused</summary>" + grid(rej) + "</details>") : "") + toggle;
+      (rej.length ? '<div style="margin:.55rem 0 .3rem;font-size:.72rem;color:#ef4444;font-weight:600">Did not qualify (' +
+          rej.length + ") - top runs, best first, with why</div>" + grid(rej) : "") + toggle;
   }
 
   // Gate log: every proposal the agents made, split by what the gate said,
@@ -662,14 +669,14 @@
     const monday = new Date(now); monday.setUTCDate(now.getUTCDate() - ((now.getUTCDay() + 6) % 7));
     const since = GPERIOD === "today" ? now.toISOString().slice(0, 10)
       : GPERIOD === "week" ? monday.toISOString().slice(0, 10) : "";
-    const inScope = PROPS.filter((p) => (!since || String(p.created_at) >= since) &&
+    const inScope = mine().filter((p) => (!since || String(p.created_at) >= since) &&
       (!GAGENT || p.agent === GAGENT));
     const count = (k) => k === "all" ? inScope.length : inScope.filter((p) => GROUTES[k].includes(p.route)).length;
     const rows = inScope.filter((p) => GTAB === "all" || GROUTES[GTAB].includes(p.route));
     const tab = (k, label, col) => '<button class="btn-secondary" data-gtab="' + k + '" style="width:auto;font-size:.68rem;' +
       "padding:.2rem .55rem;" + (GTAB === k ? "border-color:" + col + ";color:" + col + ";font-weight:600" : "") + '">' +
       label + " " + count(k) + "</button>";
-    const agents = [...new Set(PROPS.map((p) => p.agent))].sort();
+    const agents = [...new Set(mine().map((p) => p.agent))].sort();
     const sel = (id, cur, opts) => '<select id="' + id + '" style="width:auto;font-size:.68rem;padding:.1rem .3rem">' +
       opts.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ">" + esc(o[1]) + "</option>").join("") + "</select>";
     const legsShort = (p) => ((p.proposal || {}).legs || []).filter((l) => !/BOX/i.test(String(l.strategy || "")))
@@ -694,23 +701,39 @@
             '</td><td style="min-width:15rem">' + pricingBlock(p) +
             "</td><td>" + route(p.route) + '</td><td style="min-width:18rem;line-height:1.35">' + gateWhy(p) +
             "</td><td>" + esc(p.status) + (p.decided_by ? ' <span style="color:var(--muted)">' + esc(p.decided_by) + "</span>" : "") +
-            '</td><td><button class="btn-secondary" style="width:auto;font-size:.62rem;padding:.12rem .35rem" data-v4="' + p.id + '">v4</button></td></tr>';
+            '</td><td>' + loadBtns(p) + "</td></tr>";
         }).join("") + "</tbody></table></div>"
         : '<p style="color:var(--muted);font-size:.78rem;margin:0">Nothing here for this filter.</p>');
     $("agents-gl-agent").onchange = (e) => { GAGENT = e.target.value; renderGateLog(); };
     $("agents-gl-period").onchange = (e) => { GPERIOD = e.target.value; renderGateLog(); };
   }
 
+  // v4 / Pricing buttons for any proposal row (rejected ones included).
+  function loadBtns(p) {
+    const nOpt = (((p.proposal || {}).legs) || []).filter((l) => (l.kind || "option") === "option").length;
+    const b = 'class="btn-secondary" style="width:auto;font-size:.62rem;padding:.12rem .35rem;margin:0 .15rem .15rem 0"';
+    return '<span style="white-space:nowrap"><button ' + b + ' data-v4="' + p.id + '">v4</button>' +
+      "<button " + b + ' data-price="' + p.id + '"' + (nOpt ? "" : " disabled") + ">Pricing</button></span>";
+  }
+
+  // Run text with every "proposal #N" turned into its v4 / Pricing buttons.
+  function setOutput(text) {
+    const byId = {};
+    PROPS.forEach((p) => { byId[p.id] = p; });
+    $("agents-output").innerHTML = esc(text || "").replace(/proposal #(\d+)/g, (m, id) =>
+      byId[id] ? "proposal #" + id + " " + loadBtns(byId[id]) : m);
+  }
+
   function renderDecisions() {
     // Superseded = replaced by a newer sweep, not a decision anyone took.
-    const done = PROPS.filter((p) => p.status !== "open" && p.status !== "superseded");
+    const done = mine().filter((p) => p.status !== "open" && p.status !== "superseded");
     if (!done.length) {
       $("agents-decisions").innerHTML = '<p style="color:var(--muted);font-size:.8rem;margin:0">Nothing decided yet.</p>';
       return;
     }
     $("agents-decisions").innerHTML =
       '<table class="data-table" style="width:100%"><thead><tr><th>When</th><th>#</th><th>Asset</th>' +
-      '<th>What</th><th>Route</th><th>Why (the gate)</th><th>Agent&rsquo;s pricing</th><th>Outcome</th><th>By</th></tr></thead><tbody>' +
+      '<th>What</th><th>Route</th><th>Why (the gate)</th><th>Agent&rsquo;s pricing</th><th>Outcome</th><th>By</th><th>Load</th></tr></thead><tbody>' +
       done.map((p) => {
         const col = p.status === "rejected" ? "#f59e0b"
           : p.status === "executed" ? "#10b981" : "#94a3b8";
@@ -718,7 +741,7 @@
           "</td><td>" + esc(p.asset) + '</td><td style="font-size:.74rem"><div>' + targetChip(p) + "</div>" + esc(p.summary) +
           "</td><td>" + esc(p.route.toUpperCase()) + '</td><td style="min-width:16rem;font-size:.68rem;line-height:1.35">' +
           gateWhy(p) + '</td><td style="min-width:14rem">' + pricingBlock(p) + '</td><td style="color:' + col +
-          ';font-weight:600">' + esc(p.status) + "</td><td>" + esc(p.decided_by || "gate") + "</td></tr>";
+          ';font-weight:600">' + esc(p.status) + "</td><td>" + esc(p.decided_by || "gate") + "</td><td>" + loadBtns(p) + "</td></tr>";
       }).join("") + "</tbody></table>";
   }
 
@@ -796,7 +819,7 @@
 
       PROPS = (await api("/api/agents/proposals?limit=400")).proposals || [];
       const counts = {};
-      PROPS.filter((p) => p.status === "open").forEach((p) => {
+      mine().filter((p) => p.status === "open").forEach((p) => {
         counts[p.agent] = (counts[p.agent] || 0) + 1;
       });
 
@@ -833,7 +856,7 @@
     $("agents-output").textContent = "Loading…";
     try {
       const r = (await api("/api/agents/runs?agent=" + encodeURIComponent(name) + "&limit=1")).runs[0];
-      $("agents-output").textContent = r ? r.text : "No runs yet.";
+      setOutput(r ? r.text : "No runs yet.");
     } catch (e) {
       $("agents-output").textContent = "Could not load: " + e.message;
     }
@@ -1114,7 +1137,7 @@
         });
         selected = n;
         $("agents-output-name").textContent = "— " + n;
-        $("agents-output").textContent = r.text;
+        setOutput(r.text);
       } catch (e) { $("agents-output").textContent = "Failed: " + e.message; }
       t.textContent = "Run"; t.disabled = false; load();
       return;
@@ -1185,4 +1208,8 @@
 
   const navItem = document.querySelector('.nav-item[data-page="agents"]');
   if (navItem) navItem.addEventListener("click", load);
+  // Switching ETH / FIL while the page is open reloads it for that asset.
+  document.querySelectorAll(".asset-btn").forEach((b) => b.addEventListener("click", () => {
+    if ($("agents-props") && $("agents-props").offsetParent !== null) load();
+  }));
 })();

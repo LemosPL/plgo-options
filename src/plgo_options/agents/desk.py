@@ -28,11 +28,12 @@ from plgo_options.agents import optimizer as opt_mod
 from plgo_options.agents import store
 from plgo_options.agents.narrate import narrate
 from plgo_options.agents.policy import AssetPolicy
-from plgo_options.agents.rows import UK, build_rows, crossed_rows, month_key, next_rows, week_key
+from plgo_options.agents.rows import (UK, build_rows, crossed_rows, month_key, next_rows, week_key,
+                                      week_start_utc)
 from plgo_options.data.database import get_db
 
 ASSETS = ("ETH", "FIL")
-MAX_PROPOSALS = 5           # per sweep and asset; older open sweep proposals are superseded
+TOP_RUNS = 5                # per sweep and asset, qualified or not; older open sweep proposals are superseded
 
 
 # ── data helpers (each one survives a failing upstream) ─────────────────────
@@ -220,8 +221,19 @@ async def row_watcher(ctx: dict) -> dict:
         if pol.stop_price and spot <= pol.stop_price:
             wake.append(f"{asset} at {_p(asset, spot)} is AT/BELOW THE STOP {_p(asset, pol.stop_price)}. "
                         "Close, do not roll. Chris decides (A3).")
+        # A fired row belongs to its week (B1): last week's open row trades were
+        # sized on last week's reference and are no longer the instruction.
+        n_old = await store.supersede_open(asset, "row_watcher", [], created_before=week_start_utc())
+        if n_old:
+            lines.append(f"{asset}: {n_old} open row proposal(s) from last week superseded.")
         if not pol.reference_price:
             lines.append(f"{asset} {_p(asset, spot)}: no Monday reference set - rows inactive.")
+            continue
+        # Until the Monday pack sets this week's reference, rows would be
+        # measured from last week's price (they fired at 00:00 UK on 12 Oct).
+        if (pol.reference_set_on or "") < week_key():
+            lines.append(f"{asset} {_p(asset, spot)}: this week's reference not set yet "
+                         f"(last {pol.reference_set_on or '-'}) - rows inactive.")
             continue
         rows = build_rows(asset, pol.reference_price, pol.row_steps_pct)
         hit = crossed_rows(rows, pol.reference_price, spot)
@@ -237,6 +249,13 @@ async def row_watcher(ctx: dict) -> dict:
             continue                                # B1: once per week
         if row.step >= 3:
             wake.append(f"{asset} row {row.key} at {_p(asset, spot)}: {row.action}")
+        # A1: under the "up" view a rise is the view playing out. Selling perp
+        # into it gives away the upside the book is built for, so the up-row
+        # perp sale is not proposed at all.
+        if pol.view == "up" and row.direction > 0 and row.instrument == "perp":
+            lines.append(f"  ROW {row.key} reached - view is UP, holding exposure: "
+                         "no perp sale proposed (A1).")
+            continue
         book, _ = await _safe(get_book(asset), {"delta": 0, "positions": [], "mtm": None})
         perp, _ = await _safe(get_perp(asset), {})
         prop = await _validated(_row_trade(asset, row, spot, book, pol), pol)
@@ -368,6 +387,7 @@ async def optimizer(ctx: dict) -> dict:
                        "no giveback beyond limit).")
         # Say why a target produced nothing, so a bad target is visible, not silent.
         got = {s["target"]["name"] for s in best}
+        closest = []                                # (target, run, line index in out)
         for tname in res["targets"]:
             if tname in got:
                 continue
@@ -390,6 +410,8 @@ async def optimizer(ctx: dict) -> dict:
                           + ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in near["key_spot_changes"]))
             out.append(f"[{tname}] no run passed: " + (", ".join(f"{k} x{v}" for k, v in why.items()) or "-")
                        + (f", {n_err} errors" if n_err else "") + detail)
+            if near and near.get("trades"):
+                closest.append((tname, near, len(out) - 1))
 
         # Each target's passing runs, best first, through the validation and the
         # gate: the first one they accept is the proposal. If every one tried is
@@ -417,25 +439,57 @@ async def optimizer(ctx: dict) -> dict:
                 if first:
                     picks.append(first)
                     out.append(f"[{tname}] the gate rejected all {tried} runs tried; filing the top one with its reasons.")
+        # The sweep's top runs go on the Proposals tab even when they did not
+        # qualify (12 Oct 2026, Lucas), each with why, so they can be opened in
+        # v4 / Pricing: the gate's picks, then each empty target's closest run,
+        # then the next best runs, up to TOP_RUNS. Open until the next sweep.
+        def sig(s):
+            return tuple(sorted(f"{t.get('counterparty')}|{t.get('opt')}|{t.get('strike')}|{t.get('expiry')}|"
+                                f"{t.get('side')}|{round(float(t.get('qty') or 0))}" for t in s["trades"]))
+        filed = list(picks[:TOP_RUNS])
+        seen = {sig(f[0]) for f in filed}
+        for s in [c[1] for c in closest] + res["ranked"]:
+            if len(filed) >= TOP_RUNS:
+                break
+            if not (s.get("trades") and s.get("key_spot_changes")) or sig(s) in seen:
+                continue
+            seen.add(sig(s))
+            prop = opt_mod.to_proposal(asset, s)
+            prop["variant"] = s["variant"]
+            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, s["variant"], s["target"])
+            prop["target"] = s["target"]
+            await _validated(prop, pol, res.get("book"))
+            filed.append((s, prop, gate_mod.evaluate(prop, gctx), 0))
+        closest_line = {id(c[1]): c[2] for c in closest}
         new_ids = []
-        for i, (s, prop, gres, tried) in enumerate(picks[:MAX_PROPOSALS], 1):
+        for i, (s, prop, gres, tried) in enumerate(filed, 1):
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
             rank_note = f" (rank {tried}: the {tried - 1} above it were rejected)" if tried > 1 else ""
+            sweep_out = [f"Sweep filter: {d}." for d in s["disqualified"]]
+            gate = gres.to_dict()
+            route, reasons = gres.route, gres.reasons
+            if sweep_out:
+                route = gate_mod.REJECTED
+                reasons = sweep_out + [r for r in gres.reasons if r != "Inside Lucas's mandate."]
+                gate.update(route=route, reasons=reasons, rejected_by=sweep_out + list(gres.rejected_by))
             pid = await store.add_proposal(
                 "optimizer", asset, f"v4 {label} #{i}",
+                ("Did not qualify - " if route == gate_mod.REJECTED else "") +
                 f"λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} max {v['max_trades']} "
                 f"trades / {v['max_qty']:g} qty: target {s['track_gain_pct']:+.1f}% closer, fit +{s['fit_gain_pct']}%, "
                 f"{s['option_lines']} lines, cost {_m(s['cost_usd'])} | target {s['target']['name']} | "
                 f"judged at T+{s.get('judged_on_days', 0)}d{rank_note}",
-                gres.route, gres.reasons, {**prop, "gate": gres.to_dict()})
+                route, reasons, {**prop, "sweep_rank": i, "gate": gate}, status="open")
             new_ids.append(pid)
+            if id(s) in closest_line:
+                out[closest_line[id(s)]] += f" | proposal #{pid}"
             out.append(f"{i}. [{s['target']['name']}] λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} "
                        f"max{v['max_trades']}/{v['max_qty']:g}: target {s['track_gain_pct']:+.1f}% closer "
                        f"(fit +{s['fit_gain_pct']}%), {s['option_lines']} option lines, cost {_m(s['cost_usd'])}, net prem "
                        f"{_m(s['net_premium_usd'])}{rank_note} | vs book at T+{s.get('judged_on_days', 0)}d: {ch} | "
-                       f"proposal #{pid} -> {gres.route.upper()}"
-                       + (": " + " / ".join(gres.rejected_by or gres.needs_chris) if gres.route != gate_mod.LUCAS else ""))
+                       f"proposal #{pid} -> {route.upper()}"
+                       + (": " + " / ".join(gate["rejected_by"] or gate["needs_chris"]) if route != gate_mod.LUCAS else ""))
         # Older proposals were judged on an older book (and maybe older rules):
         # this sweep replaces them even when it files nothing itself.
         n_old = await store.supersede_open(asset, "optimizer", new_ids)

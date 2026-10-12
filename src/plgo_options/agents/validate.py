@@ -201,6 +201,9 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
     chg = aH - bH
     at = lambda arr, x: float(np.interp(x, ladder, arr))
     tol = policy.cost_tolerance_usd if tol is None else tol
+    floor_tol = tol
+    if reshape and policy.reshape_floor_tolerance_usd is not None:
+        floor_tol = float(policy.reshape_floor_tolerance_usd)
     find: list[tuple[str, str, str]] = []
     out: dict[str, Any] = {"findings": find}
 
@@ -211,9 +214,9 @@ def curve_tests(ladder, before, after, spot: float, dealing: float,
     worst_below = float((chg[below]).min()) - dealing if below.any() else 0.0
     out.update(floor=floor, floor_decided=decided, floor_change_usd=at(chg, floor) - dealing,
                floor_worst_change_usd=worst_below)
-    if worst_below < -tol:
+    if worst_below < -floor_tol:
         find.append(("fail", f"Pushes the floor down: ${-worst_below:,.0f} worse below {label} at T+{horizon}d "
-                             f"(tolerance ${tol:,.0f})", "A2"))
+                             f"(tolerance ${floor_tol:,.0f})", "A2"))
     else:
         find.append(("ok", f"Floor {label} held at T+{horizon}d (worst change below it ${worst_below:,.0f})", "A2"))
 

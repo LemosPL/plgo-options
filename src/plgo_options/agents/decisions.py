@@ -113,6 +113,14 @@ FLOOR_2026_10_07: dict[str, dict[str, Any]] = {
     "FIL": {"reshape_tolerance_usd": 500_000.0},
 }
 
+# 12 Oct 2026, Lucas: ETH reshapes were failing the floor by a few tens of
+# thousands over the $500k (closest: $505-538k worse below 2,000). The floor
+# test for optimizer reshapes allows $700k; max loss and the view keep $500k.
+FLOOR_TOL_2026_10_12: dict[str, dict[str, Any]] = {
+    "ETH": {"reshape_floor_tolerance_usd": 700_000.0},
+    "FIL": {"reshape_floor_tolerance_usd": 700_000.0},
+}
+
 SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-05": SHEET_2026_10_05,
     "2026-10-06-sweep": SWEEP_2026_10_06,
@@ -120,6 +128,7 @@ SHEETS: dict[str, dict[str, dict[str, Any]]] = {
     "2026-10-06-size": SIZE_2026_10_06,
     "2026-10-07-shape": SHAPE_2026_10_07,
     "2026-10-07-floor": FLOOR_2026_10_07,
+    "2026-10-12-floor-tol": FLOOR_TOL_2026_10_12,
 }
 
 

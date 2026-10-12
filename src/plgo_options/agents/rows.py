@@ -75,6 +75,12 @@ def week_key(now: datetime | None = None) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
+def week_start_utc(now: datetime | None = None) -> str:
+    """This week's Monday 00:00 UK as an ISO UTC timestamp (proposal created_at)."""
+    monday = datetime.fromisoformat(week_key(now)).replace(tzinfo=UK)
+    return monday.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+
+
 def month_key(now: datetime | None = None) -> str:
     return (now or datetime.now(UK)).astimezone(UK).strftime("%Y-%m")
 

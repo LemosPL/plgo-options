@@ -198,13 +198,16 @@ async def last_run(agent: str) -> dict[str, Any] | None:
 
 
 async def add_proposal(agent: str, asset: str, kind: str, summary: str,
-                       route: str, reasons: list[str], proposal: dict) -> int:
+                       route: str, reasons: list[str], proposal: dict,
+                       status: str | None = None) -> int:
+    """``status`` None = "rejected" for a rejected route, else "open". The
+    sweep files its rejected top runs "open" so they stay on Proposals."""
     db = await get_db()
     cur = await db.execute(
         "INSERT INTO agent_proposals (created_at, agent, asset, kind, summary, route, reasons_json, "
         "proposal_json, status) VALUES (?,?,?,?,?,?,?,?,?)",
         (now_iso(), agent, asset.upper(), kind, summary, route, json.dumps(reasons),
-         json.dumps(proposal, default=str), "rejected" if route == "rejected" else "open"))
+         json.dumps(proposal, default=str), status or ("rejected" if route == "rejected" else "open")))
     await db.commit()
     return cur.lastrowid
 
@@ -244,15 +247,18 @@ async def decide_proposal(pid: int, status: str, by: str) -> None:
     await db.commit()
 
 
-async def supersede_open(asset: str, agent: str, keep_ids: list[int]) -> int:
+async def supersede_open(asset: str, agent: str, keep_ids: list[int],
+                         created_before: str | None = None) -> int:
     """Close the agent's still-open proposals for ``asset`` that a newer run
-    replaced, so the screen only carries the latest sweep. Returns how many."""
+    replaced, so the screen only carries the latest sweep. ``created_before``
+    (ISO UTC) limits it to proposals older than that. Returns how many."""
     db = await get_db()
     keep = f" AND id NOT IN ({','.join('?' * len(keep_ids))})" if keep_ids else ""
+    before = " AND created_at < ?" if created_before else ""
     cur = await db.execute(
         "UPDATE agent_proposals SET status='superseded', decided_by='newer run', decided_at=? "
-        "WHERE asset=? AND agent=? AND status='open'" + keep,
-        (now_iso(), asset, agent, *keep_ids))
+        "WHERE asset=? AND agent=? AND status='open'" + keep + before,
+        (now_iso(), asset, agent, *keep_ids, *([created_before] if created_before else [])))
     await db.commit()
     return cur.rowcount or 0
 

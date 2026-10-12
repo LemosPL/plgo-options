@@ -115,11 +115,11 @@ async def test_desk_walks_down_the_ranking_until_the_gate_accepts(monkeypatch):
 
     filed, superseded = [], []
 
-    async def add_proposal(agent, asset, kind, summary, route, reasons, proposal):
+    async def add_proposal(agent, asset, kind, summary, route, reasons, proposal, status=None):
         filed.append((route, proposal["variant"]["max_trades"], summary))
         return len(filed)
 
-    async def supersede_open(asset, agent, keep):
+    async def supersede_open(asset, agent, keep, created_before=None):
         superseded.append(keep)
         return 3
 
@@ -142,8 +142,9 @@ async def test_desk_walks_down_the_ranking_until_the_gate_accepts(monkeypatch):
     monkeypatch.setattr(desk.store, "recent_curves", lambda a, n: nothing())
     monkeypatch.setattr(desk.store, "save_curve", lambda *a, **k: nothing())
     out = await desk.optimizer({"assets": ["ETH"], "label": "am"})
-    assert [(r, m) for r, m, _ in filed] == [(gate.CHRIS, 7)]
-    assert "rank 2" in filed[0][2] and superseded == [[1]]
+    # The gate's pick first; the run it rejected is still shown, with why.
+    assert [(r, m) for r, m, _ in filed] == [(gate.CHRIS, 7), (gate.REJECTED, 5)]
+    assert "rank 2" in filed[0][2] and superseded == [[1, 2]]
     assert "superseded" in out["facts"]
 
 
@@ -240,3 +241,17 @@ async def test_sweep_judges_on_the_exact_expiry_horizon(monkeypatch):
     res = await opt.sweep(pol)
     h = horizon_days(pol.optimizer.effective_expiry())
     assert h in seen[0] and res["ranked"][0]["judged_on_days"] == h
+
+
+def test_reshape_floor_tolerance_is_separate_from_max_loss_and_view():
+    import numpy as np
+    pol = policy()
+    pol.floor_price, pol.reshape_tolerance_usd, pol.reshape_floor_tolerance_usd = 2000.0, 500_000.0, 700_000.0
+    before = np.zeros(len(LADDER))
+    after = np.where(np.asarray(LADDER) <= 2000.0, -600_000.0, 0.0)
+    fails = [f[1] for f in curve_tests(LADDER, before, after, SPOT, 0.0, pol, 79, 500_000.0,
+                                       reshape=True)["findings"] if f[0] == "fail"]
+    assert not any("floor" in f for f in fails)
+    fails = [f[1] for f in curve_tests(LADDER, before, after, SPOT, 0.0, pol, 79, 500_000.0)["findings"]
+             if f[0] == "fail"]
+    assert any("floor" in f for f in fails)       # row trades keep the plain tolerance

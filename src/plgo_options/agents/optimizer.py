@@ -330,6 +330,12 @@ async def gather_book(asset: str) -> tuple[dict, dict]:
     from plgo_options.web.routes.portfolio import portfolio_pnl
 
     pnl = await portfolio_pnl(asset=asset.upper(), include_expired=False)
+    # include_expired only reads the trade's status, which the expiry job sets
+    # later in the day: on 12 Oct the 09:00 FIL sweep still saw 9 Oct puts and
+    # proposed "unwinding" them, and the validation could not price them.
+    today = date.today().isoformat()
+    pnl["positions"] = [p for p in (pnl.get("positions") or [])
+                        if not (p.get("expiry") and str(p["expiry"])[:10] < today)]
     try:
         perps = await _build_perp_positions(asset.upper(), pnl)
         if perps:
