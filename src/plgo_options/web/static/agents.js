@@ -564,13 +564,35 @@
     if (!name && pr.v4_params) name = pr.v4_params.target_profile_file ? pr.v4_params.target_profile_file.replace(/\.csv$/i, "") : "parametric V";
     return { name, days: pr.judged_on_days };
   }
+  // Which target profile a proposal was fitted to, spelled out (12 Oct 2026):
+  // the parametric V with its max loss and breakevens at the run's spot, or
+  // the saved curve's name; row and manual trades say they have none.
   function targetChip(p) {
-    const t = propTarget(p);
-    if (!t.name) return "";
-    return '<span class="ag-chip" style="background:rgba(168,85,247,.15);color:#a855f7" title="Target profile the optimizer fitted">' +
-      "Target: " + esc(t.name) + "</span>" +
-      (t.days ? ' <span class="ag-chip" style="background:rgba(148,163,184,.15);color:var(--muted)" title="P&L curve used for the giveback and floor tests">' +
-        "judged at T+" + t.days + "d</span>" : "");
+    const pr = p.proposal || {}, t = propTarget(p), vp = pr.v4_params || {};
+    const box = (inner, col) => '<div style="font-size:.66rem;line-height:1.4;margin:.1rem 0 .25rem;padding:.25rem .45rem;' +
+      "border-radius:4px;background:" + col + "1a;border-left:2px solid " + col + '">' + inner + "</div>";
+    const judged = (t.days ? " · judged at T+" + t.days + "d" : "") + (vp.target_expiry ? " on " + esc(vp.target_expiry) : "");
+    if (p.agent === "row_watcher" || pr.source === "row") {
+      return box('<b>Target profile:</b> none - row trade, sized by the B1 row rule' +
+        (pr.row_key ? " (row " + esc(pr.row_key) + ")" : "") + ".", "#94a3b8");
+    }
+    if (!t.name) return box("<b>Target profile:</b> not recorded on this proposal.", "#94a3b8");
+    const file = (pr.target && pr.target.file) || vp.target_profile_file || null;
+    const S = Number(pr.spot) || null;
+    if (!file && vp.parametric_trough_payoff != null) {
+      const dn = Number(vp.parametric_low_floor_ratio), up = Number(vp.parametric_high_plateau_ratio);
+      const be = (r) => S ? px(p.asset, Math.round(S * r * 10000) / 10000) : "—";
+      return box('<b style="color:#a855f7">Target profile: parametric V</b> (' + esc(t.name) + ")" + judged + "<br>" +
+        "Max loss " + money(Number(vp.parametric_trough_payoff)) + " at spot" + (S ? " " + px(p.asset, S) : "") +
+        "; breaks even at " + be(1 - dn) + " (−" + Math.round(dn * 100) + "%) and " + be(1 + up) +
+        " (+" + Math.round(up * 100) + "%); straight lines between.", "#a855f7");
+    }
+    if (!file && /^(V |parametric)/i.test(t.name)) {     // older proposals: name only
+      return box('<b style="color:#a855f7">Target profile: parametric V</b> (' + esc(t.name) + ")" + judged, "#a855f7");
+    }
+    return box('<b style="color:#a855f7">Target profile: saved curve "' + esc(t.name) + '"</b>' + judged +
+      (file ? '<br><span style="color:var(--muted)">File ' + esc(file) +
+        " - Validate in v4 loads this curve; it is in v4's Target list.</span>" : ""), "#a855f7");
   }
 
   // The agent's own pricing of the trade (agents/validate.py): what the
