@@ -312,6 +312,8 @@
         <button id="btn-tm-bulk-reactivate" class="btn-secondary tm-bulk-btn" style="width:auto;display:none"
           title="Put the selected expired trades back to active. The expiry date is left unchanged, so any trade already past its expiry will be auto-expired again on the next app restart — edit its expiry to keep it active.">Reactivate Selected</button>
         <button id="btn-tm-bulk-delete" class="btn-secondary tm-bulk-btn btn-delete" style="width:auto;display:none">Delete Selected</button>
+        <span id="tm-sel-decay" style="display:none;font-size:.8rem;padding:.25rem .55rem;border-radius:6px;background:var(--hover-bg);white-space:nowrap"
+              title="Time decay of the ticked active trades at today's spot and vol: day = theta; month / year = value now minus value in 30 / 360 days (trades that expire sooner count to expiry)"></span>
         <label class="toggle-label" style="margin:0">
           <input type="checkbox" id="tm-show-expired"> Show Expired
         </label>
@@ -3999,7 +4001,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=185"></script>
+<script src="/static/app.js?v=186"></script>
 <script src="/static/agents.js?v=27"></script>
 </body>
 </html>

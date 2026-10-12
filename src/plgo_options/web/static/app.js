@@ -2410,9 +2410,41 @@ function tmSelectedByStatus() {
   };
 }
 
+// What the ticked trades lose (or earn) to time: a day = theta x net qty; a
+// month / year = value in 30 / 360 days minus value now, at today's spot and
+// vol (mtm_by_horizon), so decay speeding up and trades expiring first count.
+function tmSelectedDecay(active) {
+  const iH = h => (window.TM_MATRIX_HORIZONS || [30, 45, 60, 90, 120, 150, 180, 270, 360]).indexOf(h);
+  const at = (t, h) => {
+    const arr = t.mtm_by_horizon || [];
+    const i = iH(h);
+    return i >= 0 && arr[i] != null ? Number(arr[i]) : null;
+  };
+  let day = 0, month = 0, year = 0, missing = 0;
+  active.forEach(t => {
+    day += (t.theta || 0) * (t.net_qty || 0);
+    const now = t.current_mtm || 0, m = at(t, 30), y = at(t, 360);
+    if (m == null || y == null) { missing += 1; month += (t.theta || 0) * (t.net_qty || 0) * 30; year += (t.theta || 0) * (t.net_qty || 0) * 360; return; }
+    month += m - now; year += y - now;
+  });
+  return { day, month, year, missing };
+}
+
+function tmRenderSelectedDecay(active) {
+  const el = document.getElementById("tm-sel-decay");
+  if (!el) return;
+  if (!active.length) { el.style.display = "none"; return; }
+  const d = tmSelectedDecay(active);
+  const fmt = v => `<b style="color:${v < 0 ? "var(--red)" : "var(--green)"}">${v < 0 ? "-$" : "+$"}${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}</b>`;
+  el.innerHTML = `${active.length} selected &middot; time decay: ${fmt(d.day)} / day &middot; ${fmt(d.month)} / month &middot; ${fmt(d.year)} / year` +
+    (d.missing ? ` <span style="color:var(--muted)">(${d.missing} estimated as theta x days)</span>` : "");
+  el.style.display = "";
+}
+
 function tmUpdateBulkUI() {
   const n = tmSelected.size;
   const { active, expired } = tmSelectedByStatus();
+  tmRenderSelectedDecay(active);
   const $expire = document.getElementById("btn-tm-bulk-expire");
   const $delete = document.getElementById("btn-tm-bulk-delete");
   const $react = document.getElementById("btn-tm-bulk-reactivate");
