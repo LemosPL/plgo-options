@@ -85,3 +85,35 @@ async def test_roll_into_choices_are_v4s_maturities(book):
     pol.optimizer.counterparties = []
     _, expiries = await opt.roll_universe(pol, 20)
     assert expiries == [{"code": "30OCT26", "dte": 18}, {"code": "25DEC26", "dte": 74}]
+
+
+def test_roll_runs_that_touch_other_legs_or_grow_the_book_are_out():
+    roll = {"gross_qty": 10_000_000}
+    ok = {"trades": [{"opt": "C", "qty": -2e6, "is_unwind": True, "strategy": "ROLL_UNWIND"},
+                     {"opt": "C", "qty": 3e6, "is_unwind": False, "strategy": "NAKED"},
+                     {"opt": "C", "qty": 9e6, "is_unwind": False, "strategy": "BOX_NEUTRALIZER"}],
+          "disqualified": [], "score": 5.0}
+    assert opt.roll_limits(dict(ok), roll)["disqualified"] == []
+    other = dict(ok, trades=ok["trades"] + [{"opt": "C", "strike": 0.25, "expiry": "2026-12-25", "qty": -1e6,
+                                              "is_unwind": True, "strategy": "REDUCE", "counterparty": "KeyRock"}])
+    assert "outside the roll" in opt.roll_limits(other, roll)["disqualified"][0]
+    big = dict(ok, trades=ok["trades"] + [{"opt": "P", "qty": 8e6, "is_unwind": False, "strategy": "NAKED"}])
+    out = opt.roll_limits(big, roll)
+    assert "more than the 10,000,000 rolled" in out["disqualified"][0] and out["score"] == -1e9
+
+
+def test_roll_policy_caps_line_size_and_turns_off_composite_unwinds():
+    pol = default_policy("FIL")
+    rp = opt.roll_policy(pol, {"into": "25DEC26", "max_leg_qty": 2_500_000})
+    assert max(rp.optimizer.max_qty_grid) == 2_500_000 and rp.optimizer.enable_composite_unwind is False
+
+
+def test_like_for_like_closes_each_leg_and_reopens_it_in_the_new_expiry():
+    roll = {"into": "25DEC26", "ids": [1], "legs": [
+        {"id": 1, "counterparty": "Flowdesk", "opt": "P", "strike": 0.45, "expiry": "2026-10-30", "qty": -18e6}]}
+    p = desk._like_for_like("FIL", roll, 1.25)
+    close, reopen = p["legs"]
+    assert (close["side"], close["expiry"], close["is_unwind"]) == ("Buy", "2026-10-30", True)
+    assert (reopen["side"], reopen["expiry"], reopen["qty"], reopen["strike"]) == ("Sell", "2026-12-25", -18e6, 0.45)
+    from plgo_options.agents import gate
+    assert gate.classify_rolls(p["legs"])[0]["type"] == "out_same_strike"

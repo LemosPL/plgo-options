@@ -447,6 +447,26 @@ async def optimizer(ctx: dict) -> dict:
                 if first:
                     picks.append(first)
                     out.append(f"[{tname}] the gate rejected all {tried} runs tried; filing the top one with its reasons.")
+        # Roll sweep: the plain roll first - every leg as it is (same
+        # counterparty, strike and quantity) into the new expiry - priced and
+        # gated like any proposal, so the optimizer's rolls have a yardstick.
+        baseline = None
+        if roll and roll.get("legs"):
+            baseline = _like_for_like(asset, roll, res["spot"])
+            await _validated(baseline, vpol, res.get("book"))
+            bres = gate_mod.evaluate(baseline, gctx)
+            bv = baseline.get("validation") or {}
+            bpid = await store.add_proposal(
+                who, asset, f"roll {label} baseline",
+                f"Like-for-like roll: {len(roll['legs'])} legs {', '.join(roll.get('expiries') or [])} -> "
+                f"{res['target']['expiry']}, same counterparty / strike / quantity",
+                bres.route, bres.reasons, {**baseline, "sweep_rank": 0, "gate": bres.to_dict()}, status="open")
+            ks = ", ".join(f"{k['moneyness']:+.0%} {_m(k['change_usd'])}" for k in bv.get("key_spots") or [])
+            out.append(f"0. LIKE-FOR-LIKE ROLL: net premium {_m(bv.get('net_premium_usd'))}, dealing "
+                       f"{_m(bv.get('dealing_cost_usd'))} | vs letting them expire at T+{bv.get('horizon_days')}d: {ks}"
+                       + (f", expected range avg {_m(bv.get('range_avg_change_usd'))}" if bv.get("range_low") else "")
+                       + f" | proposal #{bpid} -> {bres.route.upper()}"
+                       + (": " + " / ".join(bres.rejected_by or bres.needs_chris) if bres.route != gate_mod.LUCAS else ""))
         # The sweep's top runs go on the Proposals tab even when they did not
         # qualify (12 Oct 2026, Lucas), each with why, so they can be opened in
         # v4 / Pricing: the gate's picks, then each empty target's closest run,
@@ -472,7 +492,7 @@ async def optimizer(ctx: dict) -> dict:
             await _validated(prop, vpol, res.get("book"))
             filed.append((s, prop, gate_mod.evaluate(prop, gctx), 0))
         closest_line = {id(c[1]): c[2] for c in closest}
-        new_ids = []
+        new_ids = [bpid] if baseline else []
         for i, (s, prop, gres, tried) in enumerate(filed, 1):
             v = s["variant"]
             ch = ", ".join(f"{d['moneyness']:+.0%} {_m(d['change_usd'])}" for d in s["key_spot_changes"])
@@ -486,6 +506,7 @@ async def optimizer(ctx: dict) -> dict:
                 gate.update(route=route, reasons=reasons, rejected_by=sweep_out + list(gres.rejected_by))
             if roll:
                 prop["roll"] = {k: roll.get(k) for k in ("ids", "into", "dte", "expiries")}
+                prop["sweep_rank"] = i
             pid = await store.add_proposal(
                 who, asset, f"roll {label} #{i}" if roll else f"v4 {label} #{i}",
                 ("Did not qualify - " if route == gate_mod.REJECTED else "") +
@@ -750,18 +771,40 @@ async def monthly_review(ctx: dict) -> dict:
     return {"facts": "MONTHLY REVIEW\n" + "\n".join(out), "deliver": True}
 
 
+def _like_for_like(asset: str, roll: dict, spot: float) -> dict:
+    """The plain roll as a proposal: close each leg, reopen it at the same
+    counterparty, strike and quantity in roll["into"]."""
+    into = datetime.strptime(str(roll["into"]), "%d%b%y").date().isoformat()
+    legs = []
+    for l in roll["legs"]:
+        q = float(l["qty"])
+        legs.append({"kind": "option", "side": "Buy" if q < 0 else "Sell", "opt": l["opt"], "strike": l["strike"],
+                     "expiry": l["expiry"], "qty": -q, "counterparty": l["counterparty"],
+                     "is_unwind": True, "strategy": "ROLL_UNWIND"})
+        legs.append({"kind": "option", "side": "Sell" if q < 0 else "Buy", "opt": l["opt"], "strike": l["strike"],
+                     "expiry": into, "qty": q, "counterparty": l["counterparty"],
+                     "is_unwind": False, "strategy": "ROLL_NEW"})
+    return {"asset": asset, "source": "optimizer", "purpose": "shape", "legs": legs,
+            "notional_usd": 2 * sum(abs(float(l["qty"])) for l in roll["legs"]) * spot, "net_cost_usd": 0.0,
+            "spot": spot, "roll": {k: roll.get(k) for k in ("ids", "into", "dte", "expiries")},
+            "roll_baseline": True,
+            "reason": "Like-for-like roll: every leg into the new expiry at the same strike and size."}
+
+
 async def roll_sweep(ctx: dict) -> dict:
     """On demand from the Agents page: ctx {"assets": [asset], "roll": {"ids",
     "into", "dte", "expiries"}}. Rolls only legs the roll sweep may touch."""
     roll = dict(ctx.get("roll") or {})
     asset = [a.upper() for a in (ctx.get("assets") or ["ETH"])][:1]
     pol = await store.get_policy(asset[0])
-    allowed = {r["id"] for r in await opt_mod.roll_candidates(pol, 3650)}
-    ids = [int(i) for i in roll.get("ids") or [] if int(i) in allowed]
+    by_id = {r["id"]: r for r in await opt_mod.roll_candidates(pol, 3650)}
+    ids = [int(i) for i in roll.get("ids") or [] if int(i) in by_id]
     if not ids:
         return {"facts": f"{asset[0]} roll sweep: no legs to roll (none chosen, or none the sweep may roll).",
                 "deliver": False}
-    roll["ids"] = ids
+    legs = [by_id[i] for i in ids]
+    roll.update(ids=ids, legs=legs, expiries=sorted({l["expiry"] for l in legs}),
+                gross_qty=sum(abs(l["qty"]) for l in legs), max_leg_qty=max(abs(l["qty"]) for l in legs))
     return await optimizer({**ctx, "assets": asset, "roll": roll, "label": ctx.get("label") or "roll"})
 
 

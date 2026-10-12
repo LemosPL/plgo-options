@@ -640,6 +640,10 @@
     const box = (inner, col) => '<div style="font-size:.66rem;line-height:1.4;margin:.1rem 0 .25rem;padding:.25rem .45rem;' +
       "border-radius:4px;background:" + col + "1a;border-left:2px solid " + col + '">' + inner + "</div>";
     const judged = (t.days ? " · judged at T+" + t.days + "d" : "") + (vp.target_expiry ? " on " + esc(vp.target_expiry) : "");
+    if (pr.roll_baseline) {
+      return box("<b>Target profile:</b> none - like-for-like roll baseline: every leg into " + esc((pr.roll || {}).into || "") +
+        " at the same counterparty, strike and size, so the optimizer's rolls have a yardstick.", "#f59e0b");
+    }
     if (p.agent === "row_watcher" || pr.source === "row") {
       return box('<b>Target profile:</b> none - row trade, sized by the B1 row rule' +
         (pr.row_key ? " (row " + esc(pr.row_key) + ")" : "") + ".", "#94a3b8");

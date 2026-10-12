@@ -457,9 +457,39 @@ def roll_policy(policy: AssetPolicy, roll: dict[str, Any]) -> AssetPolicy:
     """The policy a roll sweep runs under: the target expiry is the one the
     legs roll into (no automatic switch)."""
     import dataclasses
+    # Roll-sized (12 Oct 2026): no line bigger than the biggest leg rolled, and
+    # no composite unwinds of legs outside the selection.
+    cap = float(roll.get("max_leg_qty") or 0)
+    grid = list(policy.optimizer.max_qty_grid)
+    if cap > 0:
+        grid = sorted({min(q, cap) for q in grid})
     preset = dataclasses.replace(policy.optimizer, target_expiry=str(roll.get("into") or policy.optimizer.effective_expiry()),
-                                 next_expiry=None)
+                                 next_expiry=None, max_qty_grid=grid, enable_composite_unwind=False)
     return dataclasses.replace(policy, optimizer=preset)
+
+
+def roll_limits(s: dict[str, Any], roll: dict[str, Any] | None) -> dict[str, Any]:
+    """A roll run is out if it touches legs outside the selection (closes or
+    reduces a position that was not ticked) or opens more option contracts
+    than the roll closes."""
+    if not roll:
+        return s
+    opts = [t for t in s.get("trades") or []
+            if str(t.get("opt") or "").upper() in ("C", "P") and "BOX" not in str(t.get("strategy") or "").upper()]
+    outside = [t for t in opts if t.get("is_unwind") and str(t.get("strategy") or "").upper() != "ROLL_UNWIND"]
+    new_qty = sum(abs(float(t.get("qty") or 0)) for t in opts if not t.get("is_unwind"))
+    rolled = float(roll.get("gross_qty") or 0)
+    out = []
+    if outside:
+        out.append(f"touches {len(outside)} leg(s) outside the roll: " + ", ".join(
+            f"{t.get('opt')} {float(t.get('strike') or 0):g} {str(t.get('expiry'))[:10]} ({t.get('counterparty')})"
+            for t in outside[:3]))
+    if rolled and new_qty > rolled * 1.0001:
+        out.append(f"opens {new_qty:,.0f} contracts, more than the {rolled:,.0f} rolled")
+    if out:
+        s["disqualified"] = list(s.get("disqualified") or []) + out
+        s["score"] = -1e9
+    return s
 
 
 def roll_kwargs(kw: dict[str, Any], roll: dict[str, Any] | None) -> dict[str, Any]:
@@ -500,7 +530,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
             kw = roll_kwargs(run_kwargs(policy.asset, preset, v, tgt), roll)
             try:
                 result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
-                s = summarize(result, v, preset, policy)
+                s = roll_limits(summarize(result, v, preset, policy), roll)
                 s["target"] = tgt
                 out.append(s)
             except Exception as e:                  # one bad combination must not stop the sweep
