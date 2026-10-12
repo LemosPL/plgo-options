@@ -102,7 +102,7 @@ async def test_desk_walks_down_the_ranking_until_the_gate_accepts(monkeypatch):
     for s in (a, b):
         s["target"] = {"name": tname, "file": None}
 
-    async def fake_sweep(p):
+    async def fake_sweep(p, roll=None):
         return {"asset": "ETH", "target": {"expiry": "x", "counterparties": []}, "targets": [tname],
                 "runs": 2, "errors": [], "ranked": [a, b], "pareto": [a, b], "best": [a],
                 "candidates": {tname: [a, b]}, "spot": SPOT, "book": {}, "book_mtm": 0.0}

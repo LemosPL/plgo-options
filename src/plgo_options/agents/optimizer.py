@@ -397,6 +397,45 @@ async def gather_book(asset: str) -> tuple[dict, dict]:
     return pnl, collateral
 
 
+# 12 Oct 2026, Lucas: G20 is out of the roll sweep completely (never listed,
+# never rolled). Its trades stay in the book; nothing here deletes them.
+ROLL_EXCLUDED_COUNTERPARTIES = {"g20"}
+
+
+async def roll_candidates(policy: AssetPolicy, dte_max: int) -> list[dict[str, Any]]:
+    """Option legs of the managed book expiring within ``dte_max`` days that
+    the roll sweep may roll: not G20, and inside the sweep's counterparties
+    when some are selected. Collar loans are already out of the book."""
+    from plgo_options.web.routes.portfolio import portfolio_pnl
+    pnl = await portfolio_pnl(asset=policy.asset.upper(), include_expired=False)
+    spot = float(pnl.get("spot") or pnl.get("eth_spot") or 0)
+    allowed = {c.lower() for c in (policy.optimizer.counterparties or [])}
+    today = date.today()
+    out = []
+    for p in pnl.get("positions") or []:
+        cp = str(p.get("counterparty") or "")
+        opt = str(p.get("opt") or "").upper()
+        if opt not in ("C", "P") or cp.lower() in ROLL_EXCLUDED_COUNTERPARTIES:
+            continue
+        if allowed and cp.lower() not in allowed:
+            continue
+        try:
+            exp = date.fromisoformat(str(p.get("expiry"))[:10])
+        except ValueError:
+            continue
+        dte = (exp - today).days
+        if dte < 0 or dte > dte_max:
+            continue
+        k = float(p.get("strike") or 0)
+        out.append({
+            "id": p.get("id"), "counterparty": cp, "instrument": p.get("instrument"),
+            "side": p.get("side"), "opt": opt, "strike": k, "expiry": exp.isoformat(), "dte": dte,
+            "qty": float(p.get("net_qty") or 0), "mtm_usd": float(p.get("current_mtm") or 0),
+            "itm": (opt == "C" and k < spot) or (opt == "P" and k > spot),
+        })
+    return sorted(out, key=lambda r: (r["expiry"], r["counterparty"].lower(), r["opt"], r["strike"]))
+
+
 def _run_one(pnl: dict, collateral: dict, kwargs: dict) -> dict:
     from plgo_options.optimization.optim_usecase import OptimizerRunParams, OptimizerUseCase
     params = OptimizerRunParams(collateral_by_cp=collateral, enforce_collateral_cap=False, **kwargs)
@@ -404,9 +443,30 @@ def _run_one(pnl: dict, collateral: dict, kwargs: dict) -> dict:
     return usecase.run()
 
 
+def roll_policy(policy: AssetPolicy, roll: dict[str, Any]) -> AssetPolicy:
+    """The policy a roll sweep runs under: the target expiry is the one the
+    legs roll into (no automatic switch)."""
+    import dataclasses
+    preset = dataclasses.replace(policy.optimizer, target_expiry=str(roll.get("into") or policy.optimizer.effective_expiry()),
+                                 next_expiry=None)
+    return dataclasses.replace(policy, optimizer=preset)
+
+
+def roll_kwargs(kw: dict[str, Any], roll: dict[str, Any] | None) -> dict[str, Any]:
+    """Engine kwargs for a roll sweep: close exactly the chosen legs (the
+    engine's manual roll mode, as v4's checked rows), nothing by DTE."""
+    if roll:
+        kw.update(roll_dte_threshold=-1, forced_roll_ids=[int(i) for i in roll.get("ids") or []])
+    return kw
+
+
 async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
-                variants: list[dict] | None = None) -> dict[str, Any]:
-    """Run the grid for one asset. Returns ranked summaries + the best three."""
+                variants: list[dict] | None = None, roll: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run the grid for one asset. Returns ranked summaries + the best three.
+    ``roll`` = {"ids": [...], "into": "25DEC26"}: a roll sweep - the legs are
+    always closed and the grid finds the best way to replace them."""
+    if roll:
+        policy = roll_policy(policy, roll)
     preset = policy.optimizer
     pnl, collateral = await gather_book(policy.asset)
     if custom_spot:
@@ -427,7 +487,7 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
             if _vkey(v) in done or len(done) >= max(1, preset.max_runs):
                 continue
             done.add(_vkey(v))
-            kw = run_kwargs(policy.asset, preset, v, tgt)
+            kw = roll_kwargs(run_kwargs(policy.asset, preset, v, tgt), roll)
             try:
                 result = await asyncio.to_thread(_run_one, pnl, collateral, kw)
                 s = summarize(result, v, preset, policy)
@@ -504,6 +564,8 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "candidates": candidates,
         "spot": float(pnl.get("spot") or pnl.get("eth_spot") or 0),
         "book": pnl,                          # for the validation pass; not stored
+        "policy": policy,                     # the one it ran under (a roll's target expiry)
+        "roll": roll,
         "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
     }
 

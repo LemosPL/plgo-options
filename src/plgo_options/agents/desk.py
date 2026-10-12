@@ -363,13 +363,21 @@ async def morning_open(ctx: dict) -> dict:
 async def optimizer(ctx: dict) -> dict:
     label = ctx.get("label") or ("am" if datetime.now(UK).hour < 13 else "pm")
     assets = [a.upper() for a in (ctx.get("assets") or ["ETH"])]
+    # A roll sweep (Agents page > Roll sweep): the chosen legs are closed and
+    # the grid finds the best replacement into ``roll["into"]``. Filed under
+    # its own agent so it never supersedes the regular sweep's proposals.
+    roll = ctx.get("roll") or None
+    who = "roll_sweep" if roll else "optimizer"
     out, pols, data = [], [], {}
     for asset in assets:
         pol = await store.get_policy(asset)
         pols.append(pol)
-        res = await opt_mod.sweep(pol)
+        res = await opt_mod.sweep(pol, roll=roll)
+        vpol = res.get("policy") or pol             # a roll's target expiry
         best = res["best"]
-        out.append(f"== {asset} Optimizer v4 sweep ({label}) - {res['runs']} runs, "
+        what = (f"ROLL sweep: {len(roll.get('ids') or [])} legs ({', '.join(roll.get('expiries') or []) or '-'}) "
+                f"into {res['target']['expiry']}" if roll else f"Optimizer v4 sweep ({label})")
+        out.append(f"== {asset} {what} - {res['runs']} runs, "
                    f"{res['target']['expiry']} {','.join(res['target']['counterparties'] or ['all'])}, "
                    f"{len(res['targets'])} target profiles: {'; '.join(res['targets'])} ==")
         fine = {k: v for k, v in (res.get("lam_refined") or {}).items() if v}
@@ -427,9 +435,9 @@ async def optimizer(ctx: dict) -> dict:
                 prop = opt_mod.to_proposal(asset, s)
                 # What "Validate in v4" replays: the page's own run parameters.
                 prop["variant"] = s["variant"]
-                prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, s["variant"], s["target"])
+                prop["v4_params"] = opt_mod.roll_kwargs(opt_mod.run_kwargs(asset, vpol.optimizer, s["variant"], s["target"]), roll)
                 prop["target"] = s["target"]
-                await _validated(prop, pol, res.get("book"))
+                await _validated(prop, vpol, res.get("book"))
                 gres = gate_mod.evaluate(prop, gctx)
                 first = first or (s, prop, gres, tried)
                 if gres.route != gate_mod.REJECTED:
@@ -459,9 +467,9 @@ async def optimizer(ctx: dict) -> dict:
             seen.add(sig(s))
             prop = opt_mod.to_proposal(asset, s)
             prop["variant"] = s["variant"]
-            prop["v4_params"] = opt_mod.run_kwargs(asset, pol.optimizer, s["variant"], s["target"])
+            prop["v4_params"] = opt_mod.roll_kwargs(opt_mod.run_kwargs(asset, vpol.optimizer, s["variant"], s["target"]), roll)
             prop["target"] = s["target"]
-            await _validated(prop, pol, res.get("book"))
+            await _validated(prop, vpol, res.get("book"))
             filed.append((s, prop, gate_mod.evaluate(prop, gctx), 0))
         closest_line = {id(c[1]): c[2] for c in closest}
         new_ids = []
@@ -476,9 +484,12 @@ async def optimizer(ctx: dict) -> dict:
                 route = gate_mod.REJECTED
                 reasons = sweep_out + [r for r in gres.reasons if r != "Inside Lucas's mandate."]
                 gate.update(route=route, reasons=reasons, rejected_by=sweep_out + list(gres.rejected_by))
+            if roll:
+                prop["roll"] = {k: roll.get(k) for k in ("ids", "into", "dte", "expiries")}
             pid = await store.add_proposal(
-                "optimizer", asset, f"v4 {label} #{i}",
+                who, asset, f"roll {label} #{i}" if roll else f"v4 {label} #{i}",
                 ("Did not qualify - " if route == gate_mod.REJECTED else "") +
+                (f"ROLL {len(roll.get('ids') or [])} legs -> {res['target']['expiry']}: " if roll else "") +
                 f"λ{v['lam_factor']} κ{v['downside_factor']} T+90 {v['t90_weight']} max {v['max_trades']} "
                 f"trades / {v['max_qty']:g} qty: target {s['track_gain_pct']:+.1f}% closer, fit +{s['fit_gain_pct']}%, "
                 f"{s['option_lines']} lines, cost {_m(s['cost_usd'])} | target {s['target']['name']} | "
@@ -496,11 +507,11 @@ async def optimizer(ctx: dict) -> dict:
                        + (": " + " / ".join(gate["rejected_by"] or gate["needs_chris"]) if route != gate_mod.LUCAS else ""))
         # Older proposals were judged on an older book (and maybe older rules):
         # this sweep replaces them even when it files nothing itself.
-        n_old = await store.supersede_open(asset, "optimizer", new_ids)
+        n_old = await store.supersede_open(asset, who, new_ids)
         if n_old:
-            out.append(f"{n_old} older open sweep proposal(s) for {asset} superseded by this run.")
-        # Two-curve check against the previous run today.
-        top = best[0] if best else None
+            out.append(f"{n_old} older open {'roll ' if roll else ''}sweep proposal(s) for {asset} superseded by this run.")
+        # Two-curve check against the previous run today (regular sweeps only).
+        top = best[0] if best and not roll else None
         if top:
             # Same day and same target only: curves fitted to different targets differ by design.
             tname = top["target"]["name"]
@@ -739,12 +750,28 @@ async def monthly_review(ctx: dict) -> dict:
     return {"facts": "MONTHLY REVIEW\n" + "\n".join(out), "deliver": True}
 
 
+async def roll_sweep(ctx: dict) -> dict:
+    """On demand from the Agents page: ctx {"assets": [asset], "roll": {"ids",
+    "into", "dte", "expiries"}}. Rolls only legs the roll sweep may touch."""
+    roll = dict(ctx.get("roll") or {})
+    asset = [a.upper() for a in (ctx.get("assets") or ["ETH"])][:1]
+    pol = await store.get_policy(asset[0])
+    allowed = {r["id"] for r in await opt_mod.roll_candidates(pol, 3650)}
+    ids = [int(i) for i in roll.get("ids") or [] if int(i) in allowed]
+    if not ids:
+        return {"facts": f"{asset[0]} roll sweep: no legs to roll (none chosen, or none the sweep may roll).",
+                "deliver": False}
+    roll["ids"] = ids
+    return await optimizer({**ctx, "assets": asset, "roll": roll, "label": ctx.get("label") or "roll"})
+
+
 # ── registry and runner ───────────────────────────────────────────────────
 
 AGENTS: dict[str, Callable[[dict], Awaitable[dict]]] = {
     "row-watcher": row_watcher,
     "morning-open": morning_open,
     "optimizer": optimizer,
+    "roll-sweep": roll_sweep,
     "handover": handover,
     "night-desk": night_desk,
     "close-check": close_check,

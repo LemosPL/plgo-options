@@ -67,9 +67,63 @@
             (last ? ' <span style="color:var(--muted)">· ' + last + '</span>' : "") + '</div>' +
         '</span>' +
         '<button class="btn-secondary ag-run" data-run="' + n + '">Run</button>' +
-      '</div>' + (n === "optimizer" ? '<div id="agents-cpty-box"></div>' : "");
+      '</div>' + (n === "optimizer" ? '<div id="agents-cpty-box"></div><div id="agents-roll-box"></div>' : "");
     }).join("");
     loadCptys();
+    renderRoll();
+  }
+
+  // Roll sweep (12 Oct 2026): pick the legs to roll by days to expiry, untick
+  // any to keep, choose the expiry to roll into, run. The legs are always
+  // closed and the sweep finds the best replacement (agents roll-sweep).
+  // G20 legs are never listed; only the sweep's counterparties are.
+  const ROLL = { data: null, dte: 20, into: "", itm: false, sel: new Set(), open: false, busy: false, msg: "" };
+  function rollLegs() {
+    return ((ROLL.data && ROLL.data.legs) || []).filter((l) => !ROLL.itm || l.itm);
+  }
+  function renderRoll() {
+    const box = $("agents-roll-box");
+    if (!box) return;
+    if (ROLL.data && ROLL.data.asset !== asset()) { ROLL.data = null; ROLL.sel = new Set(); ROLL.into = ""; }
+    const legs = rollLegs();
+    const picked = legs.filter((l) => ROLL.sel.has(l.id));
+    const mtm = picked.reduce((a, l) => a + (l.mtm_usd || 0), 0);
+    const exps = [...new Set(legs.map((l) => l.expiry))];
+    const inp = 'style="width:auto;font-size:.66rem;padding:.08rem .25rem"';
+    const btn = 'class="btn-secondary" style="width:auto;font-size:.62rem;padding:.12rem .4rem"';
+    box.innerHTML = '<details id="agents-roll-details" style="margin:.1rem .4rem .45rem 1.4rem;font-size:.68rem"' + (ROLL.open ? " open" : "") + ">" +
+      '<summary style="cursor:pointer;color:var(--muted)">' + esc(asset()) + " roll sweep" +
+        (ROLL.data ? ": " + picked.length + " of " + legs.length + " legs ticked" : ": pick legs by days to expiry") + "</summary>" +
+      '<div style="display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;margin:.3rem 0">' +
+        'DTE &le; <input id="agents-roll-dte" type="number" min="0" max="400" value="' + ROLL.dte + '" ' + inp + ' size="3">' +
+        'Roll into <input id="agents-roll-into" value="' + esc(ROLL.into || (ROLL.data && ROLL.data.into) || "") + '" ' + inp + ' size="8" placeholder="25DEC26">' +
+        '<label style="cursor:pointer"><input type="checkbox" id="agents-roll-itm"' + (ROLL.itm ? " checked" : "") + "> ITM only</label>" +
+        "<button " + btn + ' id="btn-agents-roll-find">Find legs</button>' +
+      "</div>" +
+      (ROLL.data ? (legs.length ?
+        '<div style="margin:.2rem 0">' + exps.map((e) => "<button " + btn + ' data-rollexp="' + esc(e) + '">' +
+          esc(e) + " (" + legs.filter((l) => l.expiry === e).length + ")</button>").join(" ") +
+          ' <span style="color:var(--muted)">click an expiry to tick / untick all its legs</span></div>' +
+        '<div style="max-height:220px;overflow:auto"><table class="data-table" style="width:100%;font-size:.64rem"><thead><tr>' +
+          "<th></th><th>Cpty</th><th>Leg</th><th>Expiry</th><th>DTE</th><th>Qty</th><th>ITM</th><th>MtM</th></tr></thead><tbody>" +
+          legs.map((l) => '<tr><td><input type="checkbox" class="ag-roll-leg" value="' + l.id + '"' + (ROLL.sel.has(l.id) ? " checked" : "") + "></td>" +
+            "<td>" + esc(l.counterparty) + "</td><td>" + esc(l.side || "") + " " + esc(l.opt) + " " + px(asset(), l.strike) + "</td><td>" +
+            esc(l.expiry) + "</td><td>" + l.dte + "</td><td>" + Number(l.qty).toLocaleString() + "</td><td>" + (l.itm ? "yes" : "") +
+            "</td><td>" + money(l.mtm_usd) + "</td></tr>").join("") + "</tbody></table></div>" +
+        '<div style="margin:.3rem 0">' + picked.length + " legs, MtM " + money(mtm) + " &middot; counterparties " +
+          esc((ROLL.data.counterparties || []).join(", ") || "all") + " &middot; never " + esc((ROLL.data.excluded || []).join(", ").toUpperCase()) + "</div>" +
+        "<button " + btn + ' id="btn-agents-roll-run"' + (ROLL.busy || !picked.length ? " disabled" : "") + ">" +
+          (ROLL.busy ? "Running&hellip; (4-6 min)" : "Run roll sweep") + "</button>"
+        : '<div style="color:var(--muted)">No legs within ' + ROLL.dte + " days.</div>") : "") +
+      (ROLL.msg ? ' <span style="color:var(--muted)">' + esc(ROLL.msg) + "</span>" : "") + "</details>";
+    const d = $("agents-roll-details");
+    d.addEventListener("toggle", () => { ROLL.open = d.open; });
+    d.querySelectorAll(".ag-roll-leg").forEach((c) => c.addEventListener("change", () => {
+      const id = Number(c.value); if (c.checked) ROLL.sel.add(id); else ROLL.sel.delete(id); renderRoll();
+    }));
+    $("agents-roll-itm").addEventListener("change", (e) => { ROLL.itm = e.target.checked; renderRoll(); });
+    $("agents-roll-into").addEventListener("change", (e) => { ROLL.into = e.target.value.trim().toUpperCase(); });
+    $("agents-roll-dte").addEventListener("change", (e) => { ROLL.dte = Math.max(0, parseInt(e.target.value, 10) || 0); });
   }
 
   // Which counterparties the optimizer sweep may trade with, per asset. Saved
@@ -568,6 +622,12 @@
   // the parametric V with its max loss and breakevens at the run's spot, or
   // the saved curve's name; row and manual trades say they have none.
   function targetChip(p) {
+    const rl = (p.proposal || {}).roll;
+    const rollTag = rl ? '<div style="margin:.1rem 0"><span class="ag-chip" style="background:rgba(245,158,11,.18);color:#f59e0b">ROLL ' +
+      ((rl.ids || []).length) + " legs " + esc((rl.expiries || []).join(", ")) + " &rarr; " + esc(rl.into || "") + "</span></div>" : "";
+    return rollTag + targetBox(p);
+  }
+  function targetBox(p) {
     const pr = p.proposal || {}, t = propTarget(p), vp = pr.v4_params || {};
     const box = (inner, col) => '<div style="font-size:.66rem;line-height:1.4;margin:.1rem 0 .25rem;padding:.25rem .45rem;' +
       "border-radius:4px;background:" + col + "1a;border-left:2px solid " + col + '">' + inner + "</div>";
@@ -1118,6 +1178,20 @@
     if (tmSelected && tmSelected.size) notes.push(tmSelected.size + " Trade Management selection(s) will be sent as forced rolls - clear them for an exact replay");
     if (optv2BaseIds()) notes.push("a Deals scope is active, so the run covers only part of the book");
 
+    // A roll-sweep proposal closed exactly its chosen legs (engine manual
+    // roll mode): replay it with v4's "use ticked rows" and those legs ticked.
+    const rollIds = Number(P.roll_dte_threshold) === -1 && Array.isArray(P.forced_roll_ids)
+      ? P.forced_roll_ids.map(Number) : [];
+    if (rollIds.length && typeof optv4RenderRollCandidates === "function") {
+      v4Set("optv4-roll-dte-threshold", 3650);              // list every leg; the ticks decide
+      document.querySelectorAll("#optv4-dte-list .optv4-dte-input").forEach((i) => { i.value = 3650; });
+      v4Check("optv4-roll-use-ticked", true);
+      optv4RenderRollCandidates();                          // settles the candidate set
+      optv4RollSel = new Set(rollIds);
+      optv4RenderRollCandidates();
+      notes.push("roll replay: " + rollIds.length + " leg(s) ticked to roll ('use ticked rows')");
+    }
+
     // 3. Run Optimizer and wait for the result (the page's own handler).
     optv4SyncRunEnabled();
     const runBtn = document.getElementById("btn-run-optv4");
@@ -1216,6 +1290,46 @@
     }
     if (t.dataset.show) { show(t.dataset.show); return; }
 
+    if (t.id === "btn-agents-roll-find") {
+      ROLL.dte = Math.max(0, parseInt($("agents-roll-dte").value, 10) || 0);
+      ROLL.msg = "Loading...";
+      renderRoll();
+      try {
+        ROLL.data = await api("/api/agents/roll-candidates/" + asset() + "?dte=" + ROLL.dte);
+        ROLL.sel = new Set(ROLL.data.legs.map((l) => l.id));
+        if (!ROLL.into) ROLL.into = ROLL.data.into || "";
+        ROLL.msg = "";
+      } catch (e) { ROLL.msg = "Could not load: " + e.message; }
+      renderRoll();
+      return;
+    }
+    if (t.dataset.rollexp) {
+      const legs = rollLegs().filter((l) => l.expiry === t.dataset.rollexp);
+      const allOn = legs.every((l) => ROLL.sel.has(l.id));
+      legs.forEach((l) => { if (allOn) ROLL.sel.delete(l.id); else ROLL.sel.add(l.id); });
+      renderRoll();
+      return;
+    }
+    if (t.id === "btn-agents-roll-run") {
+      const picked = rollLegs().filter((l) => ROLL.sel.has(l.id));
+      if (!picked.length) return;
+      ROLL.busy = true; ROLL.msg = "";
+      renderRoll();
+      try {
+        const r = await api("/api/agents/run/roll-sweep", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ deliver: false, use_ai: false, ctx: { assets: [asset()], roll: {
+            ids: picked.map((l) => l.id), into: ROLL.into || (ROLL.data && ROLL.data.into),
+            dte: ROLL.dte, expiries: [...new Set(picked.map((l) => l.expiry))] } } }),
+        });
+        ROLL.busy = false;
+        ROLL.msg = "Done - the roll proposals are on Proposals (ROLL).";
+        await load();
+        $("agents-output-name").textContent = "- roll sweep";
+        setOutput(r.text);
+      } catch (e) { ROLL.busy = false; ROLL.msg = "Failed: " + e.message; renderRoll(); }
+      return;
+    }
     if (t.id === "btn-agents-cpty-all") {
       document.querySelectorAll(".ag-cpty").forEach((c) => { c.checked = true; });
       return;

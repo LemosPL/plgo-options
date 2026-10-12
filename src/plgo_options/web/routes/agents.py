@@ -178,6 +178,18 @@ async def set_sweep_counterparties(asset: str, req: CptyReq):
     return {"asset": asset.upper(), "available": avail, "selected": chosen}
 
 
+@router.get("/roll-candidates/{asset}")
+async def roll_candidates(asset: str, dte: int = 20):
+    """Legs the roll sweep may roll: managed book, expiring within ``dte``
+    days, inside the sweep's counterparties, never G20. ``into`` defaults to
+    the policy's target expiry."""
+    pol = await store.get_policy(asset)
+    legs = await opt_mod.roll_candidates(pol, max(0, min(int(dte), 3650)))
+    return {"asset": asset.upper(), "dte": dte, "into": pol.optimizer.effective_expiry(),
+            "counterparties": list(pol.optimizer.counterparties or []),
+            "excluded": sorted(opt_mod.ROLL_EXCLUDED_COUNTERPARTIES), "legs": legs}
+
+
 class FlagReq(BaseModel):
     key: str                # kill_switch | curves_frozen_ETH | curves_frozen_FIL
     value: str              # on | off
