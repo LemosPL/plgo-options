@@ -1148,7 +1148,10 @@
     try { d = await api("/api/agents/proposals/" + p.id + "/v4"); }
     catch (e) { alert("Could not load proposal #" + p.id + ": " + e.message); return; }
     const P = d.params || {};
-    const fromOptimizer = d.agent === "optimizer";
+    // Roll-sweep runs are optimizer runs too: keep v4's own trades ticked. Only
+    // the like-for-like baseline is a designed trade (no v4 run to match).
+    const fromOptimizer = d.agent === "optimizer" ||
+      (d.agent === "roll_sweep" && !/baseline/i.test(String(d.kind || "")));
     const notes = [];
 
     // 1. Asset, then the page, then its own first step: Load Risk Profile.
