@@ -103,6 +103,10 @@ class CollateralOptimization:
         collateral_floor_by_cp=None,
         enforce_collateral_floor=False,
         collateral_transfer=None,
+        c_decay=None,
+        base_decay=0.0,
+        carry_weight=0.0,
+        max_carry_usd=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -465,6 +469,27 @@ class CollateralOptimization:
                     prob += cp_total_i >= -float(floor_curve[i]), f"cp_loss_cap_{cp}_{i}"
                 applied_floor_min[cp] = float(np.min(floor_curve))
 
+        # Carry: the whole book's (non-rolled legs + this run's trades) theta
+        # run-rate over the carry horizon — see optimizer_v3.run_lp; c_decay is
+        # per unit of each candidate, base_decay the fixed part the LP cannot
+        # touch. carry_weight charges each dollar of net decay like a dollar of
+        # trading cost; one-sided, so
+        # a book that earns decay is not rewarded for selling more optionality.
+        # max_carry_usd is a HARD cap on the same number — like Max CP Loss,
+        # too tight a cap makes the run infeasible rather than a worse fit.
+        carry_cost = 0.0
+        if c_decay is not None and (carry_weight or max_carry_usd is not None):
+            carry_after = float(base_decay) + pulp.lpSum(
+                (buy_vars[j] - sell_vars[j]) * float(c_decay[j])
+                for j in range(n_candidates) if c_decay[j]
+            )
+            if carry_weight:
+                carry_burn = pulp.LpVariable("carry_burn", lowBound=0, cat="Continuous")
+                prob += carry_burn >= carry_after, "carry_burn"
+                carry_cost = float(carry_weight) * carry_burn
+            if max_carry_usd is not None:
+                prob += carry_after <= float(max_carry_usd), "max_carry"
+
         transfer_model = None
         transfer_cost = 0.0
         if collateral_transfer:
@@ -473,7 +498,7 @@ class CollateralOptimization:
             transfer_cost = transfer_model["cost"]
 
         prob += (lam_factor * profile_error + trading_cost + collateral_cost
-                 + cash_neutrality_cost + transfer_cost)
+                 + cash_neutrality_cost + transfer_cost + carry_cost)
 
         # Per-counterparty signed net notional constraint (existing + net new <= max).
         if max_exposure_by_counterparty:

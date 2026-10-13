@@ -14,7 +14,7 @@ from .collateral_optimization import CollateralOptimization
 from .delta_hedger import net_option_delta, perp_trade_cost, plan_counterparty_rehedge
 from .elastic_net import GeneralizedLasso
 from .models import Position, Candidate
-from .math_utils import bs_vec, bs_vec_bridge
+from .math_utils import bs_greeks, bs_vec, bs_vec_bridge
 from .option_smile import OptionSmile
 from .pulp_solver import PulpSolver
 from .snapshot import load_snapshot_dict
@@ -1308,6 +1308,14 @@ class OptimizerV3(BaseOptimizer):
                  collateral_prices: "dict[str, float] | None" = None,
                  enable_composite_unwind: bool = True,
                  atm_concentration: float = 0.0,
+                 # Carry lever: the book's theta run-rate over carry_horizon_days
+                 # (-theta/day x days, as if every leg is kept at its tenor).
+                 # carry_weight charges each dollar of it like a dollar of
+                 # trading cost (0 = off); max_carry_usd is a hard cap on it
+                 # (None = no cap).
+                 carry_horizon_days: float = 30.0,
+                 carry_weight: float = 0.0,
+                 max_carry_usd: float | None = None,
                  # Parametric (auto) target-profile shape — see
                  # misc_utils.build_parametric_target_profile_eth. None = engine
                  # default for that one knob; only used when neither manual_target
@@ -1765,6 +1773,23 @@ class OptimizerV3(BaseOptimizer):
             if collateral_transfer else None
         )
 
+        # Carry = theta run-rate over the horizon: -theta/day x days, as if
+        # every leg is kept at its tenor. Not decay-to-expiry: that counts a
+        # 3-day option for 3 days only, so the LP could swap long-dated legs
+        # for short-dated ones and show no carry, though the client then rolls
+        # them again and again — the very cost being cut. The non-rolled book
+        # is fixed; each candidate adds its own legs' run-rate per unit traded.
+        carry_h = float(carry_horizon_days or 0.0)
+        base_decay = -carry_h * sum(
+            float(p.net_qty or 0.0) * self._bs_theta(p.strike, p.days_remaining, p.iv_pct, str(p.opt))
+            for p in self.positions if id(p) not in roll_position_ids
+        )
+        c_decay = np.array([
+            -carry_h * sum(sign_qty * self._bs_theta(leg.strike, leg.dte, leg.iv_pct, str(leg.opt))
+                           for leg, sign_qty, _kind in self._candidate_trade_legs(c, 1))
+            for c in candidates
+        ])
+
         lp = CollateralOptimization(self.asset, counterparties)
         lp_result = lp.optimize(
             spot_arr, spot_weights, residual, candidates, c_payoffs,
@@ -1794,10 +1819,21 @@ class OptimizerV3(BaseOptimizer):
             collateral_floor_by_cp=collateral_floor_by_cp,
             enforce_collateral_floor=enforce_collateral_cap,
             collateral_transfer=transfer_cfg,
+            c_decay=c_decay,
+            base_decay=base_decay,
+            carry_weight=carry_weight,
+            max_carry_usd=max_carry_usd,
         )
 
         if lp_result is None:
-            return {"status": "lp_failed", "message": "LP solver did not find an optimal solution."}
+            message = "LP solver did not find an optimal solution."
+            if max_carry_usd is not None:
+                message += (
+                    f" Max carry may be too tight: the book's theta run-rate is ${base_decay:,.0f} over "
+                    f"{carry_h:g} days before any trade (cap ${float(max_carry_usd):,.0f}), and only "
+                    f"the selected counterparties' legs can be changed to bring it down."
+                )
+            return {"status": "lp_failed", "message": message}
 
         net_qty = lp_result["net_qty"]
 
@@ -2182,11 +2218,35 @@ class OptimizerV3(BaseOptimizer):
                 f"result as non-executable at its stated size."
             )
 
+        # Carry before/after, from the FINAL trades (after the box
+        # neutralizer, re-hedge and trade-count pruning), not the raw LP
+        # solution — so it can sit slightly off a Max carry cap.
+        theta_before = sum(float(p.net_qty or 0.0) * self._bs_theta(p.strike, p.days_remaining, p.iv_pct, str(p.opt))
+                           for p in self.positions)
+        theta_after = theta_before + sum(
+            float(t.get("qty", 0.0) or 0.0) * self._bs_theta(t.get("strike", 0.0), t.get("dte", 0), t.get("iv_pct", 0.0), str(t.get("opt", "")))
+            for t in trades
+        )
+        carry_before, carry_after = -carry_h * theta_before, -carry_h * theta_after
+        carry = {
+            "horizon_days": carry_h,
+            "weight": float(carry_weight or 0.0),
+            "max_usd": None if max_carry_usd is None else float(max_carry_usd),
+            # Theta run-rate over the horizon; positive = the book loses this much.
+            "before_usd": round(carry_before, 2),
+            "after_usd": round(carry_after, 2),
+            "theta_per_day_before": round(theta_before, 2),
+            "theta_per_day_after": round(theta_after, 2),
+        }
+        print(f"carry over {carry_h:g}d: {carry_before:,.0f} -> {carry_after:,.0f}  "
+              f"(theta/day {theta_before:,.0f} -> {theta_after:,.0f})")
+
         return {
             "status": "ok",
             "message": message,
             "asset": self.asset,
             "target_expiry": target_expiry,
+            "carry": carry,
             "cone_expiries": cone_expiries if cone_mode else None,
             "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             # Same band, evaluated at the P&L Matrix's own calendar-day columns
@@ -3421,6 +3481,12 @@ class OptimizerV3(BaseOptimizer):
                 continue
             out[cp] = out[cp] + qty * vals
         return out
+
+    def _bs_theta(self, strike, dte, iv_pct, opt) -> float:
+        """BS theta ($/day per unit) at today's spot; 0 for perps and expired legs."""
+        if opt not in ("C", "P") or not dte or float(dte) <= 0 or not iv_pct:
+            return 0.0
+        return bs_greeks(self.spot, float(strike), float(dte) / 365.25, 0.0, float(iv_pct) / 100.0, opt)[2]
 
     def _candidate_trade_legs(self, c, qty: int) -> list[tuple[Candidate, int, str]]:
         """

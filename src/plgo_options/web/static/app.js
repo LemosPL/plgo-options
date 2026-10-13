@@ -10518,6 +10518,9 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const maxCpLossRaw = document.getElementById("optv2-max-cp-loss")?.value;
     const maxCpLoss = maxCpLossRaw === "" || maxCpLossRaw === undefined ? null : parseFloat(maxCpLossRaw);
     const useCollateralCap = document.getElementById("optv2-use-collateral-cap")?.checked || false;
+    // Blank = no carry cap; "0" is a real cap (no net decay at all).
+    const maxCarryRaw = document.getElementById("optv2-max-carry")?.value;
+    const maxCarry = maxCarryRaw === "" || maxCarryRaw === undefined ? null : parseFloat(maxCarryRaw);
     const customSpotRaw = document.getElementById("optv2-custom-spot")?.value;
     const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
     const data = await post("/api/optimization/run", {
@@ -10534,6 +10537,9 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       max_cp_loss_usd: maxCpLoss,
       use_collateral_cap: useCollateralCap,
+      carry_weight: parseFloat(document.getElementById("optv2-carry-weight")?.value || "0"),
+      carry_horizon_days: parseFloat(document.getElementById("optv2-carry-horizon-days")?.value || "30"),
+      max_carry_usd: maxCarry,
       // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
       // The three cone_* fields drive the multi-expiry candidate universe instead.
       target_expiry: optv2IsConeMode() ? null : (document.getElementById("optv2-target-expiry").value || null),
@@ -10788,6 +10794,17 @@ function optv2RenderResult(data) {
   const cash = data.cash_shift || 0;
   document.getElementById("optv2-sum-cash-shift").textContent =
     (cash >= 0 ? "+$" : "-$") + optv2Fmt(Math.abs(cash), 0);
+  // Carry (theta run-rate over the horizon), before → after; green when it fell.
+  const carry = data.carry;
+  const $carry = document.getElementById("optv2-sum-carry");
+  if (carry && carry.before_usd != null && carry.after_usd != null) {
+    document.getElementById("optv2-sum-carry-label").textContent = `Carry (${optv2Fmt(carry.horizon_days, 0)}d)`;
+    $carry.textContent = `$${optv2Fmt(carry.before_usd, 0)} → $${optv2Fmt(carry.after_usd, 0)}`;
+    $carry.style.color = carry.after_usd <= carry.before_usd ? "var(--green)" : "var(--red)";
+    $carry.title = `Theta/day ${optv2Fmt(carry.theta_per_day_before, 0)} → ${optv2Fmt(carry.theta_per_day_after, 0)}`;
+  } else {
+    $carry.textContent = "—";
+  }
   // Fit error improvement (before - after); positive = better fit
   const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;
   const $fit = document.getElementById("optv2-sum-fit");

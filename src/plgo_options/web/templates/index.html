@@ -1756,6 +1756,18 @@
           <input type="checkbox" id="optv2-use-collateral-cap">
           Cap to posted collateral
         </label>
+        <label class="pf-filter-label">Carry Weight
+          <input type="number" id="optv2-carry-weight" value="0" step="0.05" min="0" style="width:5rem"
+            title="Cost of carry lever. Carry = the book's theta run-rate over the Carry Days below (-theta/day × days, as if every leg is kept at its tenor and rolled). Each dollar of it is charged in the LP objective like this many dollars of trading cost. 0 = off (default). One-sided: a book that already earns theta is not pushed to sell more optionality. Higher = cheaper to hold, at the expense of the profile fit.">
+        </label>
+        <label class="pf-filter-label">Carry Days
+          <input type="number" id="optv2-carry-horizon-days" value="30" step="1" min="1" style="width:4.5rem"
+            title="Horizon of the carry measure: carry = -theta/day × this many days. 30 = monthly run-rate. Scales both Carry Weight and Max Carry.">
+        </label>
+        <label class="pf-filter-label">Max Carry ($)
+          <input type="number" id="optv2-max-carry" step="10000" min="0" style="width:7rem"
+            title="Hard cap on the whole book's carry (theta run-rate over Carry Days) after this run's trades. Blank = no cap (default). Like Max CP Loss, too tight a cap makes the run infeasible instead of trading off against the fit. The cap binds on the LP's trades; the final trades (after box neutralizer, re-hedge and Max Trades) can land slightly off it.">
+        </label>
         <label class="pf-filter-label">Target Expiry
           <select id="optv2-target-expiry" style="width:8rem">
             <option value="">Select maturity…</option>
@@ -2036,7 +2048,7 @@
 
       <!-- A. Summary -->
       <h3 style="margin:0 0 .5rem;font-size:.95rem">Summary</h3>
-      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(7,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(8,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
         <div style="border-radius:6px;background:rgba(248,81,73,.08);padding:.25rem 0" title="Sum of the assumed bid-ask transaction cost across every proposed trade (also shown per-row as &quot;Cost ($)&quot; in the two trade tables below).">
           <div class="greek-label">Total Cost</div><div class="greek-value" id="optv2-sum-total-cost" style="color:var(--red);font-weight:700">--</div>
         </div>
@@ -2045,6 +2057,7 @@
         <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv2-sum-net-premium">--</div></div>
         <div><div class="greek-label">Cash Shift</div><div class="greek-value" id="optv2-sum-cash-shift">--</div></div>
         <div><div class="greek-label">Fit Error ↓</div><div class="greek-value" id="optv2-sum-fit">--</div></div>
+        <div title="Theta run-rate of the whole book over Carry Days (-theta/day × days), before → after the proposed trades. Positive = the book loses this much to time decay if kept as is."><div class="greek-label" id="optv2-sum-carry-label">Carry</div><div class="greek-value" id="optv2-sum-carry">--</div></div>
         <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv2-candidates">--</div></div>
       </div>
       <div style="display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.78rem;opacity:.75;margin:-1rem 0 1.5rem">
@@ -4018,7 +4031,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=190"></script>
+<script src="/static/app.js?v=191"></script>
 <script src="/static/agents.js?v=28"></script>
 </body>
 </html>

@@ -193,6 +193,13 @@ class OptimizationParams(BaseModel):
     # above, this is a hard constraint — too tight a cap can make a run
     # infeasible instead of just trading off against a worse fit.
     max_cp_loss_usd: float | dict[str, float] | None = None
+    # Carry lever: the book's time decay (value lost at today's spot and vol)
+    # over carry_horizon_days. carry_weight charges each dollar of it like a
+    # dollar of trading cost (0 = off, the default); max_carry_usd is a hard
+    # cap on it (None = no cap) — too tight a cap makes the run infeasible.
+    carry_horizon_days: float = 30.0
+    carry_weight: float = 0.0
+    max_carry_usd: float | None = None
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -474,6 +481,9 @@ async def run_optimizer(params: OptimizationParams):
         parametric_high_plateau_ratio=params.parametric_high_plateau_ratio,
         parametric_high_plateau_payoff=params.parametric_high_plateau_payoff,
         max_cp_loss_usd=params.max_cp_loss_usd,
+        carry_horizon_days=params.carry_horizon_days,
+        carry_weight=params.carry_weight,
+        max_carry_usd=params.max_carry_usd,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),
