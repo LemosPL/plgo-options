@@ -887,7 +887,34 @@ function addFromChain(instrumentName) {
 // ─── Deribit Replication Pricing (client-side, uses cached vol surface) ──
 let lastReplPremiums = [];
 
-function replicateStrategy() {
+// The global spot must belong to the asset on screen. If it is off from the
+// legs' strikes by more than 20x (ETH ~2,500 vs FIL strikes ~1), refetch it.
+async function pricingEnsureSpot() {
+  const ks = legs.map(l => parseFloat(l.strike)).filter(k => k > 0).sort((a, b) => a - b);
+  const mid = ks.length ? ks[Math.floor(ks.length / 2)] : null;
+  const wrong = !(ethSpot > 0) || (mid && (ethSpot / mid > 20 || mid / ethSpot > 20));
+  if (!wrong) return true;
+  try {
+    const d = await get(`/api/market/spot?asset=${currentAsset}`);
+    const s = currentAsset === "FIL" ? d.fil_spot : d.eth_spot;
+    if (s > 0) {
+      console.warn(`Pricing: spot ${ethSpot} did not fit ${currentAsset} strikes; refreshed to ${s}`);
+      ethSpot = s;
+      const $s = document.getElementById("eth-spot");
+      if ($s) $s.textContent = `$${s.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+      return true;
+    }
+  } catch (e) { console.error("Pricing: spot refresh failed", e); }
+  alert(`Pricing stopped: the ${currentAsset} spot could not be confirmed (have ${ethSpot}).`);
+  return false;
+}
+
+async function replicateStrategy() {
+  if (legs.length && !(await pricingEnsureSpot())) return;
+  replicateStrategySync();
+}
+
+function replicateStrategySync() {
   if (legs.length === 0) { alert("Add at least one leg."); return; }
   for (const l of legs) {
     const s = parseFloat(l.strike);
@@ -1386,6 +1413,7 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
       get(`/api/market/spot?asset=${asset}`).catch(() => null),
       get(`/api/market/vol-surface?asset=${asset}`).catch(() => null),
     ]).then(([spotData, volData]) => {
+      if (asset !== currentAsset) return;            // switched again meanwhile
       if (spotData) {
         ethSpot = spotData.eth_spot || spotData.fil_spot;
         document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -1578,17 +1606,23 @@ async function tmLoad() {
   const tmBody = document.getElementById("tm-body");
   tmBody.innerHTML = '<tr><td colspan="22" style="text-align:center;padding:2rem;color:var(--muted)">Loading trades...</td></tr>';
   tmSelected.clear();
+  // 13 Oct 2026: the P&L call takes seconds; switching asset meanwhile used to
+  // let the old asset's answer land here - ETH's spot became the global spot on
+  // the FIL page and Pricing valued FIL legs at ~$2,500 (billions). Drop it.
+  const asset0 = currentAsset;
 
   try {
     // Fetch trades from DB
     const includeExp = document.getElementById("tm-show-expired").checked;
-    const data = await get(`/api/trades/?include_expired=${includeExp}&asset=${currentAsset}`);
+    const data = await get(`/api/trades/?include_expired=${includeExp}&asset=${asset0}`);
+    if (currentAsset !== asset0) return;
     tmTrades = data.trades || [];
 
     // Fetch enriched data from portfolio endpoint for live Greeks/MTM
     let enriched = [];
     try {
-      const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExp}`);
+      const pfData = await get(`/api/portfolio/pnl?asset=${asset0}&include_expired=${includeExp}`);
+      if (currentAsset !== asset0) return;
       enriched = pfData.positions || [];
       tmDecayCal = pfData.decay_calendar || [];
       ethSpot = pfData.eth_spot;
@@ -15333,7 +15367,7 @@ document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", 
     const cptyOrMidPrice = moved
       ? optv4DisplayPriceAtStrike(t, K, _S0)
       : (t.cpty_price_usd != null ? t.cpty_price_usd : t.bs_price_usd);
-    const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 100) / 100) : "0";
+    const premium = cptyOrMidPrice ? String(Math.round(cptyOrMidPrice * 1e6) / 1e6) : "0";   // FIL premiums are cents
     let expCode = optv2ExpiryText(t);
     if (!/^\d{1,2}[A-Z]{3}\d{2}$/.test(expCode || "")) expCode = null;
     addLeg(side, opt, String(K), premium, String(qty), expCode, t.counterparty ? String(t.counterparty).toLowerCase() : "");
