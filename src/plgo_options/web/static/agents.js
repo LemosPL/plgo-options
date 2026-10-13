@@ -52,6 +52,21 @@
     return { c: C.ok, label: "ran clean" };
   }
 
+  // The optimizer row also shows the latest FIL KeyRock roll sweep (legs
+  // within 20 days): it runs as its own agent, so the row alone looks stale.
+  function keyrockRollLine() {
+    const props = PROPS.filter((p) => p.agent === "roll_sweep" && String(p.asset).toUpperCase() === "FIL" &&
+      (p.proposal || {}).roll && Number(p.proposal.roll.dte) <= 20 &&
+      (p.proposal.legs || []).some((l) => l.kind !== "perp") &&
+      (p.proposal.legs || []).every((l) => l.kind === "perp" || String(l.counterparty || "").toLowerCase() === "keyrock"));
+    if (!props.length) return "";
+    const last = props.reduce((m, p) => (p.created_at > m ? p.created_at : m), "");
+    const n = props.filter((p) => p.status === "open").length;
+    return '<div class="ag-task-s" style="color:' + (n ? C.prop : C.ok) + '">FIL KeyRock roll &le;20d: ' +
+      (n ? n + " proposal" + (n > 1 ? "s" : "") : "no open proposals") +
+      ' <span style="color:var(--muted)">· ' + esc(last.replace("T", " ").slice(5, 16)) + "</span></div>";
+  }
+
   function renderTasks(st, counts) {
     $("agents-tasklist").innerHTML = ORDER.filter((n) => n in st.agents).map((n) => {
       const r = st.agents[n], s = state(r, counts[n] || 0);
@@ -65,6 +80,7 @@
           '<div class="ag-task-w">' + esc(meta.note) + '</div>' +
           '<div class="ag-task-s" style="color:' + s.c + '">' + s.label +
             (last ? ' <span style="color:var(--muted)">· ' + last + '</span>' : "") + '</div>' +
+          (n === "optimizer" ? keyrockRollLine() : "") +
         '</span>' +
         '<button class="btn-secondary ag-run" data-run="' + n + '">Run</button>' +
       '</div>' + (n === "optimizer" ? '<div id="agents-cpty-box"></div><div id="agents-roll-box"></div>' : "");
