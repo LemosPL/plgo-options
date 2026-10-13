@@ -351,6 +351,19 @@ async def build_market_context(asset: str) -> dict:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _decay_calendar(today: date, months: int = 13) -> list[dict]:
+    """Month-end checkpoints for the decay calendar: "now" then the last day of
+    this month and the next ``months - 1``, as days from today."""
+    out = [{"label": "now", "days": 0, "date": today.isoformat()}]
+    y, m = today.year, today.month
+    for _ in range(months):
+        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+        end = date.fromordinal(date(ny, nm, 1).toordinal() - 1)       # last day of (y, m)
+        out.append({"label": end.strftime("%b %y"), "days": (end - today).days, "date": end.isoformat()})
+        y, m = ny, nm
+    return out
+
+
 @router.get("/pnl")
 async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
                         include_collar_loans: bool = False):
@@ -505,6 +518,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             continue
 
     today = date.today()
+    decay_cal = _decay_calendar(today)
 
     # 3. Enrich each trade
     enriched = []
@@ -644,6 +658,19 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
                 val = max(eth_spot - strike, 0) if opt == "C" else max(strike - eth_spot, 0)
             mtm_horizon.append(round(signed_qty * val, 2))
 
+        # Decay calendar (13 Oct 2026): the position's value now and at each
+        # month-end at today's spot and vol, so the time value lost in each
+        # calendar month is a difference - decay speeds up near expiry and
+        # stops at it, which a flat theta x days cannot show.
+        value_path = []
+        for ck in decay_cal:
+            T_c = max(days_rem - ck["days"], 0) / 365.25
+            if T_c > 0:
+                vc = bs_price(eth_spot, strike, T_c, 0.0, scenario_sigma, opt)
+            else:
+                vc = max(eth_spot - strike, 0) if opt == "C" else max(strike - eth_spot, 0)
+            value_path.append(round(signed_qty * vc, 2))
+
         # ------------------------------------------------------------------
         # Payoff curves across spot ladder — FIXED formula
         # ------------------------------------------------------------------
@@ -718,6 +745,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             "collateral_call_usd": round(max(0.0, -cur_mtm), 2),
             "notional_live": notional_live,
             "mtm_by_horizon": mtm_horizon,
+            "value_path": value_path,
             "payoff_by_horizon": trade_payoff,
             # Bridge-repriced curves for P&L matrices (Portfolio P&L, and
             # OptimizerV2's before matrix/trade delta — see optimizer.py).
@@ -878,6 +906,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         "eth_spot": eth_spot,
         "spot_ladder": spot_ladder,
         "matrix_horizons": MATRIX_HORIZONS,
+        "decay_calendar": decay_cal,             # checkpoints for positions[].value_path
         "chart_horizons": sorted(set(CHART_HORIZONS + [0])),
         "all_horizons": sorted(set(CHART_HORIZONS + MATRIX_HORIZONS + [0])),
         # Columns of the P&L matrix (same set Optimizer v4 draws).

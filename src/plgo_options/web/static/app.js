@@ -1590,6 +1590,7 @@ async function tmLoad() {
     try {
       const pfData = await get(`/api/portfolio/pnl?asset=${currentAsset}&include_expired=${includeExp}`);
       enriched = pfData.positions || [];
+      tmDecayCal = pfData.decay_calendar || [];
       ethSpot = pfData.eth_spot;
       document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
     } catch (e) {
@@ -1675,111 +1676,135 @@ function tmRenderSummary() {
   tmRenderDecay(active, totalTheta);
 }
 
-// Daily decay by counterparty (12 Oct 2026), laid out like the trades table:
-// one row per active trade grouped under its counterparty's subtotal. Decay /
-// day = theta x signed qty, so bought legs cost and sold legs earn; month /
-// year revalue at today's spot and vol (tmSelectedDecay); time value left =
-// MTM - intrinsic. Ticks share tmSelected with the trades table.
+// Daily decay by counterparty, laid out like the trades table: one row per
+// active trade under its counterparty's subtotal, with the decay calendar
+// (time value lost per calendar month) instead of theta x days. Ticks share
+// tmSelected with the trades table.
 const tmDecayOpen = new Set();
-let tmDecaySort = { col: "_day", asc: true };
-function tmIntrinsic(t) {
-  const S = ethSpot || 0, K = t.strike || 0, q = t.net_qty || 0;
-  const o = String(t.opt || (t.option_type || "")[0] || "").toUpperCase();
-  if (o === "C") return q * Math.max(S - K, 0);
-  if (o === "P") return q * Math.max(K - S, 0);
-  return t.current_mtm || 0;                        // perps / forwards: no time value
-}
-function tmIsPriced(t) { return t.theta != null || (t.mtm_by_horizon || []).length > 0; }
-function tmDecayLeg(t) {
-  const d = tmSelectedDecay([t]);
-  return { _day: d.day, _month: d.month, _year: d.year, _run: d.day * 365, _tv: (t.current_mtm || 0) - tmIntrinsic(t) };
-}
-function tmDecayGroup(list) {
-  const priced = list.filter(tmIsPriced);
-  const d = tmSelectedDecay(priced);
-  let longs = 0, shorts = 0, mtm = 0, tv = 0;
-  priced.forEach(t => {
-    const th = (t.theta || 0) * (t.net_qty || 0);
-    if ((t.net_qty || 0) > 0) longs += th; else shorts += th;
-    mtm += t.current_mtm || 0;
-    tv += (t.current_mtm || 0) - tmIntrinsic(t);
+let tmDecaySort = { col: "_total", asc: true };
+function tmIsPriced(t) { return Array.isArray(t.value_path) && t.value_path.length === tmDecayCal.length; }
+function tmDecayRow(list, cols) {
+  const d = tmDecayOf(list);
+  const r = { n: list.length, unpriced: d.unpriced, _day: d.day, _total: d.total, longs: 0, shorts: 0,
+              current_mtm: list.reduce((a, t) => a + (t.current_mtm || 0), 0), ids: list.map(t => t.db_id || t.id) };
+  cols.forEach(c => { r[c.key] = c.idx.reduce((a, i) => a + d.months[i], 0); });
+  list.forEach(t => {
+    const x = tmDecayOf([t]).total;
+    if ((t.net_qty || 0) > 0) r.longs += x; else r.shorts += x;
   });
-  return { n: list.length, unpriced: list.length - priced.length, day: d.day, month: d.month, year: d.year,
-           run: d.day * 365, longs, shorts, mtm, tv, ids: list.map(t => t.db_id || t.id) };
+  return r;
 }
 function tmRenderDecay(active, totalTheta) {
-  const body = document.getElementById("tm-decay-body");
-  if (!body) return;
+  const body = document.getElementById("tm-decay-body"), head = document.getElementById("tm-decay-head");
+  if (!body || !head) return;
   const isFil = currentAsset === "FIL";
   const usd = v => (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const cls = v => v > 0 ? "mtm-pos" : v < 0 ? "mtm-neg" : "";
-  const money = v => `<td class="${cls(v)}">${usd(v)}</td>`;
+  const money = v => `<td class="${cls(v)}">${Math.abs(v) < 0.5 ? '<span style="opacity:.35">-</span>' : usd(v)}</td>`;
   const num = (v, d) => v == null || v === "" ? "--" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
-  const legs = active.map(t => Object.assign({}, t, tmDecayLeg(t)));
+  const cols = tmDecayColumns(active);
+  const nCols = 11 + cols.length + 2;
+  const th = (key, label, title, left) => `<th class="sortable" data-dcol="${key}"${left ? ' style="text-align:left"' : ""}${title ? ` title="${title}"` : ""}>${label}</th>`;
+  head.innerHTML = "<tr>" +
+    '<th style="width:30px"><input type="checkbox" id="tm-decay-check-all" title="Select all active trades"></th>' +
+    th("counterparty", "Counterparty", "Click a counterparty row to open / close its trades", true) +
+    th("side", "Side", "", true) + th("option_type", "Type", "", true) + th("instrument", "Instrument", "", true) +
+    th("expiry", "Expiry") + th("days_remaining", "DTE") + th("strike", "Strike") + th("net_qty", "Qty") +
+    th("theta", "&Theta; / contract", "Theta per contract (the trades table's &Theta;): negative for every option, the side sets the sign") +
+    th("_day", "Today / day", "Theta x signed qty: today's speed of decay only - it rises toward expiry") +
+    cols.map(c => th(c.key, c.label, "Time value lost in this calendar month at today's spot and vol")).join("") +
+    th("_total", "Total to expiry", "All the time value still to decay (or to earn) until the positions expire") +
+    th("current_mtm", "MTM") + "</tr>";
+  const legs = active.map(t => Object.assign({}, t, tmDecayRow([t], cols)));
   const byCp = {};
   legs.forEach(t => { (byCp[t.counterparty || "(none)"] = byCp[t.counterparty || "(none)"] || []).push(t); });
   const { col, asc } = tmDecaySort;
   const cmp = (x, y) => {
-    let a = x[col], b = y[col];
+    const a = x[col], b = y[col];
     if (typeof a === "number" || typeof b === "number") return asc ? (a || 0) - (b || 0) : (b || 0) - (a || 0);
     return asc ? String(a || "").localeCompare(String(b || "")) : String(b || "").localeCompare(String(a || ""));
   };
-  const gKey = { _day: "day", _month: "month", _year: "year", _run: "run", _tv: "tv", current_mtm: "mtm" }[col];
-  const groups = Object.entries(byCp).map(([cp, list]) => ({ cp, list: list.sort(cmp), ...tmDecayGroup(list) }))
-    .sort((x, y) => gKey ? (asc ? x[gKey] - y[gKey] : y[gKey] - x[gKey])
-                         : (col === "counterparty" && !asc ? y.cp.localeCompare(x.cp) : x.cp.localeCompare(y.cp)));
+  const groups = Object.entries(byCp).map(([cp, list]) => Object.assign({ cp, list: list.sort(cmp) }, tmDecayRow(list, cols)))
+    .sort((x, y) => (col === "counterparty" || typeof x[col] !== "number")
+      ? (asc ? x.cp.localeCompare(y.cp) : y.cp.localeCompare(x.cp)) : cmp(x, y));
   const allIds = legs.map(t => t.db_id || t.id);
   const ticked = ids => ids.length > 0 && ids.every(id => tmSelected.has(id));
   const some = ids => ids.some(id => tmSelected.has(id));
+  const tail = r => money(r._day) + cols.map(c => money(r[c.key])).join("") + money(r._total) + money(r.current_mtm);
+  const note = r => `<td class="tm-decay-note" colspan="8">to expiry: bought legs <span class="${cls(r.longs)}">${usd(r.longs)}</span> &middot; ` +
+    `sold legs <span class="${cls(r.shorts)}">${usd(r.shorts)}</span>` +
+    (r.unpriced ? ` &middot; <span style="color:#f59e0b">${r.unpriced} not priced</span>` : "") + "</td>";
   let html = "";
   groups.forEach(g => {
     const open = tmDecayOpen.has(g.cp);
     html += `<tr class="tm-decay-group" data-decay-cp="${g.cp}">` +
       `<td><input type="checkbox" class="tm-decay-gcheck" data-cp="${g.cp}" ${ticked(g.ids) ? "checked" : ""}></td>` +
       `<td style="text-align:left">${open ? "&#9662;" : "&#9656;"} ${g.cp} <span style="font-weight:400;color:var(--muted)">(${g.n})</span></td>` +
-      `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(g.longs)}</span> / day &middot; sold legs ` +
-        `<span class="${cls(g.shorts)}">${usd(g.shorts)}</span> / day` +
-        (g.unpriced ? ` &middot; <span style="color:#f59e0b">${g.unpriced} not priced</span>` : "") + `</td>` +
-      money(g.day) + money(g.month) + money(g.year) + money(g.run) + money(g.tv) + money(g.mtm) + "</tr>";
+      note(g) + tail(g) + "</tr>";
     if (!open) return;
     g.list.forEach(t => {
       const tid = t.db_id || t.id, priced = tmIsPriced(t);
       const side = (t.side || "").toLowerCase();
       const sideCls = side.includes("buy") || side.includes("long") ? "qty-long" : "qty-short";
-      const cell = v => priced ? money(v) : '<td style="color:#f59e0b">not priced</td>';
       html += `<tr class="${tmSelected.has(tid) ? "tm-row-selected" : ""}">` +
         `<td><input type="checkbox" class="tm-decay-check" data-tid="${tid}" ${tmSelected.has(tid) ? "checked" : ""}></td>` +
         `<td style="text-align:left;padding-left:1.4rem;color:var(--muted)">${t.counterparty || ""}</td>` +
-        `<td style="text-align:left" class="${sideCls}">${t.side || ""}</td>` +
-        `<td style="text-align:left">${t.option_type || ""}</td>` +
-        `<td style="text-align:left">${t.instrument || ""}</td>` +
-        `<td>${t.expiry || ""}</td><td>${t.days_remaining || 0}</td>` +
+        `<td style="text-align:left" class="${sideCls}">${t.side || ""}</td><td style="text-align:left">${t.option_type || ""}</td>` +
+        `<td style="text-align:left">${t.instrument || ""}</td><td>${t.expiry || ""}</td><td>${t.days_remaining || 0}</td>` +
         `<td>${num(t.strike, isFil ? 4 : 0)}</td><td class="${sideCls}">${num(t.net_qty, 0)}</td>` +
         `<td>${t.theta == null ? "--" : Number(t.theta).toFixed(4)}</td>` +
-        cell(t._day) + cell(t._month) + cell(t._year) + cell(t._run) + cell(t._tv) + money(t.current_mtm || 0) + "</tr>";
+        (priced ? tail(t) : `<td colspan="${cols.length + 2}" style="color:#f59e0b">not priced</td>` + money(t.current_mtm || 0)) + "</tr>";
     });
   });
   if (!groups.length) {
-    html = '<tr><td colspan="16" style="text-align:center;color:var(--muted)">No active trades.</td></tr>';
+    html = `<tr><td colspan="${nCols}" style="text-align:center;color:var(--muted)">No active trades.</td></tr>`;
   } else {
-    const tot = tmDecayGroup(legs);
-    html += `<tr class="tm-decay-total"><td></td><td style="text-align:left">Total (${tot.n})</td>` +
-      `<td class="tm-decay-note" colspan="8">bought legs <span class="mtm-neg">${usd(tot.longs)}</span> / day &middot; sold legs ` +
-      `<span class="${cls(tot.shorts)}">${usd(tot.shorts)}</span> / day</td>` +
-      money(tot.day) + money(tot.month) + money(tot.year) + money(tot.run) + money(tot.tv) + money(tot.mtm) + "</tr>";
+    const tot = tmDecayRow(legs, cols);
+    html += `<tr class="tm-decay-total"><td></td><td style="text-align:left">Total (${tot.n})</td>` + note(tot) + tail(tot) + "</tr>";
   }
   body.innerHTML = html;
   const all = document.getElementById("tm-decay-check-all");
   if (all) { all.checked = ticked(allIds); all.indeterminate = !all.checked && some(allIds); }
-  document.querySelectorAll("#tm-decay-table th[data-dcol]").forEach(th => {
-    th.classList.toggle("sort-asc", th.dataset.dcol === col && asc);
-    th.classList.toggle("sort-desc", th.dataset.dcol === col && !asc);
+  document.querySelectorAll("#tm-decay-table th[data-dcol]").forEach(x => {
+    x.classList.toggle("sort-asc", x.dataset.dcol === col && asc);
+    x.classList.toggle("sort-desc", x.dataset.dcol === col && !asc);
   });
   const t = document.getElementById("tm-decay-total");
-  if (t) t.textContent = `- ${usd(totalTheta)} / day for the ${currentAsset} book`;
+  if (t) t.textContent = `- today ${usd(totalTheta)} / day, ${usd(tmDecayOf(active).total)} to expiry (${currentAsset} book)`;
   tmDecayGroupIds = Object.fromEntries(groups.map(g => [g.cp, g.ids]));
   tmDecayAllIds = allIds;
   tmWireDecay();
+  tmRenderDecayChart(groups);
+}
+// Time value still to decay, per counterparty, from now to the last month-end
+// that matters: the slope is the decay, steeper toward each expiry.
+function tmRenderDecayChart(groups) {
+  const el = document.getElementById("tm-decay-chart");
+  if (!el || typeof Plotly === "undefined") return;
+  if (!groups.length || tmDecayCal.length < 2) { el.innerHTML = ""; return; }
+  let last = 1;
+  groups.forEach(g => g.list.forEach(t => {
+    const p = t.value_path || [];
+    for (let i = p.length - 1; i > 0; i--) if (Math.abs(p[i] - p[i - 1]) > 0.5) { last = Math.max(last, i); break; }
+  }));
+  const pts = tmDecayCal.slice(0, last + 1);
+  const remaining = list => pts.map((_, i) => list.reduce((a, t) => {
+    const p = t.value_path;
+    return Array.isArray(p) && p.length === tmDecayCal.length ? a + (p[i] - p[p.length - 1]) : a;
+  }, 0));
+  const x = pts.map(c => c.date);
+  const traces = groups.map(g => ({ x, y: remaining(g.list), name: g.cp, mode: "lines+markers", line: { shape: "linear" } }));
+  traces.push({ x, y: remaining(groups.flatMap(g => g.list)), name: "Total", mode: "lines+markers", line: { width: 3, dash: "dot" } });
+  const dark = document.body.classList.contains("dark") || getComputedStyle(document.body).backgroundColor.startsWith("rgb(1");
+  Plotly.react(el, traces, {
+    title: { text: "Time value still to decay (today's spot & vol)", font: { size: 12 } },
+    margin: { l: 70, r: 10, t: 30, b: 35 }, hovermode: "x unified",
+    yaxis: { tickprefix: "$", tickformat: ",.0f", zeroline: true },
+    xaxis: { type: "date", tickformat: "%d %b %y" },
+    legend: { orientation: "h", y: -0.2 },
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)",
+    font: { color: dark ? "#c9d1d9" : "#333", size: 11 },
+  }, { displayModeBar: false, responsive: true });
 }
 let tmDecayGroupIds = {}, tmDecayAllIds = [];
 function tmRedrawDecay() {
@@ -2526,35 +2551,52 @@ function tmSelectedByStatus() {
   };
 }
 
-// What the ticked trades lose (or earn) to time: a day = theta x net qty; a
-// month / year = value in 30 / 360 days minus value now, at today's spot and
-// vol (mtm_by_horizon), so decay speeding up and trades expiring first count.
-function tmSelectedDecay(active) {
-  const iH = h => (window.TM_MATRIX_HORIZONS || [30, 45, 60, 90, 120, 150, 180, 270, 360]).indexOf(h);
-  const at = (t, h) => {
-    const arr = t.mtm_by_horizon || [];
-    const i = iH(h);
-    return i >= 0 && arr[i] != null ? Number(arr[i]) : null;
-  };
-  let day = 0, month = 0, year = 0, missing = 0;
-  active.forEach(t => {
+// Decay calendar (13 Oct 2026). Each position comes with its value now and at
+// every month-end at today's spot and vol (value_path, aligned with
+// tmDecayCal), so the time value lost in a calendar month is a difference.
+// Decay speeds up near expiry and stops at it - unlike theta x days.
+let tmDecayCal = [];
+function tmDecayOf(list) {
+  const n = Math.max(0, tmDecayCal.length - 1);
+  const months = new Array(n).fill(0);
+  let day = 0, unpriced = 0;
+  list.forEach(t => {
     day += (t.theta || 0) * (t.net_qty || 0);
-    const now = t.current_mtm || 0, m = at(t, 30), y = at(t, 360);
-    if (m == null || y == null) { missing += 1; month += (t.theta || 0) * (t.net_qty || 0) * 30; year += (t.theta || 0) * (t.net_qty || 0) * 360; return; }
-    month += m - now; year += y - now;
+    const p = t.value_path;
+    if (!Array.isArray(p) || p.length !== tmDecayCal.length) { unpriced += 1; return; }
+    for (let i = 0; i < n; i++) months[i] += p[i + 1] - p[i];
   });
-  return { day, month, year, missing };
+  return { day, months, total: months.reduce((a, v) => a + v, 0), unpriced };
+}
+// Month columns worth showing: up to the last month any of these positions
+// still decays in (at most 6, the rest summed as "Later").
+function tmDecayColumns(list) {
+  const m = tmDecayOf(list).months;
+  let last = -1;
+  list.forEach(t => {
+    const p = t.value_path || [];
+    for (let i = p.length - 1; i > 0; i--) if (Math.abs(p[i] - p[i - 1]) > 0.5) { last = Math.max(last, i - 1); break; }
+  });
+  const shown = Math.min(last + 1, 6);
+  const cols = [];
+  for (let i = 0; i < shown; i++) {
+    const lab = (tmDecayCal[i + 1] || {}).label || "";
+    cols.push({ key: "_m" + i, label: i === 0 ? "Rest of " + lab : lab, idx: [i] });
+  }
+  if (last + 1 > shown) cols.push({ key: "_later", label: "Later", idx: Array.from({ length: m.length - shown }, (_, k) => shown + k) });
+  return cols;
 }
 
 function tmRenderSelectedDecay(active) {
   const el = document.getElementById("tm-sel-decay");
   if (!el) return;
   if (!active.length) { el.style.display = "none"; return; }
-  const d = tmSelectedDecay(active);
+  const d = tmDecayOf(active);
   const fmt = v => `<b style="color:${v < 0 ? "var(--red)" : "var(--green)"}">${v < 0 ? "-$" : "+$"}${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}</b>`;
-  el.innerHTML = `${active.length} selected &middot; time decay: ${fmt(d.day)} / day &middot; ${fmt(d.month)} / month &middot; ${fmt(d.year)} / year` +
-    ` <span style="color:var(--muted)">(to expiry)</span> &middot; run-rate ${fmt(d.day * 365)} / year <span style="color:var(--muted)">(if kept)</span>` +
-    (d.missing ? ` <span style="color:var(--muted)">(${d.missing} estimated as theta x days)</span>` : "");
+  const cols = tmDecayColumns(active).slice(0, 4);
+  const parts = cols.map(c => `${c.label} ${fmt(c.idx.reduce((a, i) => a + d.months[i], 0))}`);
+  el.innerHTML = `${active.length} selected &middot; today ${fmt(d.day)} / day &middot; ` + parts.join(" &middot; ") +
+    ` &middot; total to expiry ${fmt(d.total)}` + (d.unpriced ? ` <span style="color:var(--muted)">(${d.unpriced} not priced)</span>` : "");
   el.style.display = "";
 }
 

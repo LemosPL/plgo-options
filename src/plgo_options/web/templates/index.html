@@ -262,36 +262,17 @@
           <small id="tm-decay-total" style="color:var(--muted);font-weight:normal"></small></h2></summary>
         <div class="chain-wrapper" style="max-height:520px;margin-top:.5rem">
           <table id="tm-decay-table">
-            <thead>
-              <tr>
-                <th style="width:30px"><input type="checkbox" id="tm-decay-check-all" title="Select all active trades"></th>
-                <th class="sortable" data-dcol="counterparty" style="text-align:left" title="Click a counterparty row to open / close its trades">Counterparty</th>
-                <th class="sortable" data-dcol="side" style="text-align:left">Side</th>
-                <th class="sortable" data-dcol="option_type" style="text-align:left">Type</th>
-                <th class="sortable" data-dcol="instrument" style="text-align:left">Instrument</th>
-                <th class="sortable" data-dcol="expiry">Expiry</th>
-                <th class="sortable" data-dcol="days_remaining">DTE</th>
-                <th class="sortable" data-dcol="strike">Strike</th>
-                <th class="sortable" data-dcol="net_qty">Qty</th>
-                <th class="sortable" data-dcol="theta" title="Theta per contract (the trades table's &Theta;): negative for every option, bought or sold">&Theta; / contract</th>
-                <th class="sortable" data-dcol="_day" title="Theta x signed qty: bought options cost (-), sold options earn (+)">Decay / day</th>
-                <th class="sortable" data-dcol="_month" title="Value in 30 days minus value now, at today's spot and vol">Month (30d)</th>
-                <th class="sortable" data-dcol="_year" title="Value in 360 days minus value now, at today's spot and vol. A leg expiring sooner stops at expiry, so for legs inside a month this equals Month">Year (360d)</th>
-                <th class="sortable" data-dcol="_run" title="Theta / day x 365: what decay costs a year if this exposure is kept (rolled), not just until the legs expire">Run-rate / year</th>
-                <th class="sortable" data-dcol="_tv" title="MTM minus intrinsic at today's spot: time value still to decay (or to earn) until expiry">Time value left</th>
-                <th class="sortable" data-dcol="current_mtm">MTM</th>
-              </tr>
-            </thead>
-            <tbody id="tm-decay-body"><tr><td colspan="16" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
+            <thead id="tm-decay-head"></thead>
+            <tbody id="tm-decay-body"><tr><td colspan="14" style="text-align:center;color:var(--muted)">Loading&hellip;</td></tr></tbody>
           </table>
         </div>
-        <p style="color:var(--muted);font-size:.72rem;margin:.4rem 0 0">Active trades of this book; theta per position
-          from Deribit when listed, else Black-Scholes on our vol surface (USD per day). Month / year revalue each trade
-          30 / 360 days on at today's spot and vol, so faster decay near expiry counts and a trade stops at its expiry.
-          Month / Year stop at each leg's expiry (legs expiring within 30 days show the same Month and Year);
-          Run-rate / year = theta &times; 365, the cost of keeping the exposure (rolling it) for a year.
-          Bought legs cost (red), sold legs earn (green); &Theta; / contract is negative for every option, the side sets the sign.
-          Ticks here and in the trades table are the same selection, so the decay bar above the trades shows them.</p>
+        <div id="tm-decay-chart" style="height:260px;margin-top:.6rem"></div>
+        <p style="color:var(--muted);font-size:.72rem;margin:.4rem 0 0">Decay calendar: the time value each position loses in
+          each calendar month, at today's spot and vol (each position revalued at every month-end). Decay speeds up as expiry
+          nears and stops at expiry, so a month column is <i>not</i> today's rate &times; 30. <b>Today / day</b> is only the
+          current speed. <b>Total to expiry</b> = all the time value still to go. Bought legs cost (red), sold legs earn
+          (green). The chart shows the time value still to decay over time - the slope is the decay. Ticks here and in the
+          trades table are the same selection.</p>
       </details>
     </section>
 
@@ -4031,7 +4012,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=191"></script>
+<script src="/static/app.js?v=192"></script>
 <script src="/static/agents.js?v=28"></script>
 </body>
 </html>
