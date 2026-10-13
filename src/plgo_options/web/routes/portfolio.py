@@ -414,6 +414,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
     smiles = {}
     tickers = {}
     stale_spot = False
+    # Set when the vol-smile fetch fails (e.g. Deribit maintenance): smiles
+    # stay empty, so vol_surface comes back empty and every IV falls back to
+    # DEFAULT_IV. Surfaced so the UI can say so instead of quietly offering
+    # no maturities.
+    vol_surface_error: str | None = None
 
     if is_fil:
         # FIL: fetch live spot + ETH vol surface scaled by HV ratio
@@ -437,8 +442,8 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
                 else:
                     fil_strikes = smile.strikes.tolist()
                 smiles[exp_code] = VolSmile(fil_strikes, scaled_ivs)
-        except Exception:
-            pass  # fall back to DEFAULT_IV
+        except Exception as e:
+            vol_surface_error = str(e).splitlines()[0] if str(e) else type(e).__name__  # fall back to DEFAULT_IV
     else:
         try:
             eth_spot = await client.get_eth_spot_price()
@@ -461,8 +466,8 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             stale_spot = True
         try:
             smiles = await _fetch_smiles()
-        except Exception:
-            pass  # fall back to DEFAULT_IV, same as the FIL branch above
+        except Exception as e:
+            vol_surface_error = str(e).splitlines()[0] if str(e) else type(e).__name__  # fall back to DEFAULT_IV, same as the FIL branch above
 
         # Collect unique Deribit instrument names for batch ticker fetch.
         #
@@ -878,6 +883,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         # Columns of the P&L matrix (same set Optimizer v4 draws).
         "pnl_matrix_horizons": PNL_MATRIX_HORIZONS,
         "vol_surface": vol_surface,
+        "vol_surface_error": vol_surface_error,
         "no_live_data": False,
         # True when eth_spot came from a fallback (most recent trade's own
         # reference spot) rather than a live feed — e.g. a Deribit outage/

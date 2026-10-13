@@ -9458,6 +9458,19 @@ document.getElementById("btn-load-optv2").addEventListener("click", async () => 
 
     optv2RenderAll();
 
+    // Warn when there is no vol surface (live feed down — e.g. Deribit
+    // maintenance): the dropdown below would otherwise offer only Cone.
+    const $noVol = document.getElementById("optv2-no-vol-banner");
+    if ($noVol) {
+      const noVol = !(optv2Data.vol_surface || []).some(s => s.dte > 0);
+      $noVol.style.display = noVol ? "" : "none";
+      $noVol.textContent = noVol
+        ? "Live vol surface is unavailable right now (market data feed down" +
+          (optv2Data.vol_surface_error ? `: ${optv2Data.vol_surface_error}` : "") +
+          ") — no target maturities can be offered and IVs fall back to a default. Reload the risk profile once the feed is back."
+        : "";
+    }
+
     // Populate expiry dropdown from vol surface
     const $expiry = document.getElementById("optv2-target-expiry");
     $expiry.innerHTML = '<option value="">Select maturity…</option><option value="__CONE__">Cone (multi-expiry)</option>';
