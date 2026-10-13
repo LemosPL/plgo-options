@@ -107,6 +107,7 @@ class CollateralOptimization:
         base_decay=0.0,
         carry_weight=0.0,
         max_carry_usd=None,
+        allowed=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -116,6 +117,10 @@ class CollateralOptimization:
         c_deltas = np.array([abs(float(getattr(c, "delta", 0.5) or 0.5)) for c in candidates])
         # Candidates below min_trade_delta are too illiquid to trade: freeze their bounds at 0.
         tradeable = c_deltas >= min_trade_delta
+        # allowed (optional bool per candidate): the Max Trades re-solve freezes
+        # every candidate outside the kept legs at 0, same as an illiquid one.
+        if allowed is not None:
+            tradeable = tradeable & np.asarray(allowed, dtype=bool)
 
         prob = pulp.LpProblem("CollateralOptimization", pulp.LpMinimize)
 

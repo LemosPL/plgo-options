@@ -1791,8 +1791,8 @@ class OptimizerV3(BaseOptimizer):
         ])
 
         lp = CollateralOptimization(self.asset, counterparties)
-        lp_result = lp.optimize(
-            spot_arr, spot_weights, residual, candidates, c_payoffs,
+        lp_args = (spot_arr, spot_weights, residual, candidates, c_payoffs)
+        lp_kwargs = dict(
             lam_factor=lam_factor,
             mu_factor=mu_factor,
             bid_ask_atm_pct=bid_ask_atm_pct,
@@ -1824,6 +1824,45 @@ class OptimizerV3(BaseOptimizer):
             carry_weight=carry_weight,
             max_carry_usd=max_carry_usd,
         )
+        lp_result = lp.optimize(*lp_args, **lp_kwargs)
+
+        # Max Trades: keep the top-N legs of this solution (same notional
+        # ranking as the cut further down), then RE-SOLVE with only the
+        # candidates whose legs are all among them. Cutting the solution
+        # without re-solving dropped the small legs that held the hard caps
+        # (Max Carry, Max CP Loss) and left the rest sized for trades that
+        # were no longer there. If no solution fits in N trades, fall back to
+        # the plain cut and say so.
+        max_trades_note = None
+        if lp_result is not None and max_trades is not None:
+            cand_legs = [
+                [((getattr(leg, "expiry_code", ""), float(getattr(leg, "strike", 0.0)),
+                   getattr(leg, "opt", ""), getattr(leg, "counterparty", "")), sign_qty, leg)
+                 for leg, sign_qty, _kind in self._candidate_trade_legs(c, 1)]
+                for c in candidates
+            ]
+            leg_net: dict[tuple, float] = {}
+            leg_price: dict[tuple, float] = {}
+            for j, legs in enumerate(cand_legs):
+                for key, sign_qty, leg in legs:
+                    leg_net[key] = leg_net.get(key, 0.0) + sign_qty * float(lp_result["net_qty"][j])
+                    leg_price[key] = float(getattr(leg, "bs_price_usd", 0.0) or 0.0)
+            traded = [k for k, q in leg_net.items() if abs(q) >= 0.5]
+            if len(traded) > int(max_trades):
+                traded.sort(key=lambda k: abs(leg_net[k]) * leg_price[k], reverse=True)
+                kept = set(traded[:int(max_trades)])
+                allowed = np.array([bool(legs) and all(key in kept for key, _sq, _l in legs) for legs in cand_legs])
+                resolved = lp.optimize(*lp_args, **lp_kwargs, allowed=allowed)
+                if resolved is not None:
+                    print(f"max_trades: re-solved on the top {len(kept)} of {len(traded)} legs")
+                    lp_result = resolved
+                else:
+                    max_trades_note = (
+                        f"Max Trades: no solution fits in {int(max_trades)} trades within the hard caps "
+                        f"(Max Carry, Max CP Loss, collateral), so these are the {int(max_trades)} largest "
+                        f"trades of the full solution, which may break those caps. Raise Max Trades or loosen a cap."
+                    )
+                    print(f"max_trades: re-solve infeasible on the top {len(kept)} legs, falling back to the cut")
 
         if lp_result is None:
             message = "LP solver did not find an optimal solution."
@@ -2209,14 +2248,15 @@ class OptimizerV3(BaseOptimizer):
         # degenerate way). Surface that rather than let a technically-ok
         # result look clean.
         cp_loss_cap_warnings = lp_result.get("cp_loss_cap_warnings", [])
-        message = None
+        message = max_trades_note
         if cp_loss_cap_warnings:
-            message = (
+            cp_warning = (
                 f"Max CP Loss cap is only being met by pinning trades at Max Qty for: "
                 f"{', '.join(cp_loss_cap_warnings)}. The cap may be unrealistically tight for the "
                 f"current Max Qty — consider raising Max Qty, loosening the cap, or treating this "
                 f"result as non-executable at its stated size."
             )
+            message = f"{message} {cp_warning}" if message else cp_warning
 
         # Carry before/after, from the FINAL trades (after the box
         # neutralizer, re-hedge and trade-count pruning), not the raw LP
@@ -2237,9 +2277,9 @@ class OptimizerV3(BaseOptimizer):
             carry_warning = (
                 f"Max Carry not met by the final trades: carry ${carry_after:,.0f} vs cap "
                 f"${float(max_carry_usd):,.0f} over {carry_h:g} days. The LP met the cap, but "
-                + ("Max Trades kept only the largest trades by notional and dropped legs that cut carry — "
-                   "clear or raise Max Trades." if max_trades is not None else
-                   "the box neutralizer / re-hedge added carry after it.")
+                + ("no solution fits in Max Trades (see above) — raise Max Trades or loosen the cap."
+                   if max_trades_note else
+                   "the box neutralizer / re-hedge / rounding moved it afterwards.")
             )
             message = f"{message} {carry_warning}" if message else carry_warning
         carry = {
