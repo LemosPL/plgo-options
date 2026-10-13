@@ -2227,7 +2227,21 @@ class OptimizerV3(BaseOptimizer):
             float(t.get("qty", 0.0) or 0.0) * self._bs_theta(t.get("strike", 0.0), t.get("dte", 0), t.get("iv_pct", 0.0), str(t.get("opt", "")))
             for t in trades
         )
-        carry_before, carry_after = -carry_h * theta_before, -carry_h * theta_after
+        carry_before, carry_after = float(-carry_h * theta_before), float(-carry_h * theta_after)
+        theta_before, theta_after = float(theta_before), float(theta_after)
+        # Max carry binds on the LP's own solution; Max Trades then keeps only
+        # the largest trades by notional, and the legs that cut carry (small
+        # unwinds, cheap OTM sales) are the first to go — so the final book can
+        # end up well above the cap. Say so rather than show a broken cap as ok.
+        if max_carry_usd is not None and carry_after > float(max_carry_usd) + max(1_000.0, 0.01 * abs(float(max_carry_usd))):
+            carry_warning = (
+                f"Max Carry not met by the final trades: carry ${carry_after:,.0f} vs cap "
+                f"${float(max_carry_usd):,.0f} over {carry_h:g} days. The LP met the cap, but "
+                + ("Max Trades kept only the largest trades by notional and dropped legs that cut carry — "
+                   "clear or raise Max Trades." if max_trades is not None else
+                   "the box neutralizer / re-hedge added carry after it.")
+            )
+            message = f"{message} {carry_warning}" if message else carry_warning
         carry = {
             "horizon_days": carry_h,
             "weight": float(carry_weight or 0.0),
