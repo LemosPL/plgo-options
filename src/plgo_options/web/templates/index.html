@@ -1737,9 +1737,9 @@
           <input type="checkbox" id="optv2-use-collateral-cap">
           Cap to posted collateral
         </label>
-        <label class="pf-filter-label">Carry Weight
-          <input type="number" id="optv2-carry-weight" value="0" step="0.05" min="0" style="width:5rem"
-            title="Cost of carry lever. Carry = the book's theta run-rate over the Carry Days below (-theta/day × days, as if every leg is kept at its tenor and rolled). Each dollar of it is charged in the LP objective like this many dollars of trading cost. 0 = off (default). One-sided: a book that already earns theta is not pushed to sell more optionality. Higher = cheaper to hold, at the expense of the profile fit.">
+        <label class="pf-filter-label">Carry Lean (%)
+          <input type="number" id="optv2-carry-lean" value="0" step="10" min="0" max="100" style="width:5rem"
+            title="Gradual cost-of-carry lever. 0% = the optimizer's own solution, ignoring carry (default). 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
         </label>
         <label class="pf-filter-label">Carry Days
           <input type="number" id="optv2-carry-horizon-days" value="30" step="1" min="1" style="width:4.5rem"

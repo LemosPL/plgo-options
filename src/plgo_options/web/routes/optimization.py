@@ -200,6 +200,10 @@ class OptimizationParams(BaseModel):
     carry_horizon_days: float = 30.0
     carry_weight: float = 0.0
     max_carry_usd: float | None = None
+    # Carry Lean (0-1): place the book's carry between the run's own solution
+    # (0, off) and the lowest carry the other settings allow (1), as a hard
+    # cap; combined with max_carry_usd by taking the tighter of the two.
+    carry_lean: float = 0.0
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -484,6 +488,7 @@ async def run_optimizer(params: OptimizationParams):
         carry_horizon_days=params.carry_horizon_days,
         carry_weight=params.carry_weight,
         max_carry_usd=params.max_carry_usd,
+        carry_lean=params.carry_lean,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),

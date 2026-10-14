@@ -151,6 +151,9 @@ class OptimizerRunParams:
     carry_horizon_days: float = 30.0
     carry_weight: float = 0.0
     max_carry_usd: float | None = None
+    # Carry Lean (0-1): carry placed between the run's own solution and the
+    # lowest achievable, as a hard cap (see optimizer_v3.run_lp). 0 = off.
+    carry_lean: float = 0.0
     # Collateral posted against THIS book, per counterparty, per asset (e.g.
     # {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}), from the Collateral tab
     # (counterparty_collateral.book; always fetched by the route). The LP's

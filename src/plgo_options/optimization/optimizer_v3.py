@@ -44,6 +44,10 @@ DEFAULT_BID_ASK_VOL_PTS_BY_ASSET: dict[str, "dict[str, float] | float"] = {
 # Fallback VOLpts for a counterparty absent from the resolved dict.
 _VOL_PTS_FALLBACK = 0.75
 
+# Carry penalty used to find the lowest achievable carry for Carry Lean: large
+# enough to outweigh fit, trading and collateral cost on any realistic book.
+_CARRY_MIN_WEIGHT = 1_000.0
+
 # Real execution cost for a box neutralizer, in basis points of the box's
 # notional (strike width × qty — with r=0 here, box_debit already equals
 # K_high-K_low exactly, so box_debit IS the per-contract notional). This is
@@ -1316,6 +1320,10 @@ class OptimizerV3(BaseOptimizer):
                  carry_horizon_days: float = 30.0,
                  carry_weight: float = 0.0,
                  max_carry_usd: float | None = None,
+                 # Carry Lean (0-1): place the book's carry between the run's
+                 # own solution (0) and the lowest carry the other settings
+                 # allow (1, floored at zero), as a hard cap — see run_lp.
+                 carry_lean: float = 0.0,
                  # Parametric (auto) target-profile shape — see
                  # misc_utils.build_parametric_target_profile_eth. None = engine
                  # default for that one knob; only used when neither manual_target
@@ -1826,6 +1834,37 @@ class OptimizerV3(BaseOptimizer):
         )
         lp_result = lp.optimize(*lp_args, **lp_kwargs)
 
+        # Carry Lean: a gradual lever built on the cap, because the LP moves
+        # smoothly with a cap but jumps between solutions as a weight grows.
+        # The solve above is "ignore carry" (lean 0); a second solve with a
+        # carry penalty that outweighs everything finds the lowest carry the
+        # other settings allow (lean 1, floored at zero — the penalty is
+        # one-sided, so it never turns the book into an option seller); the
+        # cap then sits `lean` of the way from the first to the second. Any cap
+        # in between is feasible: the minimum-carry solution satisfies it.
+        def _lp_carry(res):
+            return float(base_decay + np.dot(c_decay, res["net_qty"]))
+
+        carry_cap = max_carry_usd
+        lean_info = None
+        lean = min(max(float(carry_lean or 0.0), 0.0), 1.0)
+        if lean > 0 and lp_result is not None:
+            carry_free = _lp_carry(lp_result)
+            min_result = lp.optimize(*lp_args, **{**lp_kwargs, "carry_weight": _CARRY_MIN_WEIGHT})
+            if min_result is not None:
+                carry_min = max(_lp_carry(min_result), 0.0)
+                lean_info = {"lean": lean, "free_usd": round(carry_free, 2), "min_usd": round(carry_min, 2)}
+                if carry_free > carry_min:
+                    target = carry_free - lean * (carry_free - carry_min)
+                    carry_cap = target if carry_cap is None else min(float(carry_cap), target)
+                    lp_kwargs["max_carry_usd"] = carry_cap
+                    leaned = lp.optimize(*lp_args, **lp_kwargs)
+                    if leaned is not None:
+                        lp_result = leaned
+                lean_info["target_usd"] = None if carry_cap is None else round(float(carry_cap), 2)
+                print(f"carry lean {lean:.0%}: free {carry_free:,.0f}  min {carry_min:,.0f}  "
+                      f"cap {'none' if carry_cap is None else f'{carry_cap:,.0f}'}")
+
         # Max Trades: keep the top-N legs of this solution (same notional
         # ranking as the cut further down), then RE-SOLVE with only the
         # candidates whose legs are all among them. Cutting the solution
@@ -2273,10 +2312,10 @@ class OptimizerV3(BaseOptimizer):
         # the largest trades by notional, and the legs that cut carry (small
         # unwinds, cheap OTM sales) are the first to go — so the final book can
         # end up well above the cap. Say so rather than show a broken cap as ok.
-        if max_carry_usd is not None and carry_after > float(max_carry_usd) + max(1_000.0, 0.01 * abs(float(max_carry_usd))):
+        if carry_cap is not None and carry_after > float(carry_cap) + max(1_000.0, 0.01 * abs(float(carry_cap))):
             carry_warning = (
-                f"Max Carry not met by the final trades: carry ${carry_after:,.0f} vs cap "
-                f"${float(max_carry_usd):,.0f} over {carry_h:g} days. The LP met the cap, but "
+                f"{'Carry cap' if lean_info else 'Max Carry'} not met by the final trades: carry ${carry_after:,.0f} vs cap "
+                f"${float(carry_cap):,.0f} over {carry_h:g} days. The LP met the cap, but "
                 + ("no solution fits in Max Trades (see above) — raise Max Trades or loosen the cap."
                    if max_trades_note else
                    "the box neutralizer / re-hedge / rounding moved it afterwards.")
@@ -2286,6 +2325,9 @@ class OptimizerV3(BaseOptimizer):
             "horizon_days": carry_h,
             "weight": float(carry_weight or 0.0),
             "max_usd": None if max_carry_usd is None else float(max_carry_usd),
+            # Carry Lean: carry of the run's own solution (free), the lowest
+            # achievable (min) and the cap applied between them; None when off.
+            "lean": lean_info,
             # Theta run-rate over the horizon; positive = the book loses this much.
             "before_usd": round(carry_before, 2),
             "after_usd": round(carry_after, 2),

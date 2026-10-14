@@ -10613,7 +10613,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       cash_neutrality_factor: parseFloat(document.getElementById("optv2-cash-neutrality-factor")?.value || "0"),
       max_cp_loss_usd: maxCpLoss,
       use_collateral_cap: useCollateralCap,
-      carry_weight: parseFloat(document.getElementById("optv2-carry-weight")?.value || "0"),
+      carry_lean: Math.min(Math.max(parseFloat(document.getElementById("optv2-carry-lean")?.value || "0"), 0), 100) / 100,
       carry_horizon_days: parseFloat(document.getElementById("optv2-carry-horizon-days")?.value || "30"),
       max_carry_usd: maxCarry,
       // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
@@ -10877,7 +10877,11 @@ function optv2RenderResult(data) {
     document.getElementById("optv2-sum-carry-label").textContent = `Carry (${optv2Fmt(carry.horizon_days, 0)}d)`;
     $carry.textContent = `$${optv2Fmt(carry.before_usd, 0)} → $${optv2Fmt(carry.after_usd, 0)}`;
     $carry.style.color = carry.after_usd <= carry.before_usd ? "var(--green)" : "var(--red)";
-    $carry.title = `Theta/day ${optv2Fmt(carry.theta_per_day_before, 0)} → ${optv2Fmt(carry.theta_per_day_after, 0)}`;
+    $carry.title = `Theta/day ${optv2Fmt(carry.theta_per_day_before, 0)} → ${optv2Fmt(carry.theta_per_day_after, 0)}` +
+      (carry.lean
+        ? `\nCarry Lean ${optv2Fmt(100 * carry.lean.lean, 0)}%: optimizer's own solution $${optv2Fmt(carry.lean.free_usd, 0)}, ` +
+          `lowest achievable $${optv2Fmt(carry.lean.min_usd, 0)}, cap applied $${optv2Fmt(carry.lean.target_usd, 0)}`
+        : "");
   } else {
     $carry.textContent = "—";
   }
