@@ -1739,7 +1739,7 @@
         </label>
         <label class="pf-filter-label">Carry Lean (%)
           <input type="number" id="optv2-carry-lean" value="0" step="10" min="0" max="100" style="width:5rem"
-            title="Gradual cost-of-carry lever. 0% = the optimizer's own solution, ignoring carry (default). 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
+            title="Gradual cost-of-carry lever. 0% = off: the optimizer's own solution, ignoring carry (default). Above 0%, the scale starts from the lower of today's carry and the optimizer's own solution, so any lean never ends above today. 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
         </label>
         <label class="pf-filter-label">Carry Days
           <input type="number" id="optv2-carry-horizon-days" value="30" step="1" min="1" style="width:4.5rem"

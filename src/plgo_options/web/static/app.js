@@ -10879,8 +10879,9 @@ function optv2RenderResult(data) {
     $carry.style.color = carry.after_usd <= carry.before_usd ? "var(--green)" : "var(--red)";
     $carry.title = `Theta/day ${optv2Fmt(carry.theta_per_day_before, 0)} → ${optv2Fmt(carry.theta_per_day_after, 0)}` +
       (carry.lean
-        ? `\nCarry Lean ${optv2Fmt(100 * carry.lean.lean, 0)}%: optimizer's own solution $${optv2Fmt(carry.lean.free_usd, 0)}, ` +
-          `lowest achievable $${optv2Fmt(carry.lean.min_usd, 0)}, cap applied $${optv2Fmt(carry.lean.target_usd, 0)}`
+        ? `\nCarry Lean ${optv2Fmt(100 * carry.lean.lean, 0)}%: from $${optv2Fmt(carry.lean.start_usd, 0)} ` +
+          `(lower of today $${optv2Fmt(carry.lean.today_usd, 0)} and the optimizer's own solution $${optv2Fmt(carry.lean.free_usd, 0)}) ` +
+          `towards the lowest achievable $${optv2Fmt(carry.lean.min_usd, 0)}; cap applied $${optv2Fmt(carry.lean.target_usd, 0)}`
         : "");
   } else {
     $carry.textContent = "—";

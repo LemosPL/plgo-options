@@ -1836,12 +1836,14 @@ class OptimizerV3(BaseOptimizer):
 
         # Carry Lean: a gradual lever built on the cap, because the LP moves
         # smoothly with a cap but jumps between solutions as a weight grows.
-        # The solve above is "ignore carry" (lean 0); a second solve with a
-        # carry penalty that outweighs everything finds the lowest carry the
-        # other settings allow (lean 1, floored at zero — the penalty is
-        # one-sided, so it never turns the book into an option seller); the
-        # cap then sits `lean` of the way from the first to the second. Any cap
-        # in between is feasible: the minimum-carry solution satisfies it.
+        # The scale starts from the LOWER of today's carry and the solve above
+        # ("ignore carry"), so any lean > 0 never ends above today — the run's
+        # own solution often adds carry. A second solve with a carry penalty
+        # that outweighs everything finds the lowest carry the other settings
+        # allow (lean 1, floored at zero — the penalty is one-sided, so it never
+        # turns the book into an option seller); the cap then sits `lean` of
+        # the way from the start to that minimum. Any cap at or above the
+        # minimum is feasible: the minimum-carry solution satisfies it.
         def _lp_carry(res):
             return float(base_decay + np.dot(c_decay, res["net_qty"]))
 
@@ -1850,19 +1852,25 @@ class OptimizerV3(BaseOptimizer):
         lean = min(max(float(carry_lean or 0.0), 0.0), 1.0)
         if lean > 0 and lp_result is not None:
             carry_free = _lp_carry(lp_result)
+            carry_today = -carry_h * float(sum(
+                float(p.net_qty or 0.0) * self._bs_theta(p.strike, p.days_remaining, p.iv_pct, str(p.opt))
+                for p in self.positions
+            ))
+            carry_start = min(carry_free, carry_today)
             min_result = lp.optimize(*lp_args, **{**lp_kwargs, "carry_weight": _CARRY_MIN_WEIGHT})
             if min_result is not None:
                 carry_min = max(_lp_carry(min_result), 0.0)
-                lean_info = {"lean": lean, "free_usd": round(carry_free, 2), "min_usd": round(carry_min, 2)}
-                if carry_free > carry_min:
-                    target = carry_free - lean * (carry_free - carry_min)
+                lean_info = {"lean": lean, "free_usd": round(carry_free, 2), "today_usd": round(carry_today, 2),
+                             "start_usd": round(carry_start, 2), "min_usd": round(carry_min, 2)}
+                if carry_start > carry_min:
+                    target = carry_start - lean * (carry_start - carry_min)
                     carry_cap = target if carry_cap is None else min(float(carry_cap), target)
                     lp_kwargs["max_carry_usd"] = carry_cap
                     leaned = lp.optimize(*lp_args, **lp_kwargs)
                     if leaned is not None:
                         lp_result = leaned
                 lean_info["target_usd"] = None if carry_cap is None else round(float(carry_cap), 2)
-                print(f"carry lean {lean:.0%}: free {carry_free:,.0f}  min {carry_min:,.0f}  "
+                print(f"carry lean {lean:.0%}: free {carry_free:,.0f}  today {carry_today:,.0f}  min {carry_min:,.0f}  "
                       f"cap {'none' if carry_cap is None else f'{carry_cap:,.0f}'}")
 
         # Max Trades: keep the top-N legs of this solution (same notional
@@ -2325,8 +2333,9 @@ class OptimizerV3(BaseOptimizer):
             "horizon_days": carry_h,
             "weight": float(carry_weight or 0.0),
             "max_usd": None if max_carry_usd is None else float(max_carry_usd),
-            # Carry Lean: carry of the run's own solution (free), the lowest
-            # achievable (min) and the cap applied between them; None when off.
+            # Carry Lean: carry of the run's own solution (free), of today's
+            # book (today), the scale's start (the lower of the two), the lowest
+            # achievable (min) and the cap applied; None when off.
             "lean": lean_info,
             # Theta run-rate over the horizon; positive = the book loses this much.
             "before_usd": round(carry_before, 2),
