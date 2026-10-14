@@ -85,6 +85,10 @@ async def init_agent_tables() -> None:
     db = await get_db()
     for stmt in SCHEMA:
         await db.execute(stmt)
+    # Star (14 Oct 2026): proposals the desk keeps across sweeps.
+    cur = await db.execute("PRAGMA table_info(agent_proposals)")
+    if "starred" not in {r[1] for r in await cur.fetchall()}:
+        await db.execute("ALTER TABLE agent_proposals ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
     await db.commit()
 
 
@@ -240,6 +244,24 @@ async def get_proposal(pid: int) -> dict[str, Any] | None:
     return d
 
 
+async def list_starred() -> list[dict[str, Any]]:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM agent_proposals WHERE starred=1 ORDER BY id DESC")
+    out = []
+    for r in await cur.fetchall():
+        d = dict(r)
+        d["reasons"] = json.loads(d.pop("reasons_json") or "[]")
+        d["proposal"] = json.loads(d.pop("proposal_json") or "{}")
+        out.append(d)
+    return out
+
+
+async def star_proposal(pid: int, on: bool) -> None:
+    db = await get_db()
+    await db.execute("UPDATE agent_proposals SET starred=? WHERE id=?", (1 if on else 0, pid))
+    await db.commit()
+
+
 async def decide_proposal(pid: int, status: str, by: str) -> None:
     db = await get_db()
     await db.execute("UPDATE agent_proposals SET status=?, decided_by=?, decided_at=? WHERE id=?",
@@ -257,7 +279,7 @@ async def supersede_open(asset: str, agent: str, keep_ids: list[int],
     before = " AND created_at < ?" if created_before else ""
     cur = await db.execute(
         "UPDATE agent_proposals SET status='superseded', decided_by='newer run', decided_at=? "
-        "WHERE asset=? AND agent=? AND status='open'" + keep + before,
+        "WHERE asset=? AND agent=? AND status='open' AND starred=0" + keep + before,   # starred ones stay
         (now_iso(), asset, agent, *keep_ids, *([created_before] if created_before else [])))
     await db.commit()
     return cur.rowcount or 0

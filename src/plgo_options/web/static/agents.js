@@ -727,20 +727,25 @@
   }
 
   function renderProposals() {
-    const live = mine().filter((p) => p.status === "open");
-    const n = (r) => live.filter((p) => r === "all" || p.route === r ||
+    // Starred proposals (14 Oct 2026) leave the route filters for "Selected",
+    // whatever their status, and new sweeps never supersede them.
+    const starred = mine().filter((p) => p.starred);
+    const live = mine().filter((p) => p.status === "open" && !p.starred);
+    const n = (r) => r === "starred" ? starred.length : live.filter((p) => r === "all" || p.route === r ||
       (r === "chris" && p.route === "lucas_tell_chris")).length;
     const chip = (r, label, col) => '<button class="btn-secondary" data-pfilter="' + r + '" style="width:auto;' +
       "font-size:.64rem;padding:.12rem .45rem;" + (PFILTER === r ? "border-color:" + col + ";color:" + col + ";font-weight:600" : "") +
       '">' + label + " " + n(r) + "</button>";
     const bar = '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.45rem">' +
       chip("all", "All", "#94a3b8") + chip("rejected", "Rejected", "#ef4444") +
-      chip("chris", "Chris", "#3b82f6") + chip("lucas", "Lucas", "#10b981") + "</div>";
-    const shown = live.filter((p) => PFILTER === "all" || p.route === PFILTER ||
+      chip("chris", "Chris", "#3b82f6") + chip("lucas", "Lucas", "#10b981") +
+      chip("starred", "&#9733; Selected", "#eab308") + "</div>";
+    const shown = PFILTER === "starred" ? starred : live.filter((p) => PFILTER === "all" || p.route === PFILTER ||
       (PFILTER === "chris" && p.route === "lucas_tell_chris"));
     if (!shown.length) {
       $("agents-props").innerHTML = bar + '<p style="color:var(--muted);font-size:.8rem;margin:0">' +
-        (live.length ? "Nothing in this filter." : "No open proposals.") + "</p>";
+        (PFILTER === "starred" ? "Nothing selected yet - click the &#9734; on a proposal to keep it here."
+          : live.length ? "Nothing in this filter." : "No open proposals.") + "</p>";
       return;
     }
     const card = (p) => {
@@ -752,7 +757,11 @@
           '<span class="ag-chip" style="background:' + col + '22;color:' + col + '">' + esc(p.route.toUpperCase()) + '</span>' +
           '<b style="font-size:.74rem">#' + p.id + " " + esc(p.asset) + '</b>' +
           '<span style="color:var(--muted);font-size:.65rem">' + esc(p.agent) + " · " +
-            esc(p.created_at.slice(5, 16).replace("T", " ")) + " · " + esc(p.kind || "") + '</span>' +
+            esc(p.created_at.slice(5, 16).replace("T", " ")) + " · " + esc(p.kind || "") +
+            (p.status !== "open" ? " · " + esc(p.status) : "") + '</span>' +
+          '<button data-star="' + p.id + '" title="' + (p.starred ? "Remove from Selected" : "Keep in Selected") + '" ' +
+            'style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:1rem;line-height:1;padding:0;color:' +
+            (p.starred ? "#eab308" : "var(--muted)") + '">' + (p.starred ? "&#9733;" : "&#9734;") + "</button>" +
         '</div>' +
         '<div style="margin:.2rem 0 0">' + targetChip(p) + '</div>' +
         pricingBlock(p) +
@@ -1291,6 +1300,20 @@
     const pf = ev.target.closest("[data-pfilter]");
     if (pf) { PFILTER = pf.dataset.pfilter; renderProposals(); return; }
     if (ev.target.closest("[data-pall]")) { PALL = !PALL; renderProposals(); return; }
+    const st = ev.target.closest("[data-star]");
+    if (st) {
+      const p = PROPS.find((x) => String(x.id) === st.dataset.star);
+      if (!p) return;
+      const on = !p.starred;
+      try {
+        await api("/api/agents/proposals/" + p.id + "/star", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ starred: on }),
+        });
+        p.starred = on ? 1 : 0;
+      } catch (e) { alert("Could not " + (on ? "star" : "unstar") + " #" + p.id + ": " + e.message); }
+      renderProposals();
+      return;
+    }
     const fold = ev.target.closest("[data-fold]");
     if (fold) { toggleFold(fold.closest("section")); return; }
     const t = ev.target.closest("[data-show],[data-run],[data-price],[data-v4],[data-decide],button");

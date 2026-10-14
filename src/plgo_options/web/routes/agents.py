@@ -80,7 +80,23 @@ async def runs(agent: str | None = None, limit: int = 30):
 
 @router.get("/proposals")
 async def proposals(status: str | None = None, limit: int = 100):
-    return {"proposals": await store.list_proposals(status, limit)}
+    rows = await store.list_proposals(status, limit)
+    if not status:                          # starred ones always, however old
+        have = {r["id"] for r in rows}
+        rows += [r for r in await store.list_starred() if r["id"] not in have]
+    return {"proposals": rows}
+
+
+class Star(BaseModel):
+    starred: bool
+
+
+@router.post("/proposals/{pid}/star")
+async def star(pid: int, s: Star):
+    if not await store.get_proposal(pid):
+        raise HTTPException(status_code=404, detail=f"No proposal #{pid}")
+    await store.star_proposal(pid, s.starred)
+    return {"ok": True, "starred": s.starred}
 
 
 @router.get("/proposals/{pid}/v4")

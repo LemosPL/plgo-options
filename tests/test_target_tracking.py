@@ -154,7 +154,7 @@ async def test_supersede_clears_old_open_proposals_even_when_nothing_new(tmp_pat
     from plgo_options.agents import store
     db = await aiosqlite.connect(tmp_path / "t.db")
     await db.execute("CREATE TABLE agent_proposals (id INTEGER PRIMARY KEY, asset TEXT, agent TEXT, "
-                     "status TEXT, decided_by TEXT, decided_at TEXT)")
+                     "status TEXT, decided_by TEXT, decided_at TEXT, starred INTEGER NOT NULL DEFAULT 0)")
     await db.executemany("INSERT INTO agent_proposals (id, asset, agent, status) VALUES (?,?,?,?)",
                          [(1, "ETH", "optimizer", "open"), (2, "ETH", "optimizer", "open"),
                           (3, "FIL", "optimizer", "open"), (4, "ETH", "row_watcher", "open")])
