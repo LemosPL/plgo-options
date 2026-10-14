@@ -1351,6 +1351,9 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     // larger contract counts at a much smaller unit price than ETH.
     const $optv2MaxQty = document.getElementById("optv2-max-qty");
     if ($optv2MaxQty) $optv2MaxQty.value = asset === "FIL" ? 5000000 : 5000;
+    // No perps on FIL by default (client request, 2026-10-14); ETH keeps them.
+    const $optv2AllowPerps = document.getElementById("optv2-allow-perps");
+    if ($optv2AllowPerps) $optv2AllowPerps.checked = asset !== "FIL";
 
 
     // Target-profile shape defaults are asset-scaled too (client spec,
@@ -10657,6 +10660,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       perp_cost_bps: optPerpCostDict("optv2-perpcost-list"),
       // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv2-enable-delta-rehedge")?.checked || false,
+      allow_perps: document.getElementById("optv2-allow-perps")?.checked ?? true,
       delta_band_usd: parseFloat(document.getElementById("optv2-delta-band")?.value || "150000"),
       ...optCollateralTransferParams("optv2"),
       // User-edited target profile (Target Profile section). null = auto parametric.

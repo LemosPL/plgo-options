@@ -160,6 +160,9 @@ class OptimizationParams(BaseModel):
     # Orthogonal to the LP's own shape fit, which rarely reaches for the perp
     # itself. Off by default — a new, opt-in feature until users have tried it.
     enable_delta_rehedge: bool = False
+    # False = the run proposes no perp trades: no perp candidates for the LP
+    # and no delta re-hedge. A perp already held is left untouched.
+    allow_perps: bool = True
     # Band width in USD notional, converted to underlying token units via
     # spot at evaluation time (see optimizer_v3._build_delta_rehedge_trades) —
     # dollar-denominated so the same tolerance means the same real risk on
@@ -475,6 +478,7 @@ async def run_optimizer(params: OptimizationParams):
         max_trades=params.max_trades,
         enable_box_neutralizer=params.enable_box_neutralizer,
         enable_delta_rehedge=params.enable_delta_rehedge,
+        allow_perps=params.allow_perps,
         delta_band_usd=params.delta_band_usd,
         downside_factor=params.downside_factor,
         t90_weight=params.t90_weight,

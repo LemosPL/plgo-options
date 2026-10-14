@@ -113,6 +113,8 @@ class OptimizerRunParams:
     # optimizer_v3 run_lp._build_delta_rehedge_trades. Off by default — a new, opt-in
     # feature until users have tried it.
     enable_delta_rehedge: bool = False
+    # False = the run proposes no perp trades (no perp candidates, no re-hedge).
+    allow_perps: bool = True
     # Band width in USD notional — mismatches within the band are left alone.
     # Converted to underlying token units via spot at evaluation time (see
     # _build_delta_rehedge_trades), so the same tolerance means the same real

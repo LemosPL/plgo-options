@@ -1835,6 +1835,10 @@
           <input type="checkbox" id="optv2-enable-delta-rehedge">
           Delta Rehedge (perp)
         </label>
+        <label class="toggle-label" style="margin:0" title="Unticked = the run proposes no perp trades at all: the optimizer gets no perp to trade and Delta Rehedge is ignored. A perp already held is left as is. Defaults to unticked for FIL, ticked for ETH.">
+          <input type="checkbox" id="optv2-allow-perps" checked>
+          Allow perps
+        </label>
         <label class="pf-filter-label">Delta Band ($)
           <input type="number" id="optv2-delta-band" value="150000" step="1000" min="0" style="width:6.5rem"
             title="Mismatches within this many dollars of notional are left alone (converted to underlying tokens via spot when the band is checked) — dollar-denominated so the same tolerance means the same real risk on ETH and FIL alike, and stays meaningful as either spot moves.">

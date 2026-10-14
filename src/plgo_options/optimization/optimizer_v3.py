@@ -1300,6 +1300,9 @@ class OptimizerV3(BaseOptimizer):
                  max_trades: int | None = None,
                  enable_box_neutralizer: bool = True,
                  enable_delta_rehedge: bool = False,
+                 # False = no perp trades at all: the LP gets no perp candidates
+                 # and the delta re-hedge is off. A perp already held is left as is.
+                 allow_perps: bool = True,
                  delta_band_usd: float = 150_000.0,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.2,
@@ -1444,6 +1447,9 @@ class OptimizerV3(BaseOptimizer):
             target_expiry=target_expiry, include_itm=False, counterparties=counterparties,
             target_expiries=cone_expiries or None, cone_strike_bounds=cone_strike_bounds or None,
         )
+        if not allow_perps:
+            option_legs = [c for c in option_legs if c.opt != "F"]
+            enable_delta_rehedge = False
         # Spreads are built from target_expiry vanilla legs only (before unwind injection),
         # so they're always new positions (existing_qty=0, unwind_only=False via getattr defaults).
         # SpreadCandidate is frozen so we concatenate after the existing_qty stamp loop below.
