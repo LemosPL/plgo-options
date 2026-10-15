@@ -1745,6 +1745,17 @@
           <input type="number" id="optv2-co-move-beta" value="0" step="0.1" min="0" max="2" style="width:4.5rem"
             title="For the collateral view (Survive Drop and the Collateral survives card): how much the other assets move per 1% move in this book's asset — ETH and BTC collateral and the other book are repriced at that move. 0 = held at today's prices (default). Past year, ETH on FIL: ~0.3 on average; on FIL's worst days ETH often fell almost as much, so 0.6-1.0 is a crash stress.">
         </label>
+        <label class="toggle-label" style="margin:0" title="Anchor at spot: the proposed trades must not lose money at today's spot by the chosen pillar — the After P&L matrix at today's spot is kept at or above the Before one in that column, the way the two already match in the Now column. Stops the decay of new premium showing up as a gap at 30-90 days. It only holds the line at today's spot: the cost can move to other spots, so pair it with Survive Drop to keep the downside covered.">
+          <input type="checkbox" id="optv2-pillar-anchor">
+          Anchor at spot
+        </label>
+        <label class="pf-filter-label">Anchor pillar
+          <select id="optv2-anchor-pillar" style="width:7.5rem"
+            title="Which column of the P&L matrix the anchor holds at today's spot: 90 days ahead (default), or the target expiry's own date.">
+            <option value="t90" selected>90d</option>
+            <option value="expiry">Target expiry</option>
+          </select>
+        </label>
         <label class="pf-filter-label">Carry Lean (%)
           <input type="number" id="optv2-carry-lean" value="0" step="10" min="0" max="100" style="width:5rem"
             title="Gradual cost-of-carry lever. 0% = off: the optimizer's own solution, ignoring carry (default). Above 0%, the scale starts from the lower of today's carry and the optimizer's own solution, so any lean never ends above today. 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
@@ -4025,7 +4036,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=196"></script>
+<script src="/static/app.js?v=197"></script>
 <script src="/static/agents.js?v=31"></script>
 </body>
 </html>

@@ -274,6 +274,9 @@ class OptimizationParams(BaseModel):
     # money at today's spot by that pillar.
     fit_pillar: str = "t90"
     pillar_anchor: bool = False
+    # Where the anchor applies: "t90" (90 days ahead) or "expiry" (target
+    # expiry), independent of fit_pillar.
+    anchor_pillar: str = "t90"
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -566,6 +569,7 @@ async def run_optimizer(params: OptimizationParams):
         co_move_beta=params.co_move_beta,
         fit_pillar=params.fit_pillar,
         pillar_anchor=params.pillar_anchor,
+        anchor_pillar=params.anchor_pillar,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),

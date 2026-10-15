@@ -167,6 +167,7 @@ class OptimizerRunParams:
     # Second fit pillar ("t90" | "expiry") and the spot anchor there (see run_lp).
     fit_pillar: str = "t90"
     pillar_anchor: bool = False
+    anchor_pillar: str = "t90"
     # Collateral posted against THIS book, per counterparty, per asset (e.g.
     # {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}), from the Collateral tab
     # (counterparty_collateral.book; always fetched by the route). The LP's

@@ -1313,6 +1313,9 @@ class OptimizerV3(BaseOptimizer):
                  # by that pillar: after >= before at (spot, pillar), the way
                  # after == before at (spot, now) already holds.
                  pillar_anchor: bool = False,
+                 # Pillar the anchor applies at, independent of fit_pillar:
+                 # "t90" (90 days ahead, default) or "expiry" (target expiry).
+                 anchor_pillar: str = "t90",
                  manual_target: list[dict] | None = None,
                  target_profile_file: str | None = None,
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,
@@ -1723,12 +1726,15 @@ class OptimizerV3(BaseOptimizer):
         # Second pillar's horizon: fixed 90 days, or the target expiry's own
         # (a hedge held to that expiry is judged there; new legs are at their
         # payoff and every premium's decay to it is realised).
-        pillar_days = 90
-        if fit_pillar == "expiry" and target_expiry:
-            try:
-                pillar_days = max((datetime.strptime(target_expiry, "%d%b%y") - self.today).days, 1)
-            except ValueError:
-                pillar_days = 90
+        def _pillar_days(which: str) -> int:
+            if which == "expiry" and target_expiry:
+                try:
+                    return max((datetime.strptime(target_expiry, "%d%b%y") - self.today).days, 1)
+                except ValueError:
+                    pass
+            return 90
+        pillar_days = _pillar_days(fit_pillar)
+        anchor_days = _pillar_days(anchor_pillar)
         base_payoff_90 = np.zeros_like(spot_arr)
         for p in self.positions:
             if id(p) in roll_position_ids:
@@ -1748,9 +1754,15 @@ class OptimizerV3(BaseOptimizer):
             for c in candidates
         ]
         # Pillar anchor: each candidate's P&L per unit at today's spot by the
-        # pillar (value then minus price paid now); the trades' sum must be >= 0.
-        pillar_anchor_pnl = (np.array([float(np.interp(self.spot, spot_arr, cp)) for cp in c_payoffs_90])
-                             if pillar_anchor else None)
+        # anchor pillar (value then minus price paid now); the trades' sum must
+        # be >= 0. Reuses the fit pillar's curves when both are the same day.
+        pillar_anchor_pnl = None
+        if pillar_anchor:
+            anchor_curves = c_payoffs_90 if anchor_days == pillar_days else [
+                self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=anchor_days)
+                for c in candidates
+            ]
+            pillar_anchor_pnl = np.array([float(np.interp(self.spot, spot_arr, cp)) for cp in anchor_curves])
 
         # Gross collateral cap: sum(|final_qty| × price) per counterparty ≤ current × (1 + budget).
         # budget=0.0 → no increase allowed; budget=-0.1 → must shrink by 10%.
@@ -2444,6 +2456,7 @@ class OptimizerV3(BaseOptimizer):
             # counterparties, free rebalancing) at spot moves, before/after.
             "aggregate_collateral": aggregate_report,
             "fit_pillar_days": pillar_days,
+            "anchor_pillar_days": anchor_days if pillar_anchor else None,
             "cone_expiries": cone_expiries if cone_mode else None,
             "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             # Same band, evaluated at the P&L Matrix's own calendar-day columns

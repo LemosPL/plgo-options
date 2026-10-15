@@ -10622,6 +10622,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       carry_horizon_days: parseFloat(document.getElementById("optv2-carry-horizon-days")?.value || "30"),
       max_carry_usd: maxCarry,
       survive_drop_pct: surviveDrop,
+      pillar_anchor: document.getElementById("optv2-pillar-anchor")?.checked || false,
+      anchor_pillar: document.getElementById("optv2-anchor-pillar")?.value || "t90",
       co_move_beta: Math.max(parseFloat(document.getElementById("optv2-co-move-beta")?.value || "0") || 0, 0),
       // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
       // The three cone_* fields drive the multi-expiry candidate universe instead.
