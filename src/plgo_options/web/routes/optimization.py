@@ -269,6 +269,11 @@ class OptimizationParams(BaseModel):
     # held constant (default); ~0.3 is ETH's beta to FIL over the past year,
     # 0.6-1.0 a crash where everything falls together.
     co_move_beta: float = 0.0
+    # Second fit pillar: "t90" (90 days ahead, default) or "expiry" (the
+    # target expiry's own horizon). pillar_anchor: the trades must not lose
+    # money at today's spot by that pillar.
+    fit_pillar: str = "t90"
+    pillar_anchor: bool = False
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -559,6 +564,8 @@ async def run_optimizer(params: OptimizationParams):
         aggregate_collateral=aggregate_collateral,
         survive_drop_pct=params.survive_drop_pct,
         co_move_beta=params.co_move_beta,
+        fit_pillar=params.fit_pillar,
+        pillar_anchor=params.pillar_anchor,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),

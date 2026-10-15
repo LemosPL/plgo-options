@@ -1306,6 +1306,13 @@ class OptimizerV3(BaseOptimizer):
                  delta_band_usd: float = 150_000.0,
                  downside_factor: float = 1.0,
                  t90_weight: float = 0.2,
+                 # Second fit pillar: "t90" (default, 90 days ahead) or "expiry"
+                 # (the target expiry's own horizon, e.g. 71d for 25DEC26).
+                 fit_pillar: str = "t90",
+                 # True = the run's trades must not lose money at today's spot
+                 # by that pillar: after >= before at (spot, pillar), the way
+                 # after == before at (spot, now) already holds.
+                 pillar_anchor: bool = False,
                  manual_target: list[dict] | None = None,
                  target_profile_file: str | None = None,
                  max_cp_loss_usd: "dict[str, float] | float | None" = None,
@@ -1713,11 +1720,20 @@ class OptimizerV3(BaseOptimizer):
         # in the LP so the fit can care about "still roughly on-target in 90
         # days," not just "on-target today" — a book can nail the latter and
         # still drift badly by the former purely from theta decay.
+        # Second pillar's horizon: fixed 90 days, or the target expiry's own
+        # (a hedge held to that expiry is judged there; new legs are at their
+        # payoff and every premium's decay to it is realised).
+        pillar_days = 90
+        if fit_pillar == "expiry" and target_expiry:
+            try:
+                pillar_days = max((datetime.strptime(target_expiry, "%d%b%y") - self.today).days, 1)
+            except ValueError:
+                pillar_days = 90
         base_payoff_90 = np.zeros_like(spot_arr)
         for p in self.positions:
             if id(p) in roll_position_ids:
                 continue
-            bs_value_90 = self.bs_value_for_position(spot_arr, p, option_smile=option_smile, horizon_days=90)
+            bs_value_90 = self.bs_value_for_position(spot_arr, p, option_smile=option_smile, horizon_days=pillar_days)
             if np.isnan(bs_value_90.sum()):
                 continue
             base_payoff_90 += bs_value_90
@@ -1728,9 +1744,13 @@ class OptimizerV3(BaseOptimizer):
         residual_90 = target_interp - adjusted_base_payoff_90
 
         c_payoffs_90 = [
-            self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=90)
+            self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=pillar_days)
             for c in candidates
         ]
+        # Pillar anchor: each candidate's P&L per unit at today's spot by the
+        # pillar (value then minus price paid now); the trades' sum must be >= 0.
+        pillar_anchor_pnl = (np.array([float(np.interp(self.spot, spot_arr, cp)) for cp in c_payoffs_90])
+                             if pillar_anchor else None)
 
         # Gross collateral cap: sum(|final_qty| × price) per counterparty ≤ current × (1 + budget).
         # budget=0.0 → no increase allowed; budget=-0.1 → must shrink by 10%.
@@ -1862,6 +1882,7 @@ class OptimizerV3(BaseOptimizer):
             carry_weight=carry_weight,
             max_carry_usd=max_carry_usd,
             aggregate_collateral=agg_lp,
+            pillar_anchor_pnl=pillar_anchor_pnl,
         )
         lp_result = lp.optimize(*lp_args, **lp_kwargs)
 
@@ -2422,6 +2443,7 @@ class OptimizerV3(BaseOptimizer):
             # Aggregate netted collateral balance (Collateral tab basis, all
             # counterparties, free rebalancing) at spot moves, before/after.
             "aggregate_collateral": aggregate_report,
+            "fit_pillar_days": pillar_days,
             "cone_expiries": cone_expiries if cone_mode else None,
             "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             # Same band, evaluated at the P&L Matrix's own calendar-day columns
