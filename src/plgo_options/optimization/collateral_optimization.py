@@ -108,6 +108,7 @@ class CollateralOptimization:
         carry_weight=0.0,
         max_carry_usd=None,
         allowed=None,
+        aggregate_collateral=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -494,6 +495,29 @@ class CollateralOptimization:
                 carry_cost = float(carry_weight) * carry_burn
             if max_carry_usd is not None:
                 prob += carry_after <= float(max_carry_usd), "max_carry"
+
+        # Aggregate collateral survival (see optimizer_v3.run_lp): at every spot
+        # in the mask, the collateral posted across ALL counterparties (haircut,
+        # own-asset collateral marked at that spot) must cover the sum of each
+        # counterparty's netted liability max(0, -value). Collateral moves
+        # freely between counterparties, so only the aggregate is constrained;
+        # the netting is still per counterparty, as each one margins its own
+        # set. t >= -value and t >= 0 with sum(t) <= collateral is the exact LP
+        # form of sum(max(0, -value)) <= collateral.
+        if aggregate_collateral:
+            agg_idx = [i for i, on in enumerate(aggregate_collateral["mask"]) if on]
+            cand_by_cp: dict[str, list[int]] = {}
+            for j, c in enumerate(candidates):
+                cand_by_cp.setdefault(str(getattr(c, "counterparty", "") or "").strip().lower(), []).append(j)
+            for i in agg_idx:
+                owed_terms = []
+                for k, (cp, value) in enumerate(aggregate_collateral["value_by_cp"].items()):
+                    t = pulp.LpVariable(f"agg_owed_{k}_{i}", lowBound=0, cat="Continuous")
+                    trade_i = pulp.lpSum((buy_vars[j] - sell_vars[j]) * float(c_payoffs[j][i])
+                                         for j in cand_by_cp.get(cp, []))
+                    prob += t >= -(float(value[i]) + trade_i), f"agg_owed_{k}_{i}"
+                    owed_terms.append(t)
+                prob += pulp.lpSum(owed_terms) <= float(aggregate_collateral["collateral"][i]), f"agg_collateral_{i}"
 
         transfer_model = None
         transfer_cost = 0.0

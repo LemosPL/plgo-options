@@ -44,6 +44,12 @@ def test_agent_params_match_v4_page(monkeypatch):
     monkeypatch.setattr(route, "portfolio_pnl", fake_pnl)
     monkeypatch.setattr(route, "_build_perp_positions", fake_perp)
     monkeypatch.setattr(route, "_fetch_collateral_by_cp", fake_coll)
+    # Data, like the collateral above: the aggregate collateral view only feeds
+    # the report unless survive_drop_pct is set, which neither side does here.
+    async def fake_agg(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(route, "_aggregate_collateral_inputs", fake_agg)
     monkeypatch.setattr(route, "OptimizerUseCase", FakeUseCase)
 
     preset = OptimizerPreset()

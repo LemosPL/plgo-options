@@ -74,6 +74,38 @@ async def _fetch_collateral_by_cp(book: str, include_collar_loans: bool = False)
     return out
 
 
+async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = False) -> dict | None:
+    """Inputs for the aggregate collateral view (the Collateral tab's netted
+    basis): collateral posted in EVERY book per counterparty, USD prices of the
+    assets other than USD/USDC and this book's own, and each counterparty's
+    signed MtM in the other book(s), held constant in this book's stress.
+    None if anything fails — the run then simply goes without it."""
+    try:
+        from plgo_options.data.collar_loans import drop_collar_loans
+        from plgo_options.web.routes.collateral import COLLATERAL_BOOKS, _gather_portfolio, _net_mtm_by_cp
+        db = await get_db()
+        cur = await db.execute(
+            "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset")
+        rows = [dict(r) for r in await cur.fetchall()]
+        if not include_collar_loans:
+            rows = drop_collar_loans(rows)
+        coll: dict[str, dict[str, float]] = {}
+        for r in rows:
+            if r["qty"]:
+                coll.setdefault(str(r["counterparty"]), {})[str(r["asset"]).upper()] = float(r["qty"])
+        other_mtm: dict[str, float] = {}
+        for book in COLLATERAL_BOOKS:
+            if book.upper() == asset.upper():
+                continue
+            for k, v in _net_mtm_by_cp(await _gather_portfolio(book)).items():
+                other_mtm[k] = other_mtm.get(k, 0.0) + v
+        return {"collateral_by_cp": coll, "prices": await _collateral_prices(coll, asset) or {},
+                "other_book_mtm_by_cp": other_mtm}
+    except Exception as e:
+        print(f"aggregate collateral: inputs unavailable ({e})")
+        return None
+
+
 async def _collateral_prices(collateral_by_cp: dict, asset: str) -> dict[str, float] | None:
     """USD prices for collateral assets other than USD/USDC and the book's own
     asset (whose price is the run's spot). None when there are none."""
@@ -207,6 +239,11 @@ class OptimizationParams(BaseModel):
     # (0, off) and the lowest carry the other settings allow (1), as a hard
     # cap; combined with max_carry_usd by taking the tighter of the two.
     carry_lean: float = 0.0
+    # Keep the aggregate netted collateral balance (Collateral tab basis: every
+    # counterparty's whole netting set, all posted collateral, own-asset
+    # collateral marked at each spot, free rebalancing) >= 0 at every spot down
+    # to this % below today's. None = off; the balance is reported either way.
+    survive_drop_pct: float | None = None
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -452,6 +489,7 @@ async def run_optimizer(params: OptimizationParams):
     # additionally constrains the LP's own trade choices (see below).
     collateral_by_cp = await _fetch_collateral_by_cp(params.asset.upper(), params.include_collar_loans)
     collateral_prices = await _collateral_prices(collateral_by_cp, params.asset)
+    aggregate_collateral = await _aggregate_collateral_inputs(params.asset.upper(), params.include_collar_loans)
 
     print(params)
     run_params = OptimizerRunParams(
@@ -493,6 +531,8 @@ async def run_optimizer(params: OptimizationParams):
         carry_weight=params.carry_weight,
         max_carry_usd=params.max_carry_usd,
         carry_lean=params.carry_lean,
+        aggregate_collateral=aggregate_collateral,
+        survive_drop_pct=params.survive_drop_pct,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),

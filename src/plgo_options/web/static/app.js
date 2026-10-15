@@ -10599,6 +10599,8 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
     const useCollateralCap = document.getElementById("optv2-use-collateral-cap")?.checked || false;
     // Blank = no carry cap; "0" is a real cap (no net decay at all).
     const maxCarryRaw = document.getElementById("optv2-max-carry")?.value;
+    const surviveRaw = document.getElementById("optv2-survive-drop")?.value;
+    const surviveDrop = surviveRaw === "" || surviveRaw === undefined ? null : parseFloat(surviveRaw);
     const maxCarry = maxCarryRaw === "" || maxCarryRaw === undefined ? null : parseFloat(maxCarryRaw);
     const customSpotRaw = document.getElementById("optv2-custom-spot")?.value;
     const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
@@ -10619,6 +10621,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       carry_lean: Math.min(Math.max(parseFloat(document.getElementById("optv2-carry-lean")?.value || "0"), 0), 100) / 100,
       carry_horizon_days: parseFloat(document.getElementById("optv2-carry-horizon-days")?.value || "30"),
       max_carry_usd: maxCarry,
+      survive_drop_pct: surviveDrop,
       // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
       // The three cone_* fields drive the multi-expiry candidate universe instead.
       target_expiry: optv2IsConeMode() ? null : (document.getElementById("optv2-target-expiry").value || null),
@@ -10889,6 +10892,22 @@ function optv2RenderResult(data) {
         : "");
   } else {
     $carry.textContent = "—";
+  }
+  // Aggregate collateral survival, before → after (green when no worse).
+  const agg = data.aggregate_collateral;
+  const usdS = v => (v < 0 ? "-$" : "$") + optv2Fmt(Math.abs(v), 0);
+  const $surv = document.getElementById("optv2-sum-survive");
+  if ($surv) {
+    if (agg) {
+      $surv.textContent = `-${optv2Fmt(agg.survives_before_pct, 0)}% → -${optv2Fmt(agg.survives_after_pct, 0)}%`;
+      $surv.style.color = agg.survives_after_pct >= agg.survives_before_pct - 0.5 ? "var(--green)" : "var(--red)";
+      $surv.title = "Aggregate netted collateral balance, before → after:\n" +
+        agg.moves_pct.map((m, i) => `${m > 0 ? "+" : ""}${m}%: ${usdS(agg.balance_before[i])} → ${usdS(agg.balance_after[i])}`).join("\n") +
+        (agg.survive_drop_pct != null ? `\nRequired: ≥ 0 down to -${optv2Fmt(agg.survive_drop_pct, 0)}%` : "");
+    } else {
+      $surv.textContent = "—";
+      $surv.title = "Collateral data unavailable for this run";
+    }
   }
   // Fit error improvement (before - after); positive = better fit
   const fitBefore = data.fit_error_before, fitAfter = data.fit_error_after;

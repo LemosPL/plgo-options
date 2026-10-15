@@ -1737,6 +1737,10 @@
           <input type="checkbox" id="optv2-use-collateral-cap">
           Cap to posted collateral
         </label>
+        <label class="pf-filter-label">Survive Drop (%)
+          <input type="number" id="optv2-survive-drop" step="5" min="0" max="95" style="width:5rem"
+            title="Aggregate collateral survival. The proposed book must keep the aggregate netted collateral balance at or above zero at every spot down to this % below today's: Σ collateral posted at all counterparties (after haircut, collateral in this book's asset marked at each spot) minus Σ each counterparty's netted liability (its whole netting set, both books; the other book held at today's MtM). Same basis as the Collateral tab's Liability / Balance (netted), assuming collateral can be moved freely between counterparties. Blank = off (default); the Summary shows how far the book survives either way.">
+        </label>
         <label class="pf-filter-label">Carry Lean (%)
           <input type="number" id="optv2-carry-lean" value="0" step="10" min="0" max="100" style="width:5rem"
             title="Gradual cost-of-carry lever. 0% = off: the optimizer's own solution, ignoring carry (default). Above 0%, the scale starts from the lower of today's carry and the optimizer's own solution, so any lean never ends above today. 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
@@ -1985,7 +1989,7 @@
               <div style="font-size:.7rem;font-weight:600;color:var(--muted);margin-bottom:.35rem">DOWNSIDE</div>
               <div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.3rem">
                 <label class="optv3-hint" style="margin:0;display:flex;align-items:center;gap:.4rem">Breakeven distance
-                  <input id="optv2-target-down-pct" type="number" value="90.91" step="5" max="100" style="width:4rem" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0.">%
+                  <input id="optv2-target-down-pct" type="number" value="90.91" step="5" max="300" style="width:4rem" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0. Above 100% the line would only cross $0 below a zero price: a gentler downside slope, i.e. a target leaning to the upside.">%
                 </label>
                 <span id="optv2-target-down-wing-readout" class="optv3-hint" style="margin:0"></span>
               </div>
@@ -2033,7 +2037,7 @@
 
       <!-- A. Summary -->
       <h3 style="margin:0 0 .5rem;font-size:.95rem">Summary</h3>
-      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(8,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
+      <div class="greek-grid" style="display:grid;grid-template-columns:repeat(9,1fr);gap:1rem;text-align:center;margin-bottom:1.5rem;padding:.75rem;border-radius:6px;background:var(--card-bg)">
         <div style="border-radius:6px;background:rgba(248,81,73,.08);padding:.25rem 0" title="Sum of the assumed bid-ask transaction cost across every proposed trade (also shown per-row as &quot;Cost ($)&quot; in the two trade tables below).">
           <div class="greek-label">Total Cost</div><div class="greek-value" id="optv2-sum-total-cost" style="color:var(--red);font-weight:700">--</div>
         </div>
@@ -2042,6 +2046,7 @@
         <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv2-sum-net-premium">--</div></div>
         <div><div class="greek-label">Cash Shift</div><div class="greek-value" id="optv2-sum-cash-shift">--</div></div>
         <div><div class="greek-label">Fit Error ↓</div><div class="greek-value" id="optv2-sum-fit">--</div></div>
+        <div title="Deepest fall in spot below today's that the aggregate netted collateral balance stays at or above zero through (Collateral tab basis, free rebalancing between counterparties), before → after the proposed trades. Hover for the balance at each move."><div class="greek-label">Collateral survives</div><div class="greek-value" id="optv2-sum-survive">--</div></div>
         <div title="Theta run-rate of the whole book over Carry Days (-theta/day × days), before → after the proposed trades. Positive = the book loses this much to time decay if kept as is."><div class="greek-label" id="optv2-sum-carry-label">Carry</div><div class="greek-value" id="optv2-sum-carry">--</div></div>
         <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv2-candidates">--</div></div>
       </div>
@@ -4016,7 +4021,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=194"></script>
+<script src="/static/app.js?v=195"></script>
 <script src="/static/agents.js?v=31"></script>
 </body>
 </html>

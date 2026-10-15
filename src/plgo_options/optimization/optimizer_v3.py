@@ -1327,6 +1327,15 @@ class OptimizerV3(BaseOptimizer):
                  # own solution (0) and the lowest carry the other settings
                  # allow (1, floored at zero), as a hard cap — see run_lp.
                  carry_lean: float = 0.0,
+                 # Aggregate collateral view (route-supplied): collateral posted
+                 # in ALL books per counterparty ({cp: {asset: qty}}), USD prices
+                 # of non-USD assets other than this book's own, and each
+                 # counterparty's MtM in the OTHER book (held constant). Always
+                 # reported when given; survive_drop_pct (e.g. 50) additionally
+                 # makes the LP keep the aggregate netted balance >= 0 at every
+                 # spot down to that % below today's.
+                 aggregate_collateral: dict | None = None,
+                 survive_drop_pct: float | None = None,
                  # Parametric (auto) target-profile shape — see
                  # misc_utils.build_parametric_target_profile_eth. None = engine
                  # default for that one knob; only used when neither manual_target
@@ -1675,6 +1684,18 @@ class OptimizerV3(BaseOptimizer):
                     usd_qty * (1.0 - usd_haircut) + native_qty * (1.0 - native_haircut) * spot_arr
                 )
 
+        # Aggregate collateral: each counterparty's netting set (this book
+        # repriced on the ladder, anchored to today's marks so the 0% point
+        # matches the Collateral tab, plus its other-book MtM held constant)
+        # against all collateral posted anywhere, own-asset collateral marked
+        # at each spot. Same basis as the tab's Liability / Balance (netted).
+        agg = self._aggregate_collateral_curves(aggregate_collateral, base_payoff_by_cp, spot_arr) \
+            if aggregate_collateral else None
+        agg_lp = None
+        if agg is not None and survive_drop_pct is not None:
+            mask = spot_arr >= self.spot * (1.0 - float(survive_drop_pct) / 100.0)
+            agg_lp = {"mask": mask.tolist(), "value_by_cp": agg["value_by_cp"], "collateral": agg["collateral"]}
+
         raw_residual = target_interp - base_payoff
         cash_shift = float(np.sum(spot_weights * raw_residual) / np.sum(spot_weights))
         adjusted_base_payoff = base_payoff + cash_shift
@@ -1837,6 +1858,7 @@ class OptimizerV3(BaseOptimizer):
             base_decay=base_decay,
             carry_weight=carry_weight,
             max_carry_usd=max_carry_usd,
+            aggregate_collateral=agg_lp,
         )
         lp_result = lp.optimize(*lp_args, **lp_kwargs)
 
@@ -1919,6 +1941,12 @@ class OptimizerV3(BaseOptimizer):
 
         if lp_result is None:
             message = "LP solver did not find an optimal solution."
+            if agg_lp is not None:
+                surv = self._survival_pct(agg["balance_before"], spot_arr)
+                message += (
+                    f" Survive drop {float(survive_drop_pct):g}% may be out of reach: today's book keeps the "
+                    f"aggregate netted collateral balance positive down to about -{surv:.0f}%."
+                )
             if max_carry_usd is not None:
                 message += (
                     f" Max carry may be too tight: the book's theta run-rate is ${base_decay:,.0f} over "
@@ -2321,6 +2349,35 @@ class OptimizerV3(BaseOptimizer):
             for t in trades
         )
         carry_before, carry_after = float(-carry_h * theta_before), float(-carry_h * theta_after)
+
+        aggregate_report = None
+        if agg is not None:
+            bal_after = self._aggregate_balance_after(agg, spot_arr, trades)
+            moves = [0, -10, -20, -30, -40, -50, -60, -70, -85, 20, 50, 100]
+            at = lambda arr, m: round(float(np.interp(self.spot * (1 + m / 100.0), spot_arr, arr)), 2)
+            # Same tolerance as the warning below: a balance a few $k under zero
+            # at a binding point is rounding, not a shortfall.
+            agg_tol = max(10_000.0, 0.001 * float(np.max(agg["collateral"])))
+            aggregate_report = {
+                "survive_drop_pct": None if survive_drop_pct is None else float(survive_drop_pct),
+                "moves_pct": moves,
+                "balance_before": [at(agg["balance_before"], m) for m in moves],
+                "balance_after": [at(bal_after, m) for m in moves],
+                # Deepest fall (% of today's spot) the aggregate balance stays >= 0 through.
+                "survives_before_pct": round(self._survival_pct(agg["balance_before"], spot_arr, agg_tol), 1),
+                "survives_after_pct": round(self._survival_pct(bal_after, spot_arr, agg_tol), 1),
+            }
+            if agg_lp is not None:
+                floor_mask = np.asarray(agg_lp["mask"])
+                worst = float(np.min(bal_after[floor_mask])) if floor_mask.any() else 0.0
+                if worst < -agg_tol:
+                    agg_warning = (
+                        f"Survive drop {float(survive_drop_pct):g}% not met by the final trades: the aggregate "
+                        f"netted collateral balance reaches ${worst:,.0f} within that range. The LP met it; "
+                        + ("Max Trades could not keep it (see above)." if max_trades_note else
+                           "the box neutralizer / re-hedge / rounding moved it afterwards.")
+                    )
+                    message = f"{message} {agg_warning}" if message else agg_warning
         theta_before, theta_after = float(theta_before), float(theta_after)
         # Max carry binds on the LP's own solution; Max Trades then keeps only
         # the largest trades by notional, and the legs that cut carry (small
@@ -2358,6 +2415,9 @@ class OptimizerV3(BaseOptimizer):
             "asset": self.asset,
             "target_expiry": target_expiry,
             "carry": carry,
+            # Aggregate netted collateral balance (Collateral tab basis, all
+            # counterparties, free rebalancing) at spot moves, before/after.
+            "aggregate_collateral": aggregate_report,
             "cone_expiries": cone_expiries if cone_mode else None,
             "cone_strike_bounds": {k: [round(v[0], 2), round(v[1], 2)] for k, v in cone_strike_bounds.items()} if cone_mode else None,
             # Same band, evaluated at the P&L Matrix's own calendar-day columns
@@ -3592,6 +3652,82 @@ class OptimizerV3(BaseOptimizer):
                 continue
             out[cp] = out[cp] + qty * vals
         return out
+
+    def _aggregate_collateral_curves(self, data: dict, base_payoff_by_cp: dict, spot_arr) -> dict:
+        """Per-counterparty netting-set value on the ladder and the aggregate
+        haircut collateral, Collateral-tab basis. Keys lower-cased."""
+        spot_arr = np.asarray(spot_arr, dtype=float)
+        i0 = lambda arr: float(np.interp(self.spot, spot_arr, arr))
+        marks: dict[str, float] = {}
+        for p in self.positions:
+            k = str(getattr(p, "counterparty", "") or "").strip().lower()
+            marks[k] = marks.get(k, 0.0) + float(getattr(p, "current_mtm", 0.0) or 0.0)
+        base = {str(cp).strip().lower(): np.asarray(v, dtype=float) for cp, v in base_payoff_by_cp.items()}
+        other = {str(cp).strip().lower(): float(v or 0.0) for cp, v in (data.get("other_book_mtm_by_cp") or {}).items()}
+        coll_by_cp = {str(cp).strip().lower(): by for cp, by in (data.get("collateral_by_cp") or {}).items()}
+        prices = {str(a).upper(): float(v or 0.0) for a, v in (data.get("prices") or {}).items()}
+        value_by_cp, collateral = {}, np.zeros_like(spot_arr)
+        for cp in sorted(set(base) | set(marks) | set(other) | set(coll_by_cp)):
+            if not cp:
+                continue
+            curve = base.get(cp, np.zeros_like(spot_arr))
+            # Anchor this book's curve to today's marks (rolled legs and perps
+            # included), then add the other book's MtM as a constant.
+            value_by_cp[cp] = curve + (marks.get(cp, 0.0) - i0(curve)) + other.get(cp, 0.0)
+            for a, q in (coll_by_cp.get(cp) or {}).items():
+                a, q = str(a).upper(), float(q or 0.0)
+                if not q:
+                    continue
+                px = spot_arr if a == self.asset else (1.0 if a in ("USD", "USDC") else prices.get(a))
+                if px is None:
+                    continue
+                collateral = collateral + q * (1.0 - effective_haircut_rate(cp, "USDC" if a == "USD" else a, q)) * px
+        owed = sum(np.maximum(-v, 0.0) for v in value_by_cp.values()) if value_by_cp else np.zeros_like(spot_arr)
+        return {"value_by_cp": value_by_cp, "collateral": collateral, "balance_before": collateral - owed}
+
+    def _aggregate_balance_after(self, agg: dict, spot_arr, trades) -> np.ndarray:
+        """Aggregate netted balance after the final trades: each trade adds
+        its P&L from entry (value on the ladder minus its price) to its
+        counterparty's netting set, as the LP counts it."""
+        spot_arr = np.asarray(spot_arr, dtype=float)
+        values = {cp: v.copy() for cp, v in agg["value_by_cp"].items()}
+        for t in trades:
+            if t.get("strategy") == "ROLL_UNWIND":
+                continue
+            cp = str(t.get("counterparty") or "").strip().lower()
+            qty = float(t.get("qty", 0.0) or 0.0)
+            if t.get("opt") == "F":
+                pnl = spot_arr - float(t.get("strike", 0.0) or 0.0)
+            elif t.get("opt") in ("C", "P"):
+                pnl = bs_vec_bridge(self.spot, spot_arr, float(t["strike"]), t.get("dte", 0), 0,
+                                    float(t.get("iv_pct", 0.0) or 0.0) / 100.0, t["opt"]) \
+                    - float(t.get("bs_price_usd", 0.0) or 0.0)
+            else:
+                continue
+            values[cp] = values.get(cp, np.zeros_like(spot_arr)) + qty * pnl
+        owed = sum(np.maximum(-v, 0.0) for v in values.values())
+        return agg["collateral"] - owed
+
+    def _survival_pct(self, balance, spot_arr, tol: float = 0.0) -> float:
+        """Deepest fall below today's spot (in %) the balance stays >= -tol
+        through, walking down the ladder from today and interpolating the
+        crossing between ladder points (the ladder is sparse in the tails);
+        0 if already short today."""
+        spot_arr = np.asarray(spot_arr, dtype=float)
+        balance = np.asarray(balance, dtype=float) + tol
+        prev_s, prev_b = self.spot, float(np.interp(self.spot, spot_arr, balance))
+        if prev_b < 0:
+            return 0.0
+        deepest = float(spot_arr.min())
+        for i in np.argsort(-spot_arr):
+            s_i, b_i = float(spot_arr[i]), float(balance[i])
+            if s_i >= self.spot:
+                continue
+            if b_i < 0:
+                deepest = prev_s - (prev_s - s_i) * prev_b / (prev_b - b_i)
+                break
+            prev_s, prev_b = s_i, b_i
+        return 100.0 * (1.0 - deepest / self.spot)
 
     def _bs_theta(self, strike, dte, iv_pct, opt) -> float:
         """BS theta ($/day per unit) at today's spot; 0 for perps and expired legs."""
