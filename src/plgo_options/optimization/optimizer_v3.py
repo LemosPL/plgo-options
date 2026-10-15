@@ -1336,6 +1336,9 @@ class OptimizerV3(BaseOptimizer):
                  # spot down to that % below today's.
                  aggregate_collateral: dict | None = None,
                  survive_drop_pct: float | None = None,
+                 # In that view, other assets (ETH, BTC collateral and the other
+                 # book) move co_move_beta x this asset's % move. 0 = constant.
+                 co_move_beta: float = 0.0,
                  # Parametric (auto) target-profile shape — see
                  # misc_utils.build_parametric_target_profile_eth. None = engine
                  # default for that one knob; only used when neither manual_target
@@ -1689,7 +1692,7 @@ class OptimizerV3(BaseOptimizer):
         # matches the Collateral tab, plus its other-book MtM held constant)
         # against all collateral posted anywhere, own-asset collateral marked
         # at each spot. Same basis as the tab's Liability / Balance (netted).
-        agg = self._aggregate_collateral_curves(aggregate_collateral, base_payoff_by_cp, spot_arr) \
+        agg = self._aggregate_collateral_curves(aggregate_collateral, base_payoff_by_cp, spot_arr, co_move_beta) \
             if aggregate_collateral else None
         agg_lp = None
         if agg is not None and survive_drop_pct is not None:
@@ -2360,6 +2363,7 @@ class OptimizerV3(BaseOptimizer):
             agg_tol = max(10_000.0, 0.001 * float(np.max(agg["collateral"])))
             aggregate_report = {
                 "survive_drop_pct": None if survive_drop_pct is None else float(survive_drop_pct),
+                "co_move_beta": float(co_move_beta or 0.0),
                 "moves_pct": moves,
                 "balance_before": [at(agg["balance_before"], m) for m in moves],
                 "balance_after": [at(bal_after, m) for m in moves],
@@ -3653,10 +3657,27 @@ class OptimizerV3(BaseOptimizer):
             out[cp] = out[cp] + qty * vals
         return out
 
-    def _aggregate_collateral_curves(self, data: dict, base_payoff_by_cp: dict, spot_arr) -> dict:
+    def _aggregate_collateral_curves(self, data: dict, base_payoff_by_cp: dict, spot_arr,
+                                     co_move_beta: float = 0.0) -> dict:
         """Per-counterparty netting-set value on the ladder and the aggregate
-        haircut collateral, Collateral-tab basis. Keys lower-cased."""
+        haircut collateral, Collateral-tab basis. Keys lower-cased. With
+        co_move_beta, every other asset's price (collateral and the other
+        book) moves beta x this asset's % move at each ladder spot."""
         spot_arr = np.asarray(spot_arr, dtype=float)
+        # Other assets' price factor at each ladder spot (never below 1% of today).
+        factor = np.maximum(1.0 + float(co_move_beta or 0.0) * (spot_arr / self.spot - 1.0), 0.01)
+        other_move: dict[str, np.ndarray] = {}
+        if co_move_beta:
+            for book in (data.get("other_books") or {}).values():
+                e0, ladder = float(book.get("spot") or 0.0), np.asarray(book.get("ladder") or [], dtype=float)
+                if e0 <= 0 or ladder.size == 0:
+                    continue
+                for cp, curve in (book.get("curves") or {}).items():
+                    curve = np.asarray(curve, dtype=float)
+                    move = np.interp(e0 * factor, ladder, curve) - float(np.interp(e0, ladder, curve))
+                    other_move[cp] = other_move.get(cp, np.zeros_like(spot_arr)) + move
+                for cp, q in (book.get("perp_qty") or {}).items():
+                    other_move[cp] = other_move.get(cp, np.zeros_like(spot_arr)) + float(q) * e0 * (factor - 1.0)
         i0 = lambda arr: float(np.interp(self.spot, spot_arr, arr))
         marks: dict[str, float] = {}
         for p in self.positions:
@@ -3667,19 +3688,26 @@ class OptimizerV3(BaseOptimizer):
         coll_by_cp = {str(cp).strip().lower(): by for cp, by in (data.get("collateral_by_cp") or {}).items()}
         prices = {str(a).upper(): float(v or 0.0) for a, v in (data.get("prices") or {}).items()}
         value_by_cp, collateral = {}, np.zeros_like(spot_arr)
-        for cp in sorted(set(base) | set(marks) | set(other) | set(coll_by_cp)):
+        for cp in sorted(set(base) | set(marks) | set(other) | set(coll_by_cp) | set(other_move)):
             if not cp:
                 continue
             curve = base.get(cp, np.zeros_like(spot_arr))
             # Anchor this book's curve to today's marks (rolled legs and perps
-            # included), then add the other book's MtM as a constant.
-            value_by_cp[cp] = curve + (marks.get(cp, 0.0) - i0(curve)) + other.get(cp, 0.0)
+            # included), then add the other book: today's MtM, plus its move
+            # when the other asset co-moves.
+            value_by_cp[cp] = (curve + (marks.get(cp, 0.0) - i0(curve)) + other.get(cp, 0.0)
+                               + other_move.get(cp, 0.0))
             for a, q in (coll_by_cp.get(cp) or {}).items():
                 a, q = str(a).upper(), float(q or 0.0)
                 if not q:
                     continue
-                px = spot_arr if a == self.asset else (1.0 if a in ("USD", "USDC") else prices.get(a))
-                if px is None:
+                if a == self.asset:
+                    px = spot_arr
+                elif a in ("USD", "USDC"):
+                    px = 1.0
+                elif a in prices:
+                    px = prices[a] * factor
+                else:
                     continue
                 collateral = collateral + q * (1.0 - effective_haircut_rate(cp, "USDC" if a == "USD" else a, q)) * px
         owed = sum(np.maximum(-v, 0.0) for v in value_by_cp.values()) if value_by_cp else np.zeros_like(spot_arr)

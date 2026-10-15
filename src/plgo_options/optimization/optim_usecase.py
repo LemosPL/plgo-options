@@ -161,6 +161,9 @@ class OptimizerRunParams:
     # keep the aggregate netted balance >= 0 down to that % fall. None = off.
     aggregate_collateral: dict | None = None
     survive_drop_pct: float | None = None
+    # Other assets' (ETH, BTC) move per 1 move in this book's asset, in the
+    # aggregate collateral view. 0 = held constant.
+    co_move_beta: float = 0.0
     # Collateral posted against THIS book, per counterparty, per asset (e.g.
     # {"Flowdesk": {"USDC": 6_717_467, "ETH": 2000}}), from the Collateral tab
     # (counterparty_collateral.book; always fetched by the route). The LP's

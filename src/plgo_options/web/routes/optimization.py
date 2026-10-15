@@ -82,7 +82,7 @@ async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = 
     None if anything fails — the run then simply goes without it."""
     try:
         from plgo_options.data.collar_loans import drop_collar_loans
-        from plgo_options.web.routes.collateral import COLLATERAL_BOOKS, _gather_portfolio, _net_mtm_by_cp
+        from plgo_options.web.routes.collateral import COLLATERAL_BOOKS, _gather_portfolio, _net_mtm_by_cp, _otc_perps
         db = await get_db()
         cur = await db.execute(
             "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset")
@@ -94,13 +94,33 @@ async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = 
             if r["qty"]:
                 coll.setdefault(str(r["counterparty"]), {})[str(r["asset"]).upper()] = float(r["qty"])
         other_mtm: dict[str, float] = {}
+        other_books: dict[str, dict] = {}
         for book in COLLATERAL_BOOKS:
             if book.upper() == asset.upper():
                 continue
-            for k, v in _net_mtm_by_cp(await _gather_portfolio(book)).items():
+            port = await _gather_portfolio(book)
+            for k, v in _net_mtm_by_cp(port).items():
                 other_mtm[k] = other_mtm.get(k, 0.0) + v
+            if not port:
+                continue
+            # Per-counterparty value of that book across its own spot ladder
+            # (each position's horizon-0 curve), plus OTC perp quantities, so
+            # the run can reprice it when that asset co-moves (co_move_beta).
+            curves: dict[str, list[float]] = {}
+            for p in port.get("positions") or []:
+                k = str(p.get("counterparty") or "").strip().lower()
+                curve = (p.get("pnl_by_horizon") or {}).get("0") or (p.get("payoff_by_horizon") or {}).get("0")
+                if k and curve:
+                    prev = curves.get(k)
+                    curves[k] = [a + b for a, b in zip(prev, curve)] if prev else list(curve)
+            other_books[book.upper()] = {
+                "spot": float(port.get("eth_spot") or 0.0),
+                "ladder": list(port.get("spot_ladder") or []),
+                "curves": curves,
+                "perp_qty": {k: v["net_qty"] for k, v in _otc_perps(port).items()},
+            }
         return {"collateral_by_cp": coll, "prices": await _collateral_prices(coll, asset) or {},
-                "other_book_mtm_by_cp": other_mtm}
+                "other_book_mtm_by_cp": other_mtm, "other_books": other_books}
     except Exception as e:
         print(f"aggregate collateral: inputs unavailable ({e})")
         return None
@@ -244,6 +264,11 @@ class OptimizationParams(BaseModel):
     # collateral marked at each spot, free rebalancing) >= 0 at every spot down
     # to this % below today's. None = off; the balance is reported either way.
     survive_drop_pct: float | None = None
+    # How much the other assets (ETH, BTC — collateral and the other book) move
+    # per 1 move in this book's asset, in the aggregate collateral view. 0 =
+    # held constant (default); ~0.3 is ETH's beta to FIL over the past year,
+    # 0.6-1.0 a crash where everything falls together.
+    co_move_beta: float = 0.0
     # Posted collateral (Collateral tab data — USD/USDC + this run's own asset
     # only) is always fetched and reported as cp_worst_case_net in the
     # response, regardless of this flag. Opt-in: when true, that
@@ -533,6 +558,7 @@ async def run_optimizer(params: OptimizationParams):
         carry_lean=params.carry_lean,
         aggregate_collateral=aggregate_collateral,
         survive_drop_pct=params.survive_drop_pct,
+        co_move_beta=params.co_move_beta,
         collateral_by_cp=collateral_by_cp,
         enforce_collateral_cap=params.use_collateral_cap,
         collateral_transfer=_collateral_transfer_config(params, collateral_by_cp, collateral_prices),

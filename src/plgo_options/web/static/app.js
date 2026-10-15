@@ -10622,6 +10622,7 @@ document.getElementById("btn-run-optv2").addEventListener("click", async () => {
       carry_horizon_days: parseFloat(document.getElementById("optv2-carry-horizon-days")?.value || "30"),
       max_carry_usd: maxCarry,
       survive_drop_pct: surviveDrop,
+      co_move_beta: Math.max(parseFloat(document.getElementById("optv2-co-move-beta")?.value || "0") || 0, 0),
       // Cone mode is a UI-only "__CONE__" sentinel — never sent as target_expiry.
       // The three cone_* fields drive the multi-expiry candidate universe instead.
       target_expiry: optv2IsConeMode() ? null : (document.getElementById("optv2-target-expiry").value || null),
@@ -10903,7 +10904,8 @@ function optv2RenderResult(data) {
       $surv.style.color = agg.survives_after_pct >= agg.survives_before_pct - 0.5 ? "var(--green)" : "var(--red)";
       $surv.title = "Aggregate netted collateral balance, before → after:\n" +
         agg.moves_pct.map((m, i) => `${m > 0 ? "+" : ""}${m}%: ${usdS(agg.balance_before[i])} → ${usdS(agg.balance_after[i])}`).join("\n") +
-        (agg.survive_drop_pct != null ? `\nRequired: ≥ 0 down to -${optv2Fmt(agg.survive_drop_pct, 0)}%` : "");
+        (agg.survive_drop_pct != null ? `\nRequired: ≥ 0 down to -${optv2Fmt(agg.survive_drop_pct, 0)}%` : "") +
+        `\nOther assets co-move beta: ${optv2Fmt(agg.co_move_beta || 0, 2)}`;
     } else {
       $surv.textContent = "—";
       $surv.title = "Collateral data unavailable for this run";

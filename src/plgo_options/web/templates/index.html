@@ -1741,6 +1741,10 @@
           <input type="number" id="optv2-survive-drop" step="5" min="0" max="95" style="width:5rem"
             title="Aggregate collateral survival. The proposed book must keep the aggregate netted collateral balance at or above zero at every spot down to this % below today's: Σ collateral posted at all counterparties (after haircut, collateral in this book's asset marked at each spot) minus Σ each counterparty's netted liability (its whole netting set, both books; the other book held at today's MtM). Same basis as the Collateral tab's Liability / Balance (netted), assuming collateral can be moved freely between counterparties. Blank = off (default); the Summary shows how far the book survives either way.">
         </label>
+        <label class="pf-filter-label">Co-move Beta
+          <input type="number" id="optv2-co-move-beta" value="0" step="0.1" min="0" max="2" style="width:4.5rem"
+            title="For the collateral view (Survive Drop and the Collateral survives card): how much the other assets move per 1% move in this book's asset — ETH and BTC collateral and the other book are repriced at that move. 0 = held at today's prices (default). Past year, ETH on FIL: ~0.3 on average; on FIL's worst days ETH often fell almost as much, so 0.6-1.0 is a crash stress.">
+        </label>
         <label class="pf-filter-label">Carry Lean (%)
           <input type="number" id="optv2-carry-lean" value="0" step="10" min="0" max="100" style="width:5rem"
             title="Gradual cost-of-carry lever. 0% = off: the optimizer's own solution, ignoring carry (default). Above 0%, the scale starts from the lower of today's carry and the optimizer's own solution, so any lean never ends above today. 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Carry = the book's theta run-rate over Carry Days. Applied as a cap, combined with Max Carry ($) by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.">
@@ -4021,7 +4025,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=195"></script>
+<script src="/static/app.js?v=196"></script>
 <script src="/static/agents.js?v=31"></script>
 </body>
 </html>
