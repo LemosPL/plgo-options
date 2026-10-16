@@ -109,7 +109,7 @@ class CollateralOptimization:
         max_carry_usd=None,
         allowed=None,
         aggregate_collateral=None,
-        pillar_anchor_pnl=None,
+        pillar_anchor=None,
     ):
         n_spots = len(spot_ladder)
         n_candidates = len(candidates)
@@ -520,11 +520,12 @@ class CollateralOptimization:
                     owed_terms.append(t)
                 prob += pulp.lpSum(owed_terms) <= float(aggregate_collateral["collateral"][i]), f"agg_collateral_{i}"
 
-        # Pillar anchor: the trades' combined P&L at today's spot by the second
-        # fit pillar (value then minus price now, per unit) must not be negative.
-        if pillar_anchor_pnl is not None:
-            prob += pulp.lpSum((buy_vars[j] - sell_vars[j]) * float(pillar_anchor_pnl[j])
-                               for j in range(n_candidates) if pillar_anchor_pnl[j]) >= 0, "pillar_anchor"
+        # Pillar anchor: at every horizon listed, the trades' combined P&L at
+        # today's spot (value then minus price now, per unit), plus the fixed
+        # P&L of the rolled positions' unwinds, must not be negative.
+        for days, pnl, offset in (pillar_anchor or []):
+            prob += pulp.lpSum((buy_vars[j] - sell_vars[j]) * float(pnl[j])
+                               for j in range(n_candidates) if pnl[j]) >= -float(offset), f"pillar_anchor_{days}"
 
         transfer_model = None
         transfer_cost = 0.0

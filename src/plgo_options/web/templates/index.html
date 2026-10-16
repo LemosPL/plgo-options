@@ -1745,13 +1745,13 @@
           <input type="number" id="optv2-co-move-beta" value="0" step="0.1" min="0" max="2" style="width:4.5rem"
             title="For the collateral view (Survive Drop and the Collateral survives card): how much the other assets move per 1% move in this book's asset — ETH and BTC collateral and the other book are repriced at that move. 0 = held at today's prices (default). Past year, ETH on FIL: ~0.3 on average; on FIL's worst days ETH often fell almost as much, so 0.6-1.0 is a crash stress.">
         </label>
-        <label class="toggle-label" style="margin:0" title="Anchor at spot: the proposed trades must not lose money at today's spot by the chosen pillar — the After P&L matrix at today's spot is kept at or above the Before one in that column, the way the two already match in the Now column. Stops the decay of new premium showing up as a gap at 30-90 days. It only holds the line at today's spot: the cost can move to other spots, so pair it with Survive Drop to keep the downside covered.">
+        <label class="toggle-label" style="margin:0" title="Anchor at spot: the proposed trades must not lose money at today's spot in any column up to the chosen pillar — the After P&L matrix at today's spot is kept at or above the Before one in every column from 16d to the pillar, rolls included, the way the two already match in the Now column. Stops the decay of new premium showing up as a gap at 30-90 days. It only holds the line at today's spot: the cost can move to other spots, so pair it with Survive Drop to keep the downside covered.">
           <input type="checkbox" id="optv2-pillar-anchor">
           Anchor at spot
         </label>
         <label class="pf-filter-label">Anchor pillar
           <select id="optv2-anchor-pillar" style="width:7.5rem"
-            title="Which column of the P&L matrix the anchor holds at today's spot: 90 days ahead (default), or the target expiry's own date.">
+            title="How far the anchor holds at today's spot: every P&L matrix column up to 90 days ahead (default), or up to the target expiry's own date.">
             <option value="t90" selected>90d</option>
             <option value="expiry">Target expiry</option>
           </select>

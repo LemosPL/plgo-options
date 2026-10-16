@@ -59,7 +59,14 @@ def bs_vec_bridge(
     (variance vanishes at both endpoints and peaks mid-bridge — pinning the
     path at both ends necessarily reduces uncertainty at every point between
     them). The conditional expected payoff then has the usual BS closed
-    form, with forward S_eff = exp(mean + var/2) and total variance `var`.
+    form, with total variance `var` and forward S_eff = exp(mean).
+
+    The forward leaves out the lognormal exp(var/2) term on purpose: `var`
+    comes from each strike's own smile vol, so with that term every strike
+    of one expiry would see a different forward and put-call parity would
+    break. A box (worth exactly K2 - K1 at expiry) then showed a P&L past
+    its expiry, and a synthetic forward drifted away from a perp's S - K.
+    With a common forward, C - P = S_eff - K at every strike.
     """
     if dte_days >= h_days or h_days <= 0:
         T_h = max(dte_days - h_days, 0.0) / 365.25
@@ -82,7 +89,7 @@ def bs_vec_bridge(
         return np.maximum(s_t - K, 0.0) if opt == "C" else np.maximum(K - s_t, 0.0)
 
     sqrt_v = math.sqrt(var_log)
-    s_eff = np.exp(mean_log + 0.5 * var_log)
+    s_eff = np.exp(mean_log)
     d1 = (np.log(s_eff / K) + 0.5 * var_log) / sqrt_v
     d2 = d1 - sqrt_v
 

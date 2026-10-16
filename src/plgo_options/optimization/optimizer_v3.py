@@ -402,7 +402,7 @@ class OptimizerV3(BaseOptimizer):
                 "qty": unwind_qty,
                 "side": "Buy" if unwind_qty > 0 else "Sell",
                 "iv_pct": round(float(getattr(p, "iv_pct", 0.0) or 0.0), 1),
-                "bs_price_usd": round(mark_price, 2),
+                "bs_price_usd": round(mark_price, 6),
                 "vega": round(float(getattr(p, "vega", 0.0) or 0.0), 4),
                 "notional": round(notional, 2),
                 "is_unwind": True,
@@ -505,7 +505,7 @@ class OptimizerV3(BaseOptimizer):
                 "qty": replacement_qty,
                 "side": "Buy" if replacement_qty > 0 else "Sell",
                 "iv_pct": round(float(replacement.iv_pct or 0.0), 1),
-                "bs_price_usd": round(float(replacement.bs_price_usd or 0.0), 2),
+                "bs_price_usd": round(float(replacement.bs_price_usd or 0.0), 6),
                 "vega": round(float(replacement.vega or 0.0), 4),
                 "estimated_cash_outlay": 0.0,
                 "normalized_benefit": 0.0,
@@ -768,7 +768,7 @@ class OptimizerV3(BaseOptimizer):
                 "qty": leg_qty,
                 "side": "Buy" if leg_qty > 0 else "Sell",
                 "iv_pct": round(float(leg.iv_pct or 0.0), 1),
-                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 6),
                 "vega": round(float(leg.vega or 0.0), 4),
                 "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
                 "is_unwind": False,
@@ -964,7 +964,7 @@ class OptimizerV3(BaseOptimizer):
                 "qty": leg_qty,
                 "side": "Buy" if leg_qty > 0 else "Sell",
                 "iv_pct": round(float(leg.iv_pct or 0.0), 1),
-                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 6),
                 "vega": round(float(leg.vega or 0.0), 4),
                 "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
                 "is_unwind": False,
@@ -1753,16 +1753,29 @@ class OptimizerV3(BaseOptimizer):
             self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=pillar_days)
             for c in candidates
         ]
-        # Pillar anchor: each candidate's P&L per unit at today's spot by the
-        # anchor pillar (value then minus price paid now); the trades' sum must
-        # be >= 0. Reuses the fit pillar's curves when both are the same day.
-        pillar_anchor_pnl = None
+        # Pillar anchor: the trades must not lose money at today's spot at any
+        # chart horizon up to the anchor pillar, nor at the pillar itself. Per
+        # horizon: each candidate's P&L per unit (value then minus price paid
+        # now), plus a fixed term for the rolled positions, which are unwound
+        # today at their mark instead of being held to that horizon. Reuses
+        # the fit pillar's curves when the horizon is that pillar.
+        pillar_anchor_rows = None
         if pillar_anchor:
-            anchor_curves = c_payoffs_90 if anchor_days == pillar_days else [
-                self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=anchor_days)
-                for c in candidates
-            ]
-            pillar_anchor_pnl = np.array([float(np.interp(self.spot, spot_arr, cp)) for cp in anchor_curves])
+            pillar_anchor_rows = []
+            for h in sorted({int(h) for h in self.chart_horizons if 0 < h < anchor_days} | {anchor_days}):
+                curves = c_payoffs_90 if h == pillar_days else [
+                    self._candidate_curve(c=c, spot_arr=spot_arr, option_smile=option_smile, horizon_days=h)
+                    for c in candidates
+                ]
+                roll_offset = 0.0
+                for p in self.positions:
+                    if id(p) in roll_position_ids:
+                        v_now = self.bs_value_for_position(spot_arr, p, option_smile=option_smile)
+                        v_h = self.bs_value_for_position(spot_arr, p, option_smile=option_smile, horizon_days=h)
+                        if not np.isnan(v_now.sum() + v_h.sum()):
+                            roll_offset += float(np.interp(self.spot, spot_arr, v_now - v_h))
+                pillar_anchor_rows.append(
+                    (h, np.array([float(np.interp(self.spot, spot_arr, cp)) for cp in curves]), roll_offset))
 
         # Gross collateral cap: sum(|final_qty| × price) per counterparty ≤ current × (1 + budget).
         # budget=0.0 → no increase allowed; budget=-0.1 → must shrink by 10%.
@@ -1894,7 +1907,7 @@ class OptimizerV3(BaseOptimizer):
             carry_weight=carry_weight,
             max_carry_usd=max_carry_usd,
             aggregate_collateral=agg_lp,
-            pillar_anchor_pnl=pillar_anchor_pnl,
+            pillar_anchor=pillar_anchor_rows,
         )
         lp_result = lp.optimize(*lp_args, **lp_kwargs)
 
@@ -2079,7 +2092,7 @@ class OptimizerV3(BaseOptimizer):
                     "qty": leg_qty,
                     "side": "Buy" if leg_qty > 0 else "Sell",
                     "iv_pct": round(float(leg.iv_pct or 0.0), 1),
-                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 6),
                     "vega": round(float(leg.vega or 0.0), 4),
                     "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
                     "is_unwind": is_unwind_leg,
@@ -2832,7 +2845,7 @@ class OptimizerV3(BaseOptimizer):
                     "qty": leg_qty,
                     "side": "Buy" if leg_qty > 0 else "Sell",
                     "iv_pct": round(float(leg.iv_pct or 0.0), 1),
-                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 2),
+                    "bs_price_usd": round(float(leg.bs_price_usd or 0.0), 6),
                     "vega": round(float(leg.vega or 0.0), 4),
                     "notional": round(abs(float(leg_qty)) * float(leg.bs_price_usd or 0.0), 2),
                     "is_unwind": False,
@@ -3029,7 +3042,7 @@ class OptimizerV3(BaseOptimizer):
                 "counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date if c else "",
                 "dte": c.dte if c else 0, "strike": c.strike if c else 0.0, "opt": c.opt, "qty": unwind_signed,
                 "side": "Buy" if unwind_signed > 0 else "Sell", "iv_pct": round(c.iv_pct, 1),
-                "bs_price_usd": round(c.bs_price_usd, 2), "notional": round(unwind_notional, 2),
+                "bs_price_usd": round(c.bs_price_usd, 6), "notional": round(unwind_notional, 2),
                 "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_unwind_part, 2),
                 "delta_contribution": round(unwind_signed * float(c.delta), 4),
                 "gamma_contribution": round(unwind_signed * float(c.gamma), 6),
@@ -3219,7 +3232,7 @@ class OptimizerV3(BaseOptimizer):
                 trades.append({"counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date,
                                "dte": dte_i, "strike": strike_i, "opt": c.opt, "qty": unwind_signed,
                                "side": "Buy" if unwind_signed > 0 else "Sell", "iv_pct": round(iv_pct_i, 1),
-                               "bs_price_usd": round(price_i, 2), "notional": round(unwind_notional, 2),
+                               "bs_price_usd": round(price_i, 6), "notional": round(unwind_notional, 2),
                                "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_unwind_part, 2),
                                "delta_contribution": round(unwind_signed * delta_i, 4),
                                "gamma_contribution": round(unwind_signed * gamma_i, 6),
@@ -3231,7 +3244,7 @@ class OptimizerV3(BaseOptimizer):
                 trades.append({"counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date,
                                "dte": dte_i, "strike": strike_i, "opt": c.opt, "qty": new_signed,
                                "side": "Buy" if new_signed > 0 else "Sell", "iv_pct": round(iv_pct_i, 1),
-                               "bs_price_usd": round(price_i, 2), "notional": round(new_notional, 2),
+                               "bs_price_usd": round(price_i, 6), "notional": round(new_notional, 2),
                                "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_new_part, 2),
                                "delta_contribution": round(new_signed * delta_i, 4),
                                "gamma_contribution": round(new_signed * gamma_i, 6),
@@ -3374,7 +3387,7 @@ class OptimizerV3(BaseOptimizer):
             "counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date if c else "",
             "dte": c.dte if c else 0, "strike": c.strike if c else 0.0, "opt": c.opt, "qty": unwind_signed,
             "side": "Buy" if unwind_signed > 0 else "Sell", "iv_pct": round(c.iv_pct, 1),
-            "bs_price_usd": round(c.bs_price_usd, 2), "notional": round(unwind_notional, 2),
+            "bs_price_usd": round(c.bs_price_usd, 6), "notional": round(unwind_notional, 2),
             "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_unwind_part, 2),
             "delta_contribution": round(unwind_signed * float(c.delta), 4),
             "gamma_contribution": round(unwind_signed * float(c.gamma), 6),
@@ -4146,7 +4159,7 @@ class OptimizerV3(BaseOptimizer):
                 "counterparty": c.counterparty, "instrument": instrument_name, "expiry": c.expiry_date if c else "",
                 "dte": c.dte if c else 0, "strike": c.strike if c else 0.0, "opt": c.opt, "qty": unwind_signed,
                 "side": "Buy" if unwind_signed > 0 else "Sell", "iv_pct": round(c.iv_pct, 1),
-                "bs_price_usd": round(c.bs_price_usd, 2), "notional": round(unwind_notional, 2),
+                "bs_price_usd": round(c.bs_price_usd, 6), "notional": round(unwind_notional, 2),
                 "cost_bps": round(cost_rate * 10_000, 1), "trade_cost": round(cost_unwind_part, 2),
                 "delta_contribution": round(unwind_signed * float(c.delta), 4),
                 "gamma_contribution": round(unwind_signed * float(c.gamma), 6),
