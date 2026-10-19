@@ -1215,12 +1215,22 @@
       "optv4-roll-dte-threshold": P.roll_dte_threshold, "optv4-collateral-budget-pct": P.collateral_budget_pct,
       "optv4-max-qty": P.max_qty, "optv4-max-trades": P.max_trades, "optv4-delta-band": P.delta_band_usd,
       "optv4-custom-spot": "",
+      // Ported from v2: the agents don't set these, so replay with them off.
+      "optv4-carry-lean": P.carry_lean != null ? 100 * P.carry_lean : 0,
+      "optv4-carry-horizon-days": P.carry_horizon_days ?? 30,
+      "optv4-max-carry": P.max_carry_usd ?? "",
+      "optv4-survive-drop": P.survive_drop_pct ?? "",
+      "optv4-co-move-beta": P.co_move_beta ?? 0,
+      "optv4-anchor-pillar": P.anchor_pillar || "t90",
     };
     Object.keys(nums).forEach((id) => v4Set(id, nums[id]));
     v4Check("optv4-roll-itm-only", P.roll_itm_only);
     v4Check("optv4-enable-box-neutralizer", P.enable_box_neutralizer);
     v4Check("optv4-enable-composite-unwind", P.enable_composite_unwind);
     v4Check("optv4-enable-delta-rehedge", P.enable_delta_rehedge);
+    // The server defaults allow_perps to true; the page defaults it off for FIL.
+    v4Check("optv4-allow-perps", P.allow_perps ?? true);
+    v4Check("optv4-pillar-anchor", !!P.pillar_anchor);
     v4Check("optv4-roll-use-ticked", false);
     v4Check("optv4-exclude-collar-loans", true);
     if (typeof P.bid_ask_vol_pts === "number") {

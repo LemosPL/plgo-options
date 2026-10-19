@@ -2744,6 +2744,42 @@
           <p class="optv3-hint">When a counterparty's legs form a multi-leg deal (spread, straddle, risk reversal, condor…), force the LP to unwind the whole deal together and proportionally, priced off the deal's net vega, instead of cherry-picking legs. This is the setting that originally distinguished v4 from v3; uncheck it to reproduce a v3-style run.</p>
         </div>
 
+        <!-- Carry & collateral survival (ported from Optimizer v2) -->
+        <div class="optv3-group">
+          <div class="optv3-group-title">Carry &amp; collateral survival</div>
+          <div class="optv3-field">
+            <label for="optv4-carry-lean">Carry Lean (%) <input type="number" id="optv4-carry-lean" value="0" step="10" min="0" max="100"></label>
+            <p class="optv3-hint">Gradual cost-of-carry lever. 0% = off: the optimizer's own solution, ignoring carry (default). Above 0%, the scale starts from the lower of today's carry and the optimizer's own solution, so any lean never ends above today. 100% = the lowest carry the other settings allow (never below zero, so the client is not turned into an option seller). In between, carry is placed proportionally: 50% lands halfway. Applied as a cap, combined with Max Carry by taking the tighter of the two. Runs the optimizer three times, so a few seconds slower.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv4-carry-horizon-days">Carry days <input type="number" id="optv4-carry-horizon-days" value="30" step="1" min="1"></label>
+            <p class="optv3-hint">Horizon of the carry measure: carry = −theta/day × this many days. 30 = monthly run-rate.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv4-max-carry">Max carry ($) <input type="number" id="optv4-max-carry" step="10000" min="0"></label>
+            <p class="optv3-hint">Hard cap on the whole book's carry (theta run-rate over Carry days) after this run's trades. Blank = no cap (default). Like Max CP loss, too tight a cap makes the run infeasible instead of trading off against the fit. The cap binds on the LP's trades; the final trades (after box neutralizer, re-hedge and Max trades) can land slightly off it.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv4-survive-drop">Survive drop (%) <input type="number" id="optv4-survive-drop" step="5" min="0" max="95"></label>
+            <p class="optv3-hint">The proposed book must keep the aggregate netted collateral balance at or above zero at every spot down to this % below today's: Σ collateral posted at all counterparties (after haircut, collateral in this book's asset marked at each spot) minus Σ each counterparty's netted liability (its whole netting set, both books). Same basis as the Collateral tab's Liability / Balance (netted), assuming collateral can be moved freely between counterparties. Blank = off (default); the result shows how far the book survives either way.</p>
+          </div>
+          <div class="optv3-field">
+            <label for="optv4-co-move-beta">Co-move beta <input type="number" id="optv4-co-move-beta" value="0" step="0.1" min="0" max="2"></label>
+            <p class="optv3-hint">For the collateral view (Survive drop and Collateral survives): how much the other assets move per 1% move in this book's asset — ETH and BTC collateral and the other book are repriced at that move. 0 = held at today's prices (default). Past year, ETH on FIL: ~0.3 on average; 0.6–1.0 is a crash stress.</p>
+          </div>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-pillar-anchor"> Anchor at spot</label>
+          <p class="optv3-hint">The proposed trades must not lose money at today's spot in any column up to the chosen pillar — the After P&amp;L at today's spot is kept at or above the Before one in every column from 16d to the pillar, rolls included. Stops the decay of new premium showing up as a gap at 30–90 days. It only holds the line at today's spot: pair it with Survive drop to keep the downside covered.</p>
+          <div class="optv3-field">
+            <label for="optv4-anchor-pillar">Anchor pillar
+              <select id="optv4-anchor-pillar">
+                <option value="t90" selected>90d</option>
+                <option value="expiry">Target expiry</option>
+              </select>
+            </label>
+            <p class="optv3-hint">How far the anchor holds at today's spot: every column up to 90 days ahead (default), or up to the target expiry's own date.</p>
+          </div>
+        </div>
+
         <!-- Rolls -->
         <div class="optv3-group">
           <div class="optv3-group-title">Rolls</div>
@@ -2797,6 +2833,8 @@
           <p class="optv3-hint">Add a per-counterparty box spread (flat vs. spot) sized to neutralize leftover cash imbalance. Uncheck to see the raw result.</p>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-enable-delta-rehedge"> Delta rehedge (perp)</label>
           <p class="optv3-hint">Post-LP step: if net option delta (existing book + every option trade just proposed), offset by the current perp holdings, still sits outside the band, propose one perp trade per counterparty, booked with that counterparty, flattening its own delta to zero (nets against its options for collateral; a Binance Futures hedge is unwound as they take over). Orthogonal to the LP's own shape fit, which rarely reaches for the perp itself. Off by default — the server documents this as opt-in, and v4 previously defaulted it on, which silently added a perp trade v2 never proposed.</p>
+          <label class="optv3-toggle"><input type="checkbox" id="optv4-allow-perps" checked> Allow perps</label>
+          <p class="optv3-hint">Unticked = the run proposes no perp trades at all: the optimizer gets no perp to trade and Delta rehedge is ignored. A perp already held is left as is. Defaults to unticked for FIL, ticked for ETH.</p>
           <div class="optv3-field"><label>Delta band ($)<input type="number" id="optv4-delta-band" value="150000" step="1000" min="0" style="width:6.5rem" title="Dollar notional — converted to underlying tokens via spot when checked, so the same tolerance means the same real risk on ETH and FIL alike."></label></div>
           <label class="optv3-toggle"><input type="checkbox" id="optv4-coll-xfer"> Collateral transfers</label>
           <p class="optv3-hint">Collateral posted against this book anywhere but the hub costs carry. Each counterparty keeps what it would be owed at every spot on the ladder plus the buffer; the run proposes moving the rest to the hub, at a fixed fee per transfer, and trades that add liability at a non-hub counterparty pay for the collateral they pin there.</p>
@@ -2851,12 +2889,14 @@
             <span class="optv3-muted" id="optv4-result-status"></span>
           </div>
           <div id="optv4-warnings" class="optv3-warn" style="display:none"></div>
-          <div class="optv3-kpi-grid">
+          <div class="optv3-kpi-grid" style="grid-template-columns:repeat(8,1fr)">
             <div><div class="greek-label">Unwind / Roll</div><div class="greek-value" id="optv4-sum-unwind">--</div></div>
             <div><div class="greek-label">Replacement / New</div><div class="greek-value" id="optv4-sum-replacement">--</div></div>
             <div><div class="greek-label">Net Premium</div><div class="greek-value" id="optv4-sum-net-premium">--</div></div>
             <div><div class="greek-label">Cash Shift</div><div class="greek-value" id="optv4-sum-cash-shift">--</div></div>
             <div><div class="greek-label">Fit Error ↓</div><div class="greek-value" id="optv4-sum-fit">--</div></div>
+            <div title="Deepest fall in spot below today's that the aggregate netted collateral balance stays at or above zero through (Collateral tab basis, free rebalancing between counterparties), before → after the proposed trades. Hover for the balance at each move."><div class="greek-label">Collateral survives</div><div class="greek-value" id="optv4-sum-survive">--</div></div>
+            <div title="Theta run-rate of the whole book over Carry days (-theta/day × days), before → after the proposed trades. Positive = the book loses this much to time decay if kept as is."><div class="greek-label" id="optv4-sum-carry-label">Carry</div><div class="greek-value" id="optv4-sum-carry">--</div></div>
             <div><div class="greek-label">Candidates</div><div class="greek-value" id="optv4-candidates">--</div></div>
           </div>
           <div class="optv3-subline">
@@ -3040,7 +3080,7 @@
                       <div class="opt-card-title" style="margin-bottom:.4rem">Downside</div>
                       <div class="opt-card-row">
                         <label class="opt-inline" title="How far below spot (%) the target crosses $0. 100% = breakeven exactly at price $0.">Breakeven distance
-                          <input id="optv4-target-down-pct" type="number" value="90.91" step="5" max="100" style="width:4.5rem">%
+                          <input id="optv4-target-down-pct" type="number" value="90.91" step="5" max="300" style="width:4.5rem">%
                         </label>
                         <span id="optv4-target-down-wing-readout" class="opt-inline" style="white-space:normal"></span>
                       </div>
@@ -4036,7 +4076,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=197"></script>
-<script src="/static/agents.js?v=31"></script>
+<script src="/static/app.js?v=198"></script>
+<script src="/static/agents.js?v=32"></script>
 </body>
 </html>

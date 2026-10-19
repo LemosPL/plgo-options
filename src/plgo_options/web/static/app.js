@@ -1390,6 +1390,9 @@ document.querySelectorAll(".asset-btn").forEach(btn => {
     // the same real risk on both books, so it is deliberately left alone here.
     const $optv4MaxQty = document.getElementById("optv4-max-qty");
     if ($optv4MaxQty) $optv4MaxQty.value = asset === "FIL" ? 5000000 : 5000;
+    // No perps on FIL by default, as on v2 (client request, 2026-10-14).
+    const $optv4AllowPerps = document.getElementById("optv4-allow-perps");
+    if ($optv4AllowPerps) $optv4AllowPerps.checked = asset !== "FIL";
 
     // Reset all page caches so they reload with new asset
     tmLoaded = false;
@@ -13977,6 +13980,47 @@ function optv4RenderRollCandidates() {
 }
 
 // Render optimization result into the v3 KPI row + tabbed detail.
+// Carry and aggregate collateral survival, before → after — the same two
+// cards as v2's Summary (optv2RenderResult).
+function optv4RenderCarryAndSurvival(data) {
+  const carry = data.carry;
+  const $carry = document.getElementById("optv4-sum-carry");
+  if ($carry) {
+    if (carry && carry.before_usd != null && carry.after_usd != null) {
+      document.getElementById("optv4-sum-carry-label").textContent = `Carry (${optv2Fmt(carry.horizon_days, 0)}d)`;
+      $carry.textContent = `$${optv2Fmt(carry.before_usd, 0)} → $${optv2Fmt(carry.after_usd, 0)}`;
+      $carry.style.color = carry.after_usd <= carry.before_usd ? "var(--green)" : "var(--red)";
+      $carry.title = `Theta/day ${optv2Fmt(carry.theta_per_day_before, 0)} → ${optv2Fmt(carry.theta_per_day_after, 0)}` +
+        (carry.lean
+          ? `\nCarry Lean ${optv2Fmt(100 * carry.lean.lean, 0)}%: from $${optv2Fmt(carry.lean.start_usd, 0)} ` +
+            `(lower of today $${optv2Fmt(carry.lean.today_usd, 0)} and the optimizer's own solution $${optv2Fmt(carry.lean.free_usd, 0)}) ` +
+            `towards the lowest achievable $${optv2Fmt(carry.lean.min_usd, 0)}; cap applied $${optv2Fmt(carry.lean.target_usd, 0)}`
+          : "");
+    } else {
+      $carry.textContent = "—";
+      $carry.style.color = "";
+      $carry.title = "";
+    }
+  }
+  const agg = data.aggregate_collateral;
+  const usdS = v => (v < 0 ? "-$" : "$") + optv2Fmt(Math.abs(v), 0);
+  const $surv = document.getElementById("optv4-sum-survive");
+  if ($surv) {
+    if (agg) {
+      $surv.textContent = `-${optv2Fmt(agg.survives_before_pct, 0)}% → -${optv2Fmt(agg.survives_after_pct, 0)}%`;
+      $surv.style.color = agg.survives_after_pct >= agg.survives_before_pct - 0.5 ? "var(--green)" : "var(--red)";
+      $surv.title = "Aggregate netted collateral balance, before → after:\n" +
+        agg.moves_pct.map((m, i) => `${m > 0 ? "+" : ""}${m}%: ${usdS(agg.balance_before[i])} → ${usdS(agg.balance_after[i])}`).join("\n") +
+        (agg.survive_drop_pct != null ? `\nRequired: ≥ 0 down to -${optv2Fmt(agg.survive_drop_pct, 0)}%` : "") +
+        `\nOther assets co-move beta: ${optv2Fmt(agg.co_move_beta || 0, 2)}`;
+    } else {
+      $surv.textContent = "—";
+      $surv.style.color = "";
+      $surv.title = "Collateral data unavailable for this run";
+    }
+  }
+}
+
 function optv4RenderResult(data) {
   if (data.status !== "ok") { alert(data.message || "Optimization returned no results."); return; }
 
@@ -14011,6 +14055,7 @@ function optv4RenderResult(data) {
     $fit.textContent = optv2Fmt(pct, 1) + "%";
     $fit.style.color = pct >= 0 ? "var(--green)" : "var(--red)";
   } else { $fit.textContent = "—"; }
+  optv4RenderCarryAndSurvival(data);
   document.getElementById("optv4-candidates").textContent = data.candidates_evaluated ?? "—";
   document.getElementById("optv4-sum-prem-sold").textContent = "$" + optv2Fmt(ps.gross_premium_sold || 0, 0);
   document.getElementById("optv4-sum-prem-bought").textContent = "$" + optv2Fmt(ps.gross_premium_bought || 0, 0);
@@ -15575,6 +15620,12 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     const useCollateralCap = document.getElementById("optv4-use-collateral-cap")?.checked || false;
     const customSpotRaw = document.getElementById("optv4-custom-spot")?.value;
     const customSpot = customSpotRaw === "" || customSpotRaw === undefined ? null : parseFloat(customSpotRaw);
+    // Carry, collateral survival and the spot anchor, ported from v2. Blank =
+    // off for Max Carry and Survive Drop; "0" is a real cap.
+    const maxCarryRaw = document.getElementById("optv4-max-carry")?.value;
+    const maxCarry = maxCarryRaw === "" || maxCarryRaw === undefined ? null : parseFloat(maxCarryRaw);
+    const surviveRaw = document.getElementById("optv4-survive-drop")?.value;
+    const surviveDrop = surviveRaw === "" || surviveRaw === undefined ? null : parseFloat(surviveRaw);
 
     // The tick-to-unwind panel is now OPT-IN, and this is the single reason v2
     // and v4 could return completely different books from identical settings.
@@ -15648,6 +15699,13 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       // Blank = live spot. Set = run the whole optimization (candidates, greeks,
       // target anchor, payoff ladder) as if spot were this price instead.
       custom_spot: customSpot,
+      carry_lean: Math.min(Math.max(parseFloat(document.getElementById("optv4-carry-lean")?.value || "0"), 0), 100) / 100,
+      carry_horizon_days: parseFloat(document.getElementById("optv4-carry-horizon-days")?.value || "30"),
+      max_carry_usd: maxCarry,
+      survive_drop_pct: surviveDrop,
+      co_move_beta: Math.max(parseFloat(document.getElementById("optv4-co-move-beta")?.value || "0") || 0, 0),
+      pillar_anchor: document.getElementById("optv4-pillar-anchor")?.checked || false,
+      anchor_pillar: document.getElementById("optv4-anchor-pillar")?.value || "t90",
       // Composite unwinding was the original v4-vs-v3 difference and used to be
       // hardcoded true here, with no way to switch it off - so a v4 run could not
       // be compared against a v2 or v3 one on equal terms. Now a checkbox,
@@ -15675,6 +15733,7 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       perp_cost_bps: optPerpCostDict("optv4-perpcost-list"),
       // Post-LP delta cleanup via perp trades, one per counterparty — see delta_hedger.plan_counterparty_rehedge.
       enable_delta_rehedge: document.getElementById("optv4-enable-delta-rehedge")?.checked || false,
+      allow_perps: document.getElementById("optv4-allow-perps")?.checked ?? true,
       delta_band_usd: parseFloat(document.getElementById("optv4-delta-band")?.value || "150000"),
       ...optCollateralTransferParams("optv4"),
       // Saved target profile selected in the dropdown (engine loads the CSV).
