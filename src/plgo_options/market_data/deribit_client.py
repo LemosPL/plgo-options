@@ -54,6 +54,10 @@ def _cache_key(method: str, params: dict | None) -> str:
     return f"{method}|{p}"
 
 
+# Last FIL/ETH realised-vol ratio fetched, served when CoinGecko fails.
+_last_vol_ratio: float | None = None
+
+
 class DeribitClient:
     """Thin async wrapper around Deribit public JSON-RPC endpoints."""
 
@@ -159,8 +163,12 @@ class DeribitClient:
     async def get_historical_vol_ratio(self, days: int = 30) -> float:
         """Return annualised HV(FIL) / HV(ETH) using CoinGecko daily closes.
 
-        Falls back to 1.5 if the fetch fails (FIL is typically ~1.5x ETH vol).
+        On a failed fetch, returns the last ratio computed in this process, and
+        only 1.5 (FIL is typically ~1.5x ETH vol) when there is none. Falling
+        straight to 1.5 made every FIL mark jump whenever CoinGecko rate-limited
+        a call (3.09 vs 1.5 on 19 Oct 2026).
         """
+        global _last_vol_ratio
         cg_url = "https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
         params = {"vs_currency": "usd", "days": days, "interval": "daily"}
 
@@ -175,7 +183,7 @@ class DeribitClient:
                 _fetch_prices("filecoin"), _fetch_prices("ethereum"),
             )
         except Exception:
-            return 1.5  # sensible default
+            return _last_vol_ratio or 1.5
 
         def _ann_vol(prices: list[float]) -> float:
             if len(prices) < 3:
@@ -187,8 +195,9 @@ class DeribitClient:
         hv_fil = _ann_vol(fil_prices)
         hv_eth = _ann_vol(eth_prices)
         if hv_eth <= 0:
-            return 1.5
-        return max(hv_fil / hv_eth, 0.5)  # floor at 0.5x to avoid absurd ratios
+            return _last_vol_ratio or 1.5
+        _last_vol_ratio = max(hv_fil / hv_eth, 0.5)  # floor at 0.5x to avoid absurd ratios
+        return _last_vol_ratio
 
     async def get_perpetual_ticker(self) -> PerpetualTicker:
         raw = await self._get("ticker", {"instrument_name": "ETH-PERPETUAL"})

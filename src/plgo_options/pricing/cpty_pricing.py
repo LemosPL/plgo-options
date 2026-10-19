@@ -51,6 +51,35 @@ CPTY_PRICING: dict[str, dict[str, dict]] = {
 }
 
 
+# Vol each counterparty MARKS our open positions at (its statements), as
+# opposed to CPTY_PRICING above, which is what it QUOTES on new trades. Flat
+# across strikes: the brokers' FIL marks carry no skew. Used for MTM wherever
+# a leg has no live exchange mark (all FIL legs). A pair absent here falls back
+# to the mid of its two-sided quote if it has one, else the vol surface.
+CPTY_MARK_VOL: dict[str, dict[str, float]] = {
+    # Flowdesk statement, 19 Oct 2026, 30OCT26 legs: 129-132% implied, spot 1.018.
+    # Flat 130% reprices that book within $7k of their -$9.11M.
+    "Flowdesk": {"FIL": 130.0},
+}
+
+
+def mark_vol_pct(counterparty: str, asset: str, spot: float, strike: float) -> float | None:
+    """Flat mark vol (%) for a leg held with this counterparty, or None when
+    there is nothing calibrated for it (callers then use the vol surface)."""
+    name = next((k for k in CPTY_MARK_VOL if k.lower() == str(counterparty).strip().lower()), None)
+    vol = CPTY_MARK_VOL.get(name, {}).get(asset.upper()) if name else None
+    if vol is not None:
+        return vol
+    name = next((k for k in CPTY_PRICING if k.lower() == str(counterparty).strip().lower()), None)
+    method = CPTY_PRICING.get(name, {}).get(asset.upper()) if name else None
+    if method and method["model"] == "two_sided_vol" and spot > 0 and strike > 0:
+        far = method.get("far_ask_vol")
+        logm = abs(math.log(strike / spot))
+        ask = far if (far is not None and logm > method["far_wing_threshold"]) else method["ask_vol"]
+        return (method["bid_vol"] + ask) / 2.0
+    return None
+
+
 def get_method(counterparty: str, asset: str) -> dict | None:
     """The calibrated methodology for (counterparty, asset), or None if uncalibrated."""
     return CPTY_PRICING.get(counterparty, {}).get(asset)

@@ -45,6 +45,7 @@ from plgo_options.web.routes.portfolio import (
     _bs_vec,
     _iso_to_date,
     _iv_from_surface,
+    _leg_iv,
     _safe_float,
 )
 
@@ -244,7 +245,7 @@ async def build_deals_payload(
         for gid, glegs in group_composite_legs(legs, omap or None):
             tdate = min((l["trade_date"] for l in glegs), default="")
             deals.append(_build_deal(cpty, tdate, glegs, gid, grid, spot,
-                                     smiles, deribit_dates, today, manual=bool(omap)))
+                                     smiles, deribit_dates, today, manual=bool(omap), asset=asset))
 
     # Sort by soonest expiry, then counterparty.
     deals.sort(key=lambda d: (d["expiry"] or "9999", d["counterparty"], d["group_id"]))
@@ -257,7 +258,7 @@ async def build_deals_payload(
 
 
 def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
-                today, manual=False):
+                today, manual=False, asset="ETH"):
     """Price one deal and assemble its analytics payload."""
     # Horizon = latest expiry among the legs (classic payoff-at-expiry diagram).
     horizon_days = max((l["days_rem"] for l in legs), default=0)
@@ -305,7 +306,7 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
         net_credit += prem_usd
 
         # IV for this leg from the term-structure surface (Pricing-tab method).
-        iv = _iv_from_surface(leg["expiry"], K, smiles, deribit_dates, today)
+        iv = _leg_iv(cpty, asset, leg["expiry"], K, spot, smiles, deribit_dates, today)
         sigma = (iv / 100.0) if iv is not None else DEFAULT_IV
         t_leg = max(leg["days_rem"], 0) / 365.25
 
@@ -375,8 +376,8 @@ def _build_deal(cpty, tdate, legs, group_id, grid, spot, smiles, deribit_dates,
         # thousands of redundant interpolations.
         leg_sigmas = []
         for leg in legs:
-            iv_l = _iv_from_surface(leg["expiry"], leg["strike"], smiles,
-                                    deribit_dates, today)
+            iv_l = _leg_iv(cpty, asset, leg["expiry"], leg["strike"], spot, smiles,
+                           deribit_dates, today)
             leg_sigmas.append((iv_l / 100.0) if iv_l is not None else DEFAULT_IV)
         for h in days_axis:
             total = 0.0

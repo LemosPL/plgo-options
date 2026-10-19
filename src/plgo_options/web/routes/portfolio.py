@@ -14,6 +14,7 @@ from plgo_options.data.database import get_db
 from plgo_options.data.collar_loans import split_collar_loans
 from plgo_options.data.trade_repository import list_trades
 from plgo_options.data.trades import read_eth_trades, read_fil_trades
+from plgo_options.pricing.cpty_pricing import mark_vol_pct
 from plgo_options.pricing.options import bs_price
 from plgo_options.pricing.vol_surface import VolSmile
 from plgo_options.market_data.deribit_client import DeribitClient
@@ -256,6 +257,23 @@ def _iv_from_surface(
     iv_b = float(smiles[before[1]].iv_at(strike))
     iv_a = float(smiles[after[1]].iv_at(strike))
     return iv_b * (1.0 - w) + iv_a * w
+
+
+def _leg_iv(
+    counterparty: str, asset: str, pos_expiry: str, strike: float, spot: float,
+    smiles: dict[str, VolSmile], deribit_dates: dict[str, date], today: date,
+) -> float | None:
+    """IV (in %) to mark a leg with no live exchange mark: the counterparty's
+    own flat mark vol when calibrated (cpty_pricing.CPTY_MARK_VOL — what its
+    statements use), else the term-structure surface.
+
+    FIL has no option market: its surface is ETH's smile scaled by FIL/ETH
+    realised vol, and tripling ETH's steep short-dated wings marked 11-day FIL
+    wings at 260-440% against the brokers' flat ~130% (19 Oct 2026)."""
+    mark = mark_vol_pct(counterparty, asset, spot, strike)
+    if mark is not None:
+        return mark
+    return _iv_from_surface(pos_expiry, strike, smiles, deribit_dates, today)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +618,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             # IV from the vol surface, interpolated across the term structure —
             # same method as the Pricing tab. Fall back to DEFAULT_IV only when
             # the surface is entirely empty.
-            surf_iv = _iv_from_surface(expiry_raw, strike, smiles, deribit_dates, today)
+            surf_iv = _leg_iv(counterparty, asset, expiry_raw, strike, eth_spot, smiles, deribit_dates, today)
             iv_pct = surf_iv if surf_iv is not None else DEFAULT_IV * 100
             # Compute BS greeks as fallback
             T_bs = max(days_rem, 0) / 365.25
@@ -642,7 +660,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         # ------------------------------------------------------------------
         scenario_sigma = sigma
         if not (ticker and ticker.mark_iv):
-            surf_iv = _iv_from_surface(expiry_raw, strike, smiles, deribit_dates, today)
+            surf_iv = _leg_iv(counterparty, asset, expiry_raw, strike, eth_spot, smiles, deribit_dates, today)
             if surf_iv is not None:
                 scenario_sigma = surf_iv / 100.0
 
