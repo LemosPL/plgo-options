@@ -11032,19 +11032,7 @@ function optv2RenderResult(data) {
   // on FIL that rounds every $0.0x-$3.xx spot down to a bare integer
   // ("$0"..."$3", one label for the whole ladder) and mislabels the column
   // "ETH Spot". Same bug v4 hit and fixed via optv4MatrixOpts (5910d1b).
-  const optv2MatrixOpts = { dp: optv3Dp(), assetLabel: currentAsset };
-  if (data.before && data.before.payoff_by_horizon) {
-    optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody", optv2MatrixOpts);
-  }
-
-  // Show "After" matrix next to the main P&L Matrix
-  const $afterPanel = document.getElementById("optv2-matrix-after-panel");
-  const $matrixGrid = document.getElementById("optv2-matrix-grid");
-  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
-    $afterPanel.style.display = "";
-    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
-    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody", optv2MatrixOpts);
-  }
+  optv2RenderResultMatrices(data);
 
   // ── D. Strategy grouping ──
   optv2RenderStrategyGroups(allTrades);
@@ -11212,6 +11200,36 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
 // levels) plus a "% move" column, instead of the equal-dollar ladder rows.
 // Opt-in per call site so v2 and v3 keep their existing tables unchanged;
 // only v4 asks for it. opts.dp sets price decimals (FIL needs 2).
+// The optimizer result's Before/After matrices. P&L from today by default;
+// with "Absolute value" ticked each cell adds the book's MTM (before: today's,
+// after: after the trades, net of cost), so it reads as the book's value then.
+function optv2RenderResultMatrices(data) {
+  const absolute = !!document.getElementById("optv2-matrix-absolute")?.checked;
+  const optv2MatrixOpts = { dp: optv3Dp(), assetLabel: currentAsset };
+  if (data.before && data.before.payoff_by_horizon) {
+    optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody",
+      { ...optv2MatrixOpts, offset: absolute ? (data.current_book_mtm || 0) : 0 });
+  }
+
+  // Show "After" matrix next to the main P&L Matrix
+  const $afterPanel = document.getElementById("optv2-matrix-after-panel");
+  const $matrixGrid = document.getElementById("optv2-matrix-grid");
+  if ($afterPanel && $matrixGrid && data.after && data.after.payoff_by_horizon) {
+    $afterPanel.style.display = "";
+    $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
+    optv2RenderCompareMatrix(data, "after", "optv2-matrix-after-main-thead", "optv2-matrix-after-main-tbody",
+      { ...optv2MatrixOpts, offset: absolute ? (data.after_book_mtm || 0) : 0 });
+  }
+  const $title = document.getElementById("optv2-matrix-title");
+  if ($title) $title.textContent = absolute ? "Value Matrix" : "P&L Matrix";
+  const $afterTitle = document.getElementById("optv2-matrix-after-title");
+  if ($afterTitle) $afterTitle.textContent = absolute ? "Value Matrix — After" : "P&L Matrix — After";
+}
+
+document.getElementById("optv2-matrix-absolute")?.addEventListener("change", () => {
+  if (optv2OptResult) optv2RenderResultMatrices(optv2OptResult);
+});
+
 function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
   const spots = data.spot_ladder;
   // The RUN result names this field "spot" (optimizer_v3), not "eth_spot" — so
@@ -11284,6 +11302,7 @@ function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
         cellVal = geometric
           ? (optv4InterpAt(spots, curve, s) || 0)
           : (curve[optv2NearestIdx(spots, s)] !== undefined ? curve[optv2NearestIdx(spots, s)] : 0);
+        cellVal += opts.offset || 0;   // absolute view: + the book's MTM at today's spot
       }
       const td = document.createElement("td");
       td.textContent = Math.round(cellVal).toLocaleString();

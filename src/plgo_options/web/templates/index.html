@@ -1930,10 +1930,14 @@
 
     <!-- P&L Matrix (Before + After side-by-side) -->
     <section class="card" id="optv2-matrix-section" style="display:none">
-      <div id="optv2-matrix-mtm-note" style="font-size:.8rem;color:var(--muted);margin-bottom:.75rem"></div>
+      <div id="optv2-matrix-mtm-note" style="font-size:.8rem;color:var(--muted);margin-bottom:.5rem"></div>
+      <label class="toggle-label" style="margin:0 0 .75rem" title="Show each cell as the book's value then (its MTM at mid, options only, cash not counted) instead of the P&amp;L from today: the Before matrix adds today's book MTM, the After matrix the book MTM after the trades, net of the assumed transaction cost.">
+        <input type="checkbox" id="optv2-matrix-absolute">
+        Absolute value
+      </label>
       <div id="optv2-matrix-grid" style="display:grid;grid-template-columns:1fr;gap:1.5rem">
         <div>
-          <h2>P&amp;L Matrix</h2>
+          <h2 id="optv2-matrix-title">P&amp;L Matrix</h2>
           <div class="chain-wrapper" style="max-height:500px">
             <table class="pf-table">
               <thead id="optv2-matrix-thead"></thead>
@@ -1942,7 +1946,7 @@
           </div>
         </div>
         <div id="optv2-matrix-after-panel" style="display:none">
-          <h2>P&amp;L Matrix — After</h2>
+          <h2 id="optv2-matrix-after-title">P&amp;L Matrix — After</h2>
           <div class="chain-wrapper" style="max-height:500px">
             <table class="pf-table">
               <thead id="optv2-matrix-after-main-thead"></thead>
@@ -4076,7 +4080,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=198"></script>
+<script src="/static/app.js?v=199"></script>
 <script src="/static/agents.js?v=32"></script>
 </body>
 </html>
