@@ -1,0 +1,78 @@
+"""Collateral Platform / Greeks report, checked against the counterparty's own
+"Protocol Labs Positions" ETH report (Flowdesk, Oct 2026): same book, spot
+2451.53, Dec26 at ~50% vol, 66 days out."""
+
+import asyncio
+
+from plgo_options.web.routes import risk_report as rr
+from plgo_options.web.routes.portfolio import bs_greeks
+
+S, DTE, IV = 2451.53, 66, 50.0
+BOOK = [(8000, 1780, "P"), (-9150, 1780, "C"), (1250, 2100, "P"), (1000, 2200, "P"), (1000, 2600, "C"),
+        (1250, 2700, "C"), (1500, 2800, "C"), (1750, 2900, "C"), (6000, 3020, "C"), (-9150, 3020, "P")]
+
+
+def _fake_portfolio():
+    positions = []
+    for q, k, opt in BOOK:
+        d, g, th, vg = bs_greeks(S, k, DTE / 365.25, 0.0, IV / 100, opt)
+        positions.append({"counterparty": "Flowdesk", "net_qty": q, "days_remaining": DTE, "opt": opt,
+                          "strike": k, "expiry": "2026-12-25", "iv_pct": IV, "current_mtm": 0.0,
+                          "delta": d, "gamma": g, "theta": th, "vega": vg})
+    positions.append({"counterparty": "Wave", "net_qty": 500, "days_remaining": DTE, "opt": "C",
+                      "strike": 3000, "expiry": "2026-12-25", "iv_pct": IV, "delta": 0.3})
+    return {"eth_spot": S, "positions": positions}
+
+
+def _run(monkeypatch, counterparty="Flowdesk"):
+    async def fake_gather(asset):
+        return _fake_portfolio() if asset == "ETH" else None
+
+    async def fake_posted(cp):
+        return {"ETH": 2000.0}
+
+    async def fake_ctx(asset):
+        raise RuntimeError("no market data in tests")
+
+    monkeypatch.setattr(rr, "_gather_portfolio", fake_gather)
+    monkeypatch.setattr(rr, "_posted_collateral", fake_posted)
+    monkeypatch.setattr(rr, "build_market_context", fake_ctx)
+    sec = asyncio.run(rr._asset_section("ETH", counterparty, 2000.0, relative=False))
+    return sec
+
+
+def test_positions_and_greeks_like_the_report(monkeypatch):
+    sec = _run(monkeypatch)
+    rows = sec["rows"]
+    assert rows[0]["symbol"] == "ETH Spot Collateral" and rows[0]["delta"] == 2000
+    assert "ETHUSDC-25DEC26-1600-1780-P-USDC" in [r["symbol"] for r in rows]
+    assert len(rows) == 1 + len(BOOK)                      # Wave's leg is not Flowdesk's
+    t = sec["totals"]
+    # Flat 50% approximates their smile: PDF 2,820 / 3.48 / -5,363 / 16,460.
+    assert 2600 < t["delta"] < 3000
+    assert 2.8 < t["gamma"] < 3.8
+    assert -7000 < t["theta"] < -5000
+    assert 15000 < t["vega"] < 18500
+    assert abs(t["delta_usd"] - t["delta"] * S) < 1
+    assert abs(t["gamma_usd"] - t["gamma"] * S * S / 100) < 1
+    assert sec["bullets"][0].startswith("Long") and "2,000 ETH collateral" in sec["bullets"][0]
+
+
+def test_slides_match_the_report_on_spot_moves(monkeypatch):
+    s = _run(monkeypatch)["slides"]
+    col = s["vol_shocks"].index(0.0)
+    at = {ds: s["pnl"][i][col] for i, ds in enumerate(s["spot_shocks"])}
+    assert at[0.0] == 0
+    # PDF: +10% 782,119 · -10% -577,794 · -50% -1,589,855 · +100% 10,165,902
+    assert abs(at[0.10] - 782_119) < 60_000
+    assert abs(at[-0.10] - (-577_794)) < 60_000
+    assert abs(at[-0.50] - (-1_589_855)) < 40_000
+    assert abs(at[1.00] - 10_165_902) < 150_000
+    # Long vega: vol up makes money at unchanged spot.
+    i0 = s["spot_shocks"].index(0.0)
+    assert s["pnl"][i0][-1] > 0 > s["pnl"][i0][0]
+
+
+def test_all_counterparties_aggregates(monkeypatch):
+    sec = _run(monkeypatch, counterparty=None)
+    assert len(sec["rows"]) == 1 + len(BOOK) + 1

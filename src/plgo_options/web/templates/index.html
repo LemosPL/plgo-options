@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=15">
+  <link rel="stylesheet" href="/static/style.css?v=17">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -177,6 +177,14 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 100 16A8 8 0 008 0zM1 8a7 7 0 1114 0A7 7 0 011 8zm7-3a.5.5 0 01.5.5v.5h1a.5.5 0 010 1h-2a.5.5 0 100 1h1a1.5 1.5 0 010 3v.5a.5.5 0 01-1 0v-.5h-1a.5.5 0 010-1h2a.5.5 0 100-1h-1a1.5 1.5 0 010-3V5.5A.5.5 0 018 5z"/></svg>
       Collateral
       <span class="nav-badge" id="nav-badge-collateral"></span>
+    </li>
+    <li class="nav-item" data-page="collatplat">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l6 2.5v4c0 3.6-2.6 6.4-6 7.5-3.4-1.1-6-3.9-6-7.5v-4L8 1zm0 1.1L3 4.2v3.3c0 3 2.1 5.4 5 6.4 2.9-1 5-3.4 5-6.4V4.2L8 2.1z"/></svg>
+      Collateral Platform
+    </li>
+    <li class="nav-item" data-page="greeks">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v1H2V2zm0 11h12v1H2v-1zM3 5h2v6H3V5zm4-1h2v7H7V4zm4 2h2v5h-2V6z"/></svg>
+      Greeks
     </li>
     <li class="nav-item" data-page="perps">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13A.5.5 0 011 8z"/><path d="M11.5 4.5a.5.5 0 01.707 0l3 3a.5.5 0 010 .707l-3 3a.5.5 0 01-.707-.707L14.293 8l-2.793-2.793a.5.5 0 010-.707z"/><path d="M4.5 11.5a.5.5 0 01-.707 0l-3-3a.5.5 0 010-.707l3-3a.5.5 0 11.707.707L1.707 8l2.793 2.793a.5.5 0 010 .707z"/></svg>
@@ -3519,6 +3527,52 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- PAGE: Agents                                               -->
   <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="page-collatplat" class="page">
+    <section class="card">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Collateral Platform</h2>
+          <span id="cp-status" class="optv3-muted" style="font-size:.75rem"></span>
+        </div>
+        <div class="collat-header-right rr-controls">
+          <label class="pf-filter-label">Counterparty <select id="cp-cpty"></select></label>
+          <label class="pf-filter-label">Asset
+            <select id="cp-asset"><option value="ALL" selected>ETH + FIL</option><option value="ETH">ETH</option><option value="FIL">FIL</option></select>
+          </label>
+          <label class="pf-filter-label" title="Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
+            <select id="cp-volmode"><option value="points" selected>Vol points</option><option value="relative">Relative %</option></select>
+          </label>
+          <button id="cp-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
+          <button id="cp-print" class="btn-secondary" style="width:auto" title="Print or save as PDF">Print / PDF</button>
+        </div>
+      </div>
+    </section>
+    <div id="cp-content"></div>
+  </div>
+
+  <div id="page-greeks" class="page">
+    <section class="card">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Greeks</h2>
+          <span id="gk-status" class="optv3-muted" style="font-size:.75rem"></span>
+        </div>
+        <div class="collat-header-right rr-controls">
+          <label class="pf-filter-label">Counterparty <select id="gk-cpty"></select></label>
+          <label class="pf-filter-label">Asset
+            <select id="gk-asset"><option value="ALL" selected>ETH + FIL</option><option value="ETH">ETH</option><option value="FIL">FIL</option></select>
+          </label>
+          <label class="pf-filter-label" title="Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
+            <select id="gk-volmode"><option value="points" selected>Vol points</option><option value="relative">Relative %</option></select>
+          </label>
+          <button id="gk-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
+          <button id="gk-print" class="btn-secondary" style="width:auto" title="Print or save as PDF">Print / PDF</button>
+        </div>
+      </div>
+    </section>
+    <div id="gk-content"></div>
+  </div>
+
   <div id="page-agents" class="page">
     <style>
       /* h3 has no base rule in style.css, so it renders at the browser default
@@ -4082,5 +4136,6 @@
 
 <script src="/static/app.js?v=199"></script>
 <script src="/static/agents.js?v=32"></script>
+<script src="/static/risk.js?v=1"></script>
 </body>
 </html>
