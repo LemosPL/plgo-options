@@ -1753,3 +1753,14 @@ select { margin-bottom: .5rem; }
 #page-collatplat .pf-table th, #page-greeks .pf-table th { background: var(--surface); font-weight: 600; }
 #page-collatplat .pf-table .num, #page-greeks .pf-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .rr-slides td.num { text-align: center !important; }
+.rr-greeks td.num { font-weight: 600; }
+.rr-greeks tbody tr:hover td { filter: brightness(1.25); }
+[data-theme="light"] .rr-greeks td.num[style*="218,54,51"] { color: #b42318 !important; }
+[data-theme="light"] .rr-greeks td.num[style*="46,160,67"] { color: #1a7f37 !important; }
+.rr-collat { max-width: 640px; }
+@media print { .rr-greeks td { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+/* Centre every column on the Collateral Platform / Greeks tables. */
+#page-collatplat .pf-table th, #page-collatplat .pf-table td,
+#page-greeks .pf-table th, #page-greeks .pf-table td,
+#page-collatplat .pf-table .num, #page-greeks .pf-table .num { text-align: center !important; }
+.rr-slides .rr-volhead { border-bottom: 1px solid var(--border); letter-spacing: .02em; }

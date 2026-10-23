@@ -26,26 +26,45 @@
   }
 
   // ── tables ────────────────────────────────────────────────────
+  // Greeks cell: red when negative, green when positive, shaded by its size
+  // against the largest in its column so the big exposures stand out.
+  const GREEK_COLS = ["delta", "delta_usd", "gamma", "gamma_usd", "theta", "vega", "mtm"];
+  function shade(v, maxAbs) {
+    if (!v || !maxAbs) return "";
+    const a = (0.08 + Math.min(Math.abs(v) / maxAbs, 1) * 0.5).toFixed(3);
+    return v < 0
+      ? `background:rgba(218,54,51,${a});color:#ff9a95`
+      : `background:rgba(46,160,67,${a});color:#7ee2a0`;
+  }
+  const signColor = (v) => (v < 0 ? "color:var(--red)" : v > 0 ? "color:var(--green)" : "");
+
+  // Option legs (and perps) only; the collateral has its own table below.
   function positionsTable(sec, showCpty) {
     const a = sec.asset;
-    const body = sec.rows.map((r) => `
-      <tr class="${r.kind === "collateral" ? "rr-collat-row" : ""}">
-        <td class="num">${fmt(r.size, r.kind === "collateral" || a === "FIL" ? 0 : 2)}</td>
+    const rows = sec.rows.filter((r) => r.kind !== "collateral");
+    const maxAbs = {};
+    GREEK_COLS.forEach((c) => { maxAbs[c] = Math.max(0, ...rows.map((r) => Math.abs(r[c] || 0))); });
+    const cell = (r, c, dp) => `<td class="num" style="${shade(r[c], maxAbs[c])}">${fmt(r[c], dp)}</td>`;
+    const body = rows.map((r) => `
+      <tr>
+        <td class="num" style="${signColor(r.size)}">${fmt(r.size, a === "FIL" ? 0 : 2)}</td>
         <td>${esc(r.symbol)}</td>
         ${showCpty ? `<td>${esc(r.counterparty || "")}</td>` : ""}
-        <td class="num">${fmt(r.delta, unitDp(a))}</td>
-        <td class="num">${fmt(r.delta_usd, 0)}</td>
-        <td class="num">${fmt(r.gamma, gammaDp(a))}</td>
-        <td class="num">${fmt(r.gamma_usd, 0)}</td>
-        <td class="num">${fmt(r.theta, 0)}</td>
-        <td class="num">${fmt(r.vega, 0)}</td>
+        ${cell(r, "delta", unitDp(a))}
+        ${cell(r, "delta_usd", 0)}
+        ${cell(r, "gamma", gammaDp(a))}
+        ${cell(r, "gamma_usd", 0)}
+        ${cell(r, "theta", 0)}
+        ${cell(r, "vega", 0)}
         <td class="num">${r.iv_pct ? fmt(r.iv_pct, 1) + "%" : "—"}</td>
-        <td class="num">${r.kind === "collateral" ? "—" : fmt(r.mtm, 0)}</td>
-      </tr>`).join("");
-    const t = sec.totals;
+        ${cell(r, "mtm", 0)}
+      </tr>`).join("")
+      || `<tr><td colspan="${showCpty ? 11 : 10}" style="text-align:center;color:var(--muted)">No open option positions.</td></tr>`;
+    const t = sec.options_totals;
+    const tot = (c, dp) => `<td class="num" style="${signColor(t[c])}"><b>${fmt(t[c], dp)}</b></td>`;
     return `
       <div class="chain-wrapper">
-      <table class="pf-table rr-table">
+      <table class="pf-table rr-table rr-greeks">
         <thead><tr>
           <th class="num">Size</th><th>Symbol</th>${showCpty ? "<th>Counterparty</th>" : ""}
           <th class="num">Delta</th><th class="num">Delta ($)</th>
@@ -55,16 +74,31 @@
         </tr></thead>
         <tbody>${body}</tbody>
         <tfoot><tr class="rr-total-row">
-          <td></td><td><b>Total:</b></td>${showCpty ? "<td></td>" : ""}
-          <td class="num"><b>${fmt(t.delta, unitDp(a))}</b></td>
-          <td class="num"><b>${fmt(t.delta_usd, 0)}</b></td>
-          <td class="num"><b>${fmt(t.gamma, gammaDp(a))}</b></td>
-          <td class="num"><b>${fmt(t.gamma_usd, 0)}</b></td>
-          <td class="num"><b>${fmt(t.theta, 0)}</b></td>
-          <td class="num"><b>${fmt(t.vega, 0)}</b></td>
+          <td></td><td><b>Options total:</b></td>${showCpty ? "<td></td>" : ""}
+          ${tot("delta", unitDp(a))}${tot("delta_usd", 0)}${tot("gamma", gammaDp(a))}${tot("gamma_usd", 0)}
+          ${tot("theta", 0)}${tot("vega", 0)}
           <td></td>
-          <td class="num"><b>${fmt(t.mtm, 0)}</b></td>
+          ${tot("mtm", 0)}
         </tr></tfoot>
+      </table></div>`;
+  }
+
+  // The spot collateral on its own, and the book's delta once it is added.
+  function collateralTable(sec) {
+    const a = sec.asset;
+    const q = sec.collateral_qty || 0;
+    const t = sec.totals;
+    return `
+      <div class="chain-wrapper" style="margin-top:.9rem">
+      <table class="pf-table rr-table rr-collat">
+        <thead><tr><th>${esc(a)} collateral</th><th class="num">Size</th><th class="num">Delta</th><th class="num">Delta ($)</th></tr></thead>
+        <tbody>
+          <tr><td>${esc(a)} Spot Collateral</td><td class="num">${fmt(q, unitDp(a))}</td>
+            <td class="num">${fmt(q, unitDp(a))}</td><td class="num">${fmt(q * sec.spot, 0)}</td></tr>
+        </tbody>
+        <tfoot><tr class="rr-total-row"><td><b>Book delta incl. collateral</b></td><td></td>
+          <td class="num" style="${signColor(t.delta)}"><b>${fmt(t.delta, unitDp(a))}</b></td>
+          <td class="num" style="${signColor(t.delta_usd)}"><b>${fmt(t.delta_usd, 0)}</b></td></tr></tfoot>
       </table></div>`;
   }
 
@@ -83,7 +117,8 @@
     const s = sec.slides;
     let maxAbs = 0;
     s.pnl.forEach((row) => row.forEach((v) => { maxAbs = Math.max(maxAbs, Math.abs(v)); }));
-    const head = s.vol_shocks.map((v) => `<th class="num">${v > 0 ? "+" : ""}${s.vol_mode === "relative" ? pct(v) : Math.round(v * 100) + "pt"}</th>`).join("");
+    const rel = s.vol_mode === "relative";
+    const head = s.vol_shocks.map((v) => `<th class="num">${v > 0 ? "+" : ""}${rel ? pct(v) : Math.round(v * 100)}</th>`).join("");
     const rows = s.spot_shocks.map((ds, i) => `
       <tr>
         <th class="rr-shock">${ds > 0 ? "+" : ""}${pct(ds)}</th>
@@ -93,7 +128,11 @@
     return `
       <div class="chain-wrapper">
       <table class="pf-table rr-slides">
-        <thead><tr><th>ΔSpot / ΔVol</th><th class="num">Spot</th>${head}</tr></thead>
+        <thead>
+          <tr><th rowspan="2" title="Rows: spot moves, in % of today's spot">Spot move</th><th rowspan="2" class="num" title="Spot after the move">Spot</th>
+            <th colspan="${s.vol_shocks.length}" class="rr-volhead" title="${rel ? "IV x (1 + shift)" : "Vol points added to every leg's IV: +5 = 50% to 55%"}">Vol shift (${rel ? "relative %" : "vol points"})</th></tr>
+          <tr>${head}</tr>
+        </thead>
         <tbody>${rows}</tbody>
       </table></div>
       <p class="optv3-hint" style="margin:.4rem 0 0">P&amp;L against today of the options plus the ${esc(sec.asset)} collateral, repriced instantly (no decay) at each spot move and vol ${s.vol_mode === "relative" ? "move (relative: IV × (1 + shift))" : "move (vol points added to every leg's IV)"}.</p>`;
@@ -157,8 +196,8 @@
       if (!data.sections.length) html += `<section class="card"><p class="optv3-hint">No open positions${showCpty ? "" : " with " + esc(data.counterparty)}.</p></section>`;
       data.sections.forEach((sec) => {
         html += `<section class="card">
-          <h3 class="rr-h">${esc(sec.asset)} Positions <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>
-          ${positionsTable(sec, showCpty)}${bullets(sec)}</section>`;
+          <h3 class="rr-h">${esc(sec.asset)} Greeks <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>
+          ${positionsTable(sec, showCpty)}${sec.collateral_qty ? collateralTable(sec) : ""}${bullets(sec)}</section>`;
         if (opts.slides) {
           html += `<section class="card"><h3 class="rr-h">${esc(sec.asset)} Slides</h3>${slidesTable(sec)}</section>`;
         }
