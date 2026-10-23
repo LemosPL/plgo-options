@@ -3536,9 +3536,6 @@
         </div>
         <div class="collat-header-right rr-controls">
           <label class="pf-filter-label">Counterparty <select id="cp-cpty"></select></label>
-          <label class="pf-filter-label">Asset
-            <select id="cp-asset"><option value="ALL" selected>ETH + FIL</option><option value="ETH">ETH</option><option value="FIL">FIL</option></select>
-          </label>
           <label class="pf-filter-label" title="Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
             <select id="cp-volmode"><option value="points" selected>Vol points</option><option value="relative">Relative %</option></select>
           </label>
@@ -3559,12 +3556,6 @@
         </div>
         <div class="collat-header-right rr-controls">
           <label class="pf-filter-label">Counterparty <select id="gk-cpty"></select></label>
-          <label class="pf-filter-label">Asset
-            <select id="gk-asset"><option value="ALL" selected>ETH + FIL</option><option value="ETH">ETH</option><option value="FIL">FIL</option></select>
-          </label>
-          <label class="pf-filter-label" title="Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
-            <select id="gk-volmode"><option value="points" selected>Vol points</option><option value="relative">Relative %</option></select>
-          </label>
           <button id="gk-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
           <button id="gk-print" class="btn-secondary" style="width:auto" title="Print or save as PDF">Print / PDF</button>
         </div>
@@ -4136,6 +4127,6 @@
 
 <script src="/static/app.js?v=199"></script>
 <script src="/static/agents.js?v=32"></script>
-<script src="/static/risk.js?v=3"></script>
+<script src="/static/risk.js?v=4"></script>
 </body>
 </html>

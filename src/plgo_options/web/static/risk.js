@@ -186,7 +186,8 @@
       return;
     }
     const cp = sel.value || "ALL";
-    const asset = document.getElementById(prefix + "-asset").value;
+    // The sidebar's ETH/FIL switch picks the book (app.js currentAsset).
+    const asset = (typeof currentAsset !== "undefined" && currentAsset) || "ETH";
     const volMode = document.getElementById(prefix + "-volmode")?.value || "points";
     $status.textContent = "Loading…";
     try {
@@ -195,11 +196,13 @@
       let html = opts.collateral ? `<section class="card"><h3 class="rr-h">Collateral — ${esc(data.counterparty)}</h3>${collateralCards(data)}</section>` : "";
       if (!data.sections.length) html += `<section class="card"><p class="optv3-hint">No open positions${showCpty ? "" : " with " + esc(data.counterparty)}.</p></section>`;
       data.sections.forEach((sec) => {
-        html += `<section class="card">
-          <h3 class="rr-h">${esc(sec.asset)} Greeks <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>
-          ${positionsTable(sec, showCpty)}${sec.collateral_qty ? collateralTable(sec) : ""}${bullets(sec)}</section>`;
+        if (opts.greeks) {
+          html += `<section class="card">
+            <h3 class="rr-h">${esc(sec.asset)} Greeks <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>
+            ${positionsTable(sec, showCpty)}${sec.collateral_qty ? collateralTable(sec) : ""}${bullets(sec)}</section>`;
+        }
         if (opts.slides) {
-          html += `<section class="card"><h3 class="rr-h">${esc(sec.asset)} Slides</h3>${slidesTable(sec)}</section>`;
+          html += `<section class="card"><h3 class="rr-h">${esc(sec.asset)} Collateral Ladder <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>${slidesTable(sec)}</section>`;
         }
       });
       $out.innerHTML = html;
@@ -210,8 +213,8 @@
   }
 
   const PAGES = {
-    collatplat: { prefix: "cp", includeAll: false, defaultCpty: "Flowdesk", collateral: true, slides: true },
-    greeks: { prefix: "gk", includeAll: true, defaultCpty: "ALL", collateral: false, slides: true },
+    collatplat: { prefix: "cp", includeAll: false, defaultCpty: "Flowdesk", collateral: true, greeks: false, slides: true },
+    greeks: { prefix: "gk", includeAll: true, defaultCpty: "ALL", collateral: false, greeks: true, slides: false },
   };
 
   Object.entries(PAGES).forEach(([page, opts]) => {
