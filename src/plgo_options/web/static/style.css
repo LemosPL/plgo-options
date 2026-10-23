@@ -1764,3 +1764,7 @@ select { margin-bottom: .5rem; }
 #page-greeks .pf-table th, #page-greeks .pf-table td,
 #page-collatplat .pf-table .num, #page-greeks .pf-table .num { text-align: center !important; }
 .rr-slides .rr-volhead { border-bottom: 1px solid var(--border); letter-spacing: .02em; }
+.rr-notes { width: 100%; box-sizing: border-box; min-height: 9rem; resize: vertical; font: inherit; font-size: .85rem; line-height: 1.5;
+  background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; }
+.rr-notes-bar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .5rem; }
+@media print { .rr-notes { border: none; min-height: 0; resize: none; } .rr-notes-bar { display: none; } }

@@ -22,7 +22,8 @@ from __future__ import annotations
 import math
 from datetime import date, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from plgo_options.data.collar_loans import drop_collar_loans
 from plgo_options.data.database import get_db
@@ -301,3 +302,42 @@ async def risk_report_counterparties():
         cp = str(r["counterparty"]).strip()
         names.setdefault(cp.lower(), cp)
     return sorted(names.values(), key=str.lower)
+
+
+class NotesUpdate(BaseModel):
+    counterparty: str
+    notes: str
+
+
+@router.get("/notes")
+async def get_notes(counterparty: str):
+    """The saved notes for a counterparty ('' when none yet)."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT notes, updated_by, updated_at FROM counterparty_notes WHERE counterparty = ?",
+        (counterparty.strip(),))
+    row = await cur.fetchone()
+    if not row:
+        return {"counterparty": counterparty.strip(), "notes": "", "updated_by": "", "updated_at": None}
+    return {"counterparty": counterparty.strip(), **dict(row)}
+
+
+@router.put("/notes")
+async def put_notes(payload: NotesUpdate, request: Request):
+    """Save a counterparty's notes, stamped with who saved them and when."""
+    cp = payload.counterparty.strip()
+    if not cp or cp.upper() == "ALL":
+        raise HTTPException(status_code=400, detail="Pick a counterparty")
+    if len(payload.notes) > 20000:
+        raise HTTPException(status_code=400, detail="Notes are limited to 20,000 characters")
+    user = (request.session.get("user") or {}) if "session" in request.scope else {}
+    who = str(user.get("email") or "")
+    db = await get_db()
+    await db.execute(
+        """INSERT INTO counterparty_notes (counterparty, notes, updated_by, updated_at)
+           VALUES (?, ?, ?, datetime('now'))
+           ON CONFLICT(counterparty) DO UPDATE SET
+             notes = excluded.notes, updated_by = excluded.updated_by, updated_at = excluded.updated_at""",
+        (cp, payload.notes, who))
+    await db.commit()
+    return await get_notes(cp)

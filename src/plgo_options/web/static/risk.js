@@ -164,6 +164,68 @@
         <tbody>${rows}</tbody></table></div>`;
   }
 
+  // ── notes (one per counterparty, saved in the database) ───────
+  function notesSection(cp) {
+    return `<section class="card">
+      <h3 class="rr-h">Notes — ${esc(cp)}</h3>
+      <textarea id="cp-notes" class="rr-notes" rows="8" placeholder="Notes on ${esc(cp)}: top-up requests, agreed levels, things to watch…"></textarea>
+      <div class="rr-notes-bar">
+        <span id="cp-notes-status" class="optv3-muted" style="font-size:.75rem"></span>
+        <button id="cp-notes-save" class="btn-primary" style="width:auto" disabled>Save notes</button>
+      </div></section>`;
+  }
+
+  function notesStamp(n) {
+    if (!n.updated_at) return "Not saved yet";
+    const when = new Date(n.updated_at.replace(" ", "T") + "Z").toLocaleString();
+    return "Last saved " + when + (n.updated_by ? " by " + n.updated_by : "");
+  }
+
+  async function wireNotes(cp) {
+    const $t = document.getElementById("cp-notes");
+    const $save = document.getElementById("cp-notes-save");
+    const $st = document.getElementById("cp-notes-status");
+    if (!$t) return;
+    let saved = "";
+    try {
+      const n = await getJSON("/api/risk-report/notes?counterparty=" + encodeURIComponent(cp));
+      saved = n.notes || "";
+      $t.value = saved;
+      $st.textContent = notesStamp(n);
+    } catch (e) {
+      $st.textContent = "Could not load notes: " + e.message;
+    }
+    $t.addEventListener("input", () => {
+      const dirty = $t.value !== saved;
+      $save.disabled = !dirty;
+      if (dirty) $st.textContent = "Unsaved changes";
+    });
+    $save.addEventListener("click", async () => {
+      $save.disabled = true;
+      $st.textContent = "Saving…";
+      try {
+        const r = await fetch("/api/risk-report/notes", {
+          method: "PUT", credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ counterparty: cp, notes: $t.value }),
+        });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+        const n = await r.json();
+        saved = n.notes || "";
+        $st.textContent = notesStamp(n);
+      } catch (e) {
+        $save.disabled = false;
+        $st.textContent = "Save failed: " + e.message;
+      }
+    });
+  }
+
+  // Unsaved notes would be lost on reload (counterparty / asset switch).
+  function notesDirty() {
+    const $save = document.getElementById("cp-notes-save");
+    return $save && !$save.disabled;
+  }
+
   // ── pages ─────────────────────────────────────────────────────
   async function fillCounterparties(sel, includeAll, preferred) {
     if (sel.dataset.loaded) return;
@@ -185,7 +247,12 @@
       $status.textContent = "Could not load counterparties: " + e.message;
       return;
     }
+    if (opts.collateral && notesDirty() && !confirm("You have unsaved notes. Discard them?")) {
+      if (sel.dataset.current) sel.value = sel.dataset.current;
+      return;
+    }
     const cp = sel.value || "ALL";
+    sel.dataset.current = cp;
     // The sidebar's ETH/FIL switch picks the book (app.js currentAsset).
     const asset = (typeof currentAsset !== "undefined" && currentAsset) || "ETH";
     const volMode = document.getElementById(prefix + "-volmode")?.value || "points";
@@ -205,7 +272,10 @@
           html += `<section class="card"><h3 class="rr-h">${esc(sec.asset)} Collateral Ladder <span class="rr-spot-pill">Spot ${fmt(sec.spot, spotDp(sec.asset))}</span></h3>${slidesTable(sec)}</section>`;
         }
       });
+      const withNotes = opts.collateral && data.counterparty !== "ALL";
+      if (withNotes) html += notesSection(data.counterparty);
       $out.innerHTML = html;
+      if (withNotes) wireNotes(data.counterparty);
       $status.textContent = "As of " + new Date(data.as_of).toLocaleString();
     } catch (e) {
       $status.textContent = "Failed: " + e.message;

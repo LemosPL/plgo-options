@@ -289,6 +289,18 @@ CREATE TABLE IF NOT EXISTS perp_funding (
 """
 
 
+# Free-text notes per counterparty (Collateral Platform), like the "General
+# Notes" a counterparty puts at the end of its position report.
+COUNTERPARTY_NOTES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS counterparty_notes (
+    counterparty TEXT PRIMARY KEY COLLATE NOCASE,
+    notes TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
 async def get_db() -> aiosqlite.Connection:
     global _db
     if _db is None:
@@ -321,6 +333,7 @@ async def init_db():
     await db.execute(SIGNAL_ALERT_STATE_SCHEMA)
     await db.execute(PERP_TRADES_SCHEMA)
     await db.execute(PERP_FUNDING_SCHEMA)
+    await db.execute(COUNTERPARTY_NOTES_SCHEMA)
     await db.commit()
 
     # One-time seed of the ETH-book collateral allocation from the values that

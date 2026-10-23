@@ -76,3 +76,29 @@ def test_slides_match_the_report_on_spot_moves(monkeypatch):
 def test_all_counterparties_aggregates(monkeypatch):
     sec = _run(monkeypatch, counterparty=None)
     assert len(sec["rows"]) == 1 + len(BOOK) + 1
+
+
+def test_notes_save_and_load_per_counterparty(monkeypatch):
+    import aiosqlite
+    from starlette.requests import Request
+    from plgo_options.data.database import COUNTERPARTY_NOTES_SCHEMA
+
+    async def go():
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        await db.execute(COUNTERPARTY_NOTES_SCHEMA)
+
+        async def fake_db():
+            return db
+
+        monkeypatch.setattr(rr, "get_db", fake_db)
+        req = Request({"type": "http", "session": {"user": {"email": "desk@example.com"}}})
+        assert (await rr.get_notes("Flowdesk"))["notes"] == ""
+        saved = await rr.put_notes(rr.NotesUpdate(counterparty="Flowdesk", notes="Need 2m FIL top-up"), req)
+        assert saved["notes"] == "Need 2m FIL top-up" and saved["updated_by"] == "desk@example.com"
+        await rr.put_notes(rr.NotesUpdate(counterparty="flowdesk", notes="Topped up"), req)
+        assert (await rr.get_notes("FLOWDESK"))["notes"] == "Topped up"     # one row per counterparty
+        assert (await rr.get_notes("KeyRock"))["notes"] == ""
+        await db.close()
+
+    asyncio.run(go())
