@@ -12,7 +12,13 @@ Laid out like the position report counterparties send us (Flowdesk's
   x vol shocks (columns), instantaneous (no decay), each leg repriced
   Black-Scholes from the same IV the book is marked at (portfolio /pnl, so
   counterparty mark vols apply). Vol shocks are vol points by default, or
-  relative (x (1 + shock)) with vol_mode=relative.
+  relative (x (1 + shock)) with vol_mode=relative. The default,
+  vol_mode=flowdesk, matches Flowdesk's slides: the shift is quoted for a
+  6-month tenor and each leg moves shift x sqrt(6M / its time to expiry)
+  vol points, so shorter expiries move more. Fitted on their Oct 2026
+  report (both books 66 days out): it reproduces their vol columns within
+  ~$2k (FIL) / ~$10k (ETH, whose skew the test flattens) per cell, against
+  $66-76k for a plain vol-point shift.
 * Summary bullets in the same words.
 
 counterparty=ALL aggregates the whole book (the Greeks screen's default).
@@ -43,6 +49,9 @@ SPOT_SHOCKS = [1.00, 0.50, 0.30, 0.20, 0.10, 0.05, 0.03, 0.02, 0.01, 0.0,
                -0.01, -0.02, -0.03, -0.05, -0.10, -0.20, -0.50, -0.80]
 VOL_SHOCKS = [-0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15]
 MIN_VOL = 0.01
+VOL_MODES = ("flowdesk", "points", "relative")
+# Flowdesk's reference tenor for a vol shift (see module docstring).
+FLOWDESK_REF_DAYS = 182.5
 
 
 def _symbol(asset: str, expiry: str, strike: float, opt: str) -> str:
@@ -62,12 +71,16 @@ def _expiry_label(expiry: str) -> str:
         return str(expiry)
 
 
-def _shocked_vol(sigma: float, dv: float, relative: bool) -> float:
-    return max(sigma * (1.0 + dv) if relative else sigma + dv, MIN_VOL)
+def _shocked_vol(sigma: float, dv: float, mode: str, T: float) -> float:
+    if mode == "relative":
+        return max(sigma * (1.0 + dv), MIN_VOL)
+    if mode == "flowdesk":
+        dv *= math.sqrt(FLOWDESK_REF_DAYS / max(T * 365.25, 1.0))
+    return max(sigma + dv, MIN_VOL)
 
 
 def slides_grid(legs: list[dict], spot: float, collateral_qty: float,
-                relative: bool = False) -> list[list[float]]:
+                mode: str = "flowdesk") -> list[list[float]]:
     """P&L vs today for every (spot shock, vol shock): Σ legs repriced minus
     their value today, plus the collateral's own move. legs: net_qty, strike,
     opt, T (years), sigma (decimal). Perps are legs with opt "PERP"."""
@@ -87,7 +100,7 @@ def slides_grid(legs: list[dict], spot: float, collateral_qty: float,
                     v += lg["net_qty"] * (s - spot)
                 else:
                     v += lg["net_qty"] * bs_price(s, lg["strike"], lg["T"], 0.0,
-                                                   _shocked_vol(lg["sigma"], dv, relative), lg["opt"])
+                                                   _shocked_vol(lg["sigma"], dv, mode, lg["T"]), lg["opt"])
             pnl = (v - base) + collateral_qty * (s - spot)
             row.append(round(float(pnl), 0))
         grid.append(row)
@@ -154,7 +167,7 @@ async def _posted_collateral(counterparty: str | None) -> dict[str, float]:
 
 
 async def _asset_section(asset: str, counterparty: str | None, coll_qty: float,
-                         relative: bool) -> dict | None:
+                         mode: str = "flowdesk") -> dict | None:
     port = await _gather_portfolio(asset) or {}
     spot = float(port.get("eth_spot") or port.get("spot") or 0.0)
     if spot <= 0:
@@ -223,7 +236,7 @@ async def _asset_section(asset: str, counterparty: str | None, coll_qty: float,
         except Exception:
             atm = None
 
-    grid = slides_grid(legs, spot, coll_qty, relative)
+    grid = slides_grid(legs, spot, coll_qty, mode)
     return {
         "asset": asset,
         "spot": spot,
@@ -234,7 +247,7 @@ async def _asset_section(asset: str, counterparty: str | None, coll_qty: float,
         "slides": {
             "spot_shocks": SPOT_SHOCKS,
             "vol_shocks": VOL_SHOCKS,
-            "vol_mode": "relative" if relative else "points",
+            "vol_mode": mode,
             "spots": [spot * (1 + s) for s in SPOT_SHOCKS],
             "pnl": grid,
         },
@@ -243,19 +256,21 @@ async def _asset_section(asset: str, counterparty: str | None, coll_qty: float,
 
 
 @router.get("")
-async def risk_report(counterparty: str = "ALL", asset: str = "ALL", vol_mode: str = "points"):
+async def risk_report(counterparty: str = "ALL", asset: str = "ALL", vol_mode: str = "flowdesk"):
     """Positions + greeks, spot/vol slides and summary per asset, for one
     counterparty (or ALL), plus that counterparty's posted collateral."""
     cp = None if counterparty.strip().upper() in ("", "ALL") else counterparty.strip()
     assets = ASSETS if asset.upper() == "ALL" else (asset.upper(),)
     if any(a not in ASSETS for a in assets):
         raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS} or ALL")
-    relative = vol_mode.lower().startswith("rel")
+    mode = vol_mode.lower()
+    if mode not in VOL_MODES:
+        raise HTTPException(status_code=400, detail=f"vol_mode must be one of {VOL_MODES}")
 
     posted = await _posted_collateral(cp)
     sections = []
     for a in assets:
-        sec = await _asset_section(a, cp, posted.get(a, 0.0), relative)
+        sec = await _asset_section(a, cp, posted.get(a, 0.0), mode)
         if sec:
             sections.append(sec)
 

@@ -24,7 +24,7 @@ def _fake_portfolio():
     return {"eth_spot": S, "positions": positions}
 
 
-def _run(monkeypatch, counterparty="Flowdesk"):
+def _run(monkeypatch, counterparty="Flowdesk", mode="flowdesk"):
     async def fake_gather(asset):
         return _fake_portfolio() if asset == "ETH" else None
 
@@ -37,7 +37,7 @@ def _run(monkeypatch, counterparty="Flowdesk"):
     monkeypatch.setattr(rr, "_gather_portfolio", fake_gather)
     monkeypatch.setattr(rr, "_posted_collateral", fake_posted)
     monkeypatch.setattr(rr, "build_market_context", fake_ctx)
-    sec = asyncio.run(rr._asset_section("ETH", counterparty, 2000.0, relative=False))
+    sec = asyncio.run(rr._asset_section("ETH", counterparty, 2000.0, mode))
     return sec
 
 
@@ -102,3 +102,16 @@ def test_notes_save_and_load_per_counterparty(monkeypatch):
         await db.close()
 
     asyncio.run(go())
+
+
+def test_vol_columns_match_flowdesk_slides(monkeypatch):
+    # Their ETH report, spot unchanged: -15..+15 -> -405,099 .. 400,466. Our
+    # book uses one flat 50% vol where theirs has a skew, hence the tolerance.
+    pdf = [-405_099, -275_123, -137_701, 0, 135_818, 269_284, 400_466]
+    s = _run(monkeypatch)["slides"]
+    ours = s["pnl"][s["spot_shocks"].index(0.0)]
+    for o, p in zip(ours, pdf):
+        assert abs(o - p) <= max(0.05 * abs(p), 1), (ours, pdf)
+    # A plain vol-point shift is ~40% short of theirs.
+    plain = _run(monkeypatch, mode="points")["slides"]["pnl"][s["spot_shocks"].index(0.0)]
+    assert plain[-1] < 0.7 * pdf[-1]

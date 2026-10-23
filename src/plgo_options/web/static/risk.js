@@ -118,6 +118,11 @@
     let maxAbs = 0;
     s.pnl.forEach((row) => row.forEach((v) => { maxAbs = Math.max(maxAbs, Math.abs(v)); }));
     const rel = s.vol_mode === "relative";
+    const VOL_DESC = {
+      flowdesk: ["Flowdesk method, 6M vol points", "Shift quoted for a 6-month tenor; each leg moves shift x sqrt(6 months / its time to expiry) vol points, so short expiries move more. Matches Flowdesk's slides."],
+      points: ["vol points", "Vol points added to every leg's IV: +5 = 50% to 55%."],
+      relative: ["relative %", "IV x (1 + shift): +5% = 50% to 52.5%."],
+    }[s.vol_mode] || ["vol points", ""];
     const head = s.vol_shocks.map((v) => `<th class="num">${v > 0 ? "+" : ""}${rel ? pct(v) : Math.round(v * 100)}</th>`).join("");
     const rows = s.spot_shocks.map((ds, i) => `
       <tr>
@@ -130,12 +135,12 @@
       <table class="pf-table rr-slides">
         <thead>
           <tr><th rowspan="2" title="Rows: spot moves, in % of today's spot">Spot move</th><th rowspan="2" class="num" title="Spot after the move">Spot</th>
-            <th colspan="${s.vol_shocks.length}" class="rr-volhead" title="${rel ? "IV x (1 + shift)" : "Vol points added to every leg's IV: +5 = 50% to 55%"}">Vol shift (${rel ? "relative %" : "vol points"})</th></tr>
+            <th colspan="${s.vol_shocks.length}" class="rr-volhead" title="${esc(VOL_DESC[1])}">Vol shift (${esc(VOL_DESC[0])})</th></tr>
           <tr>${head}</tr>
         </thead>
         <tbody>${rows}</tbody>
       </table></div>
-      <p class="optv3-hint" style="margin:.4rem 0 0">P&amp;L against today of the options plus the ${esc(sec.asset)} collateral, repriced instantly (no decay) at each spot move and vol ${s.vol_mode === "relative" ? "move (relative: IV × (1 + shift))" : "move (vol points added to every leg's IV)"}.</p>`;
+      <p class="optv3-hint" style="margin:.4rem 0 0">P&amp;L against today of the options plus the ${esc(sec.asset)} collateral, repriced instantly (no decay) at each spot move and vol move. Vol shift: ${esc(VOL_DESC[1])}</p>`;
   }
 
   function collateralCards(data) {

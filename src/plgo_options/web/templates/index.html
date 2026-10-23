@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=20">
+  <link rel="stylesheet" href="/static/style.css?v=21">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -3536,8 +3536,8 @@
         </div>
         <div class="collat-header-right rr-controls">
           <label class="pf-filter-label">Counterparty <select id="cp-cpty"></select></label>
-          <label class="pf-filter-label" title="Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
-            <select id="cp-volmode"><option value="points" selected>Vol points</option><option value="relative">Relative %</option></select>
+          <label class="pf-filter-label" title="Flowdesk: shift quoted for a 6-month tenor, each leg moves shift x sqrt(6M / time to expiry) vol points (matches their slides). Vol points: the shift is added to every leg's IV (+5 = 50% to 55%). Relative: IV x (1 + shift) (+5% = 50% to 52.5%).">Vol shift
+            <select id="cp-volmode"><option value="flowdesk" selected>Flowdesk method</option><option value="points">Vol points</option><option value="relative">Relative %</option></select>
           </label>
           <button id="cp-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
           <button id="cp-print" class="btn-secondary" style="width:auto" title="Print or save as PDF">Print / PDF</button>
@@ -4127,6 +4127,6 @@
 
 <script src="/static/app.js?v=199"></script>
 <script src="/static/agents.js?v=32"></script>
-<script src="/static/risk.js?v=5"></script>
+<script src="/static/risk.js?v=6"></script>
 </body>
 </html>

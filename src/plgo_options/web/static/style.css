@@ -1768,3 +1768,6 @@ select { margin-bottom: .5rem; }
   background: var(--surface); color: inherit; border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; }
 .rr-notes-bar { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-top: .5rem; }
 @media print { .rr-notes { border: none; min-height: 0; resize: none; } .rr-notes-bar { display: none; } }
+/* Space between the stacked boxes (collateral, ladder, notes). */
+#page-collatplat .card, #page-greeks .card { margin-bottom: 1.25rem; }
+#cp-content > .card:first-child, #gk-content > .card:first-child { margin-top: 1.25rem; }
