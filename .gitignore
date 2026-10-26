@@ -30,3 +30,8 @@ data/optimization_snapshots/usecases/*.json
 
 # Market data cached by scripts/backtest_rehedge_band.py
 data/cache/
+
+# Production data saved from the live app for scripts/import_prod_json.py
+data/prod/
+data/trades/
+data/plgo_options.*.bak.db
