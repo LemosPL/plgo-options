@@ -11033,6 +11033,7 @@ function optv2RenderResult(data) {
   // ("$0"..."$3", one label for the whole ladder) and mislabels the column
   // "ETH Spot". Same bug v4 hit and fixed via optv4MatrixOpts (5910d1b).
   optv2RenderResultMatrices(data);
+  optv2RenderLadder(data);
 
   // ── D. Strategy grouping ──
   optv2RenderStrategyGroups(allTrades);
@@ -11229,6 +11230,90 @@ function optv2RenderResultMatrices(data) {
 document.getElementById("optv2-matrix-absolute")?.addEventListener("change", () => {
   if (optv2OptResult) optv2RenderResultMatrices(optv2OptResult);
 });
+
+/* ── Collateral Ladder (Collateral Platform's slides, before / after) ── */
+
+const OPTV2_LADDER_VOL_DESC = {
+  flowdesk: "Shift quoted for a 6-month tenor; each leg moves shift × √(6 months / its time to expiry) vol points, so short expiries move more. Matches Flowdesk's slides.",
+  points: "Vol points added to every leg's IV: +5 = 50% to 55%.",
+  relative: "IV × (1 + shift): +5% = 50% to 52.5%.",
+};
+
+function optv2LadderHeat(v, maxAbs) {
+  if (!maxAbs || !v) return "";
+  const a = Math.min(Math.abs(v) / maxAbs, 1) * 0.75 + 0.04;
+  return v > 0 ? `background:rgba(46,160,67,${a.toFixed(3)})` : `background:rgba(218,54,51,${a.toFixed(3)})`;
+}
+
+function optv2LadderTable(title, L, grid, maxAbs, mode) {
+  const rel = mode === "relative";
+  const pct = (v) => Math.round(v * 100) + "%";
+  const spotDp = L.asset === "FIL" ? 4 : 2;
+  const head = L.vol_shocks.map((v) => `<th class="num">${v > 0 ? "+" : ""}${rel ? pct(v) : Math.round(v * 100)}</th>`).join("");
+  const rows = L.spot_shocks.map((ds, i) => `
+    <tr>
+      <th class="rr-shock">${ds > 0 ? "+" : ""}${pct(ds)}</th>
+      <td class="num rr-spot">${optv2Fmt(L.spots[i], spotDp)}</td>
+      ${grid[i].map((v) => `<td class="num" style="${optv2LadderHeat(v, maxAbs)}">${optv2Fmt(v || 0, 0)}</td>`).join("")}
+    </tr>`).join("");
+  return `<div>
+    <h3 style="margin:0 0 .4rem;font-size:.95rem">${title}</h3>
+    <div class="chain-wrapper" style="max-height:none">
+    <table class="pf-table rr-slides">
+      <thead>
+        <tr><th rowspan="2">Spot move</th><th rowspan="2" class="num">Spot</th>
+          <th colspan="${L.vol_shocks.length}" class="rr-volhead" title="${OPTV2_LADDER_VOL_DESC[mode] || ""}">Vol shift</th></tr>
+        <tr>${head}</tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>`;
+}
+
+function optv2RenderLadder(data) {
+  const $sec = document.getElementById("optv2-ladder-section");
+  const L = data && data.collateral_ladder;
+  if (!$sec) return;
+  if (!L || !(L.counterparties || []).length) { $sec.style.display = "none"; return; }
+  $sec.style.display = "";
+  document.getElementById("optv2-ladder-spot").textContent =
+    "Spot " + optv2Fmt(L.spot, L.asset === "FIL" ? 4 : 2);
+
+  // Stay on the same counterparty across reruns when it's still listed.
+  const $cp = document.getElementById("optv2-ladder-cpty");
+  $cp.innerHTML = L.counterparties.map((c, i) => `<option value="${i}">${escAttr(c.counterparty)}</option>`).join("");
+  const keep = L.counterparties.findIndex((c) => c.counterparty === $cp.dataset.name);
+  $cp.value = String(keep >= 0 ? keep : 0);
+  optv2RenderLadderGrids();
+}
+
+function optv2RenderLadderGrids() {
+  const L = optv2OptResult && optv2OptResult.collateral_ladder;
+  if (!L) return;
+  const $cp = document.getElementById("optv2-ladder-cpty");
+  const c = L.counterparties[parseInt($cp.value, 10) || 0];
+  if (!c) return;
+  $cp.dataset.name = c.counterparty;
+  const mode = document.getElementById("optv2-ladder-volmode").value || "flowdesk";
+  const g = c.grids[mode] || c.grids.flowdesk;
+  const delta = g.after.map((row, i) => row.map((v, j) => v - g.before[i][j]));
+  // Before and After share one colour scale so they compare cell for cell.
+  let maxAbs = 0, maxDelta = 0;
+  [g.before, g.after].forEach((m) => m.forEach((row) => row.forEach((v) => { maxAbs = Math.max(maxAbs, Math.abs(v)); })));
+  delta.forEach((row) => row.forEach((v) => { maxDelta = Math.max(maxDelta, Math.abs(v)); }));
+  document.getElementById("optv2-ladder-grids").innerHTML =
+    optv2LadderTable("Before", L, g.before, maxAbs, mode)
+    + optv2LadderTable("After", L, g.after, maxAbs, mode)
+    + optv2LadderTable("Change", L, delta, maxDelta, mode);
+
+  const dp = L.asset === "FIL" ? 0 : 2;
+  const moved = Math.abs(c.collateral_after - c.collateral_before) > 1e-9;
+  document.getElementById("optv2-ladder-coll").textContent =
+    `${L.asset} collateral with ${c.counterparty}: ${optv2Fmt(c.collateral_before, dp)}`
+    + (moved ? ` → ${optv2Fmt(c.collateral_after, dp)} after transfers` : "");
+}
+
+document.getElementById("optv2-ladder-cpty")?.addEventListener("change", optv2RenderLadderGrids);
+document.getElementById("optv2-ladder-volmode")?.addEventListener("change", optv2RenderLadderGrids);
 
 function optv2RenderCompareMatrix(data, side, theadId, tbodyId, opts = {}) {
   const spots = data.spot_ladder;

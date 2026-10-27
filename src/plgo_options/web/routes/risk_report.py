@@ -28,6 +28,9 @@ from __future__ import annotations
 import math
 from datetime import date, datetime
 
+import numpy as np
+from scipy.special import ndtr
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -79,32 +82,111 @@ def _shocked_vol(sigma: float, dv: float, mode: str, T: float) -> float:
     return max(sigma + dv, MIN_VOL)
 
 
+def _bs_grid(S: np.ndarray, K: float, T: float, sigma: np.ndarray, opt: str) -> np.ndarray:
+    """bs_price (r = 0) broadcast over a spot column x vol row."""
+    if T <= 0:
+        return np.maximum(S - K, 0.0) if opt == "C" else np.maximum(K - S, 0.0)
+    sq = sigma * math.sqrt(T)
+    d1 = (np.log(S / K) + 0.5 * sigma ** 2 * T) / sq
+    d2 = d1 - sq
+    if opt == "C":
+        return S * ndtr(d1) - K * ndtr(d2)
+    return K * ndtr(-d2) - S * ndtr(-d1)
+
+
 def slides_grid(legs: list[dict], spot: float, collateral_qty: float,
                 mode: str = "flowdesk") -> list[list[float]]:
     """P&L vs today for every (spot shock, vol shock): Σ legs repriced minus
     their value today, plus the collateral's own move. legs: net_qty, strike,
     opt, T (years), sigma (decimal). Perps are legs with opt "PERP"."""
-    base = 0.0
+    S = spot * (1.0 + np.asarray(SPOT_SHOCKS))[:, None]
+    move = np.broadcast_to(S - spot, (len(SPOT_SHOCKS), len(VOL_SHOCKS)))
+    pnl = collateral_qty * move
     for lg in legs:
         if lg["opt"] == "PERP":
+            pnl = pnl + lg["net_qty"] * move
             continue
-        base += lg["net_qty"] * bs_price(spot, lg["strike"], lg["T"], 0.0, lg["sigma"], lg["opt"])
-    grid = []
-    for ds in SPOT_SHOCKS:
-        s = spot * (1.0 + ds)
-        row = []
-        for dv in VOL_SHOCKS:
-            v = 0.0
-            for lg in legs:
-                if lg["opt"] == "PERP":
-                    v += lg["net_qty"] * (s - spot)
-                else:
-                    v += lg["net_qty"] * bs_price(s, lg["strike"], lg["T"], 0.0,
-                                                   _shocked_vol(lg["sigma"], dv, mode, lg["T"]), lg["opt"])
-            pnl = (v - base) + collateral_qty * (s - spot)
-            row.append(round(float(pnl), 0))
-        grid.append(row)
-    return grid
+        base = bs_price(spot, lg["strike"], lg["T"], 0.0, lg["sigma"], lg["opt"])
+        vols = np.array([_shocked_vol(lg["sigma"], dv, mode, lg["T"]) for dv in VOL_SHOCKS])[None, :]
+        pnl = pnl + lg["net_qty"] * (_bs_grid(S, lg["strike"], lg["T"], vols, lg["opt"]) - base)
+    return [[round(float(v), 0) for v in row] for row in pnl]
+
+
+def optimizer_ladder(positions: list[dict], trades: list[dict], spot: float, asset: str,
+                     collateral_before: dict[str, dict[str, float]],
+                     collateral_after: dict[str, dict[str, float]] | None = None,
+                     counterparties: list[str] | None = None) -> dict:
+    """The Collateral Platform's ladder, before and after an optimizer run,
+    per counterparty and for every vol mode.
+
+    positions: the run's input book (/pnl positions plus the injected perps,
+    opt "F"); trades: the run's proposed trades (signed qty, dte, iv_pct).
+    A trade on a leg already held nets into it at the held leg's IV, so an
+    unwind cancels exactly instead of leaving a residual from two marks.
+    Collateral: this book's own-asset collateral per counterparty, after the
+    proposed transfers when the run planned any; other assets don't move
+    with this book's spot, so they don't change the P&L."""
+    # cp (lower) -> leg key -> leg; display spelling from the first seen
+    books: dict[str, dict[tuple, dict]] = {}
+    names: dict[str, str] = {}
+
+    def add(row: dict, qty: float, days: float, sides: tuple[str, ...]) -> None:
+        cp, opt = str(row.get("counterparty") or "").strip(), str(row.get("opt") or "C")
+        strike, iv_pct = float(row.get("strike") or 0.0), float(row.get("iv_pct") or 0.0)
+        if not cp or not qty or (opt != "F" and days <= 0):
+            return
+        names.setdefault(cp.lower(), cp)
+        opt = "PERP" if opt == "F" else opt
+        key = ("PERP",) if opt == "PERP" else (str(row.get("expiry"))[:10], round(strike, 6), opt)
+        lg = books.setdefault(cp.lower(), {}).setdefault(key, {
+            "strike": float(strike), "opt": opt, "T": days / 365.25,
+            "sigma": max(iv_pct / 100.0, MIN_VOL), "before": 0.0, "after": 0.0})
+        for side in sides:
+            lg[side] += qty
+
+    for p in positions or []:
+        add(p, float(p.get("net_qty") or 0.0), float(p.get("days_remaining") or 0.0), ("before", "after"))
+    for t in trades or []:
+        add(t, float(t.get("qty") or 0.0), float(t.get("dte") or 0.0), ("after",))
+
+    def coll(src: dict | None, cp: str) -> float | None:
+        for name, by_asset in (src or {}).items():
+            if str(name).strip().lower() == cp:
+                return float((by_asset or {}).get(asset, 0.0) or 0.0)
+        return None
+
+    for name in collateral_before or {}:
+        names.setdefault(str(name).strip().lower(), str(name).strip())
+    wanted = [c.strip().lower() for c in counterparties or [] if c and c.strip()]
+    cps = [c for c in names if (c in wanted if wanted else (c in books or coll(collateral_before, c)))]
+    if wanted:
+        cps += [c for c in wanted if c not in cps]
+
+    out = []
+    for cp in sorted(cps, key=lambda c: names.get(c, c).lower()):
+        legs = books.get(cp, {}).values()
+        before_q = coll(collateral_before, cp) or 0.0
+        after_q = coll(collateral_after, cp)
+        after_q = before_q if after_q is None else after_q
+        before = [{**lg, "net_qty": lg["before"]} for lg in legs if abs(lg["before"]) > 1e-9]
+        after = [{**lg, "net_qty": lg["after"]} for lg in legs if abs(lg["after"]) > 1e-9]
+        if not before and not after and not before_q and not after_q:
+            continue
+        out.append({
+            "counterparty": names.get(cp, cp),
+            "collateral_before": before_q,
+            "collateral_after": after_q,
+            "grids": {m: {"before": slides_grid(before, spot, before_q, m),
+                          "after": slides_grid(after, spot, after_q, m)} for m in VOL_MODES},
+        })
+    return {
+        "asset": asset,
+        "spot": spot,
+        "spot_shocks": SPOT_SHOCKS,
+        "vol_shocks": VOL_SHOCKS,
+        "spots": [spot * (1 + s) for s in SPOT_SHOCKS],
+        "counterparties": out,
+    }
 
 
 def _bullets(asset: str, tot: dict, coll_qty: float, opt_delta: float,

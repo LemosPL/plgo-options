@@ -21,6 +21,7 @@ from plgo_options.optimization.optim_usecase import (
 from plgo_options.data.database import get_db
 from plgo_options.data.deal_grouping import compute_composite_ids
 from plgo_options.web.routes.perps import build_summary as perp_summary
+from plgo_options.web.routes.risk_report import optimizer_ladder
 
 router = APIRouter()
 
@@ -611,6 +612,21 @@ async def run_optimizer(params: OptimizationParams):
             status_code=500,
             detail=f"Optimization failed: {e}\n\n{tb}",
         )
+
+    # The Collateral Platform's spot x vol ladder, before and after the
+    # proposed trades (and transfers), per counterparty. Display only, so a
+    # failure here never costs the run.
+    if isinstance(result, dict) and result.get("status") == "ok":
+        try:
+            transfers = result.get("collateral_transfers") or {}
+            result["collateral_ladder"] = optimizer_ladder(
+                positions, result.get("trades") or [],
+                float(pnl_data.get("spot") or pnl_data.get("eth_spot") or 0.0), params.asset.upper(),
+                collateral_by_cp,
+                {cp: v.get("posted_after_qty") or {} for cp, v in (transfers.get("by_counterparty") or {}).items()},
+                params.counterparties)
+        except Exception as e:
+            print(f"collateral ladder skipped ({e})")
 
     return result
 

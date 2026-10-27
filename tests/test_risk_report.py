@@ -115,3 +115,39 @@ def test_vol_columns_match_flowdesk_slides(monkeypatch):
     # A plain vol-point shift is ~40% short of theirs.
     plain = _run(monkeypatch, mode="points")["slides"]["pnl"][s["spot_shocks"].index(0.0)]
     assert plain[-1] < 0.7 * pdf[-1]
+
+
+def test_optimizer_ladder_before_matches_the_platform_and_trades_move_after(monkeypatch):
+    positions = _fake_portfolio()["positions"]
+    sec = _run(monkeypatch)
+    trades = [
+        # Full unwind of a held leg (at a different mark): nets to nothing.
+        {"counterparty": "flowdesk", "opt": "P", "strike": 1780, "expiry": "2026-12-25", "dte": DTE,
+         "qty": -8000, "iv_pct": 70.0},
+        # New perp hedge.
+        {"counterparty": "Flowdesk", "opt": "F", "strike": S, "expiry": "2099-12-31", "dte": 0,
+         "qty": -100, "iv_pct": 0.0},
+    ]
+    lad = rr.optimizer_ladder(positions, trades, S, "ETH", {"Flowdesk": {"ETH": 2000.0, "USDC": 1e6}},
+                              {"Flowdesk": {"ETH": 1500.0}}, ["Flowdesk"])
+    assert [c["counterparty"] for c in lad["counterparties"]] == ["Flowdesk"]
+    fd = lad["counterparties"][0]
+    assert (fd["collateral_before"], fd["collateral_after"]) == (2000.0, 1500.0)
+    g = fd["grids"]["flowdesk"]
+    assert g["before"] == sec["slides"]["pnl"]
+
+    legs = [{"net_qty": q, "strike": k, "opt": o, "T": DTE / 365.25, "sigma": IV / 100}
+            for q, k, o in BOOK if (q, k, o) != (8000, 1780, "P")]
+    legs.append({"net_qty": -100, "strike": 0.0, "opt": "PERP", "T": 0.0, "sigma": 0.0})
+    assert g["after"] == rr.slides_grid(legs, S, 1500.0, "flowdesk")
+
+
+def test_optimizer_ladder_without_a_selection_lists_every_counterparty():
+    positions = _fake_portfolio()["positions"]
+    lad = rr.optimizer_ladder(positions, [], S, "ETH", {"G20": {"ETH": 10.0}, "KeyRock": {"USDC": 5.0}})
+    names = [c["counterparty"] for c in lad["counterparties"]]
+    # KeyRock: no legs and no collateral in this asset, nothing to show.
+    assert names == ["Flowdesk", "G20", "Wave"]
+    for c in lad["counterparties"]:
+        assert set(c["grids"]) == set(rr.VOL_MODES)
+        assert c["grids"]["points"]["before"] == c["grids"]["points"]["after"]
