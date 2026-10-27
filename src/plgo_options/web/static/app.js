@@ -13851,6 +13851,59 @@ function optv4MatrixOpts() {
    this is a display choice about the table, not about the run. */
 const OPTV4_MATRIX_HORIZONS = [30, 60, 90, 120];
 
+document.getElementById("optv4-matrix-absolute")?.addEventListener("change", () => optv4RenderMatrix());
+
+/* -- Collateral Ladder (ported from v2): before / after the run, per counterparty -- */
+function optv4RenderLadder(data) {
+  const $empty = document.getElementById("optv4-ladder-empty");
+  const $body = document.getElementById("optv4-ladder-body");
+  const L = data && data.status === "ok" && data.collateral_ladder;
+  if (!$body) return;
+  if (!L || !(L.counterparties || []).length) {
+    $body.style.display = "none";
+    if ($empty) $empty.style.display = "";
+    return;
+  }
+  $body.style.display = "";
+  if ($empty) $empty.style.display = "none";
+  document.getElementById("optv4-ladder-spot").textContent =
+    "Spot " + optv2Fmt(L.spot, L.asset === "FIL" ? 4 : 2);
+  // Stay on the same counterparty across reruns when it's still listed.
+  const $cp = document.getElementById("optv4-ladder-cpty");
+  $cp.innerHTML = L.counterparties.map((c, i) => `<option value="${i}">${escAttr(c.counterparty)}</option>`).join("");
+  const keep = L.counterparties.findIndex((c) => c.counterparty === $cp.dataset.name);
+  $cp.value = String(keep >= 0 ? keep : 0);
+  optv4RenderLadderGrids();
+}
+
+function optv4RenderLadderGrids() {
+  const L = optv4OptResult && optv4OptResult.collateral_ladder;
+  if (!L) return;
+  const $cp = document.getElementById("optv4-ladder-cpty");
+  const c = L.counterparties[parseInt($cp.value, 10) || 0];
+  if (!c) return;
+  $cp.dataset.name = c.counterparty;
+  const mode = document.getElementById("optv4-ladder-volmode").value || "flowdesk";
+  const g = c.grids[mode] || c.grids.flowdesk;
+  const delta = g.after.map((row, i) => row.map((v, j) => v - g.before[i][j]));
+  // Before and After share one colour scale so they compare cell for cell.
+  let maxAbs = 0, maxDelta = 0;
+  [g.before, g.after].forEach((m) => m.forEach((row) => row.forEach((v) => { maxAbs = Math.max(maxAbs, Math.abs(v)); })));
+  delta.forEach((row) => row.forEach((v) => { maxDelta = Math.max(maxDelta, Math.abs(v)); }));
+  document.getElementById("optv4-ladder-grids").innerHTML =
+    optv2LadderTable("Before", L, g.before, maxAbs, mode)
+    + optv2LadderTable("After", L, g.after, maxAbs, mode)
+    + optv2LadderTable("Change", L, delta, maxDelta, mode);
+  const dp = L.asset === "FIL" ? 0 : 2;
+  const moved = Math.abs(c.collateral_after - c.collateral_before) > 1e-9;
+  document.getElementById("optv4-ladder-coll").textContent =
+    `${L.asset} collateral with ${c.counterparty}: ${optv2Fmt(c.collateral_before, dp)}`
+    + (moved ? ` → ${optv2Fmt(c.collateral_after, dp)} after transfers` : "");
+}
+
+document.getElementById("optv4-ladder-cpty")?.addEventListener("change", optv4RenderLadderGrids);
+document.getElementById("optv4-ladder-volmode")?.addEventListener("change", optv4RenderLadderGrids);
+
 function optv4RenderMatrix() {
   const r = (optv4OptResult && optv4OptResult.status === "ok" && optv4OptResult.before) ? optv4OptResult : null;
   const spots = (r && r.spot_ladder) || (optv4Data && optv4Data.spot_ladder);
@@ -13895,6 +13948,16 @@ function optv4RenderMatrix() {
   // Cone runs only: per-horizon eligible-strike band, shaded on the cells.
   const coneBounds = (r && r.cone_matrix_bounds) || null;
 
+  // "Absolute value" (ported from v2): each cell + the book's MTM, so it reads
+  // as the book's value then. Before: today's book MTM; After: the run's book
+  // MTM after the trades, net of the assumed transaction cost.
+  const absolute = !!document.getElementById("optv4-matrix-absolute")?.checked;
+  const offBefore = !absolute ? 0
+    : (r && r.current_book_mtm != null ? r.current_book_mtm : ((optv4Data && optv4Data.current_total_mtm) || 0));
+  const offAfter = !absolute ? 0 : ((r && r.after_book_mtm) || 0);
+  const $mTitle = document.getElementById("optv4-matrix-title");
+  if ($mTitle) $mTitle.textContent = absolute ? "Value Matrix" : "P&L Matrix";
+
   const C = optv4ChartColors();
   const $thead = document.getElementById("optv4-matrix-thead");
   const groupEdge = "border-left:2px solid var(--border,#30363d)";
@@ -13915,8 +13978,8 @@ function optv4RenderMatrix() {
   // Uniform-% rows: see optvGeometricRows for why equal-dollar rows read badly.
   const rows = optvGeometricRows(spots, ethSpot);
 
-  const cell = (curve, s, h, edge) => {
-    const v = curve ? (optv4InterpAt(spots, curve, s) || 0) : null;
+  const cell = (curve, s, h, edge, offset = 0) => {
+    const v = curve ? (optv4InterpAt(spots, curve, s) || 0) + offset : null;
     const band = coneBounds && coneBounds[String(h)];
     const inBand = band && s >= band[0] && s <= band[1];
     const colour = v == null ? "" : (v > 0 ? "color:#66bb6a" : (v < 0 ? "color:#ef5350" : ""));
@@ -13934,8 +13997,8 @@ function optv4RenderMatrix() {
       + `<td style="text-align:left;font-weight:600;white-space:nowrap">$${optv2Fmt(s, dp)}</td>`
       + `<td style="text-align:right;color:var(--muted)">${pct == null ? "—" : (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%"}</td>`;
     horizons.forEach(h => {
-      html += cell(curves[h].before, s, h, true);
-      if (hasAfter) html += cell(curves[h].after, s, h, false);
+      html += cell(curves[h].before, s, h, true, offBefore);
+      if (hasAfter) html += cell(curves[h].after, s, h, false, offAfter);
     });
     html += "</tr>";
   });
@@ -14126,6 +14189,7 @@ function optv4RenderCarryAndSurvival(data) {
 }
 
 function optv4RenderResult(data) {
+  optv4RenderLadder(data);
   if (data.status !== "ok") { alert(data.message || "Optimization returned no results."); return; }
 
   document.getElementById("optv4-result-kpi").style.display = "";

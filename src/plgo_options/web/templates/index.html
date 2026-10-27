@@ -2954,6 +2954,7 @@
             <button class="sub-tab-btn active" data-subtab="optv4-payoff">Payoff &amp; Trades</button>
             <button class="sub-tab-btn" data-subtab="optv4-positions">Positions</button>
             <button class="sub-tab-btn" data-subtab="optv4-matrix">P&amp;L Matrix</button>
+            <button class="sub-tab-btn" data-subtab="optv4-ladder">Collateral Ladder</button>
             <button class="sub-tab-btn" data-subtab="optv4-profile">Target Profile</button>
             <button class="sub-tab-btn" data-subtab="optv4-structures">Structures</button>
             <button class="sub-tab-btn" data-subtab="optv4-cash">Cash Flow</button>
@@ -3056,13 +3057,40 @@
 
           <!-- Matrix -->
           <div id="subtab-optv4-matrix" class="sub-tab-pane">
-            <div id="optv4-matrix-mtm-note" class="optv3-muted" style="margin-bottom:.75rem"></div>
+            <div id="optv4-matrix-mtm-note" class="optv3-muted" style="margin-bottom:.5rem"></div>
+            <label class="toggle-label" style="margin:0 0 .75rem" title="Show each cell as the book's value then (its MTM at mid, options only, cash not counted) instead of the P&amp;L from today: Before adds today's book MTM, After the book MTM after the trades, net of the assumed transaction cost.">
+              <input type="checkbox" id="optv4-matrix-absolute">
+              Absolute value
+            </label>
             <div>
-              <h3 style="margin:.2rem 0 .5rem">P&amp;L Matrix <span class="optv3-muted" style="font-weight:400">— before vs after, per horizon</span></h3>
+              <h3 style="margin:.2rem 0 .5rem"><span id="optv4-matrix-title">P&amp;L Matrix</span> <span class="optv3-muted" style="font-weight:400">— before vs after, per horizon</span></h3>
               <p class="optv3-hint" style="margin:0 0 .6rem">Each horizon shows the <b>Before</b> book and the <b>After</b> book side by side, so the pair reads straight across. Columns are 30/60/90/120 days; <b>After</b> honours the trade checkboxes and manual legs, same as the chart.</p>
               <div class="chain-wrapper" style="max-height:600px">
                 <table class="pf-table"><thead id="optv4-matrix-thead"></thead><tbody id="optv4-matrix-tbody"></tbody></table>
               </div>
+            </div>
+          </div>
+
+          <!-- Collateral Ladder (ported from v2): spot x vol slides, before / after the run -->
+          <div id="subtab-optv4-ladder" class="sub-tab-pane">
+            <h3 style="margin:.2rem 0 .5rem">Collateral Ladder <span id="optv4-ladder-spot" class="rr-spot-pill" style="margin-left:.4rem"></span></h3>
+            <p id="optv4-ladder-empty" class="optv3-hint">Run the optimizer to see each counterparty's ladder before and after the proposed trades.</p>
+            <div id="optv4-ladder-body" style="display:none">
+              <div class="pf-toolbar" style="flex-wrap:wrap;gap:.75rem;margin-bottom:.6rem">
+                <label class="pf-filter-label">Counterparty
+                  <select id="optv4-ladder-cpty" style="width:auto;min-width:140px"></select>
+                </label>
+                <label class="pf-filter-label">Vol shift
+                  <select id="optv4-ladder-volmode" style="width:auto">
+                    <option value="flowdesk">Flowdesk method (6M vol points)</option>
+                    <option value="points">Vol points</option>
+                    <option value="relative">Relative %</option>
+                  </select>
+                </label>
+                <span id="optv4-ladder-coll" class="optv3-muted" style="font-size:.8rem;align-self:center"></span>
+              </div>
+              <div id="optv4-ladder-grids" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(740px,1fr));gap:1.25rem"></div>
+              <p class="optv3-hint" style="margin:.5rem 0 0">P&amp;L against today of the options with this counterparty plus the collateral of this asset posted with them, repriced instantly (no decay) at each spot move and vol move. After = with all the proposed trades and, when collateral transfers are on, the collateral after the transfers (trade checkboxes don't apply here). Change = After &minus; Before.</p>
             </div>
           </div>
 
@@ -4145,7 +4173,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=200"></script>
+<script src="/static/app.js?v=201"></script>
 <script src="/static/agents.js?v=32"></script>
 <script src="/static/risk.js?v=6"></script>
 </body>
