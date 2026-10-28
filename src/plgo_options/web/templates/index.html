@@ -570,6 +570,10 @@
           <span class="risk-label">Perp hedge</span>
           <span class="risk-value" id="pf-perp-hedge">--</span>
         </div>
+        <div class="risk-metric" title="Open forwards (Forwards screen): signed net qty and MTM. Included in Net delta, the payoff chart and the matrix.">
+          <span class="risk-label">Forwards</span>
+          <span class="risk-value" id="pf-forwards">--</span>
+        </div>
         <div class="risk-metric">
           <span class="risk-label">&Gamma;</span>
           <span class="risk-value" id="pf-total-gamma">--</span>
@@ -587,6 +591,9 @@
 
     <!-- Payoff chart controls -->
     <div class="pf-chart-controls" style="display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap;margin-bottom:.4rem">
+      <label class="toggle-label" style="margin:0" title="Add the open forwards (Forwards screen) to the curves and the matrix: they are part of the live (New) book and follow the counterparty filter.">
+        <input type="checkbox" id="pf-include-forwards" checked> Include forwards <span id="pf-forwards-count" class="optv3-muted" style="font-size:.75rem"></span>
+      </label>
       <label class="toggle-label" style="margin:0">
         <input type="checkbox" id="pf-show-collateral"> Show posted collateral
       </label>
@@ -4232,7 +4239,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=201"></script>
+<script src="/static/app.js?v=202"></script>
 <script src="/static/agents.js?v=32"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=1"></script>

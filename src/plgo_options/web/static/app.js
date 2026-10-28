@@ -3938,7 +3938,7 @@ function pfRenderSummary() {
     if ($net) {
       $net.textContent = t.net_delta != null ? t.net_delta.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
       // Only worth colouring when there is a hedge to compare against.
-      $net.className = `risk-value ${t.perp_qty ? (Math.abs(t.net_delta) <= Math.abs(t.portfolio_delta) ? "mtm-pos" : "mtm-neg") : ""}`;
+      $net.className = `risk-value ${(t.perp_qty || t.forward_delta) ? (Math.abs(t.net_delta) <= Math.abs(t.portfolio_delta) ? "mtm-pos" : "mtm-neg") : ""}`;
     }
     const $hedge = document.getElementById("pf-perp-hedge");
     if ($hedge) {
@@ -3948,6 +3948,21 @@ function pfRenderSummary() {
             (t.perp_funding || 0) < 0 ? "\u2212" : ""}$${Math.abs(t.perp_funding || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
         : "none";
       $hedge.className = "risk-value";
+    }
+    // Forwards (Forwards screen): net qty and MTM. Their delta is already in
+    // net_delta above; the curves and matrix add them via pfBookCurves.
+    const $fwd = document.getElementById("pf-forwards");
+    if ($fwd) {
+      const q = t.forward_qty || 0, m = t.forward_mtm || 0;
+      $fwd.textContent = q
+        ? `${q > 0 ? "+" : "\u2212"}${Math.abs(q).toLocaleString(undefined, { maximumFractionDigits: 0 })} · MTM ${m < 0 ? "\u2212" : ""}$${Math.abs(m).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+        : "none";
+      $fwd.className = `risk-value ${q ? (m >= 0 ? "mtm-pos" : "mtm-neg") : ""}`;
+    }
+    const $fc = document.getElementById("pf-forwards-count");
+    if ($fc) {
+      const n = ((pfData.forwards && pfData.forwards.trades) || []).length;
+      $fc.textContent = n ? `(${n} open)` : "(none open)";
     }
   }
 }
@@ -4262,9 +4277,56 @@ function pfMatrixCurve(positionIds, horizon) {
  *  — a curve on the chart is the matrix column of the same name. */
 function pfBookCurves(set, horizons) {
   const curves = {};
-  for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
+  const withFwd = set === pfForwardSet();
+  for (const h of horizons) {
+    const c = pfMatrixCurve(set, h);
+    if (withFwd) {
+      const f = pfForwardCurve(h);
+      if (f) for (let i = 0; i < c.length; i++) c[i] += f[i];
+    }
+    curves[h] = c;
+  }
   return curves;
 }
+
+/** Cash-settled forwards (Forwards screen) on the chart and matrix. They are
+ *  live book, so they ride with the New set (or the only set when there is no
+ *  Old/New split), honour the counterparty filter, and switch off with
+ *  "Include forwards". Value at horizon h is a level like the option curves:
+ *  qty x (S x (1 + carry x T_rem) - forward price), T_rem = days left after h;
+ *  past maturity it is the cash settlement qty x (S - forward price). */
+function pfForwardsOn() {
+  const t = document.getElementById("pf-include-forwards");
+  return !t || t.checked;
+}
+function pfForwardSet() {
+  const n = pfData.positions.some(p => pfNewSet.has(p.id));
+  return n ? pfNewSet : pfOldSet;
+}
+function pfForwardTrades() {
+  const trades = (pfData && pfData.forwards && pfData.forwards.trades) || [];
+  const cp = (document.getElementById("pf-filter-cpty")?.value || "").trim().toLowerCase();
+  return cp ? trades.filter(t => String(t.counterparty || "").trim().toLowerCase() === cp) : trades;
+}
+function pfForwardCurve(horizon) {
+  if (!pfForwardsOn()) return null;
+  const trades = pfForwardTrades();
+  if (!trades.length) return null;
+  const spots = pfData.spot_ladder;
+  const carry = (pfData.forwards && pfData.forwards.carry) || 0;
+  const out = new Array(spots.length).fill(0);
+  for (const t of trades) {
+    const Trem = Math.max((t.days_to_maturity || 0) - horizon, 0) / 365;
+    for (let i = 0; i < spots.length; i++) {
+      out[i] += t.signed_qty * (spots[i] * (1 + carry * Trem) - t.forward_price);
+    }
+  }
+  return out;
+}
+
+document.getElementById("pf-include-forwards")?.addEventListener("change", () => {
+  if (typeof pfOnSelectionChange === "function") pfOnSelectionChange();
+});
 
 /** Horizons shared by the P&L matrix and the payoff chart (Now/16/30/…/150d). */
 function pfPnlHorizons() {
