@@ -1906,9 +1906,67 @@ function tmWireDecay() {
   });
 }
 
+function tmForwardRowHtml(t, f) {
+  const fw = t.fwd;
+  const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
+  const sideColor = t.side === "Buy" ? "qty-long" : "qty-short";
+  const rec = fw.recon && fw.recon.status;
+  const recDot = rec === "matched" ? "status-active" : rec === "break" ? "status-deleted" : "status-expired";
+  return `<tr class="tm-row-forward" data-fwd="${fw.id}" title="${escAttr([fw.external_ref, fw.note].filter(Boolean).join(" · "))}">
+      <td></td>
+      <td><span class="status-dot ${recDot}" title="Reconciliation: ${rec || "not reconciled"}"></span></td>
+      <td style="text-align:left">${fw.counterparty}</td>
+      <td>${fw.trade_date || ""}</td>
+      <td style="text-align:left" class="${sideColor}">${t.side}</td>
+      <td style="text-align:left"><span class="tm-fwd-badge">Forward</span></td>
+      <td style="text-align:left">${t.instrument}</td>
+      <td>${t.expiry}</td>
+      <td>${t.days_remaining}</td>
+      <td>${f.fmtK(t.strike)}</td>
+      <td>${f.fmt(t.pct_otm_live, 1)}%</td>
+      <td>${f.fmtK(t.qty)}</td>
+      <td>${f.fmtMm((t.qty || 0) * (ethSpot || 0) / 1e6)}</td>
+      <td>—</td>
+      <td>—</td>
+      <td>${f.fmt(t.delta, 4)}</td>
+      <td>0</td>
+      <td>${f.fmt(t.theta, 4)}</td>
+      <td>0</td>
+      <td>${f.fmtMoney(t.mark_price_usd)}</td>
+      <td class="${mtmColor}">${f.fmtMoney(t.current_mtm)}</td>
+      <td>
+        <div class="tm-actions">
+          <button class="tm-action-btn" onclick="tmEditForward(${fw.id})" title="Edit forward">&#9998;</button>
+          <button class="tm-action-btn btn-expire" onclick="fwSettle && fwSettle(${fw.id})" title="Settle (cash) at a fixing price">&#9201;</button>
+          <button class="tm-action-btn btn-delete" onclick="fwDelete && fwDelete(${fw.id})" title="Delete">&#10005;</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+// Open forwards (Forwards: cash-settled, booked via New Trade -> Forward) as
+// rows of the trades table, in the same shape as an option row.
+function tmForwardRows() {
+  const trades = (tmForwards && tmForwards.trades) || [];
+  return trades.map(f => {
+    let code = f.maturity_date;
+    try { code = new Date(f.maturity_date + "T00:00:00Z").toUTCString().slice(5, 16).replace(/ /g, "").toUpperCase(); } catch (_) {}
+    return {
+      kind: "forward", fwd: f, id: `fwd-${f.id}`, counterparty: f.counterparty, trade_date: f.trade_date,
+      side: f.side === "buy" ? "Buy" : "Sell", option_type: "Forward",
+      instrument: `${currentAsset}-${code}-FWD`, expiry: f.maturity_date,
+      days_remaining: Math.max(f.days_to_maturity || 0, 0), strike: f.forward_price,
+      pct_otm_live: ethSpot ? (f.forward_price / ethSpot - 1) * 100 : null, qty: f.qty,
+      premium_usd: 0, iv_pct: null, delta: f.qty ? Math.abs(f.delta / f.qty) * Math.sign(f.signed_qty) : 1,
+      gamma: 0, theta: f.qty ? f.theta / f.qty : 0, vega: 0, mark_price_usd: f.fair_forward,
+      current_mtm: f.mtm, trade_id: f.external_ref || "", db_status: "active",
+    };
+  });
+}
+
 function tmRenderTable() {
   const tbody = document.getElementById("tm-body");
-  let rows = [...tmEnriched];
+  let rows = [...tmEnriched, ...tmForwardRows()];
 
   // Filters
   const fExpiry = document.getElementById("tm-filter-expiry").value;
@@ -1935,7 +1993,7 @@ function tmRenderTable() {
   });
 
   // Populate expiry filter
-  const expiries = [...new Set(tmEnriched.map(t => t.expiry))].sort();
+  const expiries = [...new Set([...tmEnriched, ...tmForwardRows()].map(t => t.expiry))].sort();
   const expSel = document.getElementById("tm-filter-expiry");
   const curExp = expSel.value;
   expSel.innerHTML = '<option value="">All</option>';
@@ -1956,6 +2014,7 @@ function tmRenderTable() {
   const fmtMm = (v) => v != null && v !== "" ? `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm` : "--";
 
   tbody.innerHTML = rows.map(t => {
+    if (t.kind === "forward") return tmForwardRowHtml(t, { fmt, fmtK, fmtMoney, fmtMm });
     const tid = t.db_id || t.id;
     const isExpired = t.db_status === "expired";
     const isSelected = tmSelected.has(tid);
@@ -2162,8 +2221,13 @@ function tfRoundStrike(v) {
 
 function tfApplyPreset() {
   const isSingle = tfPreset === "single";
+  const isForward = tfPreset === "forward";
+  document.getElementById("tf-forward-section").style.display = isForward ? "" : "none";
   document.getElementById("tf-single-section").style.display = isSingle ? "" : "none";
-  document.getElementById("tf-multi-section").style.display = isSingle ? "none" : "";
+  document.getElementById("tf-multi-section").style.display = (isSingle || isForward) ? "none" : "";
+  document.getElementById("tf-ref-spot-field").style.display = isForward ? "none" : "";
+  document.getElementById("tf-expiry-label").textContent = isForward ? "Maturity" : "Expiry";
+  if (isForward) return;
 
   if (!isSingle) {
     const template = TF_PRESETS[tfPreset];
@@ -2398,6 +2462,63 @@ function tfPopulateCounterparties() {
     .join("");
 }
 
+// ── Forwards in the New Trade form ───────────────────────────
+// Book / amend a cash-settled forward (POST/PUT /api/forwards/trades).
+function tmEditForward(fid) {
+  const f = ((tmForwards && tmForwards.trades) || []).find(x => x.id === fid);
+  if (!f) return;
+  tmOpenModal();
+  document.getElementById("modal-trade-title").textContent = `Edit Forward #${fid}`;
+  document.getElementById("tf-strategy-bar").style.display = "none";
+  tfPreset = "forward";
+  tfApplyPreset();
+  document.getElementById("tf-fwd-id").value = fid;
+  document.getElementById("tf-counterparty").value = f.counterparty;
+  document.getElementById("tf-trade-date").value = f.trade_date || "";
+  document.getElementById("tf-expiry").value = f.maturity_date || "";
+  document.getElementById("tf-fwd-side").value = f.side;
+  document.getElementById("tf-fwd-qty").value = f.qty;
+  document.getElementById("tf-fwd-price").value = f.forward_price;
+  document.getElementById("tf-fwd-ref").value = f.external_ref || "";
+  document.getElementById("tf-fwd-note").value = f.note || "";
+}
+
+async function tfSaveForward() {
+  const fid = document.getElementById("tf-fwd-id").value;
+  const body = {
+    asset: currentAsset,
+    counterparty: document.getElementById("tf-counterparty").value.trim(),
+    side: document.getElementById("tf-fwd-side").value,
+    qty: parseFloat(document.getElementById("tf-fwd-qty").value),
+    forward_price: parseFloat(document.getElementById("tf-fwd-price").value),
+    trade_date: document.getElementById("tf-trade-date").value,
+    maturity_date: document.getElementById("tf-expiry").value,
+    external_ref: document.getElementById("tf-fwd-ref").value.trim(),
+    note: document.getElementById("tf-fwd-note").value.trim(),
+  };
+  if (!body.counterparty || !(body.qty > 0) || !(body.forward_price > 0) || !body.trade_date || !body.maturity_date) {
+    alert("Fill in counterparty, trade date, maturity, qty and forward price.");
+    return;
+  }
+  const verb = fid ? "Amend" : "Book";
+  if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}?`)) return;
+  try {
+    const r = await fetch(fid ? `/api/forwards/trades/${fid}` : "/api/forwards/trades", {
+      method: fid ? "PUT" : "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(typeof j.detail === "string" ? j.detail : (j.detail || []).map(d => d.msg).join("; ") || r.statusText);
+    }
+    document.getElementById("modal-trade").style.display = "none";
+    await tmLoad();
+    if (typeof fwReload === "function") fwReload();
+  } catch (err) {
+    alert(`${verb} failed: ${err.message}`);
+  }
+}
+
 function tmOpenModal(trade = null) {
   const modal = document.getElementById("modal-trade");
   const title = document.getElementById("modal-trade-title");
@@ -2410,6 +2531,10 @@ function tmOpenModal(trade = null) {
   const qtyUnit = document.getElementById("tf-qty-unit");
   if (qtyUnit) qtyUnit.textContent = currentAsset;
 
+  document.getElementById("tf-fwd-id").value = "";
+  document.getElementById("tf-forward-section").style.display = "none";
+  document.getElementById("tf-ref-spot-field").style.display = "";
+  document.getElementById("tf-expiry-label").textContent = "Expiry";
   if (trade) {
     // Edit mode — single leg only, hide strategy bar
     title.textContent = `Edit Trade #${trade.id}`;
@@ -2465,6 +2590,7 @@ function tmCloseModal() {
 
 document.getElementById("trade-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (tfPreset === "forward") { await tfSaveForward(); return; }
   // Enforce sign rule + USD recompute in case user clicks Save without blurring fields.
   tfEnforcePremiumSign();
   if (tfPreset !== "single") tfRecomputeAllLegsUsd();

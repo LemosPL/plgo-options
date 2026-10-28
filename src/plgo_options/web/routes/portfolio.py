@@ -940,8 +940,8 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         ],
         "trades": [
             {k: t[k] for k in ("id", "counterparty", "side", "qty", "signed_qty", "forward_price",
-                               "maturity_date", "days_to_maturity", "fair_forward", "mtm", "delta",
-                               "delta_usd", "theta")}
+                               "trade_date", "maturity_date", "days_to_maturity", "fair_forward", "mtm",
+                               "delta", "delta_usd", "theta", "external_ref", "note", "recon")}
             for t in fwd_book["trades"]
         ],
     }

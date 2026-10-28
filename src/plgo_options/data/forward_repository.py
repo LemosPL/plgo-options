@@ -56,6 +56,32 @@ async def ensure_tables(db) -> None:
     await db.execute(FORWARD_CARRY_SCHEMA)
 
 
+# Forwards booked from a counterparty confirmation, inserted once at startup
+# (init_db). Keyed on the confirmation's trade id: skipped if any row (open,
+# settled or deleted) already carries it, so it is never booked twice and a
+# deliberate delete stays deleted.
+CONFIRMED_FORWARDS = [
+    {   # Flowdesk confirmation, 27 Oct 2026: we sold 2,500 ETH/USDC, cash-settled
+        # against the Deribit 08:00 UTC fixing on 27 Nov 2026.
+        "asset": "ETH", "counterparty": "Flowdesk", "side": "sell", "qty": 2500.0,
+        "forward_price": 2346.5, "trade_date": "2026-10-27", "maturity_date": "2026-11-27",
+        "external_ref": "e45b44b1-1592-4201-86ec-bd5a7f71a0b7",
+        "note": "Cash settlement vs Deribit 0800 UTC, 27Nov26 08:00 UTC (from Flowdesk confirmation)",
+    },
+]
+
+
+async def seed_confirmed(db) -> int:
+    added = 0
+    for f in CONFIRMED_FORWARDS:
+        cur = await db.execute("SELECT 1 FROM forward_trades WHERE external_ref = ?", (f["external_ref"],))
+        if await cur.fetchone():
+            continue
+        await insert_forward(db, f, "confirmation import")
+        added += 1
+    return added
+
+
 async def list_forwards(db, asset: str | None = None, statuses: tuple[str, ...] = ("open",)) -> list[dict]:
     q = "SELECT * FROM forward_trades WHERE status IN (%s)" % ",".join("?" * len(statuses))
     args: list = list(statuses)

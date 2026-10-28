@@ -147,3 +147,23 @@ def test_forward_positions_curves_for_client_side_screens():
     assert r["payoff_by_horizon"]["60"] == r["payoff_by_horizon"]["0"]      # no carry: same past maturity
     assert r["delta"] == 1.0 and r["current_mtm"] == -133_750.0
     assert r["value_path"] == [pytest.approx(-133_750), pytest.approx(-133_750)]
+
+
+def test_confirmed_forward_is_booked_once(monkeypatch):
+    async def go():
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        await repo.ensure_tables(db)
+        assert await repo.seed_confirmed(db) == 1
+        assert await repo.seed_confirmed(db) == 0          # idempotent
+        rows = await repo.list_forwards(db, "ETH")
+        assert len(rows) == 1
+        r = rows[0]
+        assert (r["counterparty"], r["side"], r["qty"], r["forward_price"], r["maturity_date"]) == \
+            ("Flowdesk", "sell", 2500.0, 2346.5, "2026-11-27")
+        # A deliberate delete stays deleted.
+        await repo.set_status(db, r["id"], "deleted", "desk")
+        assert await repo.seed_confirmed(db) == 0
+        await db.close()
+
+    asyncio.run(go())

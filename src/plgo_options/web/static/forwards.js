@@ -84,8 +84,9 @@
   function positions() {
     const rows = book.trades.map((t) => `
       <tr class="${t.matured ? "fw-matured" : ""}">
-        <td>${t.id}</td><td>${esc(t.counterparty)}${t.external_ref || t.note
-          ? `<div class="optv3-muted" style="font-size:.7rem">${esc([t.external_ref, t.note].filter(Boolean).join(" · "))}</div>` : ""}</td>
+        <td>${t.id}</td><td title="${esc([t.external_ref, t.note].filter(Boolean).join(" · "))}">${esc(t.counterparty)}${t.external_ref || t.note
+          ? `<div class="optv3-muted fw-ref">${esc([t.external_ref ? "Ref " + t.external_ref.slice(0, 8) + (t.external_ref.length > 8 ? "…" : "") : "",
+                t.note.length > 28 ? t.note.slice(0, 28) + "…" : t.note].filter(Boolean).join(" · "))}</div>` : ""}</td>
         <td style="${t.side === "buy" ? "color:var(--green)" : "color:var(--red)"}">${t.side === "buy" ? "Buy" : "Sell"}</td>
         <td class="num">${fmt(t.qty, qtyDp())}</td>
         <td class="num">${fmt(t.forward_price, pxDp())}</td>
@@ -191,6 +192,7 @@
 
   function resetForm() {
     editingId = null;
+    if (!$("fw-f-cp")) return;           // booking moved to New Trade -> Forward
     ["fw-f-cp", "fw-f-qty", "fw-f-price", "fw-f-mdate", "fw-f-ref", "fw-f-note"].forEach((id) => { $(id).value = ""; });
     $("fw-f-side").value = "sell";
     $("fw-f-tdate").value = today();
@@ -214,6 +216,7 @@
       status(editingId ? `Forward #${editingId} amended.` : "Forward booked.");
       resetForm();
       await load();
+      refreshTradeTotals();
     } catch (e) {
       status(`${verb} failed: ${e.message}`, true);
     }
@@ -240,7 +243,7 @@
     const t = book.trades.find((x) => x.id === id);
     if (!t) return;
     try {
-      if (act === "edit") { startEdit(t); return; }
+      if (act === "edit") { if (typeof tmEditForward === "function") tmEditForward(id); return; }
       if (act === "recon") { reconOpen = reconOpen === id ? null : id; positions(); return; }
       if (act === "delete") {
         if (!confirm(`Delete forward #${id} (${t.side} ${fmt(t.qty, qtyDp())} with ${t.counterparty})? It is kept in the database as deleted.`)) return;
@@ -258,10 +261,16 @@
         status(`Forward #${id} settled: realised ${usd(pnl)}.`);
       }
       await load();
+      refreshTradeTotals();
     } catch (e) {
       status(`${act} failed: ${e.message}`, true);
     }
   }
+
+  // Used by the trades table's forward rows (Settle / Delete buttons).
+  window.fwReload = load;
+  window.fwSettle = async (id) => { if (!book) await load(); onAction("settle", id); };
+  window.fwDelete = async (id) => { if (!book) await load(); onAction("delete", id); };
 
   async function saveRecon(id) {
     const num = (elId) => { const v = $(elId).value; return v === "" ? null : parseFloat(v); };
@@ -276,8 +285,17 @@
     }
   }
 
+  // Trade Management's totals bar reads the forwards from /pnl: reload it.
+  function refreshTradeTotals() {
+    try { if (typeof tmLoad === "function") tmLoad(); } catch (_) { /* totals refresh on next visit */ }
+  }
+
   // ── wiring ────────────────────────────────────────────────────
-  document.querySelector('.nav-item[data-page="forwards"]')?.addEventListener("click", () => { resetForm(); load(); });
+  // Lives on Trade Management's Trades tab: load with the page (the sidebar
+  // asset switch re-clicks the active page, so ETH/FIL follows too).
+  document.querySelector('.nav-item[data-page="trades"]')?.addEventListener("click", () => { if (!editingId) resetForm(); load(); });
+  document.querySelector('.sub-tab-btn[data-subtab="tm-trades"]')?.addEventListener("click", load);
+  if (document.getElementById("page-trades")?.classList.contains("active")) { resetForm(); load(); }
   $("fw-refresh")?.addEventListener("click", load);
   $("fw-f-submit")?.addEventListener("click", submitForm);
   $("fw-f-cancel")?.addEventListener("click", resetForm);

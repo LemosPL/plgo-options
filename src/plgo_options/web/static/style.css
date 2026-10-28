@@ -1773,16 +1773,16 @@ select { margin-bottom: .5rem; }
 #cp-content > .card:first-child, #gk-content > .card:first-child { margin-top: 1.25rem; }
 
 /* ── Forwards (forwards.js) ─────────────────────────────────── */
-#page-forwards .card { margin-bottom: 1.25rem; }
+#tm-forwards .card { margin-bottom: 1.25rem; }
 .fw-cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: .9rem; margin-top: 1rem; }
 @media (max-width: 1100px) { .fw-cards { grid-template-columns: repeat(3, 1fr); } }
 .fw-form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem 1rem; }
 .fw-form-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .75rem; color: var(--muted); }
 .fw-form-grid input, .fw-form-grid select { font-size: .85rem; }
-#page-forwards .chain-wrapper { max-height: none; overflow-x: auto; }
-#page-forwards table.pf-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
-#page-forwards .pf-table th, #page-forwards .pf-table td { padding: .38rem .6rem; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }
-#page-forwards .pf-table th { background: var(--surface); font-weight: 600; }
+#tm-forwards .chain-wrapper { max-height: none; overflow-x: auto; }
+#tm-forwards table.pf-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+#tm-forwards .pf-table th, #tm-forwards .pf-table td { padding: .38rem .6rem; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }
+#tm-forwards .pf-table th { background: var(--surface); font-weight: 600; }
 .fw-actions button { width: auto; padding: .15rem .45rem; font-size: .72rem; margin: 0 .1rem; }
 .fw-badge { font-size: .7rem; padding: .08rem .45rem; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); }
 .fw-ok { color: var(--green); border-color: var(--green); }
@@ -1793,6 +1793,10 @@ select { margin-bottom: .5rem; }
 .fw-recon input { width: 9rem; }
 .fw-recon button { width: auto; }
 .fw-breaks { flex-basis: 100%; margin: .3rem 0 0 1rem; color: var(--red); font-size: .78rem; }
-#page-forwards .pf-table th, #page-forwards .pf-table td { padding: .38rem .45rem; }
-#page-forwards .fw-actions { white-space: nowrap; }
+#tm-forwards .pf-table th, #tm-forwards .pf-table td { padding: .38rem .45rem; }
+#tm-forwards .fw-actions { white-space: nowrap; }
 .fw-actions button { padding: .12rem .35rem; font-size: .7rem; }
+.fw-ref { font-size: .7rem; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; margin: 0 auto; }
+
+.tm-fwd-badge { font-size: .7rem; padding: .05rem .4rem; border-radius: 8px; border: 1px solid #a371f7; color: #a371f7; }
+tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
