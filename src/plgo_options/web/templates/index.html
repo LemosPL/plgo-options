@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=21">
+  <link rel="stylesheet" href="/static/style.css?v=22">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -185,6 +185,10 @@
     <li class="nav-item" data-page="greeks">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h12v1H2V2zm0 11h12v1H2v-1zM3 5h2v6H3V5zm4-1h2v7H7V4zm4 2h2v5h-2V6z"/></svg>
       Greeks
+    </li>
+    <li class="nav-item" data-page="forwards">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 4.5a.5.5 0 01.5-.5h10.793L9.646 1.354a.5.5 0 11.708-.708l3.5 3.5a.5.5 0 010 .708l-3.5 3.5a.5.5 0 01-.708-.708L12.293 5H1.5a.5.5 0 01-.5-.5zM15 11.5a.5.5 0 01-.5.5H3.707l2.647 2.646a.5.5 0 01-.708.708l-3.5-3.5a.5.5 0 010-.708l3.5-3.5a.5.5 0 11.708.708L3.707 11H14.5a.5.5 0 01.5.5z"/></svg>
+      Forwards
     </li>
     <li class="nav-item" data-page="perps">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 8a.5.5 0 01.5-.5h13a.5.5 0 010 1h-13A.5.5 0 011 8z"/><path d="M11.5 4.5a.5.5 0 01.707 0l3 3a.5.5 0 010 .707l-3 3a.5.5 0 01-.707-.707L14.293 8l-2.793-2.793a.5.5 0 010-.707z"/><path d="M4.5 11.5a.5.5 0 01-.707 0l-3-3a.5.5 0 010-.707l3-3a.5.5 0 11.707.707L1.707 8l2.793 2.793a.5.5 0 010 .707z"/></svg>
@@ -3612,6 +3616,61 @@
     <div id="gk-content"></div>
   </div>
 
+  <div id="page-forwards" class="page">
+    <section class="card">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Forwards — <span id="fw-asset-label">ETH</span></h2>
+          <span id="fw-status" class="optv3-muted" style="font-size:.75rem"></span>
+        </div>
+        <div class="collat-header-right rr-controls">
+          <label class="pf-filter-label" title="Annual carry used to mark open forwards: fair forward = spot x (1 + carry x time to maturity). 0% = forward at spot.">Carry (% a year)
+            <input type="number" id="fw-carry" step="0.25" style="width:6rem">
+          </label>
+          <button id="fw-carry-save" class="btn-secondary" style="width:auto">Save carry</button>
+          <span id="fw-carry-info" class="optv3-muted" style="font-size:.72rem"></span>
+          <button id="fw-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="fw-cards" class="fw-cards"></div>
+    </section>
+
+    <section class="card" id="fw-form">
+      <h3 class="rr-h" id="fw-form-title">Book a forward</h3>
+      <div class="fw-form-grid">
+        <label>Counterparty <input type="text" id="fw-f-cp" list="fw-cp-list" placeholder="e.g. Flowdesk"><datalist id="fw-cp-list"></datalist></label>
+        <label>Side <select id="fw-f-side"><option value="sell" selected>Sell (short)</option><option value="buy">Buy (long)</option></select></label>
+        <label>Qty (tokens) <input type="number" id="fw-f-qty" step="any" min="0"></label>
+        <label>Forward price ($) <input type="number" id="fw-f-price" step="any" min="0"></label>
+        <label>Trade date <input type="date" id="fw-f-tdate"></label>
+        <label>Maturity <input type="date" id="fw-f-mdate"></label>
+        <label>Ticket / ref <input type="text" id="fw-f-ref"></label>
+        <label>Note <input type="text" id="fw-f-note"></label>
+      </div>
+      <div style="display:flex;gap:.6rem;margin-top:.75rem">
+        <button id="fw-f-submit" class="btn-primary" style="width:auto">Book forward</button>
+        <button id="fw-f-cancel" class="btn-secondary" style="width:auto;display:none">Cancel edit</button>
+      </div>
+      <p class="optv3-hint" style="margin:.5rem 0 0">Cash-settled: at maturity only qty × (fixing − forward price) is paid, in USD/USDC. The asset is the one selected in the sidebar.</p>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Open forwards</h3>
+      <div id="fw-positions" class="chain-wrapper"></div>
+      <p class="optv3-hint" style="margin:.4rem 0 0">MTM = qty × (fair forward − forward price), signed from our side. <b>Reconcile</b> stores the counterparty's qty, forward price and MTM for a trade and flags any difference (qty exact, price to 0.01%, MTM to the larger of $1,000 or 1%). <b>Settle</b> closes a forward at a fixing price and books the realised P&amp;L.</p>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">By counterparty</h3>
+      <div id="fw-bycp" class="chain-wrapper"></div>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Settled forwards</h3>
+      <div id="fw-settled" class="chain-wrapper"></div>
+    </section>
+  </div>
+
   <div id="page-agents" class="page">
     <style>
       /* h3 has no base rule in style.css, so it renders at the browser default
@@ -4175,6 +4234,7 @@
 
 <script src="/static/app.js?v=201"></script>
 <script src="/static/agents.js?v=32"></script>
-<script src="/static/risk.js?v=6"></script>
+<script src="/static/risk.js?v=7"></script>
+<script src="/static/forwards.js?v=1"></script>
 </body>
 </html>

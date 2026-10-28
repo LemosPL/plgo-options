@@ -74,7 +74,7 @@
         </tr></thead>
         <tbody>${body}</tbody>
         <tfoot><tr class="rr-total-row">
-          <td></td><td><b>Options total:</b></td>${showCpty ? "<td></td>" : ""}
+          <td></td><td><b>Total:</b></td>${showCpty ? "<td></td>" : ""}
           ${tot("delta", unitDp(a))}${tot("delta_usd", 0)}${tot("gamma", gammaDp(a))}${tot("gamma_usd", 0)}
           ${tot("theta", 0)}${tot("vega", 0)}
           <td></td>

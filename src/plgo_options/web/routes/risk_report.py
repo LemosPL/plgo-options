@@ -293,6 +293,24 @@ async def _asset_section(asset: str, counterparty: str | None, coll_qty: float,
             "theta": 0.0, "vega": 0.0,
         })
         legs.append({"net_qty": q, "strike": 0.0, "opt": "PERP", "T": 0.0, "sigma": 0.0})
+    # Cash-settled forwards (Forwards screen), one row per trade. Linear like
+    # the perp, so in the slides each moves qty x the spot move.
+    for f in ((port.get("forwards") or {}).get("trades")) or []:
+        if counterparty and str(f["counterparty"]).strip().lower() != counterparty.lower():
+            continue
+        q = float(f["signed_qty"])
+        try:
+            code = datetime.strptime(str(f["maturity_date"])[:10], "%Y-%m-%d").strftime("%d%b%y").upper()
+        except ValueError:
+            code = str(f["maturity_date"])
+        k = f["forward_price"]
+        rows.append({
+            "kind": "forward", "counterparty": f["counterparty"], "size": q, "expiry": f["maturity_date"],
+            "symbol": f"{asset}USDC-{code}-FWD @ {k:g}", "mtm": float(f["mtm"]),
+            "delta": float(f["delta"]), "delta_usd": float(f["delta_usd"]), "gamma": 0.0, "gamma_usd": 0.0,
+            "theta": float(f["theta"]), "vega": 0.0,
+        })
+        legs.append({"net_qty": q, "strike": 0.0, "opt": "PERP", "T": 0.0, "sigma": 0.0})
     rows.sort(key=lambda r: (r["kind"] != "option", str(r.get("expiry") or ""), r.get("strike") or 0, r.get("opt") or ""))
     if not rows and not coll_qty:
         return None

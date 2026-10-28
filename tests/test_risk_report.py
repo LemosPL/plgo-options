@@ -4,6 +4,8 @@
 
 import asyncio
 
+import pytest
+
 from plgo_options.web.routes import risk_report as rr
 from plgo_options.web.routes.portfolio import bs_greeks
 
@@ -151,3 +153,29 @@ def test_optimizer_ladder_without_a_selection_lists_every_counterparty():
     for c in lad["counterparties"]:
         assert set(c["grids"]) == set(rr.VOL_MODES)
         assert c["grids"]["points"]["before"] == c["grids"]["points"]["after"]
+
+
+def test_forwards_join_the_report(monkeypatch):
+    port = _fake_portfolio()
+    port["forwards"] = {"trades": [{"counterparty": "Flowdesk", "signed_qty": -1000.0, "forward_price": 2500.0,
+                                    "maturity_date": "2026-12-31", "mtm": 48_470.0, "delta": -1000.0,
+                                    "delta_usd": -1000.0 * S, "theta": 0.0}]}
+
+    async def fake_gather(asset):
+        return port if asset == "ETH" else None
+
+    async def fake_ctx(asset):
+        raise RuntimeError("no market data in tests")
+
+    monkeypatch.setattr(rr, "_gather_portfolio", fake_gather)
+    monkeypatch.setattr(rr, "build_market_context", fake_ctx)
+    with_fwd = asyncio.run(rr._asset_section("ETH", "Flowdesk", 2000.0, "points"))
+    fwd_rows = [r for r in with_fwd["rows"] if r["kind"] == "forward"]
+    assert len(fwd_rows) == 1 and fwd_rows[0]["symbol"].startswith("ETHUSDC-31DEC26-FWD")
+    port.pop("forwards")
+    without = asyncio.run(rr._asset_section("ETH", "Flowdesk", 2000.0, "points"))
+    assert with_fwd["totals"]["delta"] == pytest.approx(without["totals"]["delta"] - 1000.0)
+    # Short 1,000 ETH forward: at +10% spot the ladder loses 1,000 x 10% of spot more.
+    i = with_fwd["slides"]["spot_shocks"].index(0.10)
+    j = with_fwd["slides"]["vol_shocks"].index(0.0)
+    assert with_fwd["slides"]["pnl"][i][j] - without["slides"]["pnl"][i][j] == pytest.approx(-1000.0 * S * 0.10, abs=1)

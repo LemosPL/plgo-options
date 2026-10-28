@@ -178,6 +178,18 @@ def _otc_perps(data: dict | None) -> dict[str, dict]:
     return out
 
 
+def _otc_forwards(data: dict | None) -> dict[str, dict]:
+    """Forward MtM per counterparty (lower-cased) from a single-asset
+    portfolio response: {"counterparty", "net_qty", "mtm"}."""
+    out: dict[str, dict] = {}
+    for c in ((data or {}).get("forwards") or {}).get("by_counterparty") or []:
+        k = str(c.get("counterparty") or "").strip().lower()
+        if k:
+            out[k] = {"counterparty": c["counterparty"], "net_qty": float(c.get("net_qty") or 0.0),
+                      "mtm": float(c.get("mtm") or 0.0)}
+    return out
+
+
 def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str, str], dict[str, int]]:
     """For a single-asset portfolio response, return:
        liabilities[cp_lower], display_names[cp_lower], position_count[cp_lower].
@@ -205,6 +217,11 @@ def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str,
         display.setdefault(k, perp["venue"])
         liabilities[k] = max(0.0, liabilities.get(k, 0.0) - perp["mtm"])
         counts[k] = counts.get(k, 0) + 1
+    # Forwards net the same way: a forward we are losing on adds to what we owe.
+    for k, f in _otc_forwards(data).items():
+        display.setdefault(k, f["counterparty"])
+        liabilities[k] = max(0.0, liabilities.get(k, 0.0) - f["mtm"])
+        counts[k] = counts.get(k, 0) + 1
     return liabilities, display, counts
 
 
@@ -223,6 +240,8 @@ def _net_mtm_by_cp(data: dict | None) -> dict[str, float]:
             out[cp] = out.get(cp, 0.0) + float(p.get("current_mtm") or 0)
     for k, perp in _otc_perps(data).items():
         out[k] = out.get(k, 0.0) + perp["mtm"]
+    for k, f in _otc_forwards(data).items():
+        out[k] = out.get(k, 0.0) + f["mtm"]
     return out
 
 

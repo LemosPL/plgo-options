@@ -384,6 +384,19 @@ async def _build_perp_positions(asset: str, pnl_data: dict) -> list[dict]:
                              spelling.get(venue.strip().lower(), venue), pos_id=-1 - i)
         if leg is not None:
             out.append(leg)
+    # Cash-settled forwards (Forwards screen) ride along the same way: linear
+    # in spot, one leg per counterparty at its net qty and qty-weighted
+    # forward price, so the fit, the rehedge, the per-counterparty caps and the
+    # collateral ladder all see them. The optimizer never trades them.
+    for i, c in enumerate(((pnl_data.get("forwards") or {}).get("by_counterparty")) or []):
+        cp = str(c.get("counterparty") or "")
+        leg = _perp_position(asset, pnl_data, {
+            "net_qty": c.get("net_qty"), "avg_entry": c.get("avg_forward_price"),
+            "unrealized_pnl_usd": c.get("mtm"),
+        }, spelling.get(cp.strip().lower(), cp), pos_id=-1001 - i)
+        if leg is not None:
+            leg.update({"instrument": f"{asset}-FWD", "option_type": "Forward", "is_forward": True})
+            out.append(leg)
     return out
 
 

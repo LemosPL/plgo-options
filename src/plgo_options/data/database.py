@@ -334,6 +334,8 @@ async def init_db():
     await db.execute(PERP_TRADES_SCHEMA)
     await db.execute(PERP_FUNDING_SCHEMA)
     await db.execute(COUNTERPARTY_NOTES_SCHEMA)
+    from plgo_options.data.forward_repository import ensure_tables as ensure_forward_tables
+    await ensure_forward_tables(db)
     await db.commit()
 
     # One-time seed of the ETH-book collateral allocation from the values that

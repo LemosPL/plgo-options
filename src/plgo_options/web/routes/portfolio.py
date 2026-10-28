@@ -25,6 +25,7 @@ from plgo_options.optimization.math_utils import bs_vec_bridge
 # data/ + market_data/, so importing it here doesn't create a cycle.
 from plgo_options.data.perp_repository import DEFAULT_VENUE as PERP_VENUE
 from plgo_options.web.routes.perps import build_summary as build_perp_summary
+from plgo_options.web.routes.forwards import build_forward_book
 
 router = APIRouter()
 client = DeribitClient()
@@ -862,10 +863,31 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
     perp_qty = float(perp_block["net_qty"] or 0.0)
     perp_mtm = float(perp_block["unrealized_pnl_usd"] or 0.0)
     perp_funding = float(perp_block["funding_total_usd"] or 0.0)
+    # Cash-settled forwards (Forwards screen): linear like the perp, valued at
+    # spot + carry. Shipped per counterparty so collateral, the optimizer and
+    # the risk report can each net them in where they belong.
+    fwd_book = await build_forward_book(asset.upper(), eth_spot)
+    forwards_block = {
+        "carry": fwd_book["carry"],
+        "totals": fwd_book["totals"],
+        "by_counterparty": [
+            {k: c[k] for k in ("counterparty", "net_qty", "mtm", "delta", "delta_usd", "theta",
+                               "avg_forward_price", "count")}
+            for c in fwd_book["by_counterparty"]
+        ],
+        "trades": [
+            {k: t[k] for k in ("id", "counterparty", "side", "qty", "signed_qty", "forward_price",
+                               "maturity_date", "days_to_maturity", "fair_forward", "mtm", "delta",
+                               "delta_usd", "theta")}
+            for t in fwd_book["trades"]
+        ],
+    }
+    fwd_delta = float(fwd_book["totals"]["delta"] or 0.0)
+
     # `total_delta` stays options-only so the stored series keeps meaning what
     # it always meant; net_delta is that plus the hedge (a perp is delta 1 per
-    # token by construction).
-    net_delta = total_delta + perp_qty
+    # token by construction) and any forwards.
+    net_delta = total_delta + perp_qty + fwd_delta
 
     # Lazy daily MTM snapshot: write one row per (date, asset) the first time
     # the endpoint is hit on a new UTC day. INSERT OR IGNORE is a no-op if a
@@ -939,6 +961,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         "stale_spot": stale_spot,
         "positions": enriched,
         "perp": perp_block,
+        "forwards": forwards_block,
         "totals": {
             "total_entry_premium": round(total_entry, 2),
             "current_total_mtm": round(total_mtm, 2),
@@ -954,6 +977,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             "net_delta": round(net_delta, 2),
             "perp_mtm": round(perp_mtm, 2),
             "perp_funding": round(perp_funding, 2),
+            "forward_qty": round(float(fwd_book["totals"]["net_qty"] or 0.0), 4),
+            "forward_delta": round(fwd_delta, 4),
+            "forward_mtm": round(float(fwd_book["totals"]["mtm"] or 0.0), 2),
         },
     }
 
