@@ -345,6 +345,8 @@
           (D(a).perp_venue ? ' <span style="color:var(--muted)">@' + esc(D(a).perp_venue) + "</span>" : "") +
           (D(a).perp_error ? ' <span style="color:#ef4444">' + esc(D(a).perp_error) + "</span>" : "") },
       { label: "Funding, 30 days", v: (a) => money(D(a).funding_30d) },
+      { label: "Forwards", v: (a) => !D(a).forward_qty ? "none" : num(D(a).forward_qty) + " (MTM " + money(D(a).forward_mtm) +
+          ') <span style="color:var(--muted)">in Mark and Delta</span>' },
       { sec: "Today" },
       { label: "Sweep targets", wide: true, v: (a) => (D(a).targets || []).map(esc).join(" · ") +
           ' <span style="color:var(--muted)">(' + (D(a).targets_set ? "set" : "auto") + ")</span>" +

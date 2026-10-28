@@ -437,6 +437,10 @@ async def init_db():
         ("perp_mtm_usd", "REAL DEFAULT 0"),
         ("perp_funding_usd", "REAL DEFAULT 0"),
         ("net_delta", "REAL DEFAULT 0"),
+        # Forwards (Forwards screen), so the history carries the whole book.
+        ("forward_qty", "REAL DEFAULT 0"),
+        ("forward_mtm_usd", "REAL DEFAULT 0"),
+        ("forward_theta", "REAL DEFAULT 0"),
     ]
     cursor = await db.execute("PRAGMA table_info(portfolio_mtm_history)")
     columns = {row[1] for row in await cursor.fetchall()}

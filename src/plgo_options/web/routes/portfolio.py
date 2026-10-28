@@ -31,6 +31,64 @@ router = APIRouter()
 client = DeribitClient()
 
 
+def _forward_positions(book: dict, ladder: list[float], horizons: list[int],
+                       decay_cal: list[dict], spot: float, asset: str) -> list[dict]:
+    """Open forwards shaped like /pnl positions: curves over the spot ladder
+    per horizon, value qty x (S x (1 + carry x T_rem) - K), T_rem = days left
+    after the horizon (cash settlement past maturity)."""
+    carry = float(book.get("carry") or 0.0)
+    out = []
+    for t in book.get("trades") or []:
+        q, K, dtm = float(t["signed_qty"]), float(t["forward_price"]), float(t["days_to_maturity"])
+
+        def val(S: float, h: float) -> float:
+            T = max(dtm - h, 0.0) / 365.0
+            return q * (S * (1.0 + carry * T) - K)
+
+        curves = {str(h): [round(val(S, h), 2) for S in ladder] for h in horizons}
+        out.append({
+            "id": -100000 - int(t["id"]),
+            "forward_id": t["id"],
+            "is_forward": True,
+            "counterparty": t["counterparty"],
+            "instrument": f"{asset}-FWD-{str(t['maturity_date'])[:10]}",
+            "opt": "F",
+            "option_type": "Forward",
+            "side": "Long" if q > 0 else "Short",
+            "side_raw": t["side"],
+            "strike": K,
+            "expiry": str(t["maturity_date"])[:10],
+            "days_remaining": max(dtm, 0.0),
+            "qty": abs(q),
+            "net_qty": q,
+            "iv_pct": 0.0,
+            "delta": (t["delta"] / q) if q else 1.0,
+            "gamma": 0.0,
+            "theta": (t["theta"] / q) if q else 0.0,
+            "vega": 0.0,
+            "premium_usd": 0.0,
+            "premium_per": 0.0,
+            "mark_price_usd": t["fair_forward"],
+            "current_mtm": t["mtm"],
+            "payoff_by_horizon": curves,
+            "pnl_by_horizon": curves,
+            "mtm_by_horizon": [round(val(spot, h), 2) for h in MATRIX_HORIZONS],
+            "value_path": [round(val(spot, c["days"]), 2) for c in decay_cal],
+            "db_status": "active",
+        })
+    return out
+
+
+async def _has_open_forwards(asset: str) -> bool:
+    try:
+        from plgo_options.data.forward_repository import ensure_tables, list_forwards
+        db = await get_db()
+        await ensure_tables(db)
+        return bool(await list_forwards(db, asset.upper(), ("open",)))
+    except Exception:
+        return False
+
+
 async def _ensure_mtm_perp_columns(db) -> None:
     """Add the perp columns to portfolio_mtm_history if this DB predates them.
 
@@ -41,7 +99,8 @@ async def _ensure_mtm_perp_columns(db) -> None:
     """
     cursor = await db.execute("PRAGMA table_info(portfolio_mtm_history)")
     columns = {row[1] for row in await cursor.fetchall()}
-    for name in ("perp_qty", "perp_mtm_usd", "perp_funding_usd", "net_delta"):
+    for name in ("perp_qty", "perp_mtm_usd", "perp_funding_usd", "net_delta",
+                 "forward_qty", "forward_mtm_usd", "forward_theta"):
         if name not in columns:
             await db.execute(
                 f"ALTER TABLE portfolio_mtm_history ADD COLUMN {name} REAL DEFAULT 0"
@@ -439,7 +498,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read trades: {e}")
 
-    if not trades:
+    # A book holding only forwards (Forwards screen) is still a book: carry on
+    # with no option legs rather than 404, so collateral, the optimizer, the
+    # risk report and the agents still see the forwards.
+    has_forwards = await _has_open_forwards(asset)
+    if not trades and not has_forwards:
         raise HTTPException(status_code=404, detail="No trades found")
 
     # 2. Fetch market data — spot, smiles (for scenario curves), and batch tickers
@@ -774,7 +837,7 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             "db_status": t.get("_db_status", "active"),
         })
 
-    if not enriched:
+    if not enriched and not has_forwards:
         raise HTTPException(status_code=404, detail="No valid trades found")
 
     # 4. Totals
@@ -883,6 +946,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         ],
     }
     fwd_delta = float(fwd_book["totals"]["delta"] or 0.0)
+    forward_positions = _forward_positions(
+        fwd_book, [float(x) for x in spot_arr], sorted(set(all_horizons) | set(PNL_MATRIX_HORIZONS)),
+        decay_cal, float(eth_spot or 0.0), asset.upper())
 
     # `total_delta` stays options-only so the stored series keeps meaning what
     # it always meant; net_delta is that plus the hedge (a perp is delta 1 per
@@ -918,8 +984,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             """INSERT OR IGNORE INTO portfolio_mtm_history
                  (snapshot_date, asset, spot, mtm_usd, position_count,
                   delta, gamma, theta, vega,
-                  perp_qty, perp_mtm_usd, perp_funding_usd, net_delta)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  perp_qty, perp_mtm_usd, perp_funding_usd, net_delta,
+                  forward_qty, forward_mtm_usd, forward_theta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 today.isoformat(),
                 asset.upper(),
@@ -934,6 +1001,9 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
                 round(perp_mtm, 2),
                 round(perp_funding, 2),
                 round(float(net_delta), 4),
+                round(float(fwd_book["totals"]["net_qty"] or 0.0), 4),
+                round(float(fwd_book["totals"]["mtm"] or 0.0), 2),
+                round(float(fwd_book["totals"]["theta"] or 0.0), 4),
             ),
         )
         await db.commit()
@@ -962,6 +1032,11 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         "positions": enriched,
         "perp": perp_block,
         "forwards": forwards_block,
+        # The forwards as position-shaped rows (opt "F", is_forward) for screens
+        # that sum positions client-side (optimizer pages before a run). NOT
+        # part of `positions`, so nothing that reads positions double-counts
+        # them (the optimizer run gets them via _build_perp_positions).
+        "forward_positions": forward_positions,
         "totals": {
             "total_entry_premium": round(total_entry, 2),
             "current_total_mtm": round(total_mtm, 2),
@@ -980,6 +1055,12 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             "forward_qty": round(float(fwd_book["totals"]["net_qty"] or 0.0), 4),
             "forward_delta": round(fwd_delta, 4),
             "forward_mtm": round(float(fwd_book["totals"]["mtm"] or 0.0), 2),
+            "forward_theta": round(float(fwd_book["totals"]["theta"] or 0.0), 2),
+            "forward_notional": round(float(fwd_book["totals"]["notional_usd"] or 0.0), 2),
+            # Whole book: options + perp + forwards. current_total_mtm and the
+            # portfolio_* greeks above stay options-only.
+            "book_mtm": round(total_mtm + perp_mtm + float(fwd_book["totals"]["mtm"] or 0.0), 2),
+            "book_theta": round(total_theta + float(fwd_book["totals"]["theta"] or 0.0), 2),
         },
     }
 
@@ -1026,7 +1107,10 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
                       COALESCE(perp_qty, 0) AS perp_qty,
                       COALESCE(perp_mtm_usd, 0) AS perp_mtm_usd,
                       COALESCE(perp_funding_usd, 0) AS perp_funding_usd,
-                      COALESCE(net_delta, delta) AS net_delta
+                      COALESCE(net_delta, delta) AS net_delta,
+                      COALESCE(forward_qty, 0) AS forward_qty,
+                      COALESCE(forward_mtm_usd, 0) AS forward_mtm_usd,
+                      COALESCE(forward_theta, 0) AS forward_theta
                FROM portfolio_mtm_history
                WHERE asset = ? AND snapshot_date >= ?
                ORDER BY snapshot_date ASC""",
@@ -1053,6 +1137,11 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
             "perp_mtm_usd": r["perp_mtm_usd"],
             "perp_funding_usd": r["perp_funding_usd"],
             "net_delta": r["net_delta"],
+            "forward_qty": r["forward_qty"],
+            "forward_mtm_usd": r["forward_mtm_usd"],
+            "forward_theta": r["forward_theta"],
+            # Whole book that day: options + perp + forwards.
+            "book_mtm_usd": round((r["mtm_usd"] or 0) + (r["perp_mtm_usd"] or 0) + (r["forward_mtm_usd"] or 0), 2),
         }
         for r in rows
     ]
@@ -1065,6 +1154,7 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
         delta_1d = {
             "from_date": prev_day["date"],
             "mtm_change": round(current["mtm_usd"] - prev_day["mtm_usd"], 2),
+            "book_mtm_change": round(current["book_mtm_usd"] - prev_day["book_mtm_usd"], 2),
             "spot_change": round((current["spot"] or 0) - (prev_day["spot"] or 0), 4),
         }
 
@@ -1077,6 +1167,7 @@ async def mtm_history(asset: str = "ETH", days: int = 90):
             delta_7d = {
                 "from_date": base["date"],
                 "mtm_change": round(current["mtm_usd"] - base["mtm_usd"], 2),
+                "book_mtm_change": round(current["book_mtm_usd"] - base["book_mtm_usd"], 2),
                 "spot_change": round((current["spot"] or 0) - (base["spot"] or 0), 4),
             }
 

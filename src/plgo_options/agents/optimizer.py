@@ -607,7 +607,8 @@ async def sweep(policy: AssetPolicy, custom_spot: float | None = None,
         "book": pnl,                          # for the validation pass; not stored
         "policy": policy,                     # the one it ran under (a roll's target expiry)
         "roll": roll,
-        "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0),
+        "book_mtm": float((pnl.get("totals") or {}).get("current_total_mtm") or 0)
+                    + float((pnl.get("totals") or {}).get("forward_mtm") or 0),
     }
 
 

@@ -75,6 +75,16 @@ async def _fetch_collateral_by_cp(book: str, include_collar_loans: bool = False)
     return out
 
 
+def _linear_qty_by_cp(port: dict) -> dict[str, float]:
+    """OTC perp plus forward quantity per counterparty (lower-cased): both
+    are linear in spot, so the co-move reprices them the same way."""
+    from plgo_options.web.routes.collateral import _otc_forwards, _otc_perps
+    out = {k: v["net_qty"] for k, v in _otc_perps(port).items()}
+    for k, f in _otc_forwards(port).items():
+        out[k] = out.get(k, 0.0) + f["net_qty"]
+    return out
+
+
 async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = False) -> dict | None:
     """Inputs for the aggregate collateral view (the Collateral tab's netted
     basis): collateral posted in EVERY book per counterparty, USD prices of the
@@ -118,7 +128,7 @@ async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = 
                 "spot": float(port.get("eth_spot") or 0.0),
                 "ladder": list(port.get("spot_ladder") or []),
                 "curves": curves,
-                "perp_qty": {k: v["net_qty"] for k, v in _otc_perps(port).items()},
+                "perp_qty": _linear_qty_by_cp(port),
             }
         return {"collateral_by_cp": coll, "prices": await _collateral_prices(coll, asset) or {},
                 "other_book_mtm_by_cp": other_mtm, "other_books": other_books}

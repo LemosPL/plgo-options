@@ -1631,6 +1631,7 @@ async function tmLoad() {
       if (currentAsset !== asset0) return;
       enriched = pfData.positions || [];
       tmDecayCal = pfData.decay_calendar || [];
+      tmForwards = pfData.forwards || null;
       ethSpot = pfData.eth_spot;
       document.getElementById("eth-spot").textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
     } catch (e) {
@@ -1672,8 +1673,13 @@ function tmRender() {
   tmUpdateBadge();
 }
 
+// Open forwards (Forwards screen) from the last /pnl load, added to the totals bar.
+let tmForwards = null;
+
 function tmRenderSummary() {
   const active = tmEnriched.filter(t => t.db_status === "active");
+  const fw = (tmForwards && tmForwards.totals) || {};
+  const fwN = fw.count || 0;
   // Compute notional live: qty * ethSpot / 1e6
   const totalNotional = active.reduce((s, t) => s + ((t.qty || 0) * (ethSpot || 0) / 1e6), 0);
   const totalMtm = active.reduce((s, t) => s + (t.current_mtm || 0), 0);
@@ -1681,34 +1687,45 @@ function tmRenderSummary() {
   const totalGamma = active.reduce((s, t) => s + ((t.gamma || 0) * (t.net_qty || 0)), 0);
   const totalTheta = active.reduce((s, t) => s + ((t.theta || 0) * (t.net_qty || 0)), 0);
   const totalVega = active.reduce((s, t) => s + ((t.vega || 0) * (t.net_qty || 0)), 0);
+  // Forwards: linear, so delta / theta / MTM / notional only.
+  const fwMtm = fw.mtm || 0, fwDelta = fw.delta || 0, fwTheta = fw.theta || 0;
+  const fwNotional = Math.abs(fw.net_qty || 0) * (ethSpot || 0) / 1e6;
+  const fwNote = fwN ? `Includes ${fwN} open forward${fwN > 1 ? "s" : ""}` : "";
 
-  document.getElementById("tm-count").textContent = active.length;
+  document.getElementById("tm-count").textContent = active.length + (fwN ? ` + ${fwN} fwd` : "");
 
   // Format notional: qty * ethSpot / 1e6 in $mm
   const $notional = document.getElementById("tm-notional");
-  if (Math.abs(totalNotional) >= 1) {
-    $notional.textContent = `$${totalNotional.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
+  const totalNotionalAll = totalNotional + fwNotional;
+  if (Math.abs(totalNotionalAll) >= 1) {
+    $notional.textContent = `$${totalNotionalAll.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}mm`;
   } else {
-    const fullUsd = totalNotional * 1e6;
+    const fullUsd = totalNotionalAll * 1e6;
     $notional.textContent = `$${fullUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   }
 
   const $mtm = document.getElementById("tm-mtm");
-  $mtm.textContent = `$${totalMtm.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-  $mtm.style.color = totalMtm >= 0 ? "var(--green)" : "var(--red)";
+  const mtmAll = totalMtm + fwMtm;
+  $mtm.textContent = `$${mtmAll.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  $mtm.style.color = mtmAll >= 0 ? "var(--green)" : "var(--red)";
+  $mtm.title = fwNote ? `${fwNote}: forwards MTM $${Math.round(fwMtm).toLocaleString()}` : "";
   // Fire-and-forget: pull Δ1d / Δ7d from the snapshot history
   refreshMtmDeltas();
 
   const $delta = document.getElementById("tm-delta");
-  $delta.textContent = totalDelta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  $delta.style.color = totalDelta >= 0 ? "var(--green)" : "var(--red)";
+  const deltaAll = totalDelta + fwDelta;
+  $delta.textContent = deltaAll.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $delta.style.color = deltaAll >= 0 ? "var(--green)" : "var(--red)";
+  $delta.title = fwNote ? `${fwNote}: options ${totalDelta.toFixed(2)}, forwards ${fwDelta.toFixed(2)}` : "";
 
   const $gamma = document.getElementById("tm-gamma");
   $gamma.textContent = totalGamma.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 
   const $theta = document.getElementById("tm-theta");
-  $theta.textContent = totalTheta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  $theta.style.color = totalTheta >= 0 ? "var(--green)" : "var(--red)";
+  const thetaAll = totalTheta + fwTheta;
+  $theta.textContent = thetaAll.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  $theta.style.color = thetaAll >= 0 ? "var(--green)" : "var(--red)";
+  $theta.title = fwNote ? `${fwNote}: forward carry ${fwTheta.toFixed(2)}/day` : "Daily decay by counterparty";
 
   const $vega = document.getElementById("tm-vega");
   $vega.textContent = totalVega.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -3899,14 +3916,16 @@ function pfRenderSummary() {
   document.getElementById("pf-count").textContent = all.length;
   document.getElementById("pf-selected-count").textContent = sel.length;
 
-  const baselineMtm = all.reduce((s, p) => s + p.current_mtm, 0);
-  const scenarioMtm = pfCalcScenarioMtm();
+  // Forwards ride with the live book when "Include forwards" is ticked.
+  const fwMtm = pfForwardsOn() ? pfForwardTrades().reduce((s, t) => s + (t.mtm || 0), 0) : 0;
+  const baselineMtm = all.reduce((s, p) => s + p.current_mtm, 0) + fwMtm;
+  const scenarioMtm = pfCalcScenarioMtm() + fwMtm;
   const delta = scenarioMtm - baselineMtm;
 
   document.getElementById("pf-entry-prem").textContent =
     `$${sel.reduce((s, p) => s + Math.abs(p.premium_usd), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
-  const mtmTotal = sel.reduce((s, p) => s + (p.current_mtm || 0), 0);
+  const mtmTotal = sel.reduce((s, p) => s + (p.current_mtm || 0), 0) + fwMtm;
   const $remPrem = document.getElementById("pf-remaining-prem");
   $remPrem.textContent = `$${mtmTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   $remPrem.className = `risk-value ${mtmTotal >= 0 ? "mtm-pos" : "mtm-neg"}`;
@@ -3928,7 +3947,8 @@ function pfRenderSummary() {
     const t = pfData.totals;
     document.getElementById("pf-total-delta").textContent = t.portfolio_delta != null ? t.portfolio_delta.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
     document.getElementById("pf-total-gamma").textContent = t.portfolio_gamma != null ? t.portfolio_gamma.toFixed(4) : "--";
-    document.getElementById("pf-total-theta").textContent = t.portfolio_theta != null ? t.portfolio_theta.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
+    const fwTheta = pfForwardsOn() ? (t.forward_theta || 0) : 0;
+    document.getElementById("pf-total-theta").textContent = t.portfolio_theta != null ? (t.portfolio_theta + fwTheta).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
     document.getElementById("pf-total-vega").textContent = t.portfolio_vega != null ? t.portfolio_vega.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--";
 
     // Net (hedged) delta and the perp leg behind it. portfolio_delta above is
@@ -9531,7 +9551,9 @@ function optv2BaseIds() {
 function optv2ActivePositions() {
   const all = (optv2Data && optv2Data.positions) || [];
   const ids = optv2BaseIds();
-  if (!ids) return all;
+  // Full book includes the open forwards (server-built position rows, opt
+  // "F", is_forward); a Deals scope is options only.
+  if (!ids) return all.concat((optv2Data && optv2Data.forward_positions) || []);
   const set = new Set(ids.map(Number));
   return all.filter(p => set.has(Number(p.id)));
 }
@@ -9671,11 +9693,11 @@ function optv2RenderGreeks() {
   if (!optv2BaseIds()) {
     // Full book — use the server-computed totals as before.
     const t = optv2Data.totals;
-    document.getElementById("optv2-total-delta").textContent  = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv2-total-delta").textContent  = optv2Fmt((t.portfolio_delta || 0) + (t.forward_delta || 0), 2);
     document.getElementById("optv2-total-gamma").textContent  = optv2Fmt(t.portfolio_gamma, 4);
-    document.getElementById("optv2-total-theta").textContent  = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv2-total-theta").textContent  = optv2Fmt((t.portfolio_theta || 0) + (t.forward_theta || 0), 2);
     document.getElementById("optv2-total-vega").textContent   = optv2Fmt(t.portfolio_vega, 2);
-    document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt(t.current_total_mtm, 2);
+    document.getElementById("optv2-total-mtm").textContent    = "$" + optv2Fmt((t.current_total_mtm || 0) + (t.forward_mtm || 0), 2);
     return;
   }
   // Scoped — recompute totals from the selected positions (same formulas the
@@ -11484,7 +11506,9 @@ let optv3Loaded = false;
 function optv3ActivePositions() {
   const all = (optv3Data && optv3Data.positions) || [];
   const ids = optv2BaseIds();
-  if (!ids) return all;
+  // Full book includes the open forwards (server-built position rows, opt
+  // "F", is_forward); a Deals scope is options only.
+  if (!ids) return all.concat((optv3Data && optv3Data.forward_positions) || []);
   const set = new Set(ids.map(Number));
   return all.filter(p => set.has(Number(p.id)));
 }
@@ -11917,11 +11941,11 @@ function optv3RenderKpi() {
   const ids = optv2BaseIds();
   if (!ids) {
     const t = optv3Data.totals || {};
-    document.getElementById("optv3-total-delta").textContent = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv3-total-delta").textContent = optv2Fmt((t.portfolio_delta || 0) + (t.forward_delta || 0), 2);
     document.getElementById("optv3-total-gamma").textContent = optv2Fmt(t.portfolio_gamma, 4);
-    document.getElementById("optv3-total-theta").textContent = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv3-total-theta").textContent = optv2Fmt((t.portfolio_theta || 0) + (t.forward_theta || 0), 2);
     document.getElementById("optv3-total-vega").textContent = optv2Fmt(t.portfolio_vega, 2);
-    document.getElementById("optv3-total-mtm").textContent = "$" + optv2Fmt(t.current_total_mtm, 2);
+    document.getElementById("optv3-total-mtm").textContent = "$" + optv2Fmt((t.current_total_mtm || 0) + (t.forward_mtm || 0), 2);
     return;
   }
   const ps = optv3ActivePositions();
@@ -12126,7 +12150,7 @@ function optv3RollCandidates() {
   const scope = new Set(cptySel ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : []);
   return optv3ActivePositions().filter(p => {
     const opt = String(p.opt || "");
-    if (!["C", "P", "F"].includes(opt)) return false;
+    if (!["C", "P", "F"].includes(opt) || p.is_forward) return false;
     if (scope.size && !scope.has(p.counterparty)) return false;
     // Per-counterparty DTE threshold, else the global default.
     let thr = Object.prototype.hasOwnProperty.call(dteMap, p.counterparty) ? dteMap[p.counterparty] : gThr;
@@ -13178,7 +13202,9 @@ let optv4Loaded = false;
 function optv4ActivePositions() {
   const all = (optv4Data && optv4Data.positions) || [];
   const ids = optv2BaseIds();
-  if (!ids) return all;
+  // Full book includes the open forwards (server-built position rows, opt
+  // "F", is_forward); a Deals scope is options only.
+  if (!ids) return all.concat((optv4Data && optv4Data.forward_positions) || []);
   const set = new Set(ids.map(Number));
   return all.filter(p => set.has(Number(p.id)));
 }
@@ -13562,11 +13588,11 @@ function optv4RenderKpi() {
   const ids = optv2BaseIds();
   if (!ids) {
     const t = optv4Data.totals || {};
-    document.getElementById("optv4-total-delta").textContent = optv2Fmt(t.portfolio_delta, 2);
+    document.getElementById("optv4-total-delta").textContent = optv2Fmt((t.portfolio_delta || 0) + (t.forward_delta || 0), 2);
     document.getElementById("optv4-total-gamma").textContent = optv2Fmt(t.portfolio_gamma, 4);
-    document.getElementById("optv4-total-theta").textContent = optv2Fmt(t.portfolio_theta, 2);
+    document.getElementById("optv4-total-theta").textContent = optv2Fmt((t.portfolio_theta || 0) + (t.forward_theta || 0), 2);
     document.getElementById("optv4-total-vega").textContent = optv2Fmt(t.portfolio_vega, 2);
-    document.getElementById("optv4-total-mtm").textContent = "$" + optv2Fmt(t.current_total_mtm, 2);
+    document.getElementById("optv4-total-mtm").textContent = "$" + optv2Fmt((t.current_total_mtm || 0) + (t.forward_mtm || 0), 2);
     return;
   }
   const ps = optv4ActivePositions();
@@ -14103,7 +14129,7 @@ function optv4RollCandidates() {
   const scope = new Set(cptySel ? Array.from(cptySel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : []);
   return optv4ActivePositions().filter(p => {
     const opt = String(p.opt || "");
-    if (!["C", "P", "F"].includes(opt)) return false;
+    if (!["C", "P", "F"].includes(opt) || p.is_forward) return false;
     if (scope.size && !scope.has(p.counterparty)) return false;
     // Per-counterparty DTE threshold, else the global default.
     let thr = Object.prototype.hasOwnProperty.call(dteMap, p.counterparty) ? dteMap[p.counterparty] : gThr;
@@ -16275,12 +16301,21 @@ function _mtmDeltaSpan(d, kind = "mtm") {
   return `<span class="${cls}">${sign}$${Math.round(val).toLocaleString()}</span>`;
 }
 
+// MTM history as the whole book: options + perp + forwards (book_mtm_usd),
+// falling back to the options-only mtm_usd for responses without it.
+function _mtmBook(data) {
+  (data.history || []).forEach(h => { if (h.book_mtm_usd != null) { h.options_mtm_usd = h.mtm_usd; h.mtm_usd = h.book_mtm_usd; } });
+  ["delta_1d", "delta_7d"].forEach(k => { const d = data[k]; if (d && d.book_mtm_change != null) d.mtm_change = d.book_mtm_change; });
+  if (data.history && data.history.length) data.current = data.history[data.history.length - 1];
+  return data;
+}
+
 async function refreshMtmDeltas() {
   const $d1 = document.getElementById("tm-mtm-d1d");
   const $d7 = document.getElementById("tm-mtm-d7d");
   if (!$d1 || !$d7) return;
   try {
-    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=14`);
+    const data = _mtmBook(await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=14`));
     $d1.innerHTML = _mtmDeltaSpan(data.delta_1d);
     $d7.innerHTML = _mtmDeltaSpan(data.delta_7d);
   } catch (e) {
@@ -16383,7 +16418,7 @@ function _renderMtmTable(history) {
 async function mtmhLoadPage() {
   const range = document.getElementById("mtmh-range").value || "30";
   try {
-    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=${range}`);
+    const data = _mtmBook(await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=${range}`));
     const history = data.history || [];
     const $summary = document.getElementById("mtmh-summary");
     const $empty = document.getElementById("mtmh-empty");
@@ -16424,7 +16459,7 @@ async function mtmhOpenModal() {
   const $modal = document.getElementById("mtmh-modal");
   $modal.classList.add("open");
   try {
-    const data = await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=30`);
+    const data = _mtmBook(await get(`/api/portfolio/mtm-history?asset=${currentAsset}&days=30`));
     const history = data.history || [];
     const $summary = document.getElementById("mtmh-modal-summary");
     const $empty = document.getElementById("mtmh-modal-empty");

@@ -132,3 +132,18 @@ def test_optimizer_gets_forward_legs(monkeypatch):
     assert leg["opt"] == "F" and leg["is_forward"] and leg["counterparty"] == "Flowdesk"
     assert leg["strike"] == 1.1 and leg["net_qty"] == -1e6
     assert leg["payoff_by_horizon"]["0"] == [pytest.approx(600_000), pytest.approx(100_000), pytest.approx(-400_000)]
+
+
+def test_forward_positions_curves_for_client_side_screens():
+    from plgo_options.web.routes.portfolio import _forward_positions
+    book = {"carry": 0.0, "trades": [{"id": 7, "counterparty": "Flowdesk", "side": "sell", "signed_qty": -2500.0,
+                                      "forward_price": 2346.5, "maturity_date": "2026-11-27", "days_to_maturity": 30,
+                                      "delta": -2500.0, "theta": 0.0, "fair_forward": 2400.0, "mtm": -133_750.0}]}
+    rows = _forward_positions(book, [2000.0, 2346.5, 2600.0], [0, 30, 60],
+                              [{"days": 0}, {"days": 45}], 2400.0, "ETH")
+    r = rows[0]
+    assert r["is_forward"] and r["opt"] == "F" and r["id"] == -100007 and r["net_qty"] == -2500.0
+    assert r["payoff_by_horizon"]["0"] == [pytest.approx(866_250), 0.0, pytest.approx(-633_750)]
+    assert r["payoff_by_horizon"]["60"] == r["payoff_by_horizon"]["0"]      # no carry: same past maturity
+    assert r["delta"] == 1.0 and r["current_mtm"] == -133_750.0
+    assert r["value_path"] == [pytest.approx(-133_750), pytest.approx(-133_750)]

@@ -545,6 +545,9 @@ async def collateral_scenario(asset: str = "ETH"):
     ladder: list[float] = list(data.get("spot_ladder") or [])
     positions: list[dict] = data.get("positions") or []
     otc_perps = _otc_perps(data)
+    fwd_block = data.get("forwards") or {}
+    fwd_trades = fwd_block.get("trades") or []
+    fwd_carry = float(fwd_block.get("carry") or 0.0)
 
     if not ladder:
         raise HTTPException(status_code=502, detail="No spot ladder from portfolio engine")
@@ -596,6 +599,15 @@ async def collateral_scenario(asset: str = "ETH"):
         for k, perp in otc_perps.items():
             perp_mtm = perp["net_qty"] * (float(s) - perp["avg_entry"])
             liab_by_cp[k] = max(0.0, liab_by_cp.get(k, 0.0) - perp_mtm)
+        # Forwards net per counterparty the same way, marked at this spot.
+        fwd_by_cp: dict[str, float] = {}
+        for f in fwd_trades:
+            k = str(f.get("counterparty") or "").strip().lower()
+            T = max(float(f.get("days_to_maturity") or 0), 0) / 365.0
+            fwd_by_cp[k] = fwd_by_cp.get(k, 0.0) + float(f["signed_qty"]) * (
+                float(s) * (1 + fwd_carry * T) - float(f["forward_price"]))
+        for k, m in fwd_by_cp.items():
+            liab_by_cp[k] = max(0.0, liab_by_cp.get(k, 0.0) - m)
         liability = sum(liab_by_cp.values())
 
         eth_px = s if a == "ETH" else other_spot

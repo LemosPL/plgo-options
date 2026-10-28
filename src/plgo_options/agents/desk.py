@@ -59,9 +59,14 @@ async def get_book(asset: str) -> dict:
     positions = [p for p in (pnl.get("positions") or []) if str(p.get("opt") or "").upper() != "F"]
     # portfolio_pnl names the asset's spot eth_spot, FIL included.
     spot = float(pnl.get("spot") or pnl.get("eth_spot") or 0)
-    return {"spot": spot, "mtm": float(t.get("current_total_mtm") or 0),
-            "delta": float(t.get("portfolio_delta") or 0), "theta": float(t.get("portfolio_theta") or 0),
-            "vega": float(t.get("portfolio_vega") or 0), "positions": positions, "n": len(positions)}
+    # Options plus forwards (Forwards screen); the perp stays separate (get_perp).
+    fq, fm = float(t.get("forward_qty") or 0), float(t.get("forward_mtm") or 0)
+    return {"spot": spot,
+            "mtm": float(t.get("current_total_mtm") or 0) + fm,
+            "delta": float(t.get("portfolio_delta") or 0) + float(t.get("forward_delta") or 0),
+            "theta": float(t.get("portfolio_theta") or 0) + float(t.get("forward_theta") or 0),
+            "vega": float(t.get("portfolio_vega") or 0), "positions": positions, "n": len(positions),
+            "forward_qty": fq, "forward_mtm": fm}
 
 
 async def get_perp(asset: str) -> dict:
@@ -125,7 +130,7 @@ async def _gate_ctx(pol: AssetPolicy, spot: float, book: dict | None = None,
         month_cost_usd=await store.month_to_date_cost(pol.asset, month_key()),
         perp_notional_usd=float((perp or {}).get("notional_usd") or 0),
         perp_funding_month_usd=abs(float(((perp or {}).get("funding") or {}).get("last_30d_usd") or 0)),
-        monday_mtm_usd=float(monday["mtm_usd"]) if monday else None,
+        monday_mtm_usd=(float(monday["mtm_usd"]) + float(monday.get("forward_mtm_usd") or 0)) if monday else None,
         current_mtm_usd=(book or {}).get("mtm"),
         book_delta_usd=float(book["delta"]) * spot if book and book.get("delta") is not None and spot else None,
     )
@@ -303,9 +308,13 @@ async def morning_open(ctx: dict) -> dict:
             continue
         if book:
             d.update(spot=spot, mtm=book["mtm"], delta=book["delta"], delta_usd=book["delta"] * spot,
-                     theta=book["theta"], vega=book["vega"])
+                     theta=book["theta"], vega=book["vega"],
+                     forward_qty=book.get("forward_qty"), forward_mtm=book.get("forward_mtm"))
             out.append(f"Spot {_p(asset, spot)} | MTM {_m(book['mtm'])} | delta {book['delta']:,.0f} "
                        f"({_m(book['delta'] * spot)}) | theta {_m(book['theta'])}/day | vega {_m(book['vega'])}")
+            if book.get("forward_qty"):
+                out.append(f"Forwards: {book['forward_qty']:+,.0f} {asset}, MTM {_m(book['forward_mtm'])} "
+                           f"(in the MTM and delta above).")
         else:
             d.update(spot=spot, book_error=berr)
             out.append(f"Book unavailable: {berr}")

@@ -807,6 +807,19 @@ async def scan_deals(asset: str = "ETH", include_expired: bool = False,
 
     counts = {k: sum(1 for s in signals if s["state"] == k)
               for k in ("live", "imminent", "approaching", "watch")}
+
+    # Forwards (Forwards screen) net into each counterparty's liability the way
+    # collateral nets them: a forward we are winning on offsets what we owe.
+    try:
+        from plgo_options.web.routes.forwards import build_forward_book
+        fwd = await build_forward_book(asset, spot, today)
+        names = {str(c).strip().lower(): c for c in liability}
+        for c in fwd["by_counterparty"]:
+            key = names.get(c["counterparty"].strip().lower(), c["counterparty"])
+            liability[key] = max(0.0, liability.get(key, 0.0) - float(c["mtm"] or 0.0))
+    except Exception:
+        pass
+
     return {
         **out_base,
         "ladder": [round(float(x), 4) for x in ladder],
