@@ -20,6 +20,7 @@ from plgo_options.optimization.optim_usecase import (
 )
 from plgo_options.data.database import get_db
 from plgo_options.data.deal_grouping import compute_composite_ids
+from plgo_options.pricing import exchange_quotes
 from plgo_options.web.routes.perps import build_summary as perp_summary
 from plgo_options.web.routes.risk_report import optimizer_ladder
 
@@ -607,6 +608,17 @@ async def run_optimizer(params: OptimizationParams):
         target_profile_file=params.target_profile_file,
         enable_composite_unwind=params.enable_composite_unwind,
     )
+
+    # Deribit is priced off its live book (pricing.exchange_quotes): load it just
+    # before the run that selects it. A failed load is not fatal - Deribit legs
+    # then fall back to the mid vol surface, like any uncalibrated counterparty.
+    if params.asset.upper() == "ETH" and any(
+            str(c).strip().lower() == "deribit" for c in (params.counterparties or [])):
+        try:
+            n = await exchange_quotes.load("Deribit", "ETH")
+            print(f"run_optimizer(): Deribit ETH book loaded, {n} two-sided options")
+        except Exception as e:
+            print(f"run_optimizer(): Deribit book load failed, mid vol fallback: {e}")
 
     usecase = OptimizerUseCase.from_portfolio_payload(pnl_data, run_params)
     try:

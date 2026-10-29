@@ -2375,12 +2375,20 @@ function optv2PopulateCounterparties() {
       .map(p => (p.counterparty || "").trim())
       .filter(Boolean)
   )].sort();
+  // Deribit is offered for ETH even with nothing held there: the run prices its
+  // legs off the live Deribit book (pricing/exchange_quotes.py). Pick it next to
+  // the held counterparties - ALL means "the ones we already hold".
+  if (currentAsset === "ETH" && !counterparties.some(c => c.toLowerCase() === "deribit")) {
+    counterparties.push("Deribit");
+  }
 
   console.log("[OPT-FE] counterparties:", counterparties);
 
   select.innerHTML =
     `<option value="ALL" selected>ALL</option>` +
     counterparties.map(c => `<option value="${c.replace(/"/g, "&quot;")}">${c}</option>`).join("");
+  // Show every entry without scrolling (ALL + each counterparty), up to 8.
+  select.size = Math.min(counterparties.length + 1, 8);
 }
 
 // Make a "<select multiple>" of counterparties toggle on plain click (no Ctrl/Cmd needed),

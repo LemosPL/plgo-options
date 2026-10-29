@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 
 from ..optimization.math_utils import bs_price
+from . import exchange_quotes
 
 CPTY_PRICING: dict[str, dict[str, dict]] = {
     "Flowdesk": {
@@ -48,6 +49,12 @@ CPTY_PRICING: dict[str, dict[str, dict]] = {
         # ETH: not calibrated yet — fill in as ETH trades with Keyrock.
     },
     # Wave, G20: not calibrated yet — resolve_price returns None, callers use mid vol.
+    # An exchange: priced off its live two-sided book (pricing.exchange_quotes),
+    # loaded before a run that selects it. Not mirrored in app.js: the Pricing
+    # tab shows Deribit legs at mid until it learns this model.
+    "Deribit": {
+        "ETH": {"model": "exchange_book", "venue": "Deribit"},
+    },
 }
 
 
@@ -105,6 +112,18 @@ def resolve_price(
             vol_pct = far if (far is not None and logm > method["far_wing_threshold"]) else method["ask_vol"]
         price = bs_price(spot, strike, T, 0.0, vol_pct / 100.0, opt)
         return price, vol_pct
+
+    if method["model"] == "exchange_book":
+        # The leg is priced at the exchange's own bid/ask vol (repriced at this
+        # spot, so a hypothetical-spot run moves it too) plus the taker fee.
+        # None - mid vol surface - for anything not quoted on both sides.
+        quote = exchange_quotes.lookup(method["venue"], asset, strike, T, opt)
+        if quote is None:
+            return None
+        vol_pct = quote[1] if side == "buy" else quote[0]
+        price = bs_price(spot, strike, T, 0.0, vol_pct / 100.0, opt)
+        fee = exchange_quotes.deribit_option_fee_usd(spot, price)
+        return (price + fee if side == "buy" else max(price - fee, 0.0)), vol_pct
 
     if method["model"] == "otm_flat_vol_itm_intrinsic":
         intrinsic = max(spot - strike, 0.0) if opt == "C" else max(strike - spot, 0.0)
