@@ -44,3 +44,6 @@ data/positions/*.csv
 data/ETH_portfolio/
 data/FIL_positions/
 data/trades.db
+
+# macOS Finder metadata
+.DS_Store
