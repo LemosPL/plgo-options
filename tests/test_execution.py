@@ -250,7 +250,7 @@ async def test_rehedge_end_to_end_on_paper():
 # -- shadow run ----------------------------------------------------------------
 
 def _shadow(book_delta: float, perp: float, books: Books, band_usd: float = 150_000.0,
-            halted=None):
+            halted=None, target: float | None = 0.0):
     from plgo_options.execution.shadow import shadow_tick
 
     async def book_fn(_a):
@@ -262,11 +262,14 @@ def _shadow(book_delta: float, perp: float, books: Books, band_usd: float = 150_
     async def band_fn(_a):
         return band_usd
 
+    async def target_fn(_a):
+        return target
+
     async def never():
         return False
 
-    return shadow_tick(book_fn=book_fn, perp_fn=perp_fn, band_fn=band_fn, quotes=books,
-                       halted=halted or never, sleep=_no_sleep)
+    return shadow_tick(book_fn=book_fn, perp_fn=perp_fn, band_fn=band_fn, target_fn=target_fn,
+                       quotes=books, halted=halted or never, sleep=_no_sleep)
 
 
 @pytest.mark.asyncio
@@ -295,3 +298,25 @@ async def test_shadow_respects_the_kill_switch():
     d = await _shadow(book_delta=100.0, perp=0.0, books=_books(), halted=on)
     assert d["status"] == "halted" and d["filled_usd"] == 0
     assert "nothing filled" in summarize(d)
+
+
+@pytest.mark.asyncio
+async def test_shadow_bands_around_the_target_not_zero():
+    # -2,500 ETH held on purpose: at target, nothing to do.
+    d = await _shadow(book_delta=-2500.0, perp=0.0, books=_books(), target=-2500.0)
+    assert d["status"] == "inside_band" and d["mismatch_eth"] == 0
+    # Drifted 100 ETH shorter than target: buy 100 back, not 2,600.
+    d = await _shadow(book_delta=-2600.0, perp=0.0, books=_books(), target=-2500.0)
+    assert d["side"] == "buy" and d["trade_eth"] == 100.0
+    # A perp already bought since counts toward the target.
+    d = await _shadow(book_delta=-2600.0, perp=80.0, books=_books(), target=-2500.0)
+    assert d["status"] == "inside_band"
+
+
+@pytest.mark.asyncio
+async def test_shadow_without_a_target_simulates_nothing():
+    from plgo_options.execution.shadow import summarize
+    books = _books()
+    d = await _shadow(book_delta=-2500.0, perp=0.0, books=books, target=None)
+    assert d["status"] == "no_target" and "side" not in d
+    assert "no target set" in summarize(d)
