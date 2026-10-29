@@ -3,7 +3,10 @@
 One tick:
     1. the ETH book's delta (options + forwards) and the perp hedge across
        venues, the same numbers the desk agents read (agents.desk);
-    2. check_rehedge against the policy's delta_band_usd / spot;
+    2. check_rehedge on the drift from the target exposure (policy
+       reference_delta, set with Monday's reference: B1 "bring exposure back
+       to target"), against the policy's delta_band_usd / spot. With no
+       target set the tick simulates nothing rather than assume zero;
     3. if breached, rehedge_request priced off live Deribit ETH-PERPETUAL, worked
        by work_order on a PaperConnector over the same live book, with the
        real kill switch;
@@ -47,6 +50,11 @@ async def _band_usd(asset: str) -> float:
     return float((await get_policy(asset)).optimizer.delta_band_usd)
 
 
+async def _target_delta(asset: str) -> float | None:
+    from plgo_options.agents.store import get_policy
+    return (await get_policy(asset)).reference_delta
+
+
 async def _kill_switch() -> bool:
     from plgo_options.agents.store import kill_switch_on
     return await kill_switch_on()
@@ -62,6 +70,7 @@ async def shadow_tick(
         book_fn: Callable[[str], Awaitable[dict]] = _live_book,
         perp_fn: Callable[[str], Awaitable[dict]] = _live_perp,
         band_fn: Callable[[str], Awaitable[float]] = _band_usd,
+        target_fn: Callable[[str], Awaitable[float | None]] = _target_delta,
         halted: Callable[[], Awaitable[bool]] = _kill_switch,
         quotes: QuoteSource | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -77,11 +86,21 @@ async def shadow_tick(
 
     book_delta = float(book.get("delta") or 0)
     perp_qty = float(perp.get("net_qty") or 0)
-    # Positions are already folded into the book's delta, so none are passed.
-    decision = check_rehedge([], spot, perp_qty, band_usd / spot, extra_option_delta=book_delta)
+    target = await target_fn(ASSET)
     data: dict[str, Any] = {
         "ts": now.isoformat(timespec="seconds"), "spot": spot,
         "book_delta_eth": round(book_delta, 3), "perp_eth": round(perp_qty, 3),
+        "target_eth": None if target is None else round(float(target), 3),
+    }
+    if target is None:
+        return {**data, "status": "no_target",
+                "detail": "no reference_delta in the ETH policy; set Monday's reference"}
+
+    # Positions are already folded into the book's delta, so none are passed; the
+    # target is subtracted so check_rehedge's "trade to zero" trades back to target.
+    decision = check_rehedge([], spot, perp_qty, band_usd / spot,
+                             extra_option_delta=book_delta - float(target))
+    data |= {
         "mismatch_eth": round(decision.mismatch, 3), "band_eth": round(decision.band, 3),
         "band_usd": band_usd, "breached": decision.breached,
         "trade_eth": round(decision.trade_qty, 3),
@@ -116,9 +135,13 @@ async def shadow_tick(
 
 def summarize(d: dict[str, Any]) -> str:
     head = (f"ETH {d.get('spot', 0):,.2f} · book Δ {d.get('book_delta_eth', 0):+,.1f} · "
-            f"perp {d.get('perp_eth', 0):+,.1f} · mismatch {d.get('mismatch_eth', 0):+,.1f} "
-            f"vs band ±{d.get('band_eth', 0):,.1f} ETH")
+            f"perp {d.get('perp_eth', 0):+,.1f}")
     status = d.get("status")
+    if status == "no_target":
+        return f"{head} → no target set, nothing simulated ({d['detail']})"
+    if d.get("target_eth") is not None:
+        head += (f" · target {d['target_eth']:+,.1f} · drift {d.get('mismatch_eth', 0):+,.1f} "
+                 f"vs band ±{d.get('band_eth', 0):,.1f} ETH")
     if status == "inside_band":
         return f"{head} → inside band, no hedge"
     if status in ("error", "below_min_size"):
