@@ -41,18 +41,20 @@ def flat_fee(maker_rate: float = 0.0, taker_rate: float = 0.0005) -> FeeFn:
 
 
 def deribit_quotes(client: Any) -> QuoteSource:
-    """A QuoteSource over market_data.deribit_client.DeribitClient (public tickers).
+    """A QuoteSource over market_data.deribit_client.DeribitClient (public ``ticker``).
 
-    The ticker schemas carry no sizes, so paper fills against them are unbounded
-    at the touch; fine for shadow runs, not for sizing.
+    Reads the raw ticker rather than the client's schemas, which drop the
+    displayed sizes; without them a paper fill of any size would clear at the
+    touch. Only the top level is known, so a large order fills the touch size
+    and no deeper: pessimistic, like the rest of the fill model. The client
+    caches responses for 10 s, so steps shorter than that see the same book.
     """
     async def quotes(instrument: str) -> BookTop:
-        if instrument == "ETH-PERPETUAL":
-            t = await client.get_perpetual_ticker()
-        else:
-            t = await client.get_option_ticker(instrument)
-        return BookTop(instrument=instrument, best_bid=t.best_bid, best_ask=t.best_ask,
-                       mark=t.mark_price, ts=time.time())
+        raw = await client._get("ticker", {"instrument_name": instrument})
+        return BookTop(instrument=instrument, best_bid=raw.get("best_bid_price"),
+                       best_ask=raw.get("best_ask_price"), bid_size=raw.get("best_bid_amount"),
+                       ask_size=raw.get("best_ask_amount"), mark=raw.get("mark_price"),
+                       ts=time.time())
     return quotes
 
 
