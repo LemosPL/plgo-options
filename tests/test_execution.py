@@ -245,3 +245,53 @@ async def test_rehedge_end_to_end_on_paper():
     assert rep.outcome == "filled"
     pos = await pc.positions()
     assert pos[0].size == req.qty
+
+
+# -- shadow run ----------------------------------------------------------------
+
+def _shadow(book_delta: float, perp: float, books: Books, band_usd: float = 150_000.0,
+            halted=None):
+    from plgo_options.execution.shadow import shadow_tick
+
+    async def book_fn(_a):
+        return {"spot": 2500.0, "delta": book_delta}
+
+    async def perp_fn(_a):
+        return {"net_qty": perp}
+
+    async def band_fn(_a):
+        return band_usd
+
+    async def never():
+        return False
+
+    return shadow_tick(book_fn=book_fn, perp_fn=perp_fn, band_fn=band_fn, quotes=books,
+                       halted=halted or never, sleep=_no_sleep)
+
+
+@pytest.mark.asyncio
+async def test_shadow_inside_band_trades_nothing():
+    d = await _shadow(book_delta=50.0, perp=-20.0, books=_books())  # 30 ETH < 60 ETH band
+    assert d["status"] == "inside_band" and d["band_eth"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_shadow_breach_works_the_hedge_on_paper():
+    from plgo_options.execution.shadow import summarize
+    d = await _shadow(book_delta=100.0, perp=-10.0, books=_books())  # 90 ETH long: sell
+    assert d["status"] == "filled" and d["side"] == "sell"
+    assert d["qty_usd"] == pytest.approx(90 * 2500.5, abs=1)
+    assert d["avg_price"] == 2500.0 and d["slippage_bps"] == pytest.approx(2.0, abs=0.01)
+    assert "would sell" in summarize(d)
+
+
+@pytest.mark.asyncio
+async def test_shadow_respects_the_kill_switch():
+    from plgo_options.execution.shadow import summarize
+
+    async def on():
+        return True
+
+    d = await _shadow(book_delta=100.0, perp=0.0, books=_books(), halted=on)
+    assert d["status"] == "halted" and d["filled_usd"] == 0
+    assert "nothing filled" in summarize(d)
