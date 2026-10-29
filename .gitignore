@@ -35,3 +35,12 @@ data/cache/
 data/prod/
 data/trades/
 data/plgo_options.*.bak.db
+
+# Trade and portfolio exports (desk / counterparty spreadsheets) and local
+# databases: real positions, never source. The two PLGO_Trades files already
+# tracked under data/positions/ stay tracked; this only stops new ones.
+data/positions/*.xlsx
+data/positions/*.csv
+data/ETH_portfolio/
+data/FIL_positions/
+data/trades.db
