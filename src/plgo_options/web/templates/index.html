@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=25">
+  <link rel="stylesheet" href="/static/style.css?v=26">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -144,6 +144,10 @@
     <li class="nav-item" data-page="pricing">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 16A8 8 0 108 0a8 8 0 000 16zm.25-11.25v1.5a.75.75 0 01-1.5 0v-1.5a.75.75 0 011.5 0zm0 4v3.5a.75.75 0 01-1.5 0v-3.5a.75.75 0 011.5 0z"/></svg>
       Pricing
+    </li>
+    <li class="nav-item" data-page="sandbox">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 1h4v1H9.5v4.2l4.3 6.9A1.3 1.3 0 0112.7 15H3.3a1.3 1.3 0 01-1.1-1.9l4.3-6.9V2H6V1zm1.5 1v4.5L5.6 9.6h4.8L8.5 6.5V2h-1z"/></svg>
+      Sandbox
     </li>
     <li class="nav-item" data-page="structurer">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M6 2a.5.5 0 01.47.33L10 11.44l1.47-4.4A.5.5 0 0112 6.67h3.5a.5.5 0 010 1h-3.15l-1.82 5.46a.5.5 0 01-.94.02L6 4.01 4.53 8.4a.5.5 0 01-.47.27H.5a.5.5 0 010-1h3.15l1.82-5.46A.5.5 0 016 2z"/></svg>
@@ -3623,6 +3627,103 @@
   <!-- ══════════════════════════════════════════════════════════ -->
   <!-- PAGE: Agents                                               -->
   <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- PAGE: Sandbox (sandbox.js, /api/sandbox): price and compare dealer offers
+       on a token we don't trade yet (ZAMA). Own tables: never touches the book. -->
+  <div id="page-sandbox" class="page">
+    <section class="card">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Sandbox — <span id="sb-asset-label">ZAMA</span>
+            <small style="font-weight:400;color:var(--muted);font-size:.75rem">what-if only: offers here never touch the trades, P&amp;L, collateral or optimizer</small></h2>
+          <span id="sb-status" class="optv3-muted" style="font-size:.75rem"></span>
+        </div>
+        <div class="collat-header-right rr-controls">
+          <label class="pf-filter-label" title="Any token listed on Coinbase / Kraken / OKX / Bybit">Token
+            <input type="text" id="sb-asset" value="ZAMA" style="width:6rem;text-transform:uppercase">
+          </label>
+          <button id="sb-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="sb-market" class="sb-market"></div>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Pricing inputs</h3>
+      <div class="sb-inputs">
+        <label title="ATM vol in %. Blank = realised vol over the window on the right (no listed options exist).">ATM vol (%)
+          <input type="number" id="sb-vol" step="1" placeholder="realised"></label>
+        <label>Realised window
+          <select id="sb-volwin"><option value="30d">30d</option><option value="60d">60d</option><option value="90d">90d</option><option value="180d">180d</option><option value="all">Since listing</option></select></label>
+        <label title="Vol points added per 10% a strike sits below the forward. > 0 = puts richer than calls (normal for a token with unlock supply). 0 = flat vol.">Skew (vol pts / 10%)
+          <input type="number" id="sb-skew" step="0.5"></label>
+        <label title="Annual carry: forward = spot x (1 + carry x T). Negative when shorting the token costs funding / borrow. Perp funding is shown above for reference.">Carry (% a year)
+          <input type="number" id="sb-carry" step="0.5"></label>
+        <label title="Opportunity cost of the collateral we would post, % a year. Charged on each offer's collateral x time to expiry.">Collateral cost (% a year)
+          <input type="number" id="sb-crate" step="0.5"></label>
+        <label title="Override spot for a what-if (e.g. price a quote at its reference). Blank = live.">Spot override
+          <input type="number" id="sb-spot" step="any" placeholder="live"></label>
+      </div>
+      <div class="sb-inputs" style="margin-top:.6rem">
+        <label>Holdings (tokens)<input type="number" id="sb-hold" step="any"></label>
+        <label>First unlock (cliff)<input type="date" id="sb-cliff"></label>
+        <label>Cliff (% of holdings)<input type="number" id="sb-cliffpct" step="1"></label>
+        <label title="The rest vests in equal monthly tranches over this many months after the cliff">Then linear over (months)<input type="number" id="sb-months" step="1"></label>
+        <div class="sb-btns">
+          <button id="sb-apply" class="btn-secondary" style="width:auto" title="Re-price with these inputs without saving">Apply (what-if)</button>
+          <button id="sb-save" class="btn-primary" style="width:auto">Save as defaults</button>
+        </div>
+      </div>
+      <p id="sb-inputs-info" class="optv3-hint" style="margin:.5rem 0 0"></p>
+    </section>
+
+    <section class="card">
+      <div class="collat-header">
+        <h3 class="rr-h" style="margin:0">Offers — compared at live spot</h3>
+        <div class="collat-header-right rr-controls">
+          <label class="toggle-label" style="margin:0"><input type="checkbox" id="sb-show-rejected"> Show rejected</label>
+          <button id="sb-new" class="btn-primary" style="width:auto">+ New offer</button>
+        </div>
+      </div>
+      <div id="sb-form" style="display:none"></div>
+      <div id="sb-offers" class="chain-wrapper"></div>
+      <p class="optv3-hint" style="margin:.4rem 0 0"><b>Value to us</b> = our fair value of the legs + premium received − collateral cost, at our vol / skew / carry; negative = what the structure hands the dealer. <b>Implied skew</b> = the skew that would make the quote fair at our ATM vol: what the dealer is implicitly charging. <b>Effective price</b> = USD each hedged token ends up sold for at expiry (all-in). Expected / 5th pct use a lognormal at the ATM vol.</p>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Effective sale price at expiry</h3>
+      <div id="sb-chart" style="height:420px"></div>
+      <div id="sb-scen" class="chain-wrapper" style="margin-top:.8rem"></div>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Collar solver <small class="optv3-muted" style="font-weight:400">what a fair quote looks like at our vol, to counter with</small></h3>
+      <div class="sb-inputs">
+        <label>Solve for<select id="sv-for"><option value="call">Call strike (I pick the put)</option><option value="put">Put strike (I pick the call)</option></select></label>
+        <label>Fixed strike<input type="number" id="sv-k" step="any" value="0.05"></label>
+        <label>Expiry<input type="date" id="sv-exp" value="2027-02-03"></label>
+        <label title="Premium per token we want to receive (+) or will pay (-). 0 = zero cost.">Net premium / token<input type="number" id="sv-prem" step="any" value="0"></label>
+        <label title="Calls sold per put bought. 2 = 1x2: each call funds half the put, so the call strike moves up, but twice the tokens are capped.">Calls per put<input type="number" id="sv-ratio" step="0.1" value="1"></label>
+        <label>Qty (tokens)<input type="number" id="sv-qty" step="any" value="36600000"></label>
+        <div class="sb-btns"><button id="sv-go" class="btn-primary" style="width:auto">Solve</button></div>
+      </div>
+      <div id="sv-out" style="margin-top:.6rem"></div>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Unlock hedge program <small class="optv3-muted" style="font-weight:400">a zero-cost collar for every unlock, fair at our inputs</small></h3>
+      <div class="sb-inputs">
+        <label>Put strike (% of spot)<input type="number" id="pg-pct" step="1" value="70"></label>
+        <div class="sb-btns"><button id="pg-go" class="btn-primary" style="width:auto">Build program</button></div>
+      </div>
+      <div id="pg-out" class="chain-wrapper" style="margin-top:.6rem"></div>
+    </section>
+
+    <section class="card">
+      <h3 class="rr-h">Sandbox book <small class="optv3-muted" style="font-weight:400">offers marked Booked</small></h3>
+      <div id="sb-book"></div>
+    </section>
+  </div>
+
   <div id="page-collatplat" class="page">
     <section class="card">
       <div class="collat-header">
@@ -4252,5 +4353,6 @@
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>
+<script src="/static/sandbox.js?v=1"></script>
 </body>
 </html>

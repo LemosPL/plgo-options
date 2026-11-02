@@ -1800,3 +1800,34 @@ select { margin-bottom: .5rem; }
 
 .tm-fwd-badge { font-size: .7rem; padding: .05rem .4rem; border-radius: 8px; border: 1px solid #a371f7; color: #a371f7; }
 tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
+
+/* ── Sandbox (sandbox.js) ───────────────────────────────────── */
+#page-sandbox .card { margin-bottom: 1.25rem; }
+.sb-market { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 1rem; margin-top: 1rem; }
+@media (max-width: 1100px) { .sb-market { grid-template-columns: 1fr; } }
+.sb-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: .7rem; }
+.sb-pill { display: inline-block; font-size: .72rem; padding: .05rem .45rem; margin: .1rem .15rem 0 0; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); }
+.sb-pill.off { text-decoration: line-through; opacity: .6; }
+.sb-inputs { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: flex-end; }
+.sb-inputs label { display: flex; flex-direction: column; gap: .25rem; font-size: .75rem; color: var(--muted); }
+.sb-inputs input, .sb-inputs select { width: 10rem; font-size: .85rem; }
+.sb-btns { display: flex; gap: .5rem; }
+#page-sandbox .chain-wrapper { max-height: none; overflow-x: auto; }
+#page-sandbox table.pf-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+#page-sandbox .pf-table th, #page-sandbox .pf-table td { padding: .36rem .5rem; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }
+#page-sandbox .pf-table th { background: var(--surface); font-weight: 600; }
+#page-sandbox .pf-table td.sb-left { text-align: left; white-space: normal; min-width: 12rem; }
+#page-sandbox .pf-table td.sb-legs { min-width: 9.5rem; white-space: nowrap; }
+#page-sandbox .pf-table td.sb-legs > div { margin-bottom: .2rem; }
+.sb-legs { font-size: .72rem; color: var(--muted); }
+.sb-warn { color: var(--orange); font-size: .72rem; margin-top: .15rem; white-space: normal; max-width: 22rem; }
+.sb-actions button { width: auto; padding: .12rem .35rem; font-size: .7rem; margin: .1rem; }
+.sb-st { font-size: .7rem; padding: .08rem .45rem; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); }
+.sb-st.booked { color: var(--green); border-color: var(--green); font-weight: 700; }
+.sb-st.rejected { color: var(--red); border-color: var(--red); }
+#page-sandbox tr.sb-rejected td { opacity: .55; }
+.sb-form { border: 1px solid var(--border); border-radius: var(--radius); padding: .8rem; margin: .8rem 0; }
+.sb-form .fw-form-grid { margin-bottom: .6rem; }
+.sb-leg-row { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; }
+.sb-leg-row select, .sb-leg-row input { width: 9rem; font-size: .82rem; }
+.sb-leg-row button { width: auto; padding: .1rem .45rem; }

@@ -338,6 +338,10 @@ async def init_db():
     await ensure_forward_tables(db)
     if await seed_confirmed(db):
         logger.info("Booked confirmed forwards from counterparty confirmations")
+    from plgo_options.data import sandbox_repository
+    await sandbox_repository.ensure_tables(db)
+    if await sandbox_repository.seed(db):
+        logger.info("Seeded the Sandbox with the dealer offers on the table")
     await db.commit()
 
     # One-time seed of the ETH-book collateral allocation from the values that
