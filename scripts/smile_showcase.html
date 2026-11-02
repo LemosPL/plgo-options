@@ -1,0 +1,735 @@
+<title>ETH __EXPIRY_LONG__ Smile</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one reading column; the chart card is the page's single object, quotes table and method follow. */
+:root {
+  --bg: #f3f5f8;
+  --card: #fcfcfd;
+  --ink: #0f1720;
+  --ink-2: #4a5462;
+  --ink-3: #6f7987;
+  --rule: #dde2e8;
+  --grid: #e7ebf0;
+  --fit: #2a78d6;
+  --mark: #1baf7a;
+  --quote: #3f4855;
+  --hi: #eef3fb;
+  --signal: #eb6834;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101317; --card: #171b20; --ink: #eef1f4; --ink-2: #b7bfc9; --ink-3: #8e98a4;
+    --rule: #2a3038; --grid: #222830; --fit: #3987e5; --mark: #199e70; --quote: #c3cad3;
+    --hi: #1d2633; --signal: #d95926; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101317; --card: #171b20; --ink: #eef1f4; --ink-2: #b7bfc9; --ink-3: #8e98a4;
+  --rule: #2a3038; --grid: #222830; --fit: #3987e5; --mark: #199e70; --quote: #c3cad3;
+  --hi: #1d2633; --signal: #d95926; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 960px; margin: 0 auto; padding-block: 36px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px; }
+header { display: grid; gap: 10px; }
+.eyebrow { font-family: var(--font-data); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(28px, 4.4vw, 40px); line-height: 1.1; margin: 0; text-wrap: balance; }
+.lead { margin: 0; max-width: 66ch; color: var(--ink-2); font-size: 16px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin: 4px 0 0; }
+.facts div { padding: 12px 14px 12px 0; display: grid; gap: 2px; }
+.facts dt { font-size: 12px; color: var(--ink-3); letter-spacing: .02em; }
+.facts dd { margin: 0; font-family: var(--font-data); font-size: 17px; font-variant-numeric: tabular-nums; }
+.card { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 18px 12px; display: grid; gap: 12px; min-width: 0; }
+.card-head { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; justify-content: space-between; }
+.card-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 7px; overflow: hidden; }
+.seg button { font: 500 13px var(--font-body); color: var(--ink-2); background: transparent; border: 0; padding: 6px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--hi); color: var(--ink); }
+.seg button:focus-visible, summary:focus-visible { outline: 2px solid var(--fit); outline-offset: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); margin: 0; padding: 0; list-style: none; }
+.legend li { display: inline-flex; align-items: center; gap: 7px; }
+.legend svg { flex: none; }
+.chart { position: relative; min-width: 0; touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+.chart.panning { cursor: grabbing; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+#zoom-in, #zoom-out { font-size: 15px; min-width: 36px; padding-inline: 10px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font-family: var(--font-data); font-size: 11px; fill: var(--ink-3); }
+.tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--rule); border-radius: 8px;
+  padding: 9px 11px; font-size: 12.5px; box-shadow: 0 6px 18px rgba(15, 23, 32, .12); min-width: 178px; z-index: 2; }
+.tip b { display: block; font-size: 13px; margin-bottom: 4px; }
+.tip table { border-collapse: collapse; font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+.tip td { padding: 1px 0; } .tip td + td { padding-left: 14px; text-align: right; color: var(--ink); }
+.tip td:first-child { color: var(--ink-2); font-family: var(--font-body); }
+.note { font-size: 12.5px; color: var(--ink-3); margin: 0; }
+.scores { display: flex; flex-wrap: wrap; gap: 10px 36px; align-items: baseline; }
+.score { display: grid; gap: 2px; }
+.score span { font-size: 13px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 7px; }
+.score b { font-family: var(--font-data); font-size: 28px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.score small { font-size: 12.5px; color: var(--ink-3); }
+.formula { font-family: var(--font-data); font-size: 13px; color: var(--ink-2); background: var(--hi); border-radius: 6px; padding: 8px 10px; overflow-x: auto; white-space: nowrap; }
+#errchart { position: relative; min-width: 0; }
+#richchart, #errchart { touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+#richchart.panning, #errchart.panning { cursor: grabbing; }
+#richchart { position: relative; min-width: 0; }
+#richchart svg { display: block; width: 100%; height: auto; overflow: visible; }
+#richchart text { font-family: var(--font-data); font-size: 11px; fill: var(--ink-3); }
+.tally { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13.5px; color: var(--ink-2); margin: 0; }
+.tally b { font-family: var(--font-data); font-weight: 500; color: var(--ink); }
+.switches { display: flex; flex-wrap: wrap; gap: 12px 28px; }
+.switch { display: grid; gap: 6px; min-width: 0; }
+.switch-label { font-size: 12px; color: var(--ink-3); letter-spacing: .02em; }
+.seg-wrap { flex-wrap: wrap; }
+#errchart svg { display: block; width: 100%; height: auto; }
+#errchart text { font-family: var(--font-data); font-size: 11px; fill: var(--ink-3); }
+section h2 { font-family: var(--font-display); font-weight: 600; font-size: 22px; margin: 0 0 10px; }
+.method { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 28px; }
+@media (max-width: 720px) { .method { grid-template-columns: 1fr; } }
+.method ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; color: var(--ink-2); max-width: 64ch; }
+.method ol b { color: var(--ink); font-weight: 600; }
+.params { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 14px; }
+.params th, .params td { text-align: left; padding: 6px 0; border-bottom: 1px solid var(--rule); }
+.params td { font-family: var(--font-data); text-align: right; }
+.params th { font-weight: 400; color: var(--ink-2); }
+.checks { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 14px; color: var(--ink-2); }
+.checks li::before { content: "✓"; color: var(--mark); font-weight: 600; margin-right: 8px; }
+details { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; }
+summary { cursor: pointer; padding: 14px 18px; font-weight: 600; }
+.tablewrap { overflow-x: auto; padding: 0 18px 14px; }
+.quotes { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 1040px; }
+.quotes th { text-align: right; font-weight: 500; color: var(--ink-3); padding: 6px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.quotes td { text-align: right; font-family: var(--font-data); padding: 5px 8px; border-bottom: 1px solid var(--grid); }
+.quotes th:first-child, .quotes td:first-child, .quotes th:nth-child(2), .quotes td:nth-child(2) { text-align: left; }
+.quotes td.fitcol { color: var(--fit); }
+.quotes tr.atf td { background: var(--hi); }
+footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rule); padding-top: 14px; }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow" id="eyebrow">ETH options · Deribit · expiry __EXPIRY_LONG__, 08:00 UTC</div>
+    <h1>The __EXPIRY_LONG__ ETH smile, fitted to every bid and ask</h1>
+    <p class="lead" id="lead"></p>
+    <dl class="facts" id="facts"></dl>
+  </header>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Implied volatility by strike</h2>
+      <div class="controls">
+        <div class="seg" role="group" aria-label="Strike range">
+          <button type="button" id="range-full" aria-pressed="true">All strikes</button>
+          <button type="button" id="range-atm" aria-pressed="false">Near the money</button>
+        </div>
+        <div class="seg" role="group" aria-label="Zoom">
+          <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+          <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+        </div>
+      </div>
+    </div>
+    <ul class="legend">
+      <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--quote)" stroke-width="2"/></svg>Deribit bid–ask, in vol (bottom bid, top ask)</li>
+      <li><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--fit)" stroke-width="2.5"/></svg><span id="legend-svi">SVI fit to mid</span></li>
+      <li><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark</li>
+    </ul>
+    <div class="chart" id="chart"><div class="tip" id="tip" hidden></div></div>
+    <p class="note">Out-of-the-money options only: puts below the forward, calls above it. Strike axis is logarithmic. Scroll or pinch to zoom, drag sideways to pan, double-click to reset. Hover or tap a strike for its prices.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Cheap or rich against the SVI curve</h2>
+      <div class="seg" role="group" aria-label="Units">
+        <button type="button" data-u="usd" aria-pressed="true">$ per option</button>
+        <button type="button" data-u="vol" aria-pressed="false">Vol points</button>
+      </div>
+    </div>
+    <ul class="legend">
+      <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--quote)" stroke-width="2"/></svg>Bid and ask minus the SVI price</li>
+      <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--signal)" stroke-width="2.5"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--signal)" stroke-width="2.5"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--signal)" stroke-width="2.5"/></svg>Whole bid–ask off the curve: cheap or rich</li>
+      <li><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark minus the SVI price</li>
+    </ul>
+    <p class="tally" id="rich-tally"></p>
+    <div id="richchart"><div class="tip" id="rtip" hidden></div></div>
+    <p class="note" id="rich-note"></p>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Fit error: our SVI against Deribit's mark</h2>
+    </div>
+    <div class="switches">
+      <div class="switch"><span class="switch-label">Measured against</span>
+        <div class="seg" role="group" aria-label="Target price">
+          <button type="button" data-t="mid" aria-pressed="true">Mid</button>
+          <button type="button" data-t="micro" aria-pressed="false">Microprice</button>
+        </div>
+      </div>
+      <div class="switch"><span class="switch-label">Strikes weighted by</span>
+        <div class="seg seg-wrap" role="group" aria-label="Weighting">
+          <button type="button" data-w="equal" aria-pressed="true">Equal</button>
+          <button type="button" data-w="size" aria-pressed="false">Thinner side √size</button>
+          <button type="button" data-w="oi" aria-pressed="false">Open interest</button>
+          <button type="button" data-w="vol24" aria-pressed="false">24h volume</button>
+          <button type="button" data-w="vega" aria-pressed="false">Vega</button>
+        </div>
+      </div>
+    </div>
+    <div class="scores">
+      <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" fill="var(--fit)"/></svg>SVI fit</span><b id="fe-svi"></b><small id="fe-svi-in"></small></div>
+      <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark</span><b id="fe-mark"></b><small id="fe-mark-in"></small></div>
+    </div>
+    <div class="formula">option error = |fitted price − target| ÷ ((ask − bid) ÷ 2) &nbsp;·&nbsp; fit error = √( Σ wᵢ · errorᵢ² ÷ Σ wᵢ )<br>
+      target = mid = (bid + ask) ÷ 2, &nbsp;or&nbsp; microprice = (bid × ask size + ask × bid size) ÷ (bid size + ask size)</div>
+    <div id="errchart"></div>
+    <p class="note" id="err-note"></p>
+  </div>
+
+  <section class="method">
+    <div>
+      <h2>How the fit is built</h2>
+      <ol id="steps"></ol>
+    </div>
+    <div>
+      <h2 id="params-title">SVI parameters</h2>
+      <table class="params" id="params"></table>
+      <ul class="checks" id="checks"></ul>
+    </div>
+  </section>
+
+  <details>
+    <summary id="table-summary">Every quote, strike by strike</summary>
+    <div class="tablewrap">
+      <table class="quotes">
+        <thead><tr><th>Strike</th><th>Option</th><th>Bid ($)</th><th>Ask ($)</th><th>Bid size</th><th>Ask size</th><th>Microprice ($)</th><th>Bid vol</th><th>Ask vol</th><th>Deribit mark</th><th>SVI fit</th><th>Mark error</th><th>SVI error</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </details>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+const D = /*DATA*/null;
+
+const fmt = (v, d = 2) => v == null ? "–" : v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = v => v == null ? "–" : fmt(v, 2) + "%";
+const asof = new Date(D.asof);
+const asofText = asof.toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
+
+/* The page shows one target at a time; each quote's fit and errors follow it. */
+let target = "mid";
+const TNAME = { mid: "mid", micro: "microprice" };
+const tgtPrice = (q, t = target) => t === "mid" ? (q.bid_usd + q.ask_usd) / 2 : q.micro_usd;
+const errOf = (q, price, t = target) => q.micro_usd == null ? null : Math.abs(price - tgtPrice(q, t)) / ((q.ask_usd - q.bid_usd) / 2);
+for (const q of D.quotes) {
+  Object.defineProperty(q, "fit_iv", { get: () => q[`fit_iv_${target}`] });
+  Object.defineProperty(q, "err_svi", { get: () => errOf(q, q[`fit_usd_${target}`]) });
+  Object.defineProperty(q, "err_mark", { get: () => errOf(q, q.mark_usd) });
+}
+const cv = c => c[target === "mid" ? 1 : 2];   // curve point's vol for the current target
+const inBook = (q, price) => price >= q.bid_usd - 1e-9 && price <= q.ask_usd + 1e-9;
+const sviInBook = q => inBook(q, q[`fit_usd_${target}`]);
+const markInBook = q => inBook(q, q.mark_usd);
+
+function equalScore(t, who) {
+  const s = D.quotes.filter(q => q.micro_usd != null);
+  return Math.sqrt(s.reduce((a, q) => a + errOf(q, who === "svi" ? q[`fit_usd_${t}`] : q.mark_usd, t) ** 2, 0) / s.length);
+}
+const winner = t => equalScore(t, "svi") < equalScore(t, "mark") ? "our SVI" : "Deribit's mark";
+document.getElementById("lead").textContent =
+  `At-the-money vol is ${fmt(D.atm_iv, 1)}%, and downside is priced richer than upside: ${fmt(D.iv_80, 1)}% at 80% of the forward against ${fmt(D.iv_120, 1)}% at 120%. ` +
+  (winner("mid") === winner("micro")
+    ? `${winner("mid") === "our SVI" ? "Our SVI" : "Deribit's mark"} sits closer to the quotes whether they are scored against the plain mid or the size-weighted microprice.`
+    : `Scored against the plain mid, ${winner("mid")} comes out closer; against the size-weighted microprice, ${winner("micro")} does.`);
+
+const facts = [
+  ["Snapshot", asofText],
+  ["ETH index", "$" + fmt(D.spot, 2)],
+  ["Forward (parity)", "$" + fmt(D.forward, 2)],
+  ["Days to expiry", fmt(D.T_days, 1)],
+  ["ATM vol", fmt(D.atm_iv, 2) + "%"],
+  ["Order books read in", fmt(D.snapshot_secs, 1) + " s"],
+];
+document.getElementById("facts").innerHTML = facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+
+const steps = [
+  `<b>Forward.</b> Taken from put–call parity, not the index: a spread-weighted regression of call minus put across near-the-money strikes gives a forward of $${fmt(D.forward, 2)} and a discount factor of ${D.DF.toFixed(4)}.`,
+  `<b>One option per strike.</b> Below the forward the put, above it the call, so every point is the more liquid, out-of-the-money side.`,
+  `<b>Bid and ask vols.</b> Each bid and each ask is converted separately into a Black implied volatility at that forward, which gives a vol band per strike instead of a single point.`,
+  `<b>Mid or microprice.</b> The mid ignores how much is offered on each side. The microprice weights the bid and ask by the size on the opposite side, so it leans toward the thinner side, where the price is more likely to move.`,
+  `<b>SVI fit.</b> Gatheral's raw SVI, five parameters on total variance, is fitted in price, once to the mid and once to the microprice. Each fit minimises the error measured below, under a constraint that keeps the curve free of butterfly arbitrage.`,
+];
+document.getElementById("steps").innerHTML = steps.map(s => `<li>${s}</li>`).join("");
+
+function renderText() {
+  const F = D.fits[target], P = F.svi;
+  document.getElementById("legend-svi").textContent = `SVI fit to ${TNAME[target]}`;
+  document.getElementById("params-title").textContent = `SVI parameters, fitted to ${TNAME[target]}`;
+  document.getElementById("params").innerHTML = [
+    ["a, variance level", P.a.toFixed(4)], ["b, wing steepness", P.b.toFixed(4)], ["ρ, skew", P.rho.toFixed(4)],
+    ["m, horizontal shift", P.m.toFixed(4)], ["σ, curvature at the money", P.sigma.toFixed(4)],
+  ].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+  const s = D.quotes.filter(q => q.micro_usd != null);
+  document.getElementById("checks").innerHTML = [
+    `Inside the bid–ask on ${s.filter(sviInBook).length} of ${s.length} strikes`,
+    F.arb_free ? `No butterfly arbitrage from $${D.arb_range[0].toLocaleString("en-US")} to $${D.arb_range[1].toLocaleString("en-US")} (Gatheral's density test)` : null,
+    `Wing slopes ${F.wing_slopes.left.toFixed(2)} and ${F.wing_slopes.right.toFixed(2)}, inside Lee's bound of 2`,
+  ].filter(Boolean).map(x => `<li>${x}</li>`).join("");
+  const n0 = v => v ? v.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "–";
+  document.getElementById("rows").innerHTML = D.quotes.map(q => {
+    const atf = Math.abs(Math.log(q.K / D.forward)) < 0.035 ? ' class="atf"' : "";
+    return `<tr${atf}><td>${q.K.toLocaleString("en-US")}</td><td>${q.cp === "C" ? "Call" : "Put"}</td>` +
+      `<td>${fmt(q.bid_usd)}</td><td>${fmt(q.ask_usd)}</td><td>${n0(q.bsize)}</td><td>${n0(q.asize)}</td><td>${fmt(q.micro_usd)}</td>` +
+      `<td>${pct(q.bid_iv)}</td><td>${pct(q.ask_iv)}</td><td>${pct(q.mark_iv)}</td><td class="fitcol">${pct(q.fit_iv)}</td>` +
+      `<td>${q.err_mark == null ? "–" : q.err_mark.toFixed(2)}</td><td class="fitcol">${q.err_svi == null ? "–" : q.err_svi.toFixed(2)}</td></tr>`;
+  }).join("");
+  document.getElementById("table-summary").textContent =
+    `Every quote, strike by strike (${D.quotes.length} strikes; errors against the ${TNAME[target]})`;
+}
+document.getElementById("footer").textContent =
+  `Source: Deribit public market data (order books for every ETH option expiring __EXPIRY_LONG__, read within ${fmt(D.snapshot_secs, 1)} s), snapshot ${asofText}. ` +
+  `Dollar prices are Deribit's ETH-denominated quotes times the delivery price at the snapshot. Sizes are in ETH. Implied vols use Black's model at the parity forward.`;
+
+/* ---------- chart ---------- */
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, parent) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+};
+const K_MIN = Math.min(...D.quotes.map(q => q.K)), K_MAX = Math.max(...D.quotes.map(q => q.K));
+const LIMIT = { lo: K_MIN * 0.88, hi: K_MAX * 1.13 };          // furthest you can zoom out
+const PRESETS = { full: { lo: K_MIN * 0.925, hi: K_MAX * 1.07 }, atm: { lo: D.forward * 0.7, hi: D.forward * 1.65 } };
+const MIN_RATIO = 1.12;                         // narrowest view: hi / lo
+let view = { ...PRESETS.full };
+const chartBox = document.getElementById("chart");
+const tip = document.getElementById("tip");
+const geos = new Map();                         // chart container -> last drawn geometry, for pointer maths
+
+const NICE = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9];
+function strikeTicks(lo, hi, maxN) {
+  const r = hi / lo;
+  let out = [];
+  if (r > 3.5) {
+    const set = r > 8 ? [1, 1.5, 2, 3, 5, 7] : [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9];
+    for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
+      for (const mnt of set) { const v = mnt * 10 ** e; if (v >= lo && v <= hi) out.push(v); }
+  } else {
+    const raw = (hi - lo) / (maxN - 1);
+    const e = 10 ** Math.floor(Math.log10(raw));
+    const stepK = [1, 2, 2.5, 5, 10].map(s => s * e).find(s => s >= raw) ?? 10 * e;
+    for (let v = Math.ceil(lo / stepK) * stepK; v <= hi; v += stepK) out.push(+v.toFixed(6));
+  }
+  while (out.length > maxN) out = out.filter((_, i) => i % 2 === 0);
+  return out;
+}
+const kLabel = K => K >= 1000 ? (K / 1000).toLocaleString("en-US", { maximumFractionDigits: 2 }) + "k" : String(K);
+
+function clampView(lo, hi) {
+  let ratio = Math.max(hi / lo, MIN_RATIO);
+  ratio = Math.min(ratio, LIMIT.hi / LIMIT.lo);
+  const c = Math.sqrt(lo * hi);
+  lo = c / Math.sqrt(ratio); hi = c * Math.sqrt(ratio);
+  if (lo < LIMIT.lo) { hi *= LIMIT.lo / lo; lo = LIMIT.lo; }
+  if (hi > LIMIT.hi) { lo *= LIMIT.hi / hi; hi = LIMIT.hi; }
+  return { lo, hi };
+}
+// Zoom by factor f (>1 zooms in) keeping strike Kc at the same screen position.
+function zoomAt(Kc, f) {
+  const a = Math.log(view.lo), b = Math.log(view.hi), c = Math.log(Kc);
+  setView(Math.exp(c - (c - a) / f), Math.exp(c + (b - c) / f));
+}
+let raf = 0;
+function setView(lo, hi) {
+  view = clampView(lo, hi);
+  const near = (p) => Math.abs(Math.log(view.lo / p.lo)) < 0.01 && Math.abs(Math.log(view.hi / p.hi)) < 0.01;
+  document.getElementById("range-full").setAttribute("aria-pressed", near(PRESETS.full));
+  document.getElementById("range-atm").setAttribute("aria-pressed", near(PRESETS.atm));
+  tip.hidden = true; document.getElementById("rtip").hidden = true;
+  cancelAnimationFrame(raf); raf = requestAnimationFrame(draw);
+}
+
+function draw() {
+  drawErrors();
+  drawRich();
+  chartBox.querySelector("svg")?.remove();
+  const W = Math.max(chartBox.clientWidth, 300);
+  const H = Math.round(Math.min(460, Math.max(300, W * 0.56)));
+  const m = { l: 46, r: W < 520 ? 14 : 64, t: 14, b: 34 };
+  const { lo, hi } = view;
+  const inX = K => K >= lo && K <= hi;
+  const vis = D.quotes.filter(q => inX(q.K));
+  let ys = vis.flatMap(q => [q.bid_iv, q.ask_iv, q.fit_iv, q.mark_iv]).filter(v => v != null)
+    .concat(D.curve.filter(c => inX(c[0])).map(cv));
+  if (!ys.length) ys = D.curve.map(cv);
+  const span = Math.max(...ys) - Math.min(...ys);
+  const step = span > 40 ? 10 : span > 16 ? 5 : span > 6 ? 2 : span > 2.5 ? 1 : 0.5;
+  const y0 = Math.floor((Math.min(...ys) - step * 0.3) / step) * step;
+  const y1 = Math.ceil((Math.max(...ys) + step * 0.3) / step) * step;
+  const pw = W - m.l - m.r;
+  const X = K => m.l + (Math.log(K) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * pw;
+  const Y = v => m.t + (y1 - v) / (y1 - y0) * (H - m.t - m.b);
+  geos.set(chartBox, { W, m, pw, lo, hi });
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `Implied volatility smile for the __EXPIRY_LONG__ ETH expiry, strikes ${Math.round(lo)} to ${Math.round(hi)}: Deribit bid and ask vols per strike with an SVI fit` });
+  chartBox.insertBefore(svg, tip);
+  const defs = el("defs", {}, svg);
+  const clip = el("clipPath", { id: "plot" }, defs);
+  el("rect", { x: m.l, y: m.t, width: pw, height: H - m.t - m.b }, clip);
+
+  const grid = el("g", {}, svg);
+  const cursor = el("rect", { y: m.t, height: H - m.t - m.b, fill: "var(--hi)", opacity: 0 }, svg);
+  for (let v = y0; v <= y1 + 1e-9; v += step) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)", "stroke-width": 1 }, grid);
+    const t = el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, grid);
+    t.textContent = (step < 1 ? v.toFixed(1) : v) + "%";
+  }
+  for (const K of strikeTicks(lo, hi, W < 520 ? 5 : 8)) {
+    const t = el("text", { x: X(K), y: H - m.b + 18, "text-anchor": "middle" }, grid);
+    t.textContent = kLabel(K);
+    el("line", { x1: X(K), x2: X(K), y1: H - m.b, y2: H - m.b + 4, stroke: "var(--rule)" }, grid);
+  }
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "var(--rule)" }, grid);
+  const xl = el("text", { x: W - m.r, y: H - 2, "text-anchor": "end" }, grid);
+  xl.textContent = "strike, USD (log scale)";
+
+  if (inX(D.forward)) {
+    const fx = X(D.forward);
+    el("line", { x1: fx, x2: fx, y1: m.t, y2: H - m.b, stroke: "var(--ink-3)", "stroke-dasharray": "3 4", "stroke-width": 1 }, svg);
+    const right = fx < m.l + pw * 0.72;
+    const fl = el("text", { x: right ? fx + 6 : fx - 6, y: m.t + 11, "text-anchor": right ? "start" : "end" }, svg);
+    fl.textContent = `forward $${Math.round(D.forward).toLocaleString("en-US")}`;
+    if (fx - m.l > 60) { const pl = el("text", { x: fx - 6, y: H - m.b - 8, "text-anchor": "end" }, svg); pl.textContent = "← puts"; }
+    if (W - m.r - fx > 60) { const cl = el("text", { x: fx + 6, y: H - m.b - 8 }, svg); cl.textContent = "calls →"; }
+  }
+
+  const plot = el("g", { "clip-path": "url(#plot)" }, svg);
+  const cap = W < 520 ? 3 : 4.5;
+  const marks = [];
+  for (const q of vis) {
+    const g = el("g", {}, plot);
+    const x = X(q.K);
+    const ln = (y1_, y2_, x1_ = x, x2_ = x, extra = {}) => el("line", { x1: x1_, x2: x2_, y1: y1_, y2: y2_,
+      stroke: "var(--quote)", "stroke-width": 2, "stroke-linecap": "round", ...extra }, g);
+    if (q.bid_iv != null && q.ask_iv != null) {
+      ln(Y(q.bid_iv), Y(q.ask_iv));
+      ln(Y(q.bid_iv), Y(q.bid_iv), x - cap, x + cap);
+      ln(Y(q.ask_iv), Y(q.ask_iv), x - cap, x + cap);
+    } else {
+      const v = q.ask_iv ?? q.bid_iv;
+      ln(Y(v), Y(v), x - cap, x + cap, { "stroke-dasharray": "2 2", "stroke-linecap": "butt" });
+    }
+    marks.push({ q, x });
+  }
+  const pts = D.curve.filter(c => c[0] >= lo * 0.98 && c[0] <= hi * 1.02);
+  if (pts.length > 1)
+    el("path", { d: pts.map((c, i) => (i ? "L" : "M") + X(c[0]).toFixed(1) + " " + Y(cv(c)).toFixed(1)).join(""),
+      fill: "none", stroke: "var(--fit)", "stroke-width": 2.5, "stroke-linejoin": "round" }, plot);
+  for (const { q, x } of marks)
+    el("circle", { cx: x, cy: Y(q.mark_iv), r: 4, fill: "var(--card)", stroke: "var(--mark)", "stroke-width": 2 }, plot);
+  if (W >= 520 && pts.length > 1) {
+    const last = pts.filter(c => c[0] <= hi).at(-1);
+    if (last) { const lab = el("text", { x: X(last[0]) + 8, y: Y(cv(last)) + 4, style: "fill: var(--fit); font-weight: 500" }, svg); lab.textContent = "SVI"; }
+  }
+
+  // hover: one column per strike, wider than the mark
+  const hover = el("g", {}, svg);
+  marks.forEach((mk, i) => {
+    const left = i ? (marks[i - 1].x + mk.x) / 2 : Math.max(m.l, mk.x - 14);
+    const right = i < marks.length - 1 ? (mk.x + marks[i + 1].x) / 2 : Math.min(W - m.r, mk.x + 14);
+    const hit = el("rect", { x: left, y: m.t, width: Math.max(right - left, 1), height: H - m.t - m.b, fill: "transparent" }, hover);
+    const show = () => {
+      if (drag && drag.moved) return;
+      cursor.setAttribute("x", mk.x - 7); cursor.setAttribute("width", 14); cursor.setAttribute("opacity", 1);
+      const q = mk.q;
+      tip.innerHTML = `<b>${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}</b><table>` +
+        `<tr><td>Bid</td><td>${pct(q.bid_iv)}</td><td>$${fmt(q.bid_usd)}</td></tr>` +
+        `<tr><td>Ask</td><td>${pct(q.ask_iv)}</td><td>$${fmt(q.ask_usd)}</td></tr>` +
+        `<tr><td>Size</td><td>${q.bsize ? q.bsize.toLocaleString("en-US") : "–"}</td><td>${q.asize ? q.asize.toLocaleString("en-US") : "–"}</td></tr>` +
+        `<tr><td>Microprice</td><td></td><td>${q.micro_usd == null ? "–" : "$" + fmt(q.micro_usd)}</td></tr>` +
+        `<tr><td>SVI fit</td><td>${pct(q.fit_iv)}</td><td>$${fmt(q[`fit_usd_${target}`])}</td></tr>` +
+        `<tr><td>Deribit mark</td><td>${pct(q.mark_iv)}</td><td>$${fmt(q.mark_usd)}</td></tr></table>`;
+      tip.hidden = false;
+      const bw = chartBox.getBoundingClientRect().width;
+      const sx = mk.x / W * bw, tw = tip.offsetWidth;
+      tip.style.left = (sx + 14 + tw > bw ? Math.max(sx - tw - 14, 0) : sx + 14) + "px";
+      tip.style.top = "8px";
+    };
+    hit.addEventListener("pointerenter", show);
+    hit.addEventListener("pointerup", show);
+    hit.addEventListener("pointerleave", () => { tip.hidden = true; cursor.setAttribute("opacity", 0); });
+  });
+}
+
+/* ---------- cheap or rich ---------- */
+let units = "usd";
+const T_YRS = (D.expiry_ts - Date.parse(D.asof)) / (365 * 864e5);
+const ncdf = x => { // Abramowitz–Stegun 7.1.26, accurate to ~1e-7
+  const t = 1 / (1 + 0.3275911 * Math.abs(x) / Math.SQRT2);
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x / 2);
+  return x >= 0 ? (1 + y) / 2 : (1 - y) / 2;
+};
+const black = (K, v, cp) => {
+  const s = v * Math.sqrt(T_YRS), d1 = (Math.log(D.forward / K) + s * s / 2) / s, d2 = d1 - s;
+  return cp === "C" ? D.DF * (D.forward * ncdf(d1) - K * ncdf(d2)) : D.DF * (K * ncdf(-d2) - D.forward * ncdf(-d1));
+};
+const impliedPct = (price, K, cp) => {   // bisection: Black is increasing in vol
+  let lo = 0.01, hi = 4;
+  if (!(price > black(K, lo, cp)) || !(price < black(K, hi, cp))) return null;
+  for (let i = 0; i < 80; i++) { const mid = (lo + hi) / 2; if (black(K, mid, cp) < price) lo = mid; else hi = mid; }
+  return (lo + hi) / 2 * 100;
+};
+for (const q of D.quotes) q.mark_iv_f = impliedPct(q.mark_usd, q.K, q.cp);   // the mark on our vol scale
+
+function richRow(q) {                      // differences from the SVI curve, in the chosen units
+  const usd = units === "usd";
+  const fit = usd ? q[`fit_usd_${target}`] : q[`fit_iv_${target}`];
+  const d = v => v == null ? null : v - fit;
+  return { bid: d(usd ? q.bid_usd : q.bid_iv), ask: d(usd ? q.ask_usd : q.ask_iv), mark: d(usd ? q.mark_usd : q.mark_iv_f) };
+}
+const verdict = q => q.ask_usd != null && q.ask_usd < q[`fit_usd_${target}`] ? "cheap"
+  : q.bid_usd != null && q.bid_usd > q[`fit_usd_${target}`] ? "rich" : null;
+const fmtU = v => v == null ? "–" : (v > 0 ? "+" : v < 0 ? "−" : "") + (units === "usd" ? "$" + fmt(Math.abs(v)) : fmt(Math.abs(v)) + " vol pts");
+
+function renderRichText() {
+  const two = D.quotes.filter(q => q.bid_usd != null && q.ask_usd != null);
+  const cheap = two.filter(q => verdict(q) === "cheap"), rich = two.filter(q => verdict(q) === "rich");
+  const names = qs => qs.map(q => `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}`).join(", ");
+  const above = two.filter(q => q.mark_usd > q[`fit_usd_${target}`]).length;
+  document.getElementById("rich-tally").innerHTML =
+    `<span>Cheap: <b>${cheap.length}</b>${cheap.length ? " (" + names(cheap) + ")" : ""}</span>` +
+    `<span>Rich: <b>${rich.length}</b>${rich.length ? " (" + names(rich) + ")" : ""}</span>` +
+    `<span>Curve inside the bid–ask: <b>${two.length - cheap.length - rich.length}</b> of ${two.length}</span>`;
+  document.getElementById("rich-note").textContent =
+    `Zero is the SVI price, fitted to the ${TNAME[target]}. An option is cheap when even its ask is below the curve, so it can be bought under fair value, ` +
+    `and rich when even its bid is above it. Where the curve runs inside the bid–ask, the band's lean shows which side of fair value the market sits on. ` +
+    `Deribit's mark is above the curve on ${above} of ${two.length} strikes. ` +
+    (units === "usd" ? "Dollar gaps are naturally larger near the money, where options cost more; vol points compare strikes on an equal footing. "
+      : "In vol points the mark is restated at our parity forward, so it sits on the same scale as the bid and ask. ") +
+    `Zoom and pan here or on the smile above: scroll or pinch to zoom, drag sideways to pan, double-click to reset. Both charts share one strike axis.`;
+  document.querySelectorAll("[data-u]").forEach(b => b.setAttribute("aria-pressed", b.dataset.u === units));
+}
+document.querySelectorAll("[data-u]").forEach(b => b.addEventListener("click", () => { units = b.dataset.u; renderRichText(); drawRich(); }));
+
+function drawRich() {
+  const box = document.getElementById("richchart"), rtip = document.getElementById("rtip");
+  box.querySelector("svg")?.remove(); rtip.hidden = true;
+  const W = Math.max(box.clientWidth, 300);
+  const H = W < 520 ? 230 : 270;
+  const m = { l: 56, r: W < 520 ? 14 : 64, t: 16, b: 28 };
+  const { lo, hi } = view;
+  const pw = W - m.l - m.r;
+  const X = K => m.l + (Math.log(K) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * pw;
+  const vis = D.quotes.filter(q => q.K >= lo && q.K <= hi).map(q => ({ q, r: richRow(q) }));
+  const vals = vis.flatMap(({ r }) => [r.bid, r.ask, r.mark]).filter(v => v != null && isFinite(v));
+  let ymin = Math.min(0, ...vals), ymax = Math.max(0, ...vals);
+  const pad = (ymax - ymin) * 0.08 || 1; ymin -= pad; ymax += pad;
+  const raw = (ymax - ymin) / 5, e = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(s => s * e).find(s => s >= raw);
+  const y0 = Math.floor(ymin / step) * step, y1 = Math.ceil(ymax / step) * step;
+  const Y = v => m.t + (y1 - v) / (y1 - y0) * (H - m.t - m.b);
+  geos.set(box, { W, m, pw, lo, hi });
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `Bid, ask and Deribit mark minus the SVI price for each strike, in ${units === "usd" ? "dollars" : "vol points"}` });
+  box.insertBefore(svg, rtip);
+  const dec = step < 0.1 ? 2 : step < 1 ? 1 : 0;
+  for (let v = y0; v <= y1 + step / 1e6; v += step) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)" }, svg);
+    const t = el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg);
+    const vv = Math.abs(v) < step / 1e6 ? 0 : v;
+    t.textContent = (vv > 0 ? "+" : vv < 0 ? "−" : "") + (units === "usd" ? "$" : "") + Math.abs(vv).toFixed(dec);
+  }
+  for (const K of strikeTicks(lo, hi, W < 520 ? 5 : 8)) {
+    const t = el("text", { x: X(K), y: H - m.b + 18, "text-anchor": "middle" }, svg); t.textContent = kLabel(K);
+  }
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "var(--rule)" }, svg);
+  const cursor = el("rect", { y: m.t, height: H - m.t - m.b, fill: "var(--hi)", opacity: 0 }, svg);
+  el("line", { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), stroke: "var(--ink-3)", "stroke-width": 1.25 }, svg);
+  const zl = el("text", { x: W - m.r, y: Y(0) - 6, "text-anchor": "end" }, svg); zl.textContent = "SVI fair value";
+  const up = el("text", { x: m.l + 6, y: m.t + 11 }, svg); up.textContent = "↑ priced above the curve";
+  const dn = el("text", { x: m.l + 6, y: H - m.b - 7 }, svg); dn.textContent = "↓ priced below the curve";
+  const clipR = el("clipPath", { id: "rplot" }, el("defs", {}, svg));
+  el("rect", { x: m.l - 8, y: m.t - 4, width: pw + 16, height: H - m.t - m.b + 8 }, clipR);
+  const g = el("g", { "clip-path": "url(#rplot)" }, svg);
+  const cap = W < 520 ? 3 : 4.5;
+  const marks = [];
+  for (const { q, r } of vis) {
+    const x = X(q.K), v = verdict(q), col = v ? "var(--signal)" : "var(--quote)", sw = v ? 2.5 : 2;
+    const ln = (ya, yb, xa = x, xb = x, extra = {}) => el("line", { x1: xa, x2: xb, y1: ya, y2: yb, stroke: col, "stroke-width": sw, "stroke-linecap": "round", ...extra }, g);
+    if (r.bid != null && r.ask != null) {
+      ln(Y(r.bid), Y(r.ask)); ln(Y(r.bid), Y(r.bid), x - cap, x + cap); ln(Y(r.ask), Y(r.ask), x - cap, x + cap);
+    } else {
+      const one = r.ask ?? r.bid;
+      if (one != null) ln(Y(one), Y(one), x - cap, x + cap, { "stroke-dasharray": "2 2", "stroke-linecap": "butt" });
+    }
+    if (r.mark != null) el("circle", { cx: x, cy: Y(r.mark), r: 4, fill: "var(--card)", stroke: "var(--mark)", "stroke-width": 2 }, g);
+    if (v && W >= 520) {
+      const ty = v === "cheap" ? Y(r.ask) - 8 : Y(r.bid) + 16;
+      const tl = el("text", { x, y: ty, "text-anchor": "middle", style: "fill: var(--ink-2)" }, svg); tl.textContent = v;
+    }
+    marks.push({ q, r, x, v });
+  }
+  marks.forEach((mk, i) => {
+    const left = i ? (marks[i - 1].x + mk.x) / 2 : Math.max(m.l, mk.x - 14);
+    const right = i < marks.length - 1 ? (mk.x + marks[i + 1].x) / 2 : Math.min(W - m.r, mk.x + 14);
+    const hit = el("rect", { x: left, y: m.t, width: Math.max(right - left, 1), height: H - m.t - m.b, fill: "transparent" }, svg);
+    const show = () => {
+      if (drag && drag.moved) return;
+      cursor.setAttribute("x", mk.x - 7); cursor.setAttribute("width", 14); cursor.setAttribute("opacity", 1);
+      const q = mk.q, r = mk.r;
+      rtip.innerHTML = `<b>${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}${mk.v ? " · " + mk.v : ""}</b><table>` +
+        `<tr><td>Bid − SVI</td><td>${fmtU(r.bid)}</td></tr><tr><td>Ask − SVI</td><td>${fmtU(r.ask)}</td></tr>` +
+        `<tr><td>Mark − SVI</td><td>${fmtU(r.mark)}</td></tr>` +
+        `<tr><td>SVI price</td><td>$${fmt(q[`fit_usd_${target}`])} · ${pct(q[`fit_iv_${target}`])}</td></tr></table>`;
+      rtip.hidden = false;
+      const bw = box.getBoundingClientRect().width, sx = mk.x / W * bw, tw = rtip.offsetWidth;
+      rtip.style.left = (sx + 14 + tw > bw ? Math.max(sx - tw - 14, 0) : sx + 14) + "px";
+      rtip.style.top = "8px";
+    };
+    hit.addEventListener("pointerenter", show);
+    hit.addEventListener("pointerup", show);
+    hit.addEventListener("pointerleave", () => { rtip.hidden = true; cursor.setAttribute("opacity", 0); });
+  });
+}
+
+/* ---------- fit error ---------- */
+const scored = D.quotes.filter(q => q.micro_usd != null);
+const WEIGHTS = { equal: () => 1, size: q => Math.sqrt(Math.min(q.bsize, q.asize)), oi: q => q.oi, vol24: q => q.vol24, vega: q => q.vega };
+const WNAME = { equal: "every strike counts once", size: "weighted by the square root of the thinner side's size", oi: "weighted by open interest", vol24: "weighted by 24h volume", vega: "weighted by vega" };
+let wkey = "equal";
+function fitError(key) {
+  const w = scored.map(WEIGHTS[wkey]);
+  const sw = w.reduce((s, x) => s + x, 0);
+  return Math.sqrt(scored.reduce((s, q, i) => s + w[i] * q[key] ** 2, 0) / sw);
+}
+function renderScores() {
+  const svi = fitError("err_svi"), mark = fitError("err_mark");
+  document.getElementById("fe-svi").textContent = svi.toFixed(3);
+  document.getElementById("fe-mark").textContent = mark.toFixed(3);
+  document.getElementById("fe-svi-in").textContent = `inside the bid–ask on ${scored.filter(sviInBook).length} of ${scored.length}`;
+  document.getElementById("fe-mark-in").textContent = `inside the bid–ask on ${scored.filter(markInBook).length} of ${scored.length}`;
+  const zero = scored.filter(q => WEIGHTS[wkey](q) === 0).length;
+  document.getElementById("err-note").textContent =
+    `Errors are in half-spreads, ${WNAME[wkey]}${zero ? ` (${zero} strikes with no volume drop out)` : ""}. ` +
+    `0 is the ${TNAME[target]}, 1 is a half-spread away from it. Scored on the ${scored.length} strikes quoted on both sides. ` +
+    `Each SVI is fitted to this measure against its own target on these same quotes, so it has a home advantage; the mark is Deribit's own model price. This chart shares the smile's strike axis and zooms the same way.`;
+  document.querySelectorAll("[data-w]").forEach(b => b.setAttribute("aria-pressed", b.dataset.w === wkey));
+}
+document.querySelectorAll("[data-w]").forEach(b => b.addEventListener("click", () => { wkey = b.dataset.w; renderScores(); }));
+document.querySelectorAll("[data-t]").forEach(b => b.addEventListener("click", () => {
+  target = b.dataset.t;
+  document.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", x.dataset.t === target));
+  tip.hidden = true;
+  renderText(); renderScores(); renderRichText(); draw();
+}));
+
+function drawErrors() {
+  const box = document.getElementById("errchart");
+  box.querySelector("svg")?.remove();
+  const W = Math.max(box.clientWidth, 300);
+  const H = W < 520 ? 170 : 190;
+  const m = { l: 46, r: W < 520 ? 14 : 64, t: 12, b: 28 };
+  const { lo, hi } = view;
+  const pw = W - m.l - m.r;
+  const X = K => m.l + (Math.log(K) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * pw;
+  const vis = scored.filter(q => q.K >= lo && q.K <= hi);
+  const top = Math.max(1.2, Math.ceil(Math.max(0, ...vis.flatMap(q => [q.err_svi, q.err_mark])) * 5) / 5);
+  const Y = v => m.t + (top - v) / top * (H - m.t - m.b);
+  geos.set(box, { W, m, pw, lo, hi });
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Option error by strike, in half-spreads, for the SVI fit and Deribit's mark" });
+  box.appendChild(svg);
+  const step = top > 2 ? 0.5 : 0.2;
+  for (let v = 0; v <= top + 1e-9; v += step) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)" }, svg);
+    const t = el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg); t.textContent = v.toFixed(1);
+  }
+  el("line", { x1: m.l, x2: W - m.r, y1: Y(1), y2: Y(1), stroke: "var(--ink-3)", "stroke-dasharray": "4 4" }, svg);
+  const lab = el("text", { x: W - m.r, y: Y(1) - 6, "text-anchor": "end" }, svg); lab.textContent = "bid or ask";
+  for (const K of strikeTicks(lo, hi, W < 520 ? 5 : 8)) {
+    const t = el("text", { x: X(K), y: H - m.b + 18, "text-anchor": "middle" }, svg); t.textContent = kLabel(K);
+  }
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "var(--rule)" }, svg);
+  const clipE = el("clipPath", { id: "eplot" }, el("defs", {}, svg));
+  el("rect", { x: m.l - 6, y: 0, width: pw + 12, height: H - m.b + 6 }, clipE);
+  const g = el("g", { "clip-path": "url(#eplot)" }, svg);
+  for (const q of vis) {
+    const x = X(q.K);
+    el("line", { x1: x, x2: x, y1: Y(q.err_svi), y2: Y(q.err_mark), stroke: "var(--rule)", "stroke-width": 1.5 }, g);
+    const a = el("circle", { cx: x, cy: Y(q.err_svi), r: 4.5, fill: "var(--fit)", stroke: "var(--card)", "stroke-width": 2 }, g);
+    el("title", {}, a).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: SVI error ${q.err_svi.toFixed(2)} half-spreads`;
+    const b = el("circle", { cx: x, cy: Y(q.err_mark), r: 4, fill: "var(--card)", stroke: "var(--mark)", "stroke-width": 2 }, g);
+    el("title", {}, b).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: mark error ${q.err_mark.toFixed(2)} half-spreads`;
+  }
+}
+
+/* ---------- zoom and pan: any of the three charts drives the shared strike view ---------- */
+let drag = null;      // the gesture in progress: one pointer pans, two pinch
+function attachZoom(box) {
+  const strikeAt = clientX => {             // strike under a screen x, clamped to this chart's plot
+    const g = geos.get(box), r = box.getBoundingClientRect();
+    const t = Math.min(Math.max(((clientX - r.left) / r.width * g.W - g.m.l) / g.pw, 0), 1);
+    return Math.exp(Math.log(g.lo) + t * (Math.log(g.hi) - Math.log(g.lo)));
+  };
+  box.addEventListener("wheel", e => {
+    if (!geos.has(box)) return;
+    e.preventDefault();
+    zoomAt(strikeAt(e.clientX), Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));   // ctrlKey = trackpad pinch
+  }, { passive: false });
+  box.addEventListener("dblclick", () => setView(PRESETS.full.lo, PRESETS.full.hi));
+  const pointers = new Map();
+  box.addEventListener("pointerdown", e => {
+    pointers.set(e.pointerId, e.clientX);
+    const xs = [...pointers.values()];
+    drag = xs.length === 1
+      ? { kind: "pan", x0: xs[0], lo: view.lo, hi: view.hi, moved: false }
+      : { kind: "pinch", d0: Math.abs(xs[1] - xs[0]) || 1, c: strikeAt((xs[0] + xs[1]) / 2), lo: view.lo, hi: view.hi, moved: true };
+    if (e.pointerType === "mouse") box.setPointerCapture(e.pointerId);
+  });
+  box.addEventListener("pointermove", e => {
+    if (!drag || !pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, e.clientX);
+    const xs = [...pointers.values()], g = geos.get(box), r = box.getBoundingClientRect();
+    if (drag.kind === "pan" && xs.length === 1) {
+      const dx = (xs[0] - drag.x0) / r.width * g.W;
+      if (Math.abs(dx) > 3) drag.moved = true;
+      if (!drag.moved) return;
+      const shift = dx / g.pw * Math.log(drag.hi / drag.lo);
+      setView(drag.lo * Math.exp(-shift), drag.hi * Math.exp(-shift));
+      box.classList.add("panning");
+    } else if (drag.kind === "pinch" && xs.length === 2) {
+      const f = (Math.abs(xs[1] - xs[0]) || 1) / drag.d0;
+      const a = Math.log(drag.lo), b = Math.log(drag.hi), c = Math.log(drag.c);
+      setView(Math.exp(c - (c - a) / f), Math.exp(c + (b - c) / f));
+    }
+  });
+  const end = e => {
+    pointers.delete(e.pointerId);
+    if (!pointers.size) { setTimeout(() => { drag = null; }, 0); box.classList.remove("panning"); }
+  };
+  box.addEventListener("pointerup", end);
+  box.addEventListener("pointercancel", end);
+}
+[chartBox, document.getElementById("richchart"), document.getElementById("errchart")].forEach(attachZoom);
+
+document.getElementById("range-full").addEventListener("click", () => setView(PRESETS.full.lo, PRESETS.full.hi));
+document.getElementById("range-atm").addEventListener("click", () => setView(PRESETS.atm.lo, PRESETS.atm.hi));
+const centre = () => Math.sqrt(view.lo * view.hi);
+document.getElementById("zoom-in").addEventListener("click", () => zoomAt(centre(), 1.5));
+document.getElementById("zoom-out").addEventListener("click", () => zoomAt(centre(), 1 / 1.5));
+let rt; new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(draw, 60); }).observe(chartBox);
+renderText();
+renderScores();
+renderRichText();
+draw();
+</script>
