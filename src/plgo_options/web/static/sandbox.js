@@ -173,24 +173,94 @@
   // ── chart + scenarios ────────────────────────────────────────
   const PALETTE = ["#58a6ff", "#3fb950", "#d29922", "#bc8cff", "#f778ba", "#39c5cf", "#ff7b72", "#e3b341"];
 
+  // Which expiry's distribution to draw: the user's pick, else the expiry
+  // most of the visible offers share.
+  function distExpiry(offers) {
+    const ds = data.distributions || {};
+    const keys = Object.keys(ds);
+    const sel = $("sb-dist-exp");
+    const cur = sel.value;
+    const counts = {};
+    offers.forEach((o) => { counts[o.expiry] = (counts[o.expiry] || 0) + 1; });
+    const common = keys.slice().sort((a, b) => (counts[b] || 0) - (counts[a] || 0))[0];
+    sel.innerHTML = keys.map((k) => `<option value="${k}">${k} (${ds[k].days}d)</option>`).join("");
+    sel.value = keys.includes(cur) ? cur : (common || "");
+    return sel.value;
+  }
+
   function renderChart() {
     const cc = colors();
     const offers = visibleOffers().filter((o) => !hidden.has(o.id));
     const g = data.grid;
-    const traces = [{ x: g, y: g, name: "Unhedged (sell at spot)", mode: "lines", line: { dash: "dot", width: 1.5, color: cc.muted } }];
+    const traces = [];
+    const shapes = [{ type: "line", x0: data.inputs.spot, x1: data.inputs.spot, yref: "paper", y0: 0, y1: 1, line: { color: cc.muted, dash: "dash", width: 1 } }];
+    const annotations = [{ x: data.inputs.spot, yref: "paper", y: 1.02, text: "spot", showarrow: false, font: { color: cc.muted, size: 11 } }];
+    const exp = distExpiry(offers);
+    const dist = $("sb-dist-show").checked && exp ? data.distributions[exp] : null;
+    if (dist) {
+      const pc = dist.percentiles;
+      traces.push({
+        x: g, y: dist.density, yaxis: "y2", name: `Probability at ${exp}`, mode: "lines", fill: "tozeroy",
+        line: { width: 1, color: "rgba(139,148,158,.9)" }, fillcolor: "rgba(139,148,158,.18)",
+        customdata: dist.cdf,
+        hovertemplate: `${data.asset} %{x:.4f}<br>P(below) ≈ %{customdata:.0%}<extra>probability</extra>`,
+      });
+      // 50% and 90% ranges as bands, the median as a line.
+      shapes.push({ type: "rect", x0: pc.p05, x1: pc.p95, yref: "paper", y0: 0, y1: 1, fillcolor: "rgba(88,166,255,.05)", line: { width: 0 }, layer: "below" });
+      shapes.push({ type: "rect", x0: pc.p25, x1: pc.p75, yref: "paper", y0: 0, y1: 1, fillcolor: "rgba(88,166,255,.09)", line: { width: 0 }, layer: "below" });
+      shapes.push({ type: "line", x0: pc.p50, x1: pc.p50, yref: "paper", y0: 0, y1: 1, line: { color: "rgba(88,166,255,.7)", width: 1, dash: "dot" } });
+      annotations.push({ x: pc.p50, yref: "paper", y: 0.97, text: "median", showarrow: false, font: { color: "#58a6ff", size: 10 } });
+      annotations.push({ x: (pc.p25 + pc.p75) / 2, yref: "paper", y: 0.92, text: "50%", showarrow: false, font: { color: "#58a6ff", size: 10 } });
+      annotations.push({ x: pc.p05, yref: "paper", y: 0.92, xanchor: "left", text: " 90% range", showarrow: false, font: { color: "#58a6ff", size: 10 } });
+      $("sb-dist-info").innerHTML = `Where ${esc(data.asset)} lands on <b>${esc(exp)}</b> (${dist.days}d), from the vol ${pct(data.inputs.atm_vol, 0)} and skew ${fmt(data.inputs.skew_pts, 1)} the offers are priced on:
+        median <b>${px(pc.p50)}</b> · 50% between <b>${px(pc.p25)}–${px(pc.p75)}</b> · 90% between <b>${px(pc.p05)}–${px(pc.p95)}</b> ·
+        ${pct(dist.prob_below_spot, 0)} chance it ends below today's spot (a high-vol token's median sits below its forward ${px(dist.forward)}).
+        Risk-neutral odds, not a forecast: no drift view is in them.`;
+    } else {
+      $("sb-dist-info").innerHTML = "";
+    }
+    traces.push({ x: g, y: g, name: "Unhedged (sell at spot)", mode: "lines", line: { dash: "dot", width: 1.5, color: cc.muted } });
     offers.forEach((o, i) => traces.push({
       x: g, y: o.curve, mode: "lines", line: { width: 2.2, color: PALETTE[i % PALETTE.length] },
       name: `${o.counterparty} · ${o.name}`.slice(0, 60),
     }));
     if (typeof Plotly === "undefined") return;
     Plotly.newPlot("sb-chart", traces, {
-      paper_bgcolor: cc.paper, plot_bgcolor: cc.plot, margin: { t: 20, r: 20, b: 50, l: 60 },
+      paper_bgcolor: cc.paper, plot_bgcolor: cc.plot, margin: { t: 24, r: dist ? 60 : 20, b: 50, l: 60 },
       xaxis: { title: `${data.asset} at expiry (USD)`, color: cc.muted, gridcolor: cc.grid },
       yaxis: { title: "Effective sale price per hedged token (USD)", color: cc.muted, gridcolor: cc.grid },
+      yaxis2: { title: "Probability density", overlaying: "y", side: "right", color: cc.muted, showgrid: false, rangemode: "tozero", showticklabels: false, visible: !!dist },
       legend: { font: { color: cc.muted }, orientation: "h", y: -0.2 },
-      shapes: [{ type: "line", x0: data.inputs.spot, x1: data.inputs.spot, yref: "paper", y0: 0, y1: 1, line: { color: cc.muted, dash: "dash", width: 1 } }],
-      annotations: [{ x: data.inputs.spot, yref: "paper", y: 1, text: "spot", showarrow: false, font: { color: cc.muted, size: 11 } }],
+      hovermode: "x unified", shapes, annotations,
     }, { responsive: true });
+    renderZones(offers);
+  }
+
+  // Chance each offer finishes protected / in between / capped.
+  function renderZones(offers) {
+    const bar = (parts) => `<div style="display:flex;height:.55rem;border-radius:3px;overflow:hidden;min-width:9rem">${parts.map(([v, c]) =>
+      `<div style="width:${(v * 100).toFixed(1)}%;background:${c}"></div>`).join("")}</div>`;
+    const rows = offers.map((o) => {
+      const z = o.stats.zones;
+      if (!z) return "";
+      if (z.kind === "forward") {
+        return `<tr><td class="sb-left"><b>${esc(o.counterparty)}</b> · ${esc(o.name)}</td><td>${esc(o.expiry)}</td>
+          <td class="num" style="color:var(--green)" title="Ends below the forward price: selling forward beat waiting">${pct(z.below, 0)}<div class="optv3-muted" style="font-size:.68rem">below ${px(z.level)}: forward wins</div></td>
+          <td class="num">—</td>
+          <td class="num" style="color:var(--red)" title="Ends above the forward price: we'd have done better unhedged">${pct(z.above, 0)}<div class="optv3-muted" style="font-size:.68rem">above ${px(z.level)}: upside given up</div></td>
+          <td>${bar([[z.below, "var(--green)"], [z.above, "var(--red)"]])}</td>
+          <td class="num">${px(o.stats.expected)}</td><td class="num">${px(o.stats.p05)}</td></tr>`;
+      }
+      return `<tr><td class="sb-left"><b>${esc(o.counterparty)}</b> · ${esc(o.name)}</td><td>${esc(o.expiry)}</td>
+        <td class="num" style="color:var(--green)">${z.put_level ? pct(z.protected, 0) : "—"}<div class="optv3-muted" style="font-size:.68rem">${z.put_level ? "below " + px(z.put_level) + ": put pays" : "no put"}</div></td>
+        <td class="num">${pct(z.between, 0)}<div class="optv3-muted" style="font-size:.68rem">sell at market</div></td>
+        <td class="num" style="color:var(--red)">${z.call_level ? pct(z.capped, 0) : "—"}<div class="optv3-muted" style="font-size:.68rem">${z.call_level ? "above " + px(z.call_level) + ": capped" : "no call"}</div></td>
+        <td>${bar([[z.protected, "var(--green)"], [z.between, "var(--muted)"], [z.capped, "var(--red)"]])}</td>
+        <td class="num">${px(o.stats.expected)}</td><td class="num">${px(o.stats.p05)}</td></tr>`;
+    }).join("");
+    $("sb-zones").innerHTML = rows ? `<table class="pf-table"><thead><tr><th>Where each offer lands</th><th>Expiry</th>
+      <th class="num">Protected</th><th class="num">In between</th><th class="num">Capped / given up</th><th></th>
+      <th class="num" title="Expected effective sale price">Expected</th><th class="num" title="5th percentile effective sale price">5th pct</th></tr></thead><tbody>${rows}</tbody></table>` : "";
   }
 
   function renderScenarios() {
@@ -417,6 +487,8 @@
   $("sb-refresh").addEventListener("click", load);
   $("sb-asset").addEventListener("change", load);
   $("sb-show-rejected").addEventListener("change", () => data && renderAll());
+  $("sb-dist-show").addEventListener("change", () => data && renderChart());
+  $("sb-dist-exp").addEventListener("change", () => data && renderChart());
   $("sb-apply").addEventListener("click", async () => {
     overrides = readOverrides();
     try { await loadOffers(); status("What-if applied (not saved)."); } catch (e) { status("Failed: " + e.message, true); }

@@ -126,6 +126,11 @@ def test_seeded_offers_and_warnings(db):
     assert fd["at_ref"]["net_value"] < 0                # costs us at their own reference
     assert any("vs the quote's reference" in w for w in fd["warnings"])
     assert len(fd["curve"]) == len(out["grid"]) and len(fd["scenarios"]) == len(out["scenario_prices"])
+    dist = out["distributions"]["2027-02-03"]
+    assert len(dist["density"]) == len(dist["cdf"]) == len(out["grid"])
+    pc = dist["percentiles"]
+    assert pc["p05"] < pc["p25"] < pc["p50"] < pc["p75"] < pc["p95"]
+    assert sum(fd["stats"]["zones"][k] for k in ("protected", "between", "capped")) == pytest.approx(1.0)
     # Re-seeding never duplicates, and a delete stays deleted.
     asyncio.run(route.remove_offer(fd["id"]))
     assert asyncio.run(repo.seed(db)) == 0
@@ -160,3 +165,25 @@ def test_settings_overrides_and_program(db):
     assert p["floor_total"] == pytest.approx(366e6 * 0.049)
     s = asyncio.run(route.solve(route.SolveIn(fixed_strike=0.05, expiry="2027-02-03")))
     assert s["call_strike"] > s["put_strike"]
+
+
+def test_terminal_distribution_matches_pricing():
+    T = sb.years_to(date(2027, 2, 3), TODAY)
+    flat = sb.TerminalDistribution(0.07, 1.3, 0.0, 0.0, T)
+    sd = 1.3 * T ** 0.5
+    from scipy.stats import norm
+    for K in (0.03, 0.05, 0.1):
+        assert float(flat.cdf(K)) == pytest.approx(norm.cdf((np.log(K / 0.07) + 0.5 * sd * sd) / sd), abs=1e-4)
+    # With skew the distribution stays centred on the forward (no smile arbitrage)
+    for skew in (-5, 5, 10):
+        d = sb.TerminalDistribution(0.07, 1.3, skew, 0.0, T)
+        assert d.samples().mean() == pytest.approx(0.07, rel=2e-3)
+        # and a put's price equals its expected payoff under it
+        st = d.samples(20000)
+        put = sb.black(d.F, 0.05, T, sb.vol_at(0.05, d.F, 1.3, skew), "put")
+        assert np.maximum(0.05 - st, 0).mean() == pytest.approx(put, rel=5e-3)
+    z = sb.landing_zones(COLLAR, flat)
+    assert z["protected"] + z["between"] + z["capped"] == pytest.approx(1.0)
+    assert z["protected"] == pytest.approx(float(flat.cdf(0.05)))
+    fz = sb.landing_zones({"legs": [{"kind": "forward", "side": "sell", "qty": 1, "strike": 0.0754}]}, flat)
+    assert fz["below"] + fz["above"] == pytest.approx(1.0)

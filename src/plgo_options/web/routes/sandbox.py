@@ -125,8 +125,8 @@ def evaluate(o: dict, inp: dict, today: date, schedule: list[dict]) -> dict:
     live = sb.value_offer(o, spot, vol, skew, carry, cr, today)
     out = {**o, "live": live,
            "floor_cap": sb.floor_cap(o, cr, today),
-           "stats": sb.distribution_stats(o, spot, vol, carry, cr, today),
-           "probabilities": sb.option_probabilities(o, spot, vol, carry, today),
+           "stats": sb.distribution_stats(o, spot, vol, carry, cr, today, skew),
+           "probabilities": sb.option_probabilities(o, spot, vol, carry, today, skew),
            "implied_skew": sb.implied_skew(o, spot, vol, carry, cr, today),
            "warnings": _warnings(o, spot, schedule, cliff)}
     ref = float(o.get("ref_spot") or 0)
@@ -199,6 +199,18 @@ async def offers(asset: str = "ZAMA", spot: float | None = None, atm_vol: float 
     S = inp["spot"]
     grid = np.linspace(0.15 * S, 2.6 * S, 141)
     scen = np.array([m * S for m in SCENARIO_MULTS])
+    # Where spot lands at each expiry on the table: density on the chart grid
+    # and its percentiles, from the same smile the offers are priced on.
+    distributions = {}
+    for x in sorted({str(e["expiry"])[:10] for e in evald if "error" not in e}):
+        d = sb.TerminalDistribution(S, inp["atm_vol"], inp["skew_pts"], inp["carry"], sb.years_to(_date(x, "expiry"), today))
+        q = d.quantile([0.05, 0.25, 0.5, 0.75, 0.95])
+        distributions[x] = {"days": (_date(x, "expiry") - today).days, "forward": d.F,
+                            "density": d.density(grid).tolist(),
+                            "cdf": d.cdf(grid).tolist(),
+                            "mass_on_chart": float(d.cdf(grid[-1]) - d.cdf(grid[0])),
+                            "percentiles": dict(zip(("p05", "p25", "p50", "p75", "p95"), map(float, q))),
+                            "prob_below_spot": float(d.cdf(S))}
     for e in evald:
         if "error" in e:
             continue
@@ -206,7 +218,7 @@ async def offers(asset: str = "ZAMA", spot: float | None = None, atm_vol: float 
         e["scenarios"] = sb.effective_price(e, scen, inp["collateral_rate"], today).tolist()
     return {"asset": a, "as_of": datetime.now(timezone.utc).isoformat(),
             "inputs": {k: inp[k] for k in ("spot", "atm_vol", "vol_source", "skew_pts", "carry", "collateral_rate")},
-            "spot_quotes": inp["spot_quotes"], "grid": grid.tolist(), "scenario_prices": scen.tolist(),
+            "spot_quotes": inp["spot_quotes"], "grid": grid.tolist(), "scenario_prices": scen.tolist(), "distributions": distributions,
             "offers": evald, "book": _book([e for e in evald if "error" not in e], sched)}
 
 

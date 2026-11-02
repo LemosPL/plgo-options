@@ -13,13 +13,16 @@ post. Everything is priced on the forward
 
 (the same convention as pricing/forwards.py; carry < 0 when shorting the token
 costs funding/borrow), Black-76 with no discounting (the books' zero-rate
-assumption), and a linear skew in log-moneyness:
+assumption), and a skew in log-moneyness x = ln(K/F):
 
-    sigma(K) = atm_vol + skew_pts/100 x (-ln(K/F) / 0.10)
+    sigma(K) = atm_vol + skew_pts/100 x L x tanh(-x / (0.10 L)),   L = 4
 
-i.e. ``skew_pts`` vol points added per 10% the strike sits below the forward
-(> 0 = puts richer than calls, the usual shape for a token with vesting supply
-overhang). No listed options exist, so atm_vol is anchored on realised vol.
+i.e. near the money ``skew_pts`` vol points added per 10% the strike sits
+below the forward (> 0 = puts richer than calls, the usual shape for a token
+with vesting supply overhang), saturating at +/- L x skew_pts in the wings. A
+straight line drove far call vols to the floor, an arbitrage that showed up as
+an implied distribution whose mean was not the forward. No listed options
+exist, so atm_vol is anchored on realised vol.
 
 "Effective sale price" puts offers of different sizes on one axis: what each
 hedged token ends up sold for at expiry, = (Q x S_T + payoff + premium -
@@ -55,8 +58,12 @@ def forward_price(spot: float, carry: float, T: float) -> float:
     return spot * (1.0 + carry * T)
 
 
+SKEW_SATURATION = 4.0
+
+
 def vol_at(K: float, F: float, atm_vol: float, skew_pts: float) -> float:
-    return max(atm_vol + skew_pts / 100.0 * (-math.log(K / F) / 0.10), MIN_VOL)
+    L = SKEW_SATURATION
+    return max(atm_vol + skew_pts / 100.0 * L * math.tanh(-math.log(K / F) / (0.10 * L)), MIN_VOL)
 
 
 def black(F: float, K: float, T: float, vol: float, kind: str) -> float:
@@ -168,40 +175,104 @@ def floor_cap(offer: dict, collateral_rate: float, today: date) -> dict:
     return {"floor": float(lo), "cap": float(hi1) if abs(hi2 - hi1) < 1e-9 else None}
 
 
+class TerminalDistribution:
+    """Where the token lands at expiry, implied by the same smile the offers
+    are priced on (Breeden-Litzenberger, zero rates): CDF(K) = 1 + dC/dK,
+    density = d2C/dK2. With skew 0 this is the lognormal at the ATM vol; with
+    put skew the left tail fattens, exactly as it does in the prices, so the
+    probabilities and the valuations never disagree."""
+
+    def __init__(self, spot: float, atm_vol: float, skew_pts: float, carry: float, T: float, n: int = 1500):
+        self.T = max(T, 1e-6)
+        self.F = forward_price(spot, carry, T)
+        sd = max(atm_vol, MIN_VOL) * math.sqrt(self.T)
+        # Wide enough for the tails of a ~130% vol token, in log space.
+        k = np.linspace(math.log(self.F) - 7 * sd - 0.5, math.log(self.F) + 7 * sd + 0.5, n)
+        K = np.exp(k)
+        h = K * 1e-4
+        L = SKEW_SATURATION
+
+        def c(x):  # vectorised black() / vol_at() calls
+            vol = np.maximum(atm_vol + skew_pts / 100.0 * L * np.tanh(-np.log(x / self.F) / (0.10 * L)), MIN_VOL)
+            sd_ = vol * math.sqrt(self.T)
+            d1 = (np.log(self.F / x) + 0.5 * sd_ * sd_) / sd_
+            return self.F * norm.cdf(d1) - x * norm.cdf(d1 - sd_)
+        cdf = 1.0 + (c(K + h) - c(K - h)) / (2 * h)
+        cdf = np.maximum.accumulate(np.clip(cdf, 0.0, 1.0))  # arbitrage noise never makes it non-monotone
+        cdf[0], cdf[-1] = 0.0, 1.0
+        self.K, self.cdf_grid = K, cdf
+
+    def cdf(self, x) -> np.ndarray:
+        return np.interp(np.asarray(x, dtype=float), self.K, self.cdf_grid, left=0.0, right=1.0)
+
+    def quantile(self, u) -> np.ndarray:
+        cdf, K = self.cdf_grid, self.K
+        keep = np.concatenate(([True], np.diff(cdf) > 1e-12))
+        return np.interp(np.asarray(u, dtype=float), cdf[keep], K[keep])
+
+    def density(self, x) -> np.ndarray:
+        """Probability per unit of price on the grid x (display)."""
+        x = np.asarray(x, dtype=float)
+        mid = 0.5 * (x[1:] + x[:-1])
+        edges = np.concatenate(([max(x[0] - (mid[0] - x[0]), 1e-12)], mid, [x[-1] + (x[-1] - mid[-1])]))
+        return np.diff(self.cdf(edges)) / np.diff(edges)
+
+    def samples(self, n: int = 4000) -> np.ndarray:
+        return self.quantile((np.arange(n) + 0.5) / n)
+
+
 def distribution_stats(offer: dict, spot: float, atm_vol: float, carry: float,
-                       collateral_rate: float, today: date, n: int = 2000) -> dict:
-    """Effective-price distribution with S_T lognormal around the forward at the
-    ATM vol (zero drift beyond carry). Quantile grid, so deterministic."""
+                       collateral_rate: float, today: date, skew_pts: float = 0.0, n: int = 4000) -> dict:
+    """Effective-price distribution under the smile-implied terminal
+    distribution (TerminalDistribution). Quantile grid, so deterministic."""
     expiry = date.fromisoformat(str(offer["expiry"])[:10])
-    T = years_to(expiry, today)
-    F = forward_price(spot, carry, T)
-    u = (np.arange(n) + 0.5) / n
-    sd = atm_vol * math.sqrt(max(T, 1e-9))
-    ST = F * np.exp(-0.5 * sd * sd + sd * norm.ppf(u))
+    dist = TerminalDistribution(spot, atm_vol, skew_pts, carry, years_to(expiry, today))
+    ST = dist.samples(n)
     eff = effective_price(offer, ST, collateral_rate, today)
-    unhedged = ST
     return {
         "expected": float(eff.mean()), "p05": float(np.quantile(eff, 0.05)), "p95": float(np.quantile(eff, 0.95)),
-        "unhedged_expected": float(unhedged.mean()), "unhedged_p05": float(np.quantile(unhedged, 0.05)),
-        "unhedged_p95": float(np.quantile(unhedged, 0.95)),
+        "unhedged_expected": float(ST.mean()), "unhedged_p05": float(np.quantile(ST, 0.05)),
+        "unhedged_p95": float(np.quantile(ST, 0.95)),
+        "zones": landing_zones(offer, dist),
     }
 
 
-def option_probabilities(offer: dict, spot: float, atm_vol: float, carry: float, today: date) -> list[dict]:
-    """Chance each option strike ends in the money (lognormal at ATM vol)."""
+def landing_zones(offer: dict, dist: "TerminalDistribution") -> dict:
+    """Chance the trade lands in each region of its payoff: below the lowest
+    bought put (protected), above the highest sold call (capped), or in
+    between (we just sell at spot). For a forward: below vs above its price
+    (better or worse off than unhedged)."""
+    legs = [check_leg(l) for l in offer["legs"]]
+    puts = [l["strike"] for l in legs if l["kind"] == "put" and l["side"] == "buy"]
+    calls = [l["strike"] for l in legs if l["kind"] == "call" and l["side"] == "sell"]
+    fwds = [l["strike"] for l in legs if l["kind"] == "forward"]
+    if fwds and not puts and not calls:
+        p = float(dist.cdf(fwds[0]))
+        return {"kind": "forward", "below": p, "above": 1.0 - p, "level": fwds[0]}
+    lo = max(puts) if puts else None   # protection starts paying below the highest put
+    hi = min(calls) if calls else None  # upside is given away above the lowest call
+    p_lo = float(dist.cdf(lo)) if lo else 0.0
+    p_hi = 1.0 - float(dist.cdf(hi)) if hi else 0.0
+    return {"kind": "options", "protected": p_lo, "between": max(1.0 - p_lo - p_hi, 0.0), "capped": p_hi,
+            "put_level": lo, "call_level": hi}
+
+
+def option_probabilities(offer: dict, spot: float, atm_vol: float, carry: float, today: date,
+                         skew_pts: float = 0.0) -> list[dict]:
+    """Chance each option strike ends in the money (smile-implied)."""
     expiry = date.fromisoformat(str(offer["expiry"])[:10])
     T = years_to(expiry, today)
-    F = forward_price(spot, carry, T)
     out = []
+    dist = TerminalDistribution(spot, atm_vol, skew_pts, carry, T) if T > 0 else None
+    F = forward_price(spot, carry, T)
     for l in (check_leg(x) for x in offer["legs"]):
         if l["kind"] == "forward":
             continue
-        if T <= 0:
+        if dist is None:
             p = float((F > l["strike"]) if l["kind"] == "call" else (F < l["strike"]))
         else:
-            sd = atm_vol * math.sqrt(T)
-            d2 = (math.log(F / l["strike"]) - 0.5 * sd * sd) / sd
-            p = float(norm.cdf(d2) if l["kind"] == "call" else norm.cdf(-d2))
+            below = float(dist.cdf(l["strike"]))
+            p = 1.0 - below if l["kind"] == "call" else below
         out.append({"kind": l["kind"], "side": l["side"], "strike": l["strike"], "prob_itm": p})
     return out
 

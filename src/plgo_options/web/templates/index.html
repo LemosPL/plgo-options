@@ -3690,8 +3690,17 @@
     </section>
 
     <section class="card">
-      <h3 class="rr-h">Effective sale price at expiry</h3>
-      <div id="sb-chart" style="height:420px"></div>
+      <div class="collat-header">
+        <h3 class="rr-h" style="margin:0">Effective sale price at expiry — and where it lands</h3>
+        <div class="collat-header-right rr-controls">
+          <label class="toggle-label" style="margin:0" title="Probability curve of the token price at expiry, implied by the vol and skew in Pricing inputs (the same smile the offers are priced on)">
+            <input type="checkbox" id="sb-dist-show" checked> Probability curve</label>
+          <label class="pf-filter-label">At expiry <select id="sb-dist-exp"></select></label>
+        </div>
+      </div>
+      <div id="sb-chart" style="height:460px"></div>
+      <div id="sb-dist-info" class="optv3-hint" style="margin:.3rem 0 0"></div>
+      <div id="sb-zones" class="chain-wrapper" style="margin-top:.8rem"></div>
       <div id="sb-scen" class="chain-wrapper" style="margin-top:.8rem"></div>
     </section>
 
@@ -4353,6 +4362,6 @@
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>
-<script src="/static/sandbox.js?v=1"></script>
+<script src="/static/sandbox.js?v=2"></script>
 </body>
 </html>
