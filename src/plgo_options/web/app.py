@@ -44,6 +44,7 @@ from plgo_options.web.routes import perps
 from plgo_options.web.routes import risk_report
 from plgo_options.web.routes import forwards
 from plgo_options.web.routes import sandbox
+from plgo_options.web.routes import smile_recorder
 from plgo_options.web.routes import agents as agents_routes
 from plgo_options.agents.decisions import apply_pending as apply_decision_sheets
 from plgo_options.agents.store import init_agent_tables
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(risk_report.router, prefix="/api/risk-report", tags=["risk-report"])
     app.include_router(forwards.router, prefix="/api/forwards", tags=["forwards"])
     app.include_router(sandbox.router, prefix="/api/sandbox", tags=["sandbox"])
+    app.include_router(smile_recorder.router, prefix="/api/smile-recorder", tags=["smile-recorder"])
     app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 
     # Google Sign-In. Routes first, then the gate, then the session store:

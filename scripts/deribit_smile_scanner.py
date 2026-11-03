@@ -41,22 +41,23 @@ Usage:
 import argparse
 import datetime as dt
 import os
-import re
+import sys
+from pathlib import Path
 
 import httpx
 import numpy as np
 import pandas as pd
 from scipy.interpolate import UnivariateSpline
-from scipy.optimize import brentq
 from scipy.stats import norm
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from plgo_options.pricing.smile_fit import black, fit_forward, implied, parse_exp, vega  # noqa: E402
+
 API = "https://www.deribit.com/api/v2/public"
-MON = dict(JAN=1, FEB=2, MAR=3, APR=4, MAY=5, JUN=6, JUL=7, AUG=8, SEP=9, OCT=10, NOV=11, DEC=12)
 FEE_ETH, FEE_CAP = 0.0003, 0.125
 WCAP = 4.0           # cap on weight relative to the median weight in an expiry
 MAX_SPREAD_VOL = 10  # quotes wider than this (vol points) are left out of the fit
 MIN_POINTS = 6
-MIN_DF_DAYS = 30     # shorter expiries: parity slope too noisy to pin DF, hold it at 1
 TICK_ETH = 0.0001    # Deribit option tick below 0.005 ETH (0.0005 above)
 MIN_TICKS = 5        # quotes under 5 ticks are tick noise, not mispricing
 MIN_VEGA = 0.5       # USD per vol point per contract
@@ -64,37 +65,7 @@ MAX_ABS_DELTA = 0.85 # deeper ITM is a bet on the parity forward, not on vol
 
 
 # ---------- Black (forward, discounted) ----------
-def black(F, K, T, vol, cp, DF=1.0):
-    sd = vol * np.sqrt(T)
-    d1 = (np.log(F / K) + 0.5 * sd * sd) / sd
-    d2 = d1 - sd
-    if cp == "C":
-        return DF * (F * norm.cdf(d1) - K * norm.cdf(d2))
-    return DF * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
-
-
-def vega(F, K, T, vol, DF=1.0):  # USD per vol point
-    sd = vol * np.sqrt(T)
-    d1 = (np.log(F / K) + 0.5 * sd * sd) / sd
-    return DF * F * norm.pdf(d1) * np.sqrt(T) / 100
-
-
-def implied(price, F, K, T, cp, DF=1.0):
-    intrinsic = DF * max(F - K, 0) if cp == "C" else DF * max(K - F, 0)
-    if not np.isfinite(price) or price <= intrinsic + 1e-9:
-        return np.nan
-    try:
-        return brentq(lambda v: black(F, K, T, v, cp, DF) - price, 1e-3, 8.0)
-    except ValueError:
-        return np.nan
-
-
 # ---------- data ----------
-def parse_exp(s):  # "27NOV26" -> 08:00 UTC
-    m = re.fullmatch(r"(\d{1,2})([A-Z]{3})(\d{2})", s)
-    return dt.datetime(2000 + int(m[3]), MON[m[2]], int(m[1]), 8, tzinfo=dt.timezone.utc)
-
-
 def fetch(currency):
     with httpx.Client(timeout=30) as c:
         rows = c.get(f"{API}/get_book_summary_by_currency", params={"currency": currency, "kind": "option"}).json()["result"]
@@ -115,26 +86,6 @@ def fetch(currency):
 
 
 # ---------- step 1: forward + DF from parity ----------
-def fit_forward(g):
-    F0 = g.F0.iloc[0]
-    c = g[g.cp == "C"].set_index("K")
-    p = g[g.cp == "P"].set_index("K")
-    Ks = c.index.intersection(p.index)
-    Ks = [K for K in Ks if abs(np.log(K / F0)) < 0.2
-          and np.isfinite(c.bid[K]) and np.isfinite(c.ask[K]) and np.isfinite(p.bid[K]) and np.isfinite(p.ask[K])]
-    if len(Ks) < 3:
-        return F0, 1.0, len(Ks), "underlying (few pairs)"
-    Ks = np.array(Ks)
-    y = np.array([(c.bid[K] + c.ask[K]) / 2 - (p.bid[K] + p.ask[K]) / 2 for K in Ks])
-    spr = np.array([(c.ask[K] - c.bid[K]) + (p.ask[K] - p.bid[K]) for K in Ks])
-    b, a = np.polyfit(Ks, y, 1, w=1 / np.maximum(spr, 1e-6))
-    DF = -b
-    if g["T"].iloc[0] * 365 < MIN_DF_DAYS or not 0.95 <= DF <= 1.0:  # hold DF at 1, refit F only
-        F = float(np.average(y + Ks, weights=1 / np.maximum(spr, 1e-6) ** 2))
-        return F, 1.0, len(Ks), "parity (DF held at 1)"
-    return a / DF, DF, len(Ks), "parity"
-
-
 # ---------- step 2: smile points ----------
 def smile_points(g, F, DF):
     T = g["T"].iloc[0]

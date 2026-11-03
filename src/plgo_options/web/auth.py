@@ -52,7 +52,7 @@ PUBLIC_PREFIXES = ("/login", "/auth/", "/api/auth/", "/api/version",
 # Scheduler-driven endpoints. They carry X-Signals-Token and are guarded by
 # their own routers; a browser session is not involved. Narrow on purpose:
 # /api/agents/status and /api/agents/proposals are UI reads and stay protected.
-MACHINE_PREFIXES = ("/api/agents/run/", "/api/signals/")
+MACHINE_PREFIXES = ("/api/agents/run/", "/api/signals/", "/api/smile-recorder/tick")
 
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS app_users (

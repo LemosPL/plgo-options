@@ -29,22 +29,22 @@ import argparse
 import asyncio
 import datetime as dt
 import json
+import sys
 import time
 from pathlib import Path
 
 import httpx
 import numpy as np
-import pandas as pd
-from scipy.optimize import least_squares
 from scipy.stats import norm
 
-import deribit_smile_scanner as sc
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from plgo_options.pricing.smile_fit import (K_RANGE, black_vec, book_frame, fit_forward, fit_svi,  # noqa: E402
+                                           implied, parse_exp, svi_iv)
+
 TEMPLATE = Path(__file__).with_name("smile_showcase.html")
 API = "https://www.deribit.com/api/v2/public"
-K_RANGE = 2.5          # |log(K/F)| over which the no-arbitrage check runs
-PENALTY = 50.0         # weight on negative density / variance in the fit's residuals
 
 
 async def snapshot(expiry: str) -> tuple[list[dict], float, float]:
@@ -71,78 +71,11 @@ async def snapshot(expiry: str) -> tuple[list[dict], float, float]:
         return books, t0, time.time()
 
 
-def book_frame(books: list[dict], expiry: str, now: dt.datetime) -> pd.DataFrame:
-    exp = sc.parse_exp(expiry)
-    rows = []
-    for b in books:
-        _, _, K, cp = b["instrument_name"].split("-")
-        S = b["estimated_delivery_price"]  # Deribit quotes options in ETH: USD = ETH price x S
-        bid, ask = b.get("best_bid_price") or 0, b.get("best_ask_price") or 0
-        rows.append(dict(K=float(K), cp=cp, T=(exp - now).total_seconds() / (365 * 86400),
-                         bid=bid * S if bid else np.nan, ask=ask * S if ask else np.nan,
-                         mark=b["mark_price"] * S, mark_iv=b["mark_iv"], F0=b["underlying_price"],
-                         oi=b["open_interest"], vol24=(b.get("stats") or {}).get("volume") or 0.0,
-                         bsize=b.get("best_bid_amount") or 0.0, asize=b.get("best_ask_amount") or 0.0,
-                         spot=b["index_price"]))
-    return pd.DataFrame(rows)
-
-
-def svi_w(p, k):
-    a, b, rho, m, s = p
-    return a + b * (rho * (k - m) + np.sqrt((k - m) ** 2 + s * s))
-
-
-def density(p, k):
-    """Total variance w and Gatheral's g(k); g >= 0 everywhere = no butterfly arbitrage."""
-    a, b, rho, m, s = p
-    w = svi_w(p, k)
-    w1 = b * (rho + (k - m) / np.sqrt((k - m) ** 2 + s * s))
-    w2 = b * s * s / ((k - m) ** 2 + s * s) ** 1.5
-    return w, (1 - k * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
-
-
-def black_vec(F, K, T, v, cp, DF=1.0):
-    """Discounted Black prices, vectorised over strikes, vols and call/put flags."""
-    K = np.asarray(K, float)
-    s = v * np.sqrt(T)
-    d1 = (np.log(F / K) + 0.5 * s * s) / s
-    d2 = d1 - s
-    call = DF * (F * norm.cdf(d1) - K * norm.cdf(d2))
-    put = DF * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
-    return np.where(np.asarray(cp) == "C", call, put)
-
-
-def svi_iv(p, K, F, T):
-    return np.sqrt(np.maximum(svi_w(p, np.log(np.asarray(K, float) / F)), 1e-9) / T)
-
-
-def fit_svi(K, CP, target, half, F, T, DF, atm, x0=None) -> tuple[np.ndarray, bool]:
-    """Raw SVI fitted in price: minimise |price - target| / half-spread with negative
-    density or variance penalised. Best of 9 starts, or one start from x0 (warm start).
-    Returns the parameters and whether g(k) >= 0 and w > 0 hold on |k| <= K_RANGE."""
-    kg = np.linspace(-K_RANGE, K_RANGE, 801)
-
-    def res(p):
-        w, gk = density(p, kg)
-        return np.concatenate([(black_vec(F, K, T, svi_iv(p, K, F, T), CP, DF) - target) / half,
-                               np.minimum(gk, 0) * PENALTY, np.minimum(w, 0) * PENALTY])
-    lb, ub = [-1, 1e-4, -0.999, -1, 1e-3], [1, 5, 0.999, 1, 2]
-    starts = [x0] if x0 is not None else [[atm * atm * T * 0.3, 0.2, rho0, 0.0, s0]
-                                          for rho0 in (-0.4, 0.0, 0.3) for s0 in (0.2, 0.5, 0.8)]
-    best = None
-    for x in starts:
-        r = least_squares(res, np.clip(x, lb, ub), bounds=(lb, ub))
-        if best is None or r.cost < best.cost:
-            best = r
-    w, gk = density(best.x, np.linspace(-K_RANGE, K_RANGE, 20001))
-    return best.x, bool(gk.min() >= 0 and w.min() > 0)
-
-
 def build(expiry: str) -> dict:
     books, t0, t1 = asyncio.run(snapshot(expiry))
     now = dt.datetime.fromtimestamp((t0 + t1) / 2, dt.timezone.utc)
     g = book_frame(books, expiry, now)
-    F, DF, _, _ = sc.fit_forward(g)
+    F, DF, _, _ = fit_forward(g)
     T = float(g["T"].iloc[0])
 
     def ivp(p, Ks):
@@ -155,8 +88,8 @@ def build(expiry: str) -> dict:
     for r in g.sort_values("K").itertuples():
         if (r.cp == "C") != (r.K >= F):  # OTM side only
             continue
-        ivb = sc.implied(r.bid, F, r.K, T, r.cp, DF) if np.isfinite(r.bid) else np.nan
-        iva = sc.implied(r.ask, F, r.K, T, r.cp, DF) if np.isfinite(r.ask) else np.nan
+        ivb = implied(r.bid, F, r.K, T, r.cp, DF) if np.isfinite(r.bid) else np.nan
+        iva = implied(r.ask, F, r.K, T, r.cp, DF) if np.isfinite(r.ask) else np.nan
         pc = lambda x: None if not np.isfinite(x) else round(float(x) * 100, 2)  # noqa: E731
         q = dict(K=r.K, cp=r.cp, bid_iv=pc(ivb), ask_iv=pc(iva), mark_iv=round(float(r.mark_iv), 2),
                  bid_usd=None if not np.isfinite(r.bid) else round(float(r.bid), 4),
@@ -197,7 +130,7 @@ def build(expiry: str) -> dict:
     pm, pu = fits["mid"]["p"], fits["micro"]["p"]
     Ks = np.exp(np.linspace(np.log(min(q["K"] for q in quotes) * 0.97),
                             np.log(max(q["K"] for q in quotes) * 1.02), 260))
-    exp = sc.parse_exp(expiry)
+    exp = parse_exp(expiry)
     for f in fits.values():
         del f["p"]
     return dict(

@@ -54,5 +54,18 @@ job agents-close-check     "0 2 * * 2-6"  close-check
 job agents-monday-pack     "30 7 * * 1"   monday-pack
 job agents-monthly-review  "0 8 1 * *"    monthly-review
 
+# Smile recorder (market_data/smile_recorder.py): the next 3 ETH quarterlies
+# order books and SVI fits, one tick file every 5 min under DB_DIR/smile_recorder.
+# Research data for SVI-timed taker execution; not an agent, so the kill switch
+# does not pause it: gcloud scheduler jobs pause smile-recorder --location=$REGION
+rec_args=(--project="$PROJECT" --location="$REGION" --schedule="*/5 * * * *" --time-zone="Etc/UTC"
+          --uri="$SERVICE_URL/api/smile-recorder/tick" --http-method=POST --attempt-deadline=180s)
+rec_hdrs="X-Signals-Token=$SIGNALS_TOKEN"
+if gcloud scheduler jobs describe smile-recorder --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
+  gcloud scheduler jobs update http smile-recorder "${rec_args[@]}" --update-headers="$rec_hdrs"
+else
+  gcloud scheduler jobs create http smile-recorder "${rec_args[@]}" --headers="$rec_hdrs"
+fi
+
 echo "Scheduler jobs in place. Pause everything with the Kill switch on the Agents page,"
 echo "or: gcloud scheduler jobs pause agents-row-watcher --location=$REGION"
