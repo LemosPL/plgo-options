@@ -101,6 +101,43 @@ def density(p, k):
     return w, (1 - k * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
 
 
+def black_vec(F, K, T, v, cp, DF=1.0):
+    """Discounted Black prices, vectorised over strikes, vols and call/put flags."""
+    K = np.asarray(K, float)
+    s = v * np.sqrt(T)
+    d1 = (np.log(F / K) + 0.5 * s * s) / s
+    d2 = d1 - s
+    call = DF * (F * norm.cdf(d1) - K * norm.cdf(d2))
+    put = DF * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
+    return np.where(np.asarray(cp) == "C", call, put)
+
+
+def svi_iv(p, K, F, T):
+    return np.sqrt(np.maximum(svi_w(p, np.log(np.asarray(K, float) / F)), 1e-9) / T)
+
+
+def fit_svi(K, CP, target, half, F, T, DF, atm, x0=None) -> tuple[np.ndarray, bool]:
+    """Raw SVI fitted in price: minimise |price - target| / half-spread with negative
+    density or variance penalised. Best of 9 starts, or one start from x0 (warm start).
+    Returns the parameters and whether g(k) >= 0 and w > 0 hold on |k| <= K_RANGE."""
+    kg = np.linspace(-K_RANGE, K_RANGE, 801)
+
+    def res(p):
+        w, gk = density(p, kg)
+        return np.concatenate([(black_vec(F, K, T, svi_iv(p, K, F, T), CP, DF) - target) / half,
+                               np.minimum(gk, 0) * PENALTY, np.minimum(w, 0) * PENALTY])
+    lb, ub = [-1, 1e-4, -0.999, -1, 1e-3], [1, 5, 0.999, 1, 2]
+    starts = [x0] if x0 is not None else [[atm * atm * T * 0.3, 0.2, rho0, 0.0, s0]
+                                          for rho0 in (-0.4, 0.0, 0.3) for s0 in (0.2, 0.5, 0.8)]
+    best = None
+    for x in starts:
+        r = least_squares(res, np.clip(x, lb, ub), bounds=(lb, ub))
+        if best is None or r.cost < best.cost:
+            best = r
+    w, gk = density(best.x, np.linspace(-K_RANGE, K_RANGE, 20001))
+    return best.x, bool(gk.min() >= 0 and w.min() > 0)
+
+
 def build(expiry: str) -> dict:
     books, t0, t1 = asyncio.run(snapshot(expiry))
     now = dt.datetime.fromtimestamp((t0 + t1) / 2, dt.timezone.utc)
@@ -109,16 +146,10 @@ def build(expiry: str) -> dict:
     T = float(g["T"].iloc[0])
 
     def ivp(p, Ks):
-        return np.sqrt(np.maximum(svi_w(p, np.log(np.asarray(Ks, float) / F)), 1e-9) / T)
+        return svi_iv(p, Ks, F, T)
 
     def black(K, v, cp):
-        K = np.asarray(K, float)
-        s = v * np.sqrt(T)
-        d1 = (np.log(F / K) + 0.5 * s * s) / s
-        d2 = d1 - s
-        call = DF * (F * norm.cdf(d1) - K * norm.cdf(d2))
-        put = DF * (K * norm.cdf(-d2) - F * norm.cdf(-d1))
-        return np.where(np.asarray(cp) == "C", call, put)
+        return black_vec(F, K, T, v, cp, DF)
 
     quotes = []
     for r in g.sort_values("K").itertuples():
@@ -141,23 +172,10 @@ def build(expiry: str) -> dict:
     K = np.array([q["K"] for q in scored])
     CP = [q["cp"] for q in scored]
     half = np.array([(q["ask_usd"] - q["bid_usd"]) / 2 for q in scored])
-    kg = np.linspace(-K_RANGE, K_RANGE, 801)
     atm = float(np.median([(q["bid_iv"] + q["ask_iv"]) / 200 for q in scored]))
 
     def fit(target: np.ndarray) -> tuple[np.ndarray, bool]:
-        def res(p):
-            w, gk = density(p, kg)
-            return np.concatenate([(black(K, ivp(p, K), CP) - target) / half,
-                                   np.minimum(gk, 0) * PENALTY, np.minimum(w, 0) * PENALTY])
-        lb, ub = [-1, 1e-4, -0.999, -1, 1e-3], [1, 5, 0.999, 1, 2]
-        best = None
-        for rho0 in (-0.4, 0.0, 0.3):
-            for s0 in (0.2, 0.5, 0.8):
-                r = least_squares(res, [atm * atm * T * 0.3, 0.2, rho0, 0.0, s0], bounds=(lb, ub))
-                if best is None or r.cost < best.cost:
-                    best = r
-        w, gk = density(best.x, np.linspace(-K_RANGE, K_RANGE, 20001))
-        return best.x, bool(gk.min() >= 0 and w.min() > 0)
+        return fit_svi(K, CP, target, half, F, T, DF, atm)
 
     targets = {"mid": np.array([(q["bid_usd"] + q["ask_usd"]) / 2 for q in scored]),
                "micro": np.array([q["micro_usd"] for q in scored])}
