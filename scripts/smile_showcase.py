@@ -7,10 +7,12 @@ prices and sizes are from the same moment), then:
     1) forward + discount factor from put-call parity (deribit_smile_scanner.fit_forward)
     2) out-of-the-money side only: Black vols of each bid and each ask
     3) microprice per strike: (bid x ask size + ask x bid size) / (bid size + ask size)
-    4) two raw-SVI fits, one to the mid and one to the microprice, each minimising
-       |SVI price - target| / half-spread under a penalty that keeps Gatheral's
-       butterfly density g(k) >= 0; the result is re-checked on k in [-2.5, 2.5]
-       and the page only claims "no butterfly arbitrage" for a fit that passes
+    4) two cubic smoothing splines of implied vol against log-moneyness, one
+       through the mid vols and one through the microprice vols, each strike
+       weighted by 1 / half-spread^2 in vol points, smoothness chosen by
+       generalized cross-validation; drawn only across the scored strikes (a
+       spline has no shape beyond its data) and checked, not constrained, for
+       butterfly arbitrage (Gatheral's g(k) >= 0) across them
 
 and writes a self-contained page from scripts/smile_showcase.html (charts,
 fit error vs Deribit's mark, cheap/rich vs the curve). Public endpoints only,
@@ -36,13 +38,12 @@ from pathlib import Path
 import httpx
 import numpy as np
 from scipy.interpolate import make_smoothing_spline
-from scipy.stats import norm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from plgo_options.pricing.smile_fit import (K_RANGE, black_vec, book_frame, fit_forward, fit_svi,  # noqa: E402
-                                           implied, parse_exp, svi_iv, vega)
+from plgo_options.pricing.smile_fit import (black_vec, book_frame, fit_forward, implied,  # noqa: E402
+                                           parse_exp, vega)
 
 TEMPLATE = Path(__file__).with_name("smile_showcase.html")
 API = "https://www.deribit.com/api/v2/public"
@@ -86,9 +87,6 @@ def build(expiry: str) -> dict:
     F, DF, _, _ = fit_forward(g)
     T = float(g["T"].iloc[0])
 
-    def ivp(p, Ks):
-        return svi_iv(p, Ks, F, T)
-
     def black(K, v, cp):
         return black_vec(F, K, T, v, cp, DF)
 
@@ -114,70 +112,42 @@ def build(expiry: str) -> dict:
     CP = [q["cp"] for q in scored]
     half = np.array([(q["ask_usd"] - q["bid_usd"]) / 2 for q in scored])
     atm = float(np.median([(q["bid_iv"] + q["ask_iv"]) / 200 for q in scored]))
-
-    def fit(target: np.ndarray) -> tuple[np.ndarray, bool]:
-        return fit_svi(K, CP, target, half, F, T, DF, atm)
+    k = np.log(K / F)
+    kk = np.linspace(k.min(), k.max(), 2001)
 
     targets = {"mid": np.array([(q["bid_usd"] + q["ask_usd"]) / 2 for q in scored]),
                "micro": np.array([q["micro_usd"] for q in scored])}
-    fits = {}
-    for name, tgt in targets.items():
-        p, ok = fit(tgt)
-        fits[name] = dict(svi=dict(zip(["a", "b", "rho", "m", "sigma"], map(float, p))), arb_free=ok,
-                          wing_slopes=dict(left=round(float(p[1] * (1 - p[2])), 4),
-                                           right=round(float(p[1] * (1 + p[2])), 4)), p=p)
-        for q in quotes:
-            v = float(ivp(p, [q["K"]])[0])
-            q[f"fit_iv_{name}"] = round(v * 100, 3)
-            q[f"fit_usd_{name}"] = round(float(black([q["K"]], v, [q["cp"]])[0]), 4)
-    for q in quotes:  # vega at the mid fit, USD per vol point per contract
-        s = q["fit_iv_mid"] / 100 * np.sqrt(T)
-        d1 = (np.log(F / q["K"]) + 0.5 * s * s) / s
-        q["vega"] = round(float(DF * F * norm.pdf(d1) * np.sqrt(T) / 100), 4)
-
-    # Smoothing spline on the vol curve, per target: cubic, through the target's
-    # implied vols against log-moneyness, each strike weighted by 1 / half-spread^2
-    # in vol points, smoothness picked by generalized cross-validation. A spline has
-    # no shape beyond its data, so it is only evaluated across the scored strikes.
-    k = np.log(K / F)
-    splines = {}
+    fits, splines = {}, {}
     for name, tgt in targets.items():
         iv_t = np.array([implied(px, F, Kj, T, c, DF) for px, Kj, c in zip(tgt, K, CP)])
         ok_t = np.isfinite(iv_t)
         vg = np.array([vega(F, Kj, T, v, DF) for Kj, v in zip(K, np.where(ok_t, iv_t, atm))])
         half_vp = half / vg                         # half-spread in vol points
         spl = make_smoothing_spline(k[ok_t], iv_t[ok_t] * 100, w=1 / half_vp[ok_t] ** 2)
-        kk = np.linspace(k.min(), k.max(), 2001)
-        w_tot = (spl(kk) / 100) ** 2 * T
-        g_k = density_numeric(w_tot, kk)
+        g_k = density_numeric((spl(kk) / 100) ** 2 * T, kk)
         bad = kk[g_k < 0]
         splines[name] = spl
-        fits[name]["spline"] = dict(n=int(ok_t.sum()), arb_free=bool(len(bad) == 0),
-                                    arb_bad=[int(round(F * np.exp(bad.min()))), int(round(F * np.exp(bad.max())))]
-                                    if len(bad) else None)
+        fits[name] = dict(n=int(ok_t.sum()), arb_free=bool(len(bad) == 0),
+                          arb_bad=[int(round(F * np.exp(bad.min()))), int(round(F * np.exp(bad.max())))]
+                          if len(bad) else None)
         for q in quotes:
             inside = k.min() - 1e-9 <= np.log(q["K"] / F) <= k.max() + 1e-9
             v = float(spl(np.log(q["K"] / F))) if inside else None
             q[f"spl_iv_{name}"] = round(v, 3) if v is not None else None
             q[f"spl_usd_{name}"] = round(float(black([q["K"]], v / 100, [q["cp"]])[0]), 4) if v is not None else None
+    for q in quotes:  # vega at the mid spline (the mark's vol past it), USD per vol point per contract
+        q["vega"] = round(float(vega(F, q["K"], T, (q["spl_iv_mid"] or q["mark_iv"]) / 100, DF)), 4)
 
-    pm, pu = fits["mid"]["p"], fits["micro"]["p"]
-    Ks = np.exp(np.linspace(np.log(min(q["K"] for q in quotes) * 0.97),
-                            np.log(max(q["K"] for q in quotes) * 1.02), 260))
+    sm = lambda x: round(float(splines["mid"](np.log(x / F))), 2)  # noqa: E731
+    Ks = np.exp(np.linspace(np.log(K.min()), np.log(K.max()), 260))
     exp = parse_exp(expiry)
-    for f in fits.values():
-        del f["p"]
     return dict(
         expiry=expiry, expiry_long=f"{exp.day} {exp:%b %Y}", expiry_ts=int(exp.timestamp() * 1000),
         asof=now.isoformat(timespec="seconds"), snapshot_secs=round(t1 - t0, 1),
         spot=round(float(g.spot.median()), 2), forward=round(float(F), 2), DF=round(float(DF), 5),
-        T_days=round(T * 365, 1), atm_iv=round(float(ivp(pm, [F])[0]) * 100, 2),
-        iv_80=round(float(ivp(pm, [0.8 * F])[0]) * 100, 2), iv_120=round(float(ivp(pm, [1.2 * F])[0]) * 100, 2),
-        n_fit=len(scored), arb_range=[int(round(F * np.exp(-K_RANGE))), int(round(F * np.exp(K_RANGE)))],
-        fits=fits, quotes=quotes,
-        curve=[[round(float(x), 1), round(float(ivp(pm, [x])[0]) * 100, 3), round(float(ivp(pu, [x])[0]) * 100, 3),
-                *[round(float(splines[t](np.log(x / F))), 3) if K.min() <= x <= K.max() else None
-                  for t in ("mid", "micro")]]
+        T_days=round(T * 365, 1), atm_iv=sm(F), iv_80=sm(0.8 * F), iv_120=sm(1.2 * F),
+        n_fit=len(scored), fit_range=[float(K.min()), float(K.max())], fits=fits, quotes=quotes,
+        curve=[[round(float(x), 1), *[round(float(splines[t](np.log(x / F))), 3) for t in ("mid", "micro")]]
                for x in Ks])
 
 
@@ -189,10 +159,10 @@ def summary(d: dict) -> None:
         tgt = [(q["bid_usd"] + q["ask_usd"]) / 2 if t == "mid" else q["micro_usd"] for q in s]
         err = lambda key: np.sqrt(np.mean([((q[key] - x) / ((q["ask_usd"] - q["bid_usd"]) / 2)) ** 2  # noqa: E731
                                            for q, x in zip(s, tgt) if q[key] is not None]))
-        inside = sum(q["bid_usd"] <= q[f"fit_usd_{t}"] <= q["ask_usd"] for q in s)
-        print(f"  vs {t:5}: fit error SVI {err(f'fit_usd_{t}'):.3f}, Deribit mark {err('mark_usd'):.3f}, "
-              f"smoothing spline {err(f'spl_usd_{t}'):.3f} (half-spreads, equal weights); SVI inside bid-ask {inside}/{len(s)}; "
-              f"butterfly-free SVI {d['fits'][t]['arb_free']}, spline {d['fits'][t]['spline']['arb_free']}")
+        inside = sum(q[f"spl_usd_{t}"] is not None and q["bid_usd"] <= q[f"spl_usd_{t}"] <= q["ask_usd"] for q in s)
+        print(f"  vs {t:5}: fit error spline {err(f'spl_usd_{t}'):.3f}, Deribit mark {err('mark_usd'):.3f} "
+              f"(half-spreads, equal weights); spline inside bid-ask {inside}/{len(s)}; "
+              f"butterfly-free {d['fits'][t]['arb_free']}")
 
 
 def main() -> None:

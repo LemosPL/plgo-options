@@ -17,7 +17,6 @@
   --quote: #3f4855;
   --hi: #eef3fb;
   --signal: #eb6834;
-  --spline: #eda100;
   --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
   --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-data: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -26,13 +25,13 @@
   :root:not([data-theme="light"]) {
     --bg: #101317; --card: #171b20; --ink: #eef1f4; --ink-2: #b7bfc9; --ink-3: #8e98a4;
     --rule: #2a3038; --grid: #222830; --fit: #3987e5; --mark: #199e70; --quote: #c3cad3;
-    --hi: #1d2633; --signal: #d95926; --spline: #c98500; color-scheme: dark;
+    --hi: #1d2633; --signal: #d95926; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #101317; --card: #171b20; --ink: #eef1f4; --ink-2: #b7bfc9; --ink-3: #8e98a4;
   --rule: #2a3038; --grid: #222830; --fit: #3987e5; --mark: #199e70; --quote: #c3cad3;
-  --hi: #1d2633; --signal: #d95926; --spline: #c98500; color-scheme: dark;
+  --hi: #1d2633; --signal: #d95926; color-scheme: dark;
 }
 body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.55; }
 .page { max-width: 960px; margin: 0 auto; padding-block: 36px 56px;
@@ -104,12 +103,11 @@ section h2 { font-family: var(--font-display); font-weight: 600; font-size: 22px
 details { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; }
 summary { cursor: pointer; padding: 14px 18px; font-weight: 600; }
 .tablewrap { overflow-x: auto; padding: 0 18px 14px; }
-.quotes { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 1040px; }
+.quotes { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; min-width: 960px; }
 .quotes th { text-align: right; font-weight: 500; color: var(--ink-3); padding: 6px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
 .quotes td { text-align: right; font-family: var(--font-data); padding: 5px 8px; border-bottom: 1px solid var(--grid); }
 .quotes th:first-child, .quotes td:first-child, .quotes th:nth-child(2), .quotes td:nth-child(2) { text-align: left; }
 .quotes td.fitcol { color: var(--fit); }
-.quotes td.splcol { color: var(--ink); }
 .quotes tr.atf td { background: var(--hi); }
 footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rule); padding-top: 14px; }
 </style>
@@ -138,30 +136,11 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
     </div>
     <ul class="legend">
       <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--quote)" stroke-width="2"/></svg>Deribit bid–ask, in vol (bottom bid, top ask)</li>
-      <li><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--fit)" stroke-width="2.5"/></svg><span id="legend-svi">SVI fit to mid</span></li>
-      <li><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--spline)" stroke-width="2.5" stroke-dasharray="6 4"/></svg><span id="legend-spl">Smoothing spline through the mid</span></li>
+      <li><svg width="22" height="10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--fit)" stroke-width="2.5"/></svg><span id="legend-spl">Smoothing spline through the mid</span></li>
       <li><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark</li>
     </ul>
     <div class="chart" id="chart"><div class="tip" id="tip" hidden></div></div>
     <p class="note">Out-of-the-money options only: puts below the forward, calls above it. Strike axis is logarithmic. Scroll or pinch to zoom, drag sideways to pan, double-click to reset. Hover or tap a strike for its prices.</p>
-  </div>
-
-  <div class="card">
-    <div class="card-head">
-      <h2>Cheap or rich against the SVI curve</h2>
-      <div class="seg" role="group" aria-label="Units">
-        <button type="button" data-u="usd" aria-pressed="true">$ per option</button>
-        <button type="button" data-u="vol" aria-pressed="false">Vol points</button>
-      </div>
-    </div>
-    <ul class="legend">
-      <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--quote)" stroke-width="2"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--quote)" stroke-width="2"/></svg>Bid and ask minus the SVI price</li>
-      <li><svg width="14" height="18" aria-hidden="true"><line x1="7" y1="2" x2="7" y2="16" stroke="var(--signal)" stroke-width="2.5"/><line x1="3" y1="2" x2="11" y2="2" stroke="var(--signal)" stroke-width="2.5"/><line x1="3" y1="16" x2="11" y2="16" stroke="var(--signal)" stroke-width="2.5"/></svg>Whole bid–ask off the curve: cheap or rich</li>
-      <li><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark minus the SVI price</li>
-    </ul>
-    <p class="tally" id="rich-tally"></p>
-    <div class="richchart" id="richchart"><div class="tip" id="rtip" hidden></div></div>
-    <p class="note" id="rich-note"></p>
   </div>
 
   <div class="card">
@@ -184,7 +163,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
 
   <div class="card">
     <div class="card-head">
-      <h2>Fit error: our curves against Deribit's mark</h2>
+      <h2>Fit error: our spline against Deribit's mark</h2>
     </div>
     <div class="switches">
       <div class="switch"><span class="switch-label">Measured against</span>
@@ -204,8 +183,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
       </div>
     </div>
     <div class="scores">
-      <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" fill="var(--fit)"/></svg>SVI fit</span><b id="fe-svi"></b><small id="fe-svi-in"></small></div>
-      <div class="score"><span><svg width="12" height="12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" fill="var(--spline)"/></svg>Smoothing spline</span><b id="fe-spl"></b><small id="fe-spl-in"></small></div>
+      <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4.5" fill="var(--fit)"/></svg>Smoothing spline</span><b id="fe-spl"></b><small id="fe-spl-in"></small></div>
       <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark</span><b id="fe-mark"></b><small id="fe-mark-in"></small></div>
     </div>
     <div class="formula">option error = |fitted price − target| ÷ ((ask − bid) ÷ 2) &nbsp;·&nbsp; fit error = √( Σ wᵢ · errorᵢ² ÷ Σ wᵢ )<br>
@@ -220,7 +198,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
       <ol id="steps"></ol>
     </div>
     <div>
-      <h2 id="params-title">SVI parameters</h2>
+      <h2 id="params-title">The spline</h2>
       <table class="params" id="params"></table>
       <ul class="checks" id="checks"></ul>
     </div>
@@ -230,7 +208,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
     <summary id="table-summary">Every quote, strike by strike</summary>
     <div class="tablewrap">
       <table class="quotes">
-        <thead><tr><th>Strike</th><th>Option</th><th>Bid ($)</th><th>Ask ($)</th><th>Bid size</th><th>Ask size</th><th>Microprice ($)</th><th>Bid vol</th><th>Ask vol</th><th>Deribit mark</th><th>SVI fit</th><th>Spline</th><th>Mark error</th><th>SVI error</th><th>Spline error</th></tr></thead>
+        <thead><tr><th>Strike</th><th>Option</th><th>Bid ($)</th><th>Ask ($)</th><th>Bid size</th><th>Ask size</th><th>Microprice ($)</th><th>Bid vol</th><th>Ask vol</th><th>Deribit mark</th><th>Spline</th><th>Mark error</th><th>Spline error</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -253,36 +231,31 @@ const TNAME = { mid: "mid", micro: "microprice" };
 const tgtPrice = (q, t = target) => t === "mid" ? (q.bid_usd + q.ask_usd) / 2 : q.micro_usd;
 const errOf = (q, price, t = target) => q.micro_usd == null || price == null ? null : Math.abs(price - tgtPrice(q, t)) / ((q.ask_usd - q.bid_usd) / 2);
 for (const q of D.quotes) {
-  Object.defineProperty(q, "fit_iv", { get: () => q[`fit_iv_${target}`] });
-  Object.defineProperty(q, "err_svi", { get: () => errOf(q, q[`fit_usd_${target}`]) });
   Object.defineProperty(q, "err_mark", { get: () => errOf(q, q.mark_usd) });
   Object.defineProperty(q, "err_spl", { get: () => errOf(q, q[`spl_usd_${target}`]) });
 }
-const cv = c => c[target === "mid" ? 1 : 2];   // curve point's vol for the current target
-const cvs = c => c[target === "mid" ? 3 : 4];  // the same for the spline (null past the quoted strikes)
-/* Our two curves, by key: price and vol at a quote for the current target. */
+const cvs = c => c[target === "mid" ? 1 : 2];  // curve point's spline vol for the current target
+/* The fitted curve: price and vol at a quote for the current target (null past the quoted strikes). */
 const CURVE = {
-  svi: { name: "SVI", usd: q => q[`fit_usd_${target}`], iv: q => q[`fit_iv_${target}`] },
   spl: { name: "spline", usd: q => q[`spl_usd_${target}`], iv: q => q[`spl_iv_${target}`] },
 };
 const inBook = (q, price) => price >= q.bid_usd - 1e-9 && price <= q.ask_usd + 1e-9;
-const sviInBook = q => inBook(q, q[`fit_usd_${target}`]);
 const splInBook = q => q[`spl_usd_${target}`] != null && inBook(q, q[`spl_usd_${target}`]);
 const markInBook = q => inBook(q, q.mark_usd);
 
-const PRICE_OF = { svi: (q, t) => q[`fit_usd_${t}`], spl: (q, t) => q[`spl_usd_${t}`], mark: q => q.mark_usd };
-const WHO = { svi: "our SVI", spl: "our smoothing spline", mark: "Deribit's mark" };
+const PRICE_OF = { spl: (q, t) => q[`spl_usd_${t}`], mark: q => q.mark_usd };
+const WHO = { spl: "our smoothing spline", mark: "Deribit's mark" };
 function equalScore(t, who) {
   const s = D.quotes.filter(q => q.micro_usd != null && PRICE_OF[who](q, t) != null);
   return Math.sqrt(s.reduce((a, q) => a + errOf(q, PRICE_OF[who](q, t), t) ** 2, 0) / s.length);
 }
-const winner = t => ["svi", "spl", "mark"].reduce((a, b) => equalScore(t, b) < equalScore(t, a) ? b : a);
+const winner = t => equalScore(t, "spl") < equalScore(t, "mark") ? "spl" : "mark";
 const cap1 = x => x[0].toUpperCase() + x.slice(1);
 document.getElementById("lead").textContent =
   `At-the-money vol is ${fmt(D.atm_iv, 1)}%, and downside is priced richer than upside: ${fmt(D.iv_80, 1)}% at 80% of the forward against ${fmt(D.iv_120, 1)}% at 120%. ` +
   (winner("mid") === winner("micro")
-    ? `Of the three curves, ${WHO[winner("mid")]} sits closest to the quotes whether they are scored against the plain mid or the size-weighted microprice.`
-    : `Of the three curves, ${WHO[winner("mid")]} sits closest to the plain mid, and ${WHO[winner("micro")]} closest to the size-weighted microprice.`);
+    ? `${cap1(WHO[winner("mid")])} sits closer to the quotes whether they are scored against the plain mid or the size-weighted microprice.`
+    : `Scored against the plain mid, ${WHO[winner("mid")]} comes out closer; against the size-weighted microprice, ${WHO[winner("micro")]} does.`);
 
 const facts = [
   ["Snapshot", asofText],
@@ -299,36 +272,33 @@ const steps = [
   `<b>One option per strike.</b> Below the forward the put, above it the call, so every point is the more liquid, out-of-the-money side.`,
   `<b>Bid and ask vols.</b> Each bid and each ask is converted separately into a Black implied volatility at that forward, which gives a vol band per strike instead of a single point.`,
   `<b>Mid or microprice.</b> The mid ignores how much is offered on each side. The microprice weights the bid and ask by the size on the opposite side, so it leans toward the thinner side, where the price is more likely to move.`,
-  `<b>SVI fit.</b> Gatheral's raw SVI, five parameters on total variance, is fitted in price, once to the mid and once to the microprice. Each fit minimises the error measured below, under a constraint that keeps the curve free of butterfly arbitrage.`,
-  `<b>Smoothing spline.</b> A cubic smoothing spline through the target's implied vols, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder), with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes, and nothing in it rules out arbitrage: it is checked instead. ` +
-    (D.fits.mid.spline.arb_free && D.fits.micro.spline.arb_free ? `On this snapshot both splines are free of butterfly arbitrage across the quoted strikes.`
-      : `On this snapshot the spline shows butterfly arbitrage between $${(D.fits.mid.spline.arb_bad || D.fits.micro.spline.arb_bad).map(x => x.toLocaleString("en-US")).join(" and $")}.`),
+  `<b>Smoothing spline.</b> A cubic smoothing spline through the implied vols of the target, once for the mid and once for the microprice, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder), with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes, and nothing in it rules out arbitrage: it is checked instead. ` +
+    (D.fits.mid.arb_free && D.fits.micro.arb_free ? `On this snapshot both splines are free of butterfly arbitrage across the quoted strikes.`
+      : `On this snapshot the spline shows butterfly arbitrage between $${(D.fits.mid.arb_bad || D.fits.micro.arb_bad).map(x => x.toLocaleString("en-US")).join(" and $")}.`),
 ];
 document.getElementById("steps").innerHTML = steps.map(s => `<li>${s}</li>`).join("");
 
 function renderText() {
-  const F = D.fits[target], P = F.svi;
-  document.getElementById("legend-svi").textContent = `SVI fit to ${TNAME[target]}`;
+  const F = D.fits[target];
   document.getElementById("legend-spl").textContent = `Smoothing spline through the ${TNAME[target]}`;
-  document.getElementById("params-title").textContent = `SVI parameters, fitted to ${TNAME[target]}`;
+  document.getElementById("params-title").textContent = `The spline, fitted to the ${TNAME[target]}`;
+  const kr = D.fit_range.map(x => "$" + x.toLocaleString("en-US"));
   document.getElementById("params").innerHTML = [
-    ["a, variance level", P.a.toFixed(4)], ["b, wing steepness", P.b.toFixed(4)], ["ρ, skew", P.rho.toFixed(4)],
-    ["m, horizontal shift", P.m.toFixed(4)], ["σ, curvature at the money", P.sigma.toFixed(4)],
+    ["Strikes fitted", F.n], ["Strike range", `${kr[0]} to ${kr[1]}`], ["Variable", "implied vol vs log(strike ÷ forward)"],
+    ["Weights", "1 ÷ half-spread² in vol points"], ["Smoothing", "generalized cross-validation"],
   ].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
   const s = D.quotes.filter(q => q.micro_usd != null);
   document.getElementById("checks").innerHTML = [
-    `Inside the bid–ask on ${s.filter(sviInBook).length} of ${s.length} strikes`,
-    F.arb_free ? `No butterfly arbitrage from $${D.arb_range[0].toLocaleString("en-US")} to $${D.arb_range[1].toLocaleString("en-US")} (Gatheral's density test)` : null,
-    `Wing slopes ${F.wing_slopes.left.toFixed(2)} and ${F.wing_slopes.right.toFixed(2)}, inside Lee's bound of 2`,
+    `Inside the bid–ask on ${s.filter(splInBook).length} of ${s.length} strikes`,
+    F.arb_free ? `No butterfly arbitrage from ${kr[0]} to ${kr[1]} (Gatheral's density test)` : null,
   ].filter(Boolean).map(x => `<li>${x}</li>`).join("");
   const n0 = v => v ? v.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "–";
   document.getElementById("rows").innerHTML = D.quotes.map(q => {
     const atf = Math.abs(Math.log(q.K / D.forward)) < 0.035 ? ' class="atf"' : "";
     return `<tr${atf}><td>${q.K.toLocaleString("en-US")}</td><td>${q.cp === "C" ? "Call" : "Put"}</td>` +
       `<td>${fmt(q.bid_usd)}</td><td>${fmt(q.ask_usd)}</td><td>${n0(q.bsize)}</td><td>${n0(q.asize)}</td><td>${fmt(q.micro_usd)}</td>` +
-      `<td>${pct(q.bid_iv)}</td><td>${pct(q.ask_iv)}</td><td>${pct(q.mark_iv)}</td><td class="fitcol">${pct(q.fit_iv)}</td><td class="splcol">${pct(q[`spl_iv_${target}`])}</td>` +
-      `<td>${q.err_mark == null ? "–" : q.err_mark.toFixed(2)}</td><td class="fitcol">${q.err_svi == null ? "–" : q.err_svi.toFixed(2)}</td>` +
-      `<td class="splcol">${q.err_spl == null ? "–" : q.err_spl.toFixed(2)}</td></tr>`;
+      `<td>${pct(q.bid_iv)}</td><td>${pct(q.ask_iv)}</td><td>${pct(q.mark_iv)}</td><td class="fitcol">${pct(q[`spl_iv_${target}`])}</td>` +
+      `<td>${q.err_mark == null ? "–" : q.err_mark.toFixed(2)}</td><td class="fitcol">${q.err_spl == null ? "–" : q.err_spl.toFixed(2)}</td></tr>`;
   }).join("");
   document.getElementById("table-summary").textContent =
     `Every quote, strike by strike (${D.quotes.length} strikes; errors against the ${TNAME[target]})`;
@@ -400,7 +370,6 @@ function setView(lo, hi) {
 
 function draw() {
   drawErrors();
-  drawRich("svi");
   drawRich("spl");
   chartBox.querySelector("svg")?.remove();
   const W = Math.max(chartBox.clientWidth, 300);
@@ -409,9 +378,9 @@ function draw() {
   const { lo, hi } = view;
   const inX = K => K >= lo && K <= hi;
   const vis = D.quotes.filter(q => inX(q.K));
-  let ys = vis.flatMap(q => [q.bid_iv, q.ask_iv, q.fit_iv, q.mark_iv, q[`spl_iv_${target}`]]).filter(v => v != null)
-    .concat(D.curve.filter(c => inX(c[0])).flatMap(c => [cv(c), cvs(c)]).filter(v => v != null));
-  if (!ys.length) ys = D.curve.map(cv);
+  let ys = vis.flatMap(q => [q.bid_iv, q.ask_iv, q.mark_iv, q[`spl_iv_${target}`]]).filter(v => v != null)
+    .concat(D.curve.filter(c => inX(c[0])).map(cvs));
+  if (!ys.length) ys = D.curve.map(cvs);
   const span = Math.max(...ys) - Math.min(...ys);
   const step = span > 40 ? 10 : span > 16 ? 5 : span > 6 ? 2 : span > 2.5 ? 1 : 0.5;
   const y0 = Math.floor((Math.min(...ys) - step * 0.3) / step) * step;
@@ -422,7 +391,7 @@ function draw() {
   geos.set(chartBox, { W, m, pw, lo, hi });
 
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
-    "aria-label": `Implied volatility smile for the __EXPIRY_LONG__ ETH expiry, strikes ${Math.round(lo)} to ${Math.round(hi)}: Deribit bid and ask vols per strike with an SVI fit and a smoothing spline` });
+    "aria-label": `Implied volatility smile for the __EXPIRY_LONG__ ETH expiry, strikes ${Math.round(lo)} to ${Math.round(hi)}: Deribit bid and ask vols per strike with a smoothing spline` });
   chartBox.insertBefore(svg, tip);
   const defs = el("defs", {}, svg);
   const clip = el("clipPath", { id: "plot" }, defs);
@@ -474,23 +443,13 @@ function draw() {
   }
   const pts = D.curve.filter(c => c[0] >= lo * 0.98 && c[0] <= hi * 1.02);
   if (pts.length > 1)
-    el("path", { d: pts.map((c, i) => (i ? "L" : "M") + X(c[0]).toFixed(1) + " " + Y(cv(c)).toFixed(1)).join(""),
+    el("path", { d: pts.map((c, i) => (i ? "L" : "M") + X(c[0]).toFixed(1) + " " + Y(cvs(c)).toFixed(1)).join(""),
       fill: "none", stroke: "var(--fit)", "stroke-width": 2.5, "stroke-linejoin": "round" }, plot);
-  const spts = pts.filter(c => cvs(c) != null);
-  if (spts.length > 1)
-    el("path", { d: spts.map((c, i) => (i ? "L" : "M") + X(c[0]).toFixed(1) + " " + Y(cvs(c)).toFixed(1)).join(""),
-      fill: "none", stroke: "var(--spline)", "stroke-width": 2.5, "stroke-dasharray": "7 5", "stroke-linejoin": "round" }, plot);
   for (const { q, x } of marks)
     el("circle", { cx: x, cy: Y(q.mark_iv), r: 4, fill: "var(--card)", stroke: "var(--mark)", "stroke-width": 2 }, plot);
-  if (W >= 520 && pts.length > 1) {
+  if (W >= 520 && pts.length > 1) {          // label where the spline stops, inside the view
     const last = pts.filter(c => c[0] <= hi).at(-1);
-    if (last) { const lab = el("text", { x: X(last[0]) + 8, y: Y(cv(last)) + 4, style: "fill: var(--fit); font-weight: 500" }, svg); lab.textContent = "SVI"; }
-    const slast = spts.filter(c => c[0] <= hi).at(-1);
-    if (slast) {                              // label where the spline stops; nudge it off the SVI label
-      let sy = Y(cvs(slast)) + 4;
-      if (last && Math.abs(X(slast[0]) - X(last[0])) < 50 && Math.abs(sy - Y(cv(last)) - 4) < 13) sy = Y(cv(last)) + 4 + (sy > Y(cv(last)) + 4 ? 14 : -14);
-      const sl = el("text", { x: X(slast[0]) + 8, y: sy, style: "fill: var(--ink-2); font-weight: 500" }, svg); sl.textContent = "Spline";
-    }
+    if (last) { const lab = el("text", { x: X(last[0]) + 8, y: Y(cvs(last)) + 4, style: "fill: var(--fit); font-weight: 500" }, svg); lab.textContent = "Spline"; }
   }
 
   // hover: one column per strike, wider than the mark
@@ -508,7 +467,6 @@ function draw() {
         `<tr><td>Ask</td><td>${pct(q.ask_iv)}</td><td>$${fmt(q.ask_usd)}</td></tr>` +
         `<tr><td>Size</td><td>${q.bsize ? q.bsize.toLocaleString("en-US") : "–"}</td><td>${q.asize ? q.asize.toLocaleString("en-US") : "–"}</td></tr>` +
         `<tr><td>Microprice</td><td></td><td>${q.micro_usd == null ? "–" : "$" + fmt(q.micro_usd)}</td></tr>` +
-        `<tr><td>SVI fit</td><td>${pct(q.fit_iv)}</td><td>$${fmt(q[`fit_usd_${target}`])}</td></tr>` +
         `<tr><td>Spline</td><td>${pct(q[`spl_iv_${target}`])}</td><td>${q[`spl_usd_${target}`] == null ? "–" : "$" + fmt(q[`spl_usd_${target}`])}</td></tr>` +
         `<tr><td>Deribit mark</td><td>${pct(q.mark_iv)}</td><td>$${fmt(q.mark_usd)}</td></tr></table>`;
       tip.hidden = false;
@@ -545,7 +503,6 @@ for (const q of D.quotes) q.mark_iv_f = impliedPct(q.mark_usd, q.K, q.cp);   // 
 
 /* One cheap/rich card per curve; c is a CURVE key. */
 const RICH = {
-  svi: { chart: "richchart", tip: "rtip", tally: "rich-tally", note: "rich-note", clip: "rplot", zero: "SVI fair value" },
   spl: { chart: "richchart-spl", tip: "rtip-spl", tally: "rich-tally-spl", note: "rich-note-spl", clip: "rplot-spl", zero: "spline fair value" },
 };
 function richRow(q, c) {                   // differences from curve c, in the chosen units; null where c has no value
@@ -575,13 +532,13 @@ function renderRichText(c) {
     `Deribit's mark is above the curve on ${above} of ${two.length} strikes. ` +
     (units === "usd" ? "Dollar gaps are naturally larger near the money, where options cost more; vol points compare strikes on an equal footing. "
       : "In vol points the mark is restated at our parity forward, so it sits on the same scale as the bid and ask. ") +
-    (c === "spl" ? "The spline exists only across the quoted strikes, so strikes quoted on one side only beyond them are left out. " : "") +
+    "The spline exists only across the strikes quoted on both sides, so one-sided quotes beyond them are left out. " +
     `Zoom and pan here or on the smile above: scroll or pinch to zoom, drag sideways to pan, double-click to reset. Every chart shares one strike axis.`;
   document.querySelectorAll("[data-u]").forEach(b => b.setAttribute("aria-pressed", b.dataset.u === units));
 }
-const renderRichAll = () => { renderRichText("svi"); renderRichText("spl"); };
+const renderRichAll = () => renderRichText("spl");
 document.querySelectorAll("[data-u]").forEach(b => b.addEventListener("click", () => {
-  units = b.dataset.u; renderRichAll(); drawRich("svi"); drawRich("spl");
+  units = b.dataset.u; renderRichAll(); drawRich("spl");
 }));
 
 function drawRich(c) {
@@ -678,20 +635,18 @@ function fitError(key) {
   return Math.sqrt(s.reduce((a, q, i) => a + w[i] * q[key] ** 2, 0) / sw);
 }
 function renderScores() {
-  const svi = fitError("err_svi"), mark = fitError("err_mark"), spl = fitError("err_spl");
-  document.getElementById("fe-svi").textContent = svi.toFixed(3);
+  const mark = fitError("err_mark"), spl = fitError("err_spl");
   document.getElementById("fe-spl").textContent = spl.toFixed(3);
   const sn = scored.filter(q => q.err_spl != null).length;
   document.getElementById("fe-spl-in").textContent = `inside the bid–ask on ${scored.filter(splInBook).length} of ${sn}`;
   document.getElementById("fe-mark").textContent = mark.toFixed(3);
-  document.getElementById("fe-svi-in").textContent = `inside the bid–ask on ${scored.filter(sviInBook).length} of ${scored.length}`;
   document.getElementById("fe-mark-in").textContent = `inside the bid–ask on ${scored.filter(markInBook).length} of ${scored.length}`;
   const zero = scored.filter(q => WEIGHTS[wkey](q) === 0).length;
   document.getElementById("err-note").textContent =
     `Errors are in half-spreads, ${WNAME[wkey]}${zero ? ` (${zero} strikes with no volume drop out)` : ""}. ` +
     `0 is the ${TNAME[target]}, 1 is a half-spread away from it. Scored on the ${scored.length} strikes quoted on both sides. ` +
-    `Each SVI is fitted to this measure against its own target on these same quotes, and each spline to nearly the same measure in vol terms, so both have a home advantage; the mark is Deribit's own model price. ` +
-    `The spline has more freedom than SVI's five parameters, so a lower score partly reflects flexibility. This chart shares the smile's strike axis and zooms the same way.`;
+    `Each spline is fitted to nearly this measure, in vol terms, against its own target on these same quotes, so it has a home advantage; the mark is Deribit's own model price. ` +
+    `This chart shares the smile's strike axis and zooms the same way.`;
   document.querySelectorAll("[data-w]").forEach(b => b.setAttribute("aria-pressed", b.dataset.w === wkey));
 }
 document.querySelectorAll("[data-w]").forEach(b => b.addEventListener("click", () => { wkey = b.dataset.w; renderScores(); }));
@@ -712,10 +667,10 @@ function drawErrors() {
   const pw = W - m.l - m.r;
   const X = K => m.l + (Math.log(K) - Math.log(lo)) / (Math.log(hi) - Math.log(lo)) * pw;
   const vis = scored.filter(q => q.K >= lo && q.K <= hi);
-  const top = Math.max(1.2, Math.ceil(Math.max(0, ...vis.flatMap(q => [q.err_svi, q.err_mark, q.err_spl]).filter(v => v != null)) * 5) / 5);
+  const top = Math.max(1.2, Math.ceil(Math.max(0, ...vis.flatMap(q => [q.err_mark, q.err_spl]).filter(v => v != null)) * 5) / 5);
   const Y = v => m.t + (top - v) / top * (H - m.t - m.b);
   geos.set(box, { W, m, pw, lo, hi });
-  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Option error by strike, in half-spreads, for the SVI fit, the smoothing spline and Deribit's mark" });
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Option error by strike, in half-spreads, for the smoothing spline and Deribit's mark" });
   box.appendChild(svg);
   const step = top > 2 ? 0.5 : 0.2;
   for (let v = 0; v <= top + 1e-9; v += step) {
@@ -733,14 +688,11 @@ function drawErrors() {
   const g = el("g", { "clip-path": "url(#eplot)" }, svg);
   for (const q of vis) {
     const x = X(q.K);
-    const es = [q.err_svi, q.err_mark, q.err_spl].filter(v => v != null);
-    el("line", { x1: x, x2: x, y1: Y(Math.min(...es)), y2: Y(Math.max(...es)), stroke: "var(--rule)", "stroke-width": 1.5 }, g);
     if (q.err_spl != null) {
-      const sq = el("rect", { x: x - 4, y: Y(q.err_spl) - 4, width: 8, height: 8, fill: "var(--spline)", stroke: "var(--card)", "stroke-width": 1.5 }, g);
-      el("title", {}, sq).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: spline error ${q.err_spl.toFixed(2)} half-spreads`;
+      el("line", { x1: x, x2: x, y1: Y(q.err_spl), y2: Y(q.err_mark), stroke: "var(--rule)", "stroke-width": 1.5 }, g);
+      const a = el("circle", { cx: x, cy: Y(q.err_spl), r: 4.5, fill: "var(--fit)", stroke: "var(--card)", "stroke-width": 2 }, g);
+      el("title", {}, a).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: spline error ${q.err_spl.toFixed(2)} half-spreads`;
     }
-    const a = el("circle", { cx: x, cy: Y(q.err_svi), r: 4.5, fill: "var(--fit)", stroke: "var(--card)", "stroke-width": 2 }, g);
-    el("title", {}, a).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: SVI error ${q.err_svi.toFixed(2)} half-spreads`;
     const b = el("circle", { cx: x, cy: Y(q.err_mark), r: 4, fill: "var(--card)", stroke: "var(--mark)", "stroke-width": 2 }, g);
     el("title", {}, b).textContent = `${q.K.toLocaleString("en-US")} ${q.cp === "C" ? "call" : "put"}: mark error ${q.err_mark.toFixed(2)} half-spreads`;
   }
