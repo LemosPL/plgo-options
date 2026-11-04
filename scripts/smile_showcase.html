@@ -272,9 +272,10 @@ const steps = [
   `<b>One option per strike.</b> Below the forward the put, above it the call, so every point is the more liquid, out-of-the-money side.`,
   `<b>Bid and ask vols.</b> Each bid and each ask is converted separately into a Black implied volatility at that forward, which gives a vol band per strike instead of a single point.`,
   `<b>Mid or microprice.</b> The mid ignores how much is offered on each side. The microprice weights the bid and ask by the size on the opposite side, so it leans toward the thinner side, where the price is more likely to move.`,
-  `<b>Smoothing spline.</b> A cubic smoothing spline through the implied vols of the target, once for the mid and once for the microprice, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder), with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes, and nothing in it rules out arbitrage: it is checked instead. ` +
-    (D.fits.mid.arb_free && D.fits.micro.arb_free ? `On this snapshot both splines are free of butterfly arbitrage across the quoted strikes.`
-      : `On this snapshot the spline shows butterfly arbitrage between $${(D.fits.mid.arb_bad || D.fits.micro.arb_bad).map(x => x.toLocaleString("en-US")).join(" and $")}.`),
+  `<b>Smoothing spline.</b> A cubic smoothing spline through the implied vols of the target, once for the mid and once for the microprice, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder), with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes. A spline that follows the mids can inherit their arbitrage: far from the money, wide one-sided quotes sometimes put a call's mid above that of a lower strike. So the curve is tested for butterfly arbitrage (Gatheral's density test), and where it fails it is refitted with the same objective plus a penalty that rules arbitrage out. ` +
+    (["mid", "micro"].some(t => D.fits[t].repaired)
+      ? `On this snapshot the plain spline had butterfly arbitrage between $${(D.fits.mid.arb_bad || D.fits.micro.arb_bad).map(x => x.toLocaleString("en-US")).join(" and $")}; the refit ${D.fits.mid.arb_free && D.fits.micro.arb_free ? "removed" : "reduced"} it, moving the curve by at most ${Math.max(D.fits.mid.max_move_vp, D.fits.micro.max_move_vp).toFixed(2)} vol points at a quoted strike.`
+      : `On this snapshot both splines were free of butterfly arbitrage as fitted, so no refit was needed.`),
 ];
 document.getElementById("steps").innerHTML = steps.map(s => `<li>${s}</li>`).join("");
 
@@ -286,6 +287,7 @@ function renderText() {
   document.getElementById("params").innerHTML = [
     ["Strikes fitted", F.n], ["Strike range", `${kr[0]} to ${kr[1]}`], ["Variable", "implied vol vs log(strike ÷ forward)"],
     ["Weights", "1 ÷ half-spread² in vol points"], ["Smoothing", "generalized cross-validation"],
+    ["No-arbitrage refit", F.repaired ? `yes, curve moved ≤ ${F.max_move_vp.toFixed(2)} vol pts` : "not needed"],
   ].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
   const s = D.quotes.filter(q => q.micro_usd != null);
   document.getElementById("checks").innerHTML = [

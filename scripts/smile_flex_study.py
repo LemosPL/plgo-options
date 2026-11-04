@@ -16,8 +16,10 @@ half-spreads, warm-started from the raw SVI fit.
 
 The smoothing spline is the client page's (smile_showcase.py): cubic, implied vol
 of the mid against log-moneyness, weights 1 / half-spread^2 in vol points,
-smoothness by generalized cross-validation. It has no shape beyond its data, so
-its arbitrage check covers the quoted strikes only (the SVI fits: |k| <= 2.5).
+smoothness by generalized cross-validation, scored as fitted ("spline") and with
+smile_fit.fit_spline's butterfly repair ("spline arb-free"). It has no shape beyond
+its data, so its arbitrage check covers the quoted strikes only (SVI: |k| <= 2.5),
+from the spline's exact derivatives.
 
 Scores, per expiry, all in half-spreads against the mid (the mark's score too):
 
@@ -46,14 +48,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.interpolate import BSpline, make_smoothing_spline
+from scipy.interpolate import BSpline
 from scipy.optimize import least_squares
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from plgo_options.pricing.smile_fit import (K_RANGE, PENALTY, black_vec, book_frame, fit_forward,  # noqa: E402
-                                            fit_svi, implied, svi_w, vega)
+                                            fit_spline, fit_svi, implied, svi_w, vega)
 
 KG = np.linspace(-K_RANGE, K_RANGE, 801)
 KG_CHECK = np.linspace(-K_RANGE, K_RANGE, 8001)
@@ -136,25 +138,19 @@ class Flex:
         return bool(w.min() > 0 and g_numeric(w, KG_CHECK).min() >= 0)
 
 
-def spline_fit(q: dict, idx: np.ndarray):
-    """The showcase's smoothing spline through the mid vols of the strikes in idx."""
+def spline_fit(q: dict, idx: np.ndarray, arb_free: bool):
+    """The showcase's smoothing spline through the mid vols of the strikes in idx:
+    (spline, butterfly-free on the quoted range)."""
     K, iv = q["K"][idx], q["iv_mid"][idx]
     ok = np.isfinite(iv)
     vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K[ok], iv[ok])])
-    half_vp = q["half"][idx][ok] / vg
-    return make_smoothing_spline(np.log(K[ok] / q["F"]), iv[ok] * 100, w=1 / half_vp ** 2)
+    spl, _, free = fit_spline(np.log(K[ok] / q["F"]), iv[ok] * 100, q["half"][idx][ok] / vg, q["T"], arb_free)
+    return spl, free
 
 
 def spline_price(q: dict, spl, K, CP):
     v = np.maximum(spl(np.log(np.asarray(K, float) / q["F"])) / 100, 1e-4)
     return black_vec(q["F"], K, q["T"], v, CP, q["DF"])
-
-
-def spline_arb_free(q: dict, spl) -> bool:
-    k = np.log(q["K"] / q["F"])
-    kk = np.linspace(k.min(), k.max(), 2001)
-    w = (spl(kk) / 100) ** 2 * q["T"]
-    return bool(w.min() > 0 and g_numeric(w, kk).min() >= 0)
 
 
 def score(q: dict, loo: bool, models: dict[str, tuple[int, float]]) -> list[dict]:
@@ -183,14 +179,15 @@ def score(q: dict, loo: bool, models: dict[str, tuple[int, float]]) -> list[dict
                 xj = m.fit(allidx[allidx != j], x)
                 r[j] = (m.price(xj, q["K"][j:j + 1], q["CP"][j:j + 1])[0] - q["mid"][j]) / q["half"][j]
             out[name]["loo"] = r
-    spl = spline_fit(q, allidx)
-    out["spline"] = dict(fit=(spline_price(q, spl, q["K"], q["CP"]) - q["mid"]) / q["half"], arb=spline_arb_free(q, spl))
-    if loo:
-        r = np.empty(n)
-        for j in range(n):
-            sj = spline_fit(q, allidx[allidx != j])
-            r[j] = (spline_price(q, sj, q["K"][j:j + 1], q["CP"][j:j + 1])[0] - q["mid"][j]) / q["half"][j]
-        out["spline"]["loo"] = r
+    for name, fix in (("spline", False), ("spline arb-free", True)):
+        spl, free = spline_fit(q, allidx, fix)
+        out[name] = dict(fit=(spline_price(q, spl, q["K"], q["CP"]) - q["mid"]) / q["half"], arb=free)
+        if loo:
+            r = np.empty(n)
+            for j in range(n):
+                sj, _ = spline_fit(q, allidx[allidx != j], fix)
+                r[j] = (spline_price(q, sj, q["K"][j:j + 1], q["CP"][j:j + 1])[0] - q["mid"][j]) / q["half"][j]
+            out[name]["loo"] = r
     out["mark"]["loo"] = out["mark"]["fit"] if loo else None
     rows = []
     for name, d in out.items():
@@ -212,7 +209,7 @@ def main() -> None:
     models = {f"svi+{nb}/λ{lam:g}": (nb, lam) for nb in map(int, args.bases.split(","))
               for lam in map(float, args.lam.split(","))}
     files = sorted(args.dir.expanduser().glob("*/*.json.gz"))[::args.every]
-    print(f"{len(files)} ticks, leave-one-out on every {args.loo_every}th; models: svi, {', '.join(models)}, spline, mark",
+    print(f"{len(files)} ticks, leave-one-out on every {args.loo_every}th; models: svi, {', '.join(models)}, spline, spline arb-free, mark",
           flush=True)
     rows = []
     for i, f in enumerate(files):
@@ -229,7 +226,7 @@ def main() -> None:
     df = pd.DataFrame(rows)
     if args.out:
         df.to_csv(args.out, index=False)
-    order = ["svi", *models, "spline", "mark"]
+    order = ["svi", *models, "spline", "spline arb-free", "mark"]
     for expiry, x in df.groupby("expiry", sort=False):
         print(f"\n{expiry}  ({x.tick.nunique()} ticks, half-spreads vs mid)")
         print(f"{'model':16}{'in-sample':>10}{'LOO':>8}{'LOO inner':>11}{'bias':>8}{'arb-free':>10}")

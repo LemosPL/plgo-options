@@ -6,6 +6,8 @@
     book_frame      order books of one expiry -> one row per instrument, USD
     fit_svi         raw SVI fitted in price to a target, |price - target| / half-spread,
                     with Gatheral's butterfly density g(k) >= 0 enforced by penalty
+    fit_spline      cubic smoothing spline of implied vol (GCV), refitted with the same
+                    butterfly penalty when it has negative density between the strikes
 """
 
 from __future__ import annotations
@@ -15,13 +17,15 @@ import re
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import brentq, least_squares
+from scipy.interpolate import BSpline, make_smoothing_spline
+from scipy.optimize import brentq, least_squares, minimize_scalar
 from scipy.stats import norm
 
 MON = dict(JAN=1, FEB=2, MAR=3, APR=4, MAY=5, JUN=6, JUL=7, AUG=8, SEP=9, OCT=10, NOV=11, DEC=12)
 MIN_DF_DAYS = 30     # shorter expiries: parity slope too noisy to pin DF, hold it at 1
 K_RANGE = 2.5        # |log(K/F)| over which the no-arbitrage check runs
 PENALTY = 50.0       # weight on negative density / variance in the fit's residuals
+G_FLOOR = 0.01       # the spline repair holds g above this margin, so the fine-grid check passes
 
 
 # ---------- Black (forward, discounted) ----------
@@ -143,3 +147,78 @@ def fit_svi(K, CP, target, half, F, T, DF, atm, x0=None) -> tuple[np.ndarray, bo
             best = r
     w, gk = density(best.x, np.linspace(-K_RANGE, K_RANGE, 20001))
     return best.x, bool(gk.min() >= 0 and w.min() > 0)
+
+
+def spline_density(spl, k, T):
+    """Total variance w and Gatheral's g(k) of a spline in implied vol points, from its
+    exact derivatives (a finite-difference g is wrong at the ends of the range)."""
+    v, v1, v2 = spl(k) / 100, spl.derivative(1)(k) / 100, spl.derivative(2)(k) / 100
+    w, w1, w2 = v * v * T, 2 * T * v * v1, 2 * T * (v1 * v1 + v * v2)
+    return w, (1 - k * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
+
+
+def _gcv_lam(k, y, wt, spl) -> float:
+    """make_smoothing_spline picks its smoothness by generalized cross-validation but does
+    not return it: recover it as the lam whose spline reproduces the GCV curve."""
+    yk = spl(k)
+
+    def miss(ll):
+        return np.sum(wt * (make_smoothing_spline(k, y, w=wt, lam=10.0 ** ll)(k) - yk) ** 2)
+    grid = np.arange(-10, 4.01, 0.25)
+    ll = grid[int(np.argmin([miss(x) for x in grid]))]
+    return 10.0 ** minimize_scalar(miss, bounds=(ll - 0.25, ll + 0.25), method="bounded").x
+
+
+def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True) -> tuple[BSpline, bool, bool]:
+    """Cubic smoothing spline of implied vol (vol points) against log-moneyness k (sorted),
+    weights 1 / half-spread^2 in vol points, smoothness by GCV.
+
+    The spline follows the mids, and wide one-sided quotes in the wings can have mids that
+    are themselves arbitraged (a call mid above a lower strike's). With arb_free, a spline
+    with negative density between the first and last strike is refitted: same objective
+    (weighted squared error + lam x integral of f''^2, lam from the GCV fit) plus the SVI
+    fit's butterfly penalty, on the same knots, starting from the GCV coefficients.
+    Returns the spline, whether it was repaired, and whether g >= 0 and w > 0 hold."""
+    k, y, half_vp = np.asarray(k, float), np.asarray(iv_pct, float), np.asarray(half_vp, float)
+    wt = 1 / half_vp ** 2
+    spl = make_smoothing_spline(k, y, w=wt)
+    kc = np.linspace(k[0], k[-1], 8001)
+
+    def ok(s):
+        w, g = spline_density(s, kc, T)
+        return bool(w.min() > 0 and g.min() >= 0)
+    if not arb_free or ok(spl):
+        return spl, False, ok(spl)
+    kg = np.linspace(k[0], k[-1], 401)
+    rough = np.sqrt(_gcv_lam(k, y, wt, spl) * (kg[1] - kg[0]))   # sum of squares ~ lam * integral f''^2
+    t, eye = spl.t, np.eye(len(spl.c))
+
+    def basis(x, n):  # column i: n-th derivative of the i-th B-spline at x
+        return np.column_stack([BSpline(t, e, 3).derivative(n)(x) if n else BSpline(t, e, 3)(x) for e in eye])
+    Bk, B2g = basis(k, 0), basis(kg, 2)                  # vol points
+    B = [basis(kc, n) / 100 for n in range(3)]           # v, v', v'' as fractions
+
+    def parts(c):
+        v, v1, v2 = (b @ c for b in B)
+        w, w1, w2 = v * v * T, 2 * T * v * v1, 2 * T * (v1 * v1 + v * v2)
+        a = 1 - kc * w1 / (2 * w)
+        g = a * a - w1 * w1 / 4 * (1 / w + 0.25) + w2 / 2
+        return v, v1, v2, w, w1, a, g
+
+    def res(c):
+        _, _, _, w, _, _, g = parts(c)
+        return np.concatenate([(Bk @ c - y) / half_vp, rough * (B2g @ c),
+                               np.minimum(g - G_FLOOR, 0) * PENALTY, np.minimum(w, 0) * PENALTY])
+
+    def jac(c):
+        v, v1, v2, w, w1, a, g = parts(c)
+        dw = 2 * T * v[:, None] * B[0]
+        dw1 = 2 * T * (v1[:, None] * B[0] + v[:, None] * B[1])
+        dw2 = 2 * T * (2 * v1[:, None] * B[1] + v2[:, None] * B[0] + v[:, None] * B[2])
+        gw = a * kc * w1 / w ** 2 + w1 * w1 / (4 * w * w)
+        gw1 = -a * kc / w - w1 / 2 * (1 / w + 0.25)
+        dg = gw[:, None] * dw + gw1[:, None] * dw1 + 0.5 * dw2
+        return np.vstack([Bk / half_vp[:, None], rough * B2g,
+                          (g < G_FLOOR)[:, None] * dg * PENALTY, (w < 0)[:, None] * dw * PENALTY])
+    fixed = BSpline(t, least_squares(res, spl.c, jac=jac).x, 3)
+    return fixed, True, ok(fixed)

@@ -11,8 +11,9 @@ prices and sizes are from the same moment), then:
        through the mid vols and one through the microprice vols, each strike
        weighted by 1 / half-spread^2 in vol points, smoothness chosen by
        generalized cross-validation; drawn only across the scored strikes (a
-       spline has no shape beyond its data) and checked, not constrained, for
-       butterfly arbitrage (Gatheral's g(k) >= 0) across them
+       spline has no shape beyond its data). Where it has butterfly arbitrage
+       (Gatheral's g(k) < 0) between them, it is refitted with a no-arbitrage
+       penalty (smile_fit.fit_spline)
 
 and writes a self-contained page from scripts/smile_showcase.html (charts,
 fit error vs Deribit's mark, cheap/rich vs the curve). Public endpoints only,
@@ -37,13 +38,12 @@ from pathlib import Path
 
 import httpx
 import numpy as np
-from scipy.interpolate import make_smoothing_spline
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from plgo_options.pricing.smile_fit import (black_vec, book_frame, fit_forward, implied,  # noqa: E402
-                                           parse_exp, vega)
+from plgo_options.pricing.smile_fit import (black_vec, book_frame, fit_forward, fit_spline, implied,  # noqa: E402
+                                           parse_exp, spline_density, vega)
 
 TEMPLATE = Path(__file__).with_name("smile_showcase.html")
 API = "https://www.deribit.com/api/v2/public"
@@ -71,13 +71,6 @@ async def snapshot(expiry: str) -> tuple[list[dict], float, float]:
         t0 = time.time()
         books = await asyncio.gather(*(one(n) for n in names))
         return books, t0, time.time()
-
-
-def density_numeric(w: np.ndarray, k: np.ndarray) -> np.ndarray:
-    """Gatheral's g(k) from total variance on a grid; g < 0 = butterfly arbitrage."""
-    w1 = np.gradient(w, k)
-    w2 = np.gradient(w1, k)
-    return (1 - k * w1 / (2 * w)) ** 2 - w1 ** 2 / 4 * (1 / w + 0.25) + w2 / 2
 
 
 def build(expiry: str) -> dict:
@@ -113,7 +106,7 @@ def build(expiry: str) -> dict:
     half = np.array([(q["ask_usd"] - q["bid_usd"]) / 2 for q in scored])
     atm = float(np.median([(q["bid_iv"] + q["ask_iv"]) / 200 for q in scored]))
     k = np.log(K / F)
-    kk = np.linspace(k.min(), k.max(), 2001)
+    kk = np.linspace(k.min(), k.max(), 8001)
 
     targets = {"mid": np.array([(q["bid_usd"] + q["ask_usd"]) / 2 for q in scored]),
                "micro": np.array([q["micro_usd"] for q in scored])}
@@ -123,13 +116,14 @@ def build(expiry: str) -> dict:
         ok_t = np.isfinite(iv_t)
         vg = np.array([vega(F, Kj, T, v, DF) for Kj, v in zip(K, np.where(ok_t, iv_t, atm))])
         half_vp = half / vg                         # half-spread in vol points
-        spl = make_smoothing_spline(k[ok_t], iv_t[ok_t] * 100, w=1 / half_vp[ok_t] ** 2)
-        g_k = density_numeric((spl(kk) / 100) ** 2 * T, kk)
-        bad = kk[g_k < 0]
+        raw, _, _ = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T, arb_free=False)
+        spl, repaired, arb_free = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T)
+        bad = kk[spline_density(raw, kk, T)[1] < 0]         # where the plain spline had arbitrage
         splines[name] = spl
-        fits[name] = dict(n=int(ok_t.sum()), arb_free=bool(len(bad) == 0),
+        fits[name] = dict(n=int(ok_t.sum()), arb_free=arb_free, repaired=repaired,
                           arb_bad=[int(round(F * np.exp(bad.min()))), int(round(F * np.exp(bad.max())))]
-                          if len(bad) else None)
+                          if len(bad) else None,
+                          max_move_vp=round(float(np.abs(spl(k) - raw(k)).max()), 2))
         for q in quotes:
             inside = k.min() - 1e-9 <= np.log(q["K"] / F) <= k.max() + 1e-9
             v = float(spl(np.log(q["K"] / F))) if inside else None
@@ -162,7 +156,8 @@ def summary(d: dict) -> None:
         inside = sum(q[f"spl_usd_{t}"] is not None and q["bid_usd"] <= q[f"spl_usd_{t}"] <= q["ask_usd"] for q in s)
         print(f"  vs {t:5}: fit error spline {err(f'spl_usd_{t}'):.3f}, Deribit mark {err('mark_usd'):.3f} "
               f"(half-spreads, equal weights); spline inside bid-ask {inside}/{len(s)}; "
-              f"butterfly-free {d['fits'][t]['arb_free']}")
+              f"butterfly-free {d['fits'][t]['arb_free']}, repaired {d['fits'][t]['repaired']} "
+              f"(plain spline's arbitrage {d['fits'][t]['arb_bad']}, max move {d['fits'][t]['max_move_vp']} vp)")
 
 
 def main() -> None:
