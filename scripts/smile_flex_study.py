@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Is raw SVI too stiff? Raw SVI vs SVI + a smooth spline correction vs Deribit's mark,
-on the order books the smile recorder saved.
+"""Is raw SVI too stiff? Raw SVI vs SVI + a smooth spline correction vs a smoothing
+spline vs Deribit's mark, on the order books the smile recorder saved.
 
 Raw SVI leaves residuals that alternate in sign in smooth runs across strikes
 and persist tick after tick (26MAR27: +0.8 / -0.75 / +0.5 / -0.5 half-spreads),
@@ -14,11 +14,18 @@ penalty on second differences of c (smoothness) and the same butterfly penalty
 as the raw fit, g(k) >= G_FLOOR computed numerically. Fitted in price to the mid, in
 half-spreads, warm-started from the raw SVI fit.
 
+The smoothing spline is the client page's (smile_showcase.py): cubic, implied vol
+of the mid against log-moneyness, weights 1 / half-spread^2 in vol points,
+smoothness by generalized cross-validation. It has no shape beyond its data, so
+its arbitrage check covers the quoted strikes only (the SVI fits: |k| <= 2.5).
+
 Scores, per expiry, all in half-spreads against the mid (the mark's score too):
 
     in-sample   RMS error of the curve fitted to every strike
     LOO         RMS error at each strike of the curve fitted WITHOUT it (sampled
                 ticks): what an execution signal would see; overfitting shows here
+    LOO inner   the same without the lowest and highest strike, where leaving the
+                strike out forces an extrapolation (hardest on the spline)
     bias        RMS over strikes of each strike's mean residual across ticks:
                 the standing, fake edges this exercise is meant to remove
     arb-free    share of fits with g(k) >= 0 and w > 0 on |k| <= 2.5
@@ -39,14 +46,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.interpolate import BSpline
+from scipy.interpolate import BSpline, make_smoothing_spline
 from scipy.optimize import least_squares
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from plgo_options.pricing.smile_fit import (K_RANGE, PENALTY, black_vec, book_frame, fit_forward,  # noqa: E402
-                                            fit_svi, implied, svi_w)
+                                            fit_svi, implied, svi_w, vega)
 
 KG = np.linspace(-K_RANGE, K_RANGE, 801)
 KG_CHECK = np.linspace(-K_RANGE, K_RANGE, 8001)
@@ -68,7 +75,9 @@ def quotes(expiry: str, books: list[dict], now: dt.datetime) -> dict | None:
     o = o[ok]
     if len(o) < 8:
         return None
-    return dict(K=o.K.to_numpy(), CP=o.cp.to_list(), mid=((o.bid + o.ask) / 2).to_numpy(),
+    mid = ((o.bid + o.ask) / 2).to_numpy()
+    iv_mid = np.array([implied(m_, F, r.K, T, r.cp, DF) for m_, r in zip(mid, o.itertuples())])
+    return dict(K=o.K.to_numpy(), CP=o.cp.to_list(), mid=mid, iv_mid=iv_mid,
                 half=((o.ask - o.bid) / 2).to_numpy(), mark=o.mark.to_numpy(), F=F, T=T, DF=DF,
                 atm=float(np.median((ivb[ok] + iva[ok]) / 2)))
 
@@ -127,6 +136,27 @@ class Flex:
         return bool(w.min() > 0 and g_numeric(w, KG_CHECK).min() >= 0)
 
 
+def spline_fit(q: dict, idx: np.ndarray):
+    """The showcase's smoothing spline through the mid vols of the strikes in idx."""
+    K, iv = q["K"][idx], q["iv_mid"][idx]
+    ok = np.isfinite(iv)
+    vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K[ok], iv[ok])])
+    half_vp = q["half"][idx][ok] / vg
+    return make_smoothing_spline(np.log(K[ok] / q["F"]), iv[ok] * 100, w=1 / half_vp ** 2)
+
+
+def spline_price(q: dict, spl, K, CP):
+    v = np.maximum(spl(np.log(np.asarray(K, float) / q["F"])) / 100, 1e-4)
+    return black_vec(q["F"], K, q["T"], v, CP, q["DF"])
+
+
+def spline_arb_free(q: dict, spl) -> bool:
+    k = np.log(q["K"] / q["F"])
+    kk = np.linspace(k.min(), k.max(), 2001)
+    w = (spl(kk) / 100) ** 2 * q["T"]
+    return bool(w.min() > 0 and g_numeric(w, kk).min() >= 0)
+
+
 def score(q: dict, loo: bool, models: dict[str, tuple[int, float]]) -> list[dict]:
     """Per strike residuals (half-spreads vs mid) for raw SVI, each Flex and the mark."""
     n = len(q["K"])
@@ -153,11 +183,19 @@ def score(q: dict, loo: bool, models: dict[str, tuple[int, float]]) -> list[dict
                 xj = m.fit(allidx[allidx != j], x)
                 r[j] = (m.price(xj, q["K"][j:j + 1], q["CP"][j:j + 1])[0] - q["mid"][j]) / q["half"][j]
             out[name]["loo"] = r
+    spl = spline_fit(q, allidx)
+    out["spline"] = dict(fit=(spline_price(q, spl, q["K"], q["CP"]) - q["mid"]) / q["half"], arb=spline_arb_free(q, spl))
+    if loo:
+        r = np.empty(n)
+        for j in range(n):
+            sj = spline_fit(q, allidx[allidx != j])
+            r[j] = (spline_price(q, sj, q["K"][j:j + 1], q["CP"][j:j + 1])[0] - q["mid"][j]) / q["half"][j]
+        out["spline"]["loo"] = r
     out["mark"]["loo"] = out["mark"]["fit"] if loo else None
     rows = []
     for name, d in out.items():
         for j in range(n):
-            rows.append(dict(model=name, K=q["K"][j], fit=d["fit"][j], arb=int(d["arb"]),
+            rows.append(dict(model=name, K=q["K"][j], end=int(j in (0, n - 1)), fit=d["fit"][j], arb=int(d["arb"]),
                              loo=d["loo"][j] if loo else np.nan))
     return rows
 
@@ -174,7 +212,7 @@ def main() -> None:
     models = {f"svi+{nb}/λ{lam:g}": (nb, lam) for nb in map(int, args.bases.split(","))
               for lam in map(float, args.lam.split(","))}
     files = sorted(args.dir.expanduser().glob("*/*.json.gz"))[::args.every]
-    print(f"{len(files)} ticks, leave-one-out on every {args.loo_every}th; models: svi, {', '.join(models)}, mark",
+    print(f"{len(files)} ticks, leave-one-out on every {args.loo_every}th; models: svi, {', '.join(models)}, spline, mark",
           flush=True)
     rows = []
     for i, f in enumerate(files):
@@ -191,17 +229,18 @@ def main() -> None:
     df = pd.DataFrame(rows)
     if args.out:
         df.to_csv(args.out, index=False)
-    order = ["svi", *models, "mark"]
+    order = ["svi", *models, "spline", "mark"]
     for expiry, x in df.groupby("expiry", sort=False):
         print(f"\n{expiry}  ({x.tick.nunique()} ticks, half-spreads vs mid)")
-        print(f"{'model':16}{'in-sample':>10}{'LOO':>8}{'bias':>8}{'arb-free':>10}")
+        print(f"{'model':16}{'in-sample':>10}{'LOO':>8}{'LOO inner':>11}{'bias':>8}{'arb-free':>10}")
         for m in order:
             y = x[x.model == m]
             ins = np.sqrt((y.fit ** 2).mean())
             loo = np.sqrt((y.loo.dropna() ** 2).mean())
+            inner = np.sqrt((y[y.end == 0].loo.dropna() ** 2).mean())
             bias = np.sqrt((y.groupby("K").fit.mean() ** 2).mean())
             arb = y.groupby("tick").arb.first().mean()
-            print(f"{m:16}{ins:>10.3f}{loo:>8.3f}{bias:>8.3f}{100 * arb:>9.0f}%")
+            print(f"{m:16}{ins:>10.3f}{loo:>8.3f}{inner:>11.3f}{bias:>8.3f}{100 * arb:>9.0f}%")
     print("\nmark has no fit, so its LOO is its plain error. bias: RMS of each strike's mean "
           "residual over ticks, i.e. edges that never go away.")
 
