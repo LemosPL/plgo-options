@@ -8,8 +8,9 @@ snapshot (5 min apart). The cost of a book level, USD per contract, is
     buy:  ask level - fair + taker fee        sell:  fair - bid level + taker fee
 
 where fair is the arbitrage-free smoothing spline through the out-of-the-money mid vols
-(smile_fit.fit_spline), fitted WITHOUT the traded strike so its own quote does not pull
-the curve, and the fee is Deribit's min(0.0003 ETH, 12.5% of the premium).
+(smile_fit.fit_spline) of every strike, the traded one included, as the execution bot
+prices it (--loo: fitted without it, so its own quote does not pull the curve), and the
+fee is Deribit's min(0.0003 ETH, 12.5% of the premium).
 
 A policy sets a threshold theta(hours elapsed, share filled). At each snapshot the order
 takes every level costing <= theta, at most --cap contracts; in the last hour it takes
@@ -59,7 +60,7 @@ from plgo_options.pricing.smile_fit import vega  # noqa: E402
 from smile_flex_study import quotes, spline_fit, spline_price  # noqa: E402
 
 
-def ladder(root: Path, expiry: str, K0: float, cp: str) -> pd.DataFrame:
+def ladder(root: Path, expiry: str, K0: float, cp: str, loo: bool = False) -> pd.DataFrame:
     """Every recorded book level of the option, with its cost against the spline."""
     name = f"ETH-{expiry}-{K0:g}-{cp}"
     rows = []
@@ -74,7 +75,7 @@ def ladder(root: Path, expiry: str, K0: float, cp: str) -> pd.DataFrame:
         if q is None:
             continue
         idx = np.arange(len(q["K"]))
-        spl, _ = spline_fit(q, idx[q["K"] != K0], True)
+        spl, _ = spline_fit(q, idx[q["K"] != K0] if loo else idx, True)
         fair = spline_price(q, spl, [K0], [cp])[0]
         S = b["estimated_delivery_price"]
         vg = vega(q["F"], K0, q["T"], float(spl(np.log(K0 / q["F"]))) / 100, q["DF"])
@@ -155,17 +156,18 @@ def main() -> None:
     ap.add_argument("--ramp")
     ap.add_argument("--step")
     ap.add_argument("--behind")
+    ap.add_argument("--loo", action="store_true", help="fair from the spline fitted without the strike")
     ap.add_argument("--dir", type=Path, default=ROOT / "data" / "cache" / "smile_recorder")
     args = ap.parse_args()
 
-    lv = ladder(args.dir.expanduser(), args.expiry, args.strike, args.cp)
+    lv = ladder(args.dir.expanduser(), args.expiry, args.strike, args.cp, args.loo)
     if lv.empty:
         sys.exit(f"no recorded books for ETH-{args.expiry}-{args.strike:g}-{args.cp} under {args.dir}")
     ts = np.sort(lv.ts.unique())
     vg, fee = lv.vega.median(), lv.fee.median()
     fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%d %b %H:%M")  # noqa: E731
     print(f"ETH-{args.expiry}-{args.strike:g}-{args.cp}: {len(ts)} snapshots, {fmt(ts[0])} .. {fmt(ts[-1])} UTC")
-    print(f"fair (spline without this strike) median ${lv.fair.median():.2f}, vega ${vg:.2f} per vol point, "
+    print(f"fair (spline {'without' if args.loo else 'through'} this strike) median ${lv.fair.median():.2f}, vega ${vg:.2f} per vol point, "
           f"fee ${fee:.2f}; costs in USD per contract, fee included")
     cap = args.cap or None
     for side in (("buy", "sell") if args.side == "both" else (args.side,)):

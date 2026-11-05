@@ -67,8 +67,8 @@ else
   gcloud scheduler jobs create http smile-recorder "${rec_args[@]}" --headers="$rec_hdrs"
 fi
 
-# Execution bot (execution/bot.py): works the open parent orders once a minute,
-# paper only for now. With no open order a tick returns at once. It checks the
+# Execution bot (execution/bot.py): each call works the open parent orders every
+# 5 s for 55 s, paper only for now. With no open order a call returns at once. It checks the
 # kill switch itself before sending anything.
 bot_args=(--project="$PROJECT" --location="$REGION" --schedule="* * * * *" --time-zone="Etc/UTC"
           --uri="$SERVICE_URL/api/execution-bot/tick" --http-method=POST --attempt-deadline=90s)

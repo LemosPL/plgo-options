@@ -7,7 +7,7 @@ contracts. Everything dropped comes back with the reason, so the page can show
 what will not be executed and why.
 
 ``preview`` adds what the bot would see right now: whether the instrument is
-listed, the spline's fair value without the strike, the best cost at the touch
+listed, the spline's fair value (every strike in the fit), the best cost at the touch
 in USD and vol points, and the starting threshold.
 """
 
@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 
 from plgo_options.market_data.smile_recorder import expiry_books
-from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair
+from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair, spline_smile
 
 from .models import BookDepth
 from .threshold import ThresholdOrder, decide
@@ -113,18 +113,25 @@ async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5,
         ok.append(leg)
     if ok:
         books, _, _ = await books_fn(sorted({x["instrument"].split("-")[1] for x in ok}))
+        fits: dict[str, tuple] = {}
         for leg in ok:
-            leg.update(_price_now(leg, books.get(leg["instrument"].split("-")[1], []), now, start_vp))
+            leg.update(_price_now(leg, books.get(leg["instrument"].split("-")[1], []), now, start_vp, fits))
     return {"legs": ok, "skipped": skipped, "asof": now}
 
 
-def _price_now(leg: dict, books: list[dict], now: float, start_vp: float) -> dict:
+def _price_now(leg: dict, books: list[dict], now: float, start_vp: float, fits: dict[str, tuple]) -> dict:
+    """fits: {expiry: (otm_quotes, spline_smile)}, filled on first use and shared by the legs."""
     expiry = leg["instrument"].split("-")[1]
     book = next((b for b in books if b["instrument_name"] == leg["instrument"]), None)
-    q = otm_quotes(expiry, books, dt.datetime.fromtimestamp(now, dt.timezone.utc)) if book else None
-    if book is None or q is None:
+    if book is None:
         return {"note": "no book to price against"}
-    fair = spline_fair(q, float(leg["instrument"].split("-")[2]), leg["instrument"].split("-")[3])
+    if expiry not in fits:
+        q = otm_quotes(expiry, books, dt.datetime.fromtimestamp(now, dt.timezone.utc))
+        fits[expiry] = (q, spline_smile(q) if q is not None else None)
+    q, smile = fits[expiry]
+    if q is None:
+        return {"note": "no book to price against"}
+    fair = spline_fair(q, float(leg["instrument"].split("-")[2]), leg["instrument"].split("-")[3], smile)
     o = ThresholdOrder(0, leg["instrument"], leg["side"], leg["qty"], 0, now, now + 12 * 3600, start_vp, start_vp,
                        start_vp, leg["qty"])
     depth = BookDepth(leg["instrument"], [tuple(x) for x in book.get("bids") or []],

@@ -6,7 +6,7 @@ The cost of taking one book level, USD per contract, is
     buy:  level price - fair + taker fee        sell:  fair - level price + taker fee
 
 with fair from smile_fit.spline_fair: the arbitrage-free smoothing spline through
-the expiry's out-of-the-money mid vols, fitted WITHOUT the traded strike. The fee
+the expiry's out-of-the-money mid vols, every strike included (the traded one too). The fee
 is Deribit's (pricing.exchange_quotes.deribit_option_fee_usd).
 
 The threshold is in vol points (x the option's vega = USD), so one setting carries
@@ -15,11 +15,12 @@ created to ``end_vp`` one hour before the deadline, then sits at ``hard_vp`` for
 final hour. It never goes above ``hard_vp``: whatever is still open at the deadline
 stays unfilled and is reported, rather than crossed at any price.
 
-Each tick takes every level costing <= the threshold, best first, up to ``cap``
-contracts and the remaining size, as one IOC limit order at the worst level taken.
+Each pass (every 5 s) takes every level costing <= the threshold, best first, up to
+``cap`` contracts and the remaining size, as one IOC limit order at the worst level
+taken; after a fill the option rests 5 minutes (execution/bot.py).
 scripts/execution_threshold_study.py replays the same rule on recorded books; with
-5-minute snapshots, 25DEC26 2500C, 10,000 over 12 h, a ramp of 0.5 -> 0.7 vol points
-cost ~$1.6 per contract against ~$5 for taking it all at once.
+5-minute snapshots (3-5 Nov 2026), 25DEC26 2500C, 10,000 over 12 h, a ramp of 0.5 -> 0.7
+vol points cost ~$1.85 per contract, filled in ~7 h, against ~$5 for taking it all at once.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ class ThresholdOrder:
     start_vp: float
     end_vp: float
     hard_vp: float
-    cap: float  # contracts per tick
+    cap: float  # contracts per take
     mode: str = "paper"
     status: str = "working"
 
@@ -100,7 +101,7 @@ class Decision:
 
 def decide(o: ThresholdOrder, now: float, fair: dict, S: float, book: BookDepth,
            qty_step: float = QTY_STEP) -> Decision:
-    """What to take this tick. ``fair`` is smile_fit.spline_fair's dict."""
+    """What to take on this pass. ``fair`` is smile_fit.spline_fair's dict."""
     th_vp = threshold_vp(o, now)
     th = th_vp * fair["vega"]
     levels = book.asks if o.side == "buy" else book.bids

@@ -1,7 +1,8 @@
 // Execution Bot page (/api/execution-bot): parent orders worked by the server
-// every minute, crossing only when the book is cheap against the smoothing spline.
+// every 5 seconds, crossing only when the book is cheap against the smoothing spline.
 // Optimizer v2's "Send to execution" lands here through window.execbotReceive.
 (function () {
+  const ACTION = { cooldown: "resting", no_book: "no book" };
   "use strict";
 
   const $ = (id) => document.getElementById(id);
@@ -10,6 +11,7 @@
     : Number(v).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
   const usd = (v, dp = 2) => (v == null || !isFinite(v)) ? "—" : (v < 0 ? "-$" : "$") + fmt(Math.abs(v), dp);
   const when = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+  const whenS = (ts) => ts ? new Date(ts * 1000).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
   const left = (ts) => {
     const s = ts - Date.now() / 1000;
     if (s <= 0) return "past";
@@ -54,7 +56,7 @@
       card("Mode", "Paper", esc(st.live_note || ""))
       + card("Kill switch", st.kill_switch ? "ON" : "off", st.kill_switch ? "nothing is sent while it is on" : "Agents page controls it",
         st.kill_switch ? "color:var(--red)" : "")
-      + card("Last tick", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) worked${lt.halted ? " · halted" : ""}` : "no tick yet: is the scheduler job deployed?")
+      + card("Last run", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) · ${fmt(lt.passes || 1)} pass(es) · ${fmt(lt.takes || 0)} take(s)${lt.halted ? " · halted" : ""}` : "no run yet: is the scheduler job deployed?")
       + card("Working", fmt(c.working || 0), `${fmt(c.paused || 0)} paused`)
       + card("Finished", fmt((c.filled || 0) + (c.expired || 0) + (c.cancelled || 0)),
         `${fmt(c.filled || 0)} filled · ${fmt(c.expired || 0)} expired · ${fmt(c.cancelled || 0)} cancelled`);
@@ -86,7 +88,7 @@
           <div style="height:4px;background:var(--border);border-radius:2px;margin-top:3px">
           <div style="height:4px;width:${pct}%;background:var(--accent);border-radius:2px"></div></div></td>
         <td>${usd(avg)}</td><td title="best cost at the touch vs the threshold, last tick">${now}</td>
-        <td style="text-align:left" title="${esc(o.last_detail || "")}">${esc(o.last_action || "—")}</td>
+        <td style="text-align:left" title="${esc(o.last_detail || "")}">${esc(ACTION[o.last_action] || o.last_action || "—")}</td>
         <td>${open ? left(o.deadline_ts) : when(o.finished_ts)}</td>
         <td style="color:${stColor}">${esc(o.status)}</td><td style="white-space:nowrap">${acts}</td></tr>`;
     }).join("");
@@ -112,7 +114,7 @@
       + card("Avg cost vs spline", usd(avg), vegaAvg ? `${fmt(avg / vegaAvg, 2)} vol pts, fee included` : "fee included")
       + card("Total cost", usd(o.cost_usd, 0), `of which fees ${usd(o.fees_usd, 0)}`)
       + card("Avg price vs fair at start", usd(vsStart), fair0 != null ? `fair at start ${usd(fair0)}; includes the market's move` : "—")
-      + card("Threshold", `${fmt(o.start_vp, 2)} → ${fmt(o.end_vp, 2)} vp`, `then ${fmt(o.hard_vp, 2)} vp in the final hour · cap ${fmt(o.cap)}/tick`);
+      + card("Threshold", `${fmt(o.start_vp, 2)} → ${fmt(o.end_vp, 2)} vp`, `then ${fmt(o.hard_vp, 2)} vp in the final hour · cap ${fmt(o.cap)}/take`);
 
     const cc = typeof chartColors === "function" ? chartColors() : { paper: "#161b22", plot: "#0d1117", text: "#e6edf3", muted: "#8b949e", grid: "#21262d" };
     const x = (ts) => new Date(ts * 1000);
@@ -135,12 +137,12 @@
       yaxis: { title: "USD per contract, fee included", color: cc.muted, gridcolor: cc.grid, zerolinecolor: cc.grid },
     }, { responsive: true, displayModeBar: false });
 
-    $("xb-fills").innerHTML = f.length ? f.slice().reverse().map((r) => `<tr><td style="text-align:left">${when(r.ts)}</td>
+    $("xb-fills").innerHTML = f.length ? f.slice().reverse().map((r) => `<tr><td style="text-align:left">${whenS(r.ts)}</td>
       <td>${fmt(r.qty)}</td><td>${fmt(r.price_eth, 4)}</td><td>${usd(r.price_usd)}</td><td>${usd(r.fair_usd)}</td>
       <td>${usd(r.fee_usd / r.qty)}</td><td>${usd(r.cost_usd)}</td></tr>`).join("")
       : `<tr><td colspan="7" style="text-align:center;color:var(--muted)">No fills yet</td></tr>`;
     const last = t.slice(-12).reverse();
-    $("xb-ticks").innerHTML = last.map((r) => `<tr><td style="text-align:left">${when(r.ts)}</td><td style="text-align:left">${esc(r.action)}</td>
+    $("xb-ticks").innerHTML = last.map((r) => `<tr><td style="text-align:left">${whenS(r.ts)}</td><td style="text-align:left">${esc(ACTION[r.action] || r.action)}</td>
       <td>${usd(r.best_cost)}</td><td>${usd(r.theta_usd)}</td><td>${usd(r.fair_usd)}</td>
       <td>${r.iv != null ? fmt(r.iv * 100, 1) + "%" : "—"}</td><td>${fmt(r.qty)}</td>
       <td style="text-align:left;color:var(--muted)">${esc(r.detail)}</td></tr>`).join("");

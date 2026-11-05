@@ -1,8 +1,8 @@
 """The execution bot's state, in the app's SQLite DB next to the agents' tables.
 
     exec_orders   one parent order: what to trade, by when, the threshold ramp, progress
-    exec_ticks    one row per order per tick: fair value, threshold, best cost, action;
-                  what the Execution page charts
+    exec_ticks    the order's passes: fair value, threshold, best cost, action; takes as they
+                  happen, the routine ones once a minute; what the Execution page charts
     exec_fills    every fill, with its cost against the spline at the time
     exec_lock     a lease so two scheduler calls never work the same orders at once
 """
@@ -160,6 +160,18 @@ async def add_fills(oid: int, fills: list[dict[str, Any]]) -> None:
                              " fees_usd = fees_usd + ? WHERE id = ?",
                              (f["qty"], f["qty"] * f["cost_usd"], f["fee_usd"], oid))
     await db.commit()
+
+
+async def last_fill_ts(instruments: list[str]) -> dict[str, float]:
+    """{instrument: time of its last fill, any order}, for the instruments that have one."""
+    if not instruments:
+        return {}
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT o.instrument, MAX(f.ts) AS ts FROM exec_fills f JOIN exec_orders o ON o.id = f.order_id"
+        f" WHERE o.instrument IN ({','.join('?' * len(set(instruments)))}) GROUP BY o.instrument",
+        tuple(set(instruments)))
+    return {r["instrument"]: r["ts"] for r in await cur.fetchall()}
 
 
 async def order_detail(oid: int, ticks: int = 2000) -> dict[str, Any] | None:

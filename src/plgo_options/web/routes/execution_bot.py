@@ -1,7 +1,7 @@
 """Execution bot endpoints (execution/bot.py, execution/threshold.py).
 
 Scheduler-facing (guarded by X-Signals-Token):
-    POST /api/execution-bot/tick                 work every open parent order once
+    POST /api/execution-bot/tick                 work the open parent orders every 5 s for 55 s
 
 People-facing:
     GET  /api/execution-bot/status               kill switch, last tick, order counts, modes available
@@ -50,7 +50,7 @@ class OrderCreate(BaseModel):
     start_vp: float = Field(0.5, ge=0, description="threshold at the start, vol points")
     end_vp: float = Field(0.7, ge=0, description="threshold one hour before the deadline, vol points")
     hard_vp: float = Field(0.9, ge=0, description="threshold in the final hour; never exceeded")
-    cap: float = Field(100, ge=1, description="max contracts per tick (one tick a minute)")
+    cap: float = Field(500, ge=1, description="max contracts per take (the option then rests 5 minutes)")
     mode: Literal["paper", "live"] = "paper"
     note: str = ""
 
@@ -65,7 +65,7 @@ async def _listed(instrument: str) -> bool:
 async def tick(x_signals_token: str | None = Header(default=None)):
     _require_token(x_signals_token)
     try:
-        return await bot.run_tick()
+        return await bot.run_minute()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"execution bot: {type(e).__name__}: {e}")
 

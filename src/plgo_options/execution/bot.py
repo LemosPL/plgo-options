@@ -1,12 +1,20 @@
-"""One tick of the execution bot (Cloud Scheduler: POST /api/execution-bot/tick, every minute).
+"""The execution bot (Cloud Scheduler: POST /api/execution-bot/tick, every minute).
 
-For every working parent order (execution/store.py):
+Each scheduler call holds the lease and runs a pass every 5 seconds for 55 seconds
+(run_minute). A pass, for every working parent order (execution/store.py):
     1) past its deadline: expired, the unfilled remainder reported, nothing crossed
-    2) the kill switch on: nothing sent, the tick recorded as halted
-    3) otherwise: every order book of its expiry (smile_recorder.expiry_books, one
-       snapshot per expiry shared by its orders), the spline's fair value without the
-       strike (smile_fit.spline_fair), the threshold decision (threshold.decide), and
-       for a take, one IOC limit order through the connector, its fills recorded
+    2) the kill switch on: nothing sent, the pass recorded as halted
+    3) a fill on the same option in the last 5 minutes: it rests (cooldown), so the
+       book can refill and our taking does not chase it
+    4) otherwise: the expiry's smile from one Deribit book summary call, the working
+       options' own order books 10 levels deep, the spline's fair value (smile_fit:
+       one spline per expiry through every strike, the traded one included), the
+       threshold decision (threshold.decide), and for a take, one IOC limit order
+       through the connector, its fills recorded
+
+Takes, fills, errors and expiries are recorded on the pass they happen; the routine
+outcomes (wait, cooldown, halted, ...) once a minute, on its first pass, so the DB
+(on GCS FUSE on Cloud Run) is not written every 5 seconds.
 
 Paper mode only for now: the PaperConnector fills against the same depth-10 book
 the decision saw. Live orders are refused at creation until the Deribit connector
@@ -18,13 +26,15 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import time
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import httpx
+
 from plgo_options.agents.store import kill_switch_on
-from plgo_options.market_data.smile_recorder import expiry_books
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
-from plgo_options.pricing.smile_fit import otm_quotes, spline_fair
+from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile
 
 from . import store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
@@ -32,11 +42,52 @@ from .paper import PaperConnector, deribit_option_fee
 from .threshold import QTY_STEP, ThresholdOrder, decide
 
 LOCK, LOCK_TTL = "exec_tick", 120.0
-BooksFn = Callable[[list[str]], Awaitable[tuple[dict[str, list[dict]], float, float]]]
+PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
+COOLDOWN = 300.0           # after a fill, the option rests 5 minutes
+ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted"}  # recorded once a minute
+API = "https://www.deribit.com/api/v2/public"
+# books_fn(expiries, instruments) -> {expiry: books}: every option of the expiries, and
+# the instruments' own books with their levels
+BooksFn = Callable[[list[str], list[str]], Awaitable[dict[str, list[dict]]]]
 
 
-async def _books(expiries: list[str]) -> tuple[dict[str, list[dict]], float, float]:
-    return await expiry_books(expiries, depth=10)
+def _summary_book(s: dict) -> dict:
+    """A get_book_summary_by_currency row in the shape of an order book (top only)."""
+    S = s["estimated_delivery_price"]
+    return {"instrument_name": s["instrument_name"], "bids": None, "asks": None,
+            "best_bid_price": s.get("bid_price"), "best_ask_price": s.get("ask_price"),
+            "best_bid_amount": None, "best_ask_amount": None, "mark_price": s["mark_price"],
+            "mark_iv": s["mark_iv"], "underlying_price": s["underlying_price"], "index_price": S,
+            "estimated_delivery_price": S, "open_interest": s.get("open_interest"),
+            "stats": {"volume": s.get("volume")}}
+
+
+async def _books(expiries: list[str], instruments: list[str]) -> dict[str, list[dict]]:
+    """The smile from one book summary call (every ETH option's top of book, fresh to
+    the second), and the instruments' own books 10 levels deep (1 if Deribit errors)."""
+    async with httpx.AsyncClient(timeout=10) as c:
+        async def get(method: str, **params) -> Any:
+            r = await c.get(f"{API}/{method}", params=params)
+            r.raise_for_status()
+            return r.json()["result"]
+
+        async def book(name: str) -> dict | None:
+            for depth in (10, 1):
+                try:
+                    return await get("get_order_book", instrument_name=name, depth=depth)
+                except httpx.HTTPStatusError:
+                    continue
+            return None
+
+        summary, *own = await asyncio.gather(get("get_book_summary_by_currency", currency="ETH", kind="option"),
+                                             *(book(n) for n in instruments))
+    own_by = {b["instrument_name"]: b for b in own if b}
+    out: dict[str, list[dict]] = {e: [] for e in expiries}
+    for s in summary:
+        e = s["instrument_name"].split("-")[1]
+        if e in out:
+            out[e].append(own_by.get(s["instrument_name"]) or _summary_book(s))
+    return out
 
 
 def _depth(b: dict) -> BookDepth:
@@ -44,21 +95,31 @@ def _depth(b: dict) -> BookDepth:
                      [tuple(x) for x in b.get("asks") or []], b.get("mark_price"), time.time())
 
 
-def _price(o: ThresholdOrder, books: list[dict], now: float) -> tuple[dict, dict] | str:
-    """(fair, book) for the order's option, or why there is none. CPU only."""
-    book = next((b for b in books if b["instrument_name"] == o.instrument), None)
-    if book is None:
-        return f"{o.instrument} not listed"
-    q = otm_quotes(o.expiry, books, dt.datetime.fromtimestamp(now, dt.timezone.utc))
-    if q is None:
-        return f"{o.expiry}: too few two-sided strikes to fit"
-    return spline_fair(q, o.strike, o.cp), book
+def _price(expiry: str, books: list[dict], orders: list[ThresholdOrder], now: float) -> dict[int, tuple | str]:
+    """{order id: (fair, book) or why there is none}: one spline for the expiry. CPU only."""
+    by_name = {b["instrument_name"]: b for b in books}
+    q = otm_quotes(expiry, books, dt.datetime.fromtimestamp(now, dt.timezone.utc))
+    smile = spline_smile(q) if q is not None else None
+    out: dict[int, tuple | str] = {}
+    for o in orders:
+        book = by_name.get(o.instrument)
+        if book is None or book.get("bids") is None:
+            out[o.id] = f"{o.instrument}: no order book"
+        elif q is None:
+            out[o.id] = f"{expiry}: too few two-sided strikes to fit"
+        else:
+            out[o.id] = (spline_fair(q, o.strike, o.cp, smile), book)
+    return out
 
 
-async def _work(o: ThresholdOrder, books: list[dict], now: float) -> dict[str, Any]:
-    priced = await asyncio.to_thread(_price, o, books, now)
+async def _tick(o: ThresholdOrder, now: float, action: str, record: bool, **kw) -> None:
+    if record or action not in ROUTINE:
+        await store.add_tick(o.id, now, action, **kw)
+
+
+async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool) -> dict[str, Any]:
     if isinstance(priced, str):
-        await store.add_tick(o.id, now, "no_book", detail=priced)
+        await _tick(o, now, "no_book", record, detail=priced)
         return {"id": o.id, "action": "no_book", "detail": priced}
     fair, book = priced
     S = book["estimated_delivery_price"]
@@ -67,7 +128,7 @@ async def _work(o: ThresholdOrder, books: list[dict], now: float) -> dict[str, A
     ctx = dict(theta_vp=d.theta_vp, theta_usd=d.theta_usd, best_cost=d.best_cost, fair_usd=fair["fair"],
                iv=fair["iv"], vega=fair["vega"], S=S)
     if d.action != "take":
-        await store.add_tick(o.id, now, d.action, detail=d.detail, **ctx)
+        await _tick(o, now, d.action, record, detail=d.detail, **ctx)
         return {"id": o.id, "action": d.action, "detail": d.detail}
 
     async def top(_: str) -> BookTop:
@@ -78,30 +139,94 @@ async def _work(o: ThresholdOrder, books: list[dict], now: float) -> dict[str, A
         return depth
 
     conn = PaperConnector(top, fee_fn=deribit_option_fee, clock=lambda: now, depth=levels)
-    intent = OrderIntent(intent_id=f"thr{o.id}-{int(now)}", proposal_id=f"exec-{o.id}", instrument=o.instrument,
-                         side=o.side, qty=d.qty, limit_price=d.limit_price, time_in_force="IOC")
+    intent = OrderIntent(intent_id=f"thr{o.id}-{int(now * 1000)}", proposal_id=f"exec-{o.id}",
+                         instrument=o.instrument, side=o.side, qty=d.qty, limit_price=d.limit_price,
+                         time_in_force="IOC")
     st = await conn.submit(intent)
     if st.status is OrderStatus.REJECTED:
-        await store.add_tick(o.id, now, "rejected", detail=st.reject_reason or "", **ctx)
+        await _tick(o, now, "rejected", record, detail=st.reject_reason or "", **ctx)
         return {"id": o.id, "action": "rejected", "detail": st.reject_reason}
     fills = []
     for f in st.fills:
         usd = f.price * S
-        # a fresh paper connector each tick restarts its ids: key paper fills by the intent too
+        # a fresh paper connector each pass restarts its ids: key paper fills by the intent too
         fills.append(dict(ts=now, intent_id=f.intent_id, trade_id=f"{f.intent_id}/{f.trade_id}",
                           price_eth=f.price, price_usd=usd,
                           qty=f.qty, fee_usd=f.fee * S, mode=o.mode, fair_usd=fair["fair"],
                           cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd)
                           + deribit_option_fee_usd(S, usd)))
     await store.add_fills(o.id, fills)
-    await store.add_tick(o.id, now, "take", qty=st.filled_qty, detail=d.detail, **ctx)
+    await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail, **ctx)
     if o.remaining - st.filled_qty < QTY_STEP:
         await store.set_status(o.id, "filled")
     return {"id": o.id, "action": "take", "qty": st.filled_qty, "cost": d.est_cost}
 
 
+def _hms(ts: float) -> str:
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%H:%M:%S")
+
+
+async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bool]],
+                record: bool) -> dict[str, Any]:
+    """One pass over the working orders; the caller holds the lease."""
+    out: dict[str, Any] = {"ts": now, "orders": []}
+    live = []
+    for o in await store.working_orders():
+        if now >= o.deadline_ts:
+            note = f"deadline passed with {o.remaining:g} of {o.qty:g} unfilled"
+            await store.add_tick(o.id, now, "expired", detail=note)
+            await store.set_status(o.id, "expired", note)
+            out["orders"].append({"id": o.id, "action": "expired", "detail": note})
+        else:
+            live.append(o)
+    if live and await halted():
+        for o in live:
+            await _tick(o, now, "halted", record, detail="kill switch on")
+        out["halted"] = True
+        out["orders"] += [{"id": o.id, "action": "halted"} for o in live]
+        return out
+    rested = await store.last_fill_ts([o.instrument for o in live])
+    active = []
+    for o in live:
+        t = rested.get(o.instrument)
+        if t is not None and now - t < COOLDOWN:
+            detail = f"resting after the fill at {_hms(t)} UTC, until {_hms(t + COOLDOWN)}"
+            await _tick(o, now, "cooldown", record, detail=detail)
+            out["orders"].append({"id": o.id, "action": "cooldown", "detail": detail})
+        else:
+            active.append(o)
+    if not active:
+        return out
+    by_exp: dict[str, list[ThresholdOrder]] = defaultdict(list)
+    for o in active:
+        by_exp[o.expiry].append(o)
+    t0 = time.time()
+    books = await books_fn(sorted(by_exp), sorted({o.instrument for o in active}))
+    out["books_secs"] = round(time.time() - t0, 2)
+    for e, orders in by_exp.items():
+        try:
+            priced = await asyncio.to_thread(_price, e, books.get(e, []), orders, now)
+        except Exception as ex:  # the expiry cannot be priced: say so on each order, go on
+            priced = {o.id: f"{e}: {type(ex).__name__}: {ex}" for o in orders}
+        for o in orders:
+            if now - rested.get(o.instrument, -COOLDOWN) < COOLDOWN:  # another order took it this pass
+                await _tick(o, now, "cooldown", record, detail="resting after a fill on the same option")
+                out["orders"].append({"id": o.id, "action": "cooldown"})
+                continue
+            try:
+                r = await _work(o, priced[o.id], now, record)
+            except Exception as ex:  # one bad order must not stop the others
+                await store.add_tick(o.id, now, "error", detail=f"{type(ex).__name__}: {ex}")
+                r = {"id": o.id, "action": "error", "detail": str(ex)}
+            if r["action"] == "take" and r["qty"] > 0:
+                rested[o.instrument] = now
+            out["orders"].append(r)
+    return out
+
+
 async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
                    halted: Callable[[], Awaitable[bool]] = kill_switch_on) -> dict[str, Any]:
+    """A single pass under the lease, everything recorded."""
     now = now or time.time()
     if not await store.working_orders():  # idle: write nothing (on Cloud Run the DB sits on GCS FUSE)
         return {"ts": now, "orders": []}
@@ -109,31 +234,38 @@ async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
         return {"ts": now, "skipped": "another tick is running"}
     out: dict[str, Any] = {"ts": now, "orders": []}
     try:
-        orders = await store.working_orders()
-        live = []
-        for o in orders:
-            if now >= o.deadline_ts:
-                note = f"deadline passed with {o.remaining:g} of {o.qty:g} unfilled"
-                await store.add_tick(o.id, now, "expired", detail=note)
-                await store.set_status(o.id, "expired", note)
-                out["orders"].append({"id": o.id, "action": "expired", "detail": note})
-            else:
-                live.append(o)
-        if live and await halted():
-            for o in live:
-                await store.add_tick(o.id, now, "halted", detail="kill switch on")
-            out["halted"] = True
-            out["orders"] += [{"id": o.id, "action": "halted"} for o in live]
-            live = []
-        if live:
-            books, t0, t1 = await books_fn(sorted({o.expiry for o in live}))
-            out["snapshot_secs"] = round(t1 - t0, 2)
-            for o in live:
-                try:
-                    out["orders"].append(await _work(o, books.get(o.expiry, []), now))
-                except Exception as e:  # one bad order must not stop the others
-                    await store.add_tick(o.id, now, "error", detail=f"{type(e).__name__}: {e}")
-                    out["orders"].append({"id": o.id, "action": "error", "detail": str(e)})
+        out = await _pass(now, books_fn, halted, record=True)
         return out
     finally:
-        await store.release_lock(LOCK, {"ts": now, "n": len(out["orders"]), "halted": out.get("halted", False)})
+        await store.release_lock(LOCK, {"ts": now, "passes": 1, "n": len(out["orders"]),
+                                        "halted": out.get("halted", False)})
+
+
+async def run_minute(books_fn: BooksFn = _books, halted: Callable[[], Awaitable[bool]] = kill_switch_on,
+                     period: float = PERIOD, span: float = SPAN, clock: Callable[[], float] = time.time,
+                     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep) -> dict[str, Any]:
+    """What one scheduler call does: a pass every ``period`` seconds for ``span``
+    seconds under one lease, stopping early when no order is left working."""
+    start = clock()
+    if not await store.working_orders():
+        return {"ts": start, "passes": 0, "orders": []}
+    while not await store.acquire_lock(LOCK, LOCK_TTL, clock()):
+        if clock() - start > 2 * period:  # the previous call should have finished by now
+            return {"ts": start, "skipped": "another tick is running"}
+        await sleep(1.0)  # the previous call's last pass is finishing
+    start = clock()
+    passes, takes, last = 0, [], {"orders": []}
+    try:
+        while True:
+            last = await _pass(clock(), books_fn, halted, record=passes == 0)
+            passes += 1
+            takes += [r for r in last["orders"] if r["action"] == "take"]
+            nxt = start + passes * period
+            if nxt > start + span or not await store.working_orders():
+                break
+            await sleep(max(0.0, nxt - clock()))
+        return {"ts": start, "passes": passes, "takes": takes, "orders": last["orders"],
+                "halted": last.get("halted", False)}
+    finally:
+        await store.release_lock(LOCK, {"ts": start, "passes": passes, "takes": len(takes),
+                                        "n": len(last["orders"]), "halted": last.get("halted", False)})

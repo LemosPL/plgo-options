@@ -119,39 +119,40 @@ def test_ticks_wait_take_up_to_the_cap_then_fill(tmp_path):
     run = _db(tmp_path, "bot.db")
     shift = {"v": 4.0}
 
-    async def books(expiries):
-        assert expiries == [EXPIRY]
-        return {EXPIRY: _books(shift["v"])}, NOW, NOW + 1
+    async def books(expiries, instruments):
+        assert expiries == [EXPIRY] and instruments == [NAME]
+        return {EXPIRY: _books(shift["v"])}
 
     async def off():
         return False
 
     async def body():
-        oid = await store.create_order(NAME, "buy", 50, NOW + 12 * H, 0.5, 0.7, 0.9, 40, now=NOW)
-        out = await bot.run_tick(NOW + 60, books, off)                 # ask $4 over fair: wait
+        oid = await store.create_order(NAME, "buy", 50, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
+        out = await bot.run_tick(NOW + 60, books, off)                 # ask $4 over the curve: wait
         assert out["orders"][0]["action"] == "wait"
-        shift["v"] = -1.0                                              # ask $1 under fair: take
+        shift["v"] = -3.0          # ask $3 under: its own quote pulls the spline down, but not all the way
         out = await bot.run_tick(NOW + 120, books, off)
-        assert out["orders"][0] == pytest.approx({"id": oid, "action": "take", "qty": 40,
-                                                  "cost": out["orders"][0]["cost"]})
+        assert out["orders"][0]["action"] == "take" and out["orders"][0]["qty"] == 25   # the cap
         o = await store.get_order(oid)
-        assert o["filled"] == 40 and o["status"] == "working"
-        await bot.run_tick(NOW + 180, books, off)                      # the last 10
+        assert o["filled"] == 25 and o["status"] == "working"
+        out = await bot.run_tick(NOW + 180, books, off)                # the option rests 5 minutes
+        assert out["orders"][0]["action"] == "cooldown"
+        await bot.run_tick(NOW + 421, books, off)                      # then the last 25
         d = await store.order_detail(oid)
         assert d["order"]["filled"] == 50 and d["order"]["status"] == "filled"
-        assert [f["qty"] for f in d["fills"]] == [30, 10, 10]
+        assert [f["qty"] for f in d["fills"]] == [25, 25]
         first = d["fills"][0]
-        assert first["cost_usd"] == pytest.approx(-1 + 0.687, abs=0.15)  # $1 under the spline, plus the fee
-        assert [t["action"] for t in d["ticks"]] == ["wait", "take", "take"]
-        assert d["ticks"][0]["best_cost"] > d["ticks"][0]["theta_usd"]
-        assert (await bot.run_tick(NOW + 240, books, off))["orders"] == []   # nothing left to work
+        assert first["cost_usd"] == pytest.approx(first["price_usd"] - first["fair_usd"] + 0.687, abs=0.01)
+        assert [t["action"] for t in d["ticks"]] == ["wait", "take", "cooldown", "take"]
+        assert d["ticks"][0]["best_cost"] > d["ticks"][0]["theta_usd"] > d["ticks"][1]["best_cost"]
+        assert (await bot.run_tick(NOW + 480, books, off))["orders"] == []   # nothing left to work
     run(body)
 
 
 def test_kill_switch_deadline_and_lock(tmp_path):
     run = _db(tmp_path, "bot2.db")
 
-    async def books(expiries):
+    async def books(expiries, instruments):
         raise AssertionError("no books are read while halted")
 
     async def on():
@@ -237,12 +238,12 @@ def test_preview_prices_listed_legs_and_drops_the_rest(monkeypatch):
 
     async def books(expiries):
         assert expiries == [EXPIRY]
-        return {EXPIRY: _books(-1.0)}, NOW, NOW + 1
+        return {EXPIRY: _books(-3.0)}, NOW, NOW + 1
 
     out = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
     (leg,) = out["legs"]
-    assert leg["instrument"] == NAME and leg["qty"] == 40 and leg["now_qty"] == 40
-    assert leg["best_cost_usd"] == pytest.approx(-1 + 0.687, abs=0.15) and leg["vega"] > 0
+    assert leg["instrument"] == NAME and leg["qty"] == 40 and leg["now_qty"] == 30   # the first level
+    assert 0.687 < leg["best_cost_usd"] < 0.5 * leg["vega"] and leg["best_cost_vp"] < 0.5
     assert "not listed" in out["skipped"][0]["reason"]
 
 
@@ -262,3 +263,72 @@ def test_batch_creates_the_valid_orders_and_lists_them_with_their_last_tick(tmp_
         (o,) = (await routes.orders())["orders"]
         assert (o["last_action"], o["last_best_cost"], o["last_theta_usd"]) == ("wait", 2.5, 1.75)
     run(body)
+
+
+def test_fair_value_includes_the_strikes_own_quote_unless_left_out():
+    from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile
+    T = (parse_exp(EXPIRY).timestamp() - NOW) / (365 * 86400)
+    true = black(F, 2400, T, float(svi_iv(SVI, [2400], F, T)[0]), "C")
+    q = otm_quotes(EXPIRY, _books(-3.0), dt.datetime.fromtimestamp(NOW, dt.timezone.utc))
+    fair = spline_fair(q, 2400, "C")
+    assert fair == spline_fair(q, 2400, "C", spline_smile(q))       # one spline shared across strikes
+    assert fair["fair"] < true - 2                                  # pulled towards its own (lower) mid
+    assert spline_fair(q, 2400, "C", loo=True)["fair"] == pytest.approx(true, abs=0.3)
+
+
+def test_a_minute_runs_a_pass_every_5_seconds_and_records_routine_passes_once(tmp_path):
+    run = _db(tmp_path, "bot5.db")
+    clock = {"t": NOW}
+    shift = {"v": 4.0}
+    seen = []
+
+    async def books(expiries, instruments):
+        seen.append(clock["t"])
+        if clock["t"] >= NOW + 20:                                     # cheap from the 5th pass on
+            shift["v"] = -3.0
+        return {EXPIRY: _books(shift["v"])}
+
+    async def sleep(s):
+        clock["t"] += s
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 500, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
+        out = await bot.run_minute(books, off, clock=lambda: clock["t"], sleep=sleep)
+        assert out["passes"] == 12 and [t - NOW for t in seen] == [0, 5, 10, 15, 20]  # resting after the take
+        assert [r["qty"] for r in out["takes"]] == [25]
+        d = await store.order_detail(oid)
+        # the first pass's wait, the take; the waits and rests in between are not written
+        assert [(t["ts"] - NOW, t["action"]) for t in d["ticks"]] == [(0, "wait"), (20, "take")]
+        assert (await store.last_run(bot.LOCK))["passes"] == 12
+        clock["t"] = NOW + 60                                          # the next minute: rests, recorded once
+        out = await bot.run_minute(books, off, clock=lambda: clock["t"], sleep=sleep)
+        assert {r["action"] for r in out["orders"]} == {"cooldown"} and out["passes"] == 12
+        assert [t["action"] for t in (await store.order_detail(oid))["ticks"]][-1] == "cooldown"
+        assert len((await store.order_detail(oid))["ticks"]) == 3
+    run(body)
+
+
+def test_the_bot_reads_the_smile_from_the_book_summary_and_its_options_books(monkeypatch):
+    import httpx
+    summ = [{"instrument_name": b["instrument_name"], "bid_price": b["best_bid_price"],
+             "ask_price": b["best_ask_price"], "mark_price": b["mark_price"], "mark_iv": b["mark_iv"],
+             "underlying_price": F, "estimated_delivery_price": S, "open_interest": 0.0, "volume": 0.0}
+            for b in _books()] + [{"instrument_name": "ETH-26MAR27-2400-C", "bid_price": 0.1}]
+    full = {b["instrument_name"]: b for b in _books(-3.0)}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path.endswith("get_book_summary_by_currency"):
+            return httpx.Response(200, json={"result": summ})
+        return httpx.Response(200, json={"result": full[req.url.params["instrument_name"]]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(bot.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    books = asyncio.run(bot._books([EXPIRY], [NAME]))[EXPIRY]
+    assert len(books) == 2 * len(STRIKES)
+    own = next(b for b in books if b["instrument_name"] == NAME)
+    assert own["asks"] == full[NAME]["asks"]                         # its own book, levels and all
+    other = next(b for b in books if b["instrument_name"] != NAME)
+    assert other["bids"] is None and other["best_bid_price"] > 0     # the summary's top of book

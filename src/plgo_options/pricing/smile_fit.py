@@ -9,7 +9,8 @@
     fit_spline      cubic smoothing spline of implied vol (GCV), refitted with the same
                     butterfly penalty when it has negative density between the strikes
     otm_quotes      one expiry's two-sided out-of-the-money strikes: mids, half-spreads, mid vols
-    spline_fair     one option's fair value from the spline fitted WITHOUT its strike
+    spline_smile    the arbitrage-free spline through an expiry's OTM mid vols, fitted once
+    spline_fair     one option's fair value from that spline (its own strike included)
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import re
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -248,18 +250,27 @@ def otm_quotes(expiry: str, books: list[dict], now: dt.datetime, min_strikes: in
                 spot=float(g.spot.median()), atm=float(np.median((ivb[ok] + iva[ok]) / 2)))
 
 
-def spline_fair(q: dict, K0: float, cp: str) -> dict:
-    """Fair value of (K0, cp) from the arbitrage-free smoothing spline through the OTM
-    mid vols, fitted WITHOUT strike K0 so its own quote cannot pull the curve towards
-    itself. USD price, vol (fraction), vega (USD per vol point), whether K0 lies inside
-    the fitted strikes (outside, the spline extrapolates) and whether it is arb-free."""
-    keep = q["K"] != K0
+def spline_smile(q: dict, drop: float | None = None) -> tuple[Any, tuple[float, float], bool]:
+    """The arbitrage-free smoothing spline through otm_quotes' mid vols, in vol points
+    against k = log(K/F), every strike included unless ``drop`` is given:
+    (spline, (k of the lowest strike, k of the highest), arb-free)."""
+    keep = q["K"] != drop
     K, iv = q["K"][keep], q["iv_mid"][keep]
     vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K, iv)])
     k = np.log(K / q["F"])
     spl, _, free = fit_spline(k, iv * 100, q["half"][keep] / vg, q["T"])
+    return spl, (float(k[0]), float(k[-1])), free
+
+
+def spline_fair(q: dict, K0: float, cp: str, smile: tuple | None = None, loo: bool = False) -> dict:
+    """Fair value of (K0, cp) from the arbitrage-free smoothing spline through the OTM
+    mid vols of every strike, K0's own quote included: USD price, vol (fraction), vega
+    (USD per vol point), whether K0 lies inside the fitted strikes (outside, the spline
+    extrapolates) and whether it is arb-free. ``smile``: spline_smile(q) already fitted,
+    shared by the expiry's strikes. ``loo``: refit without K0 instead (leave-one-out)."""
+    spl, (lo, hi), free = spline_smile(q, K0) if loo else smile or spline_smile(q)
     k0 = math.log(K0 / q["F"])
     v0 = max(float(spl(k0)) / 100, 1e-4)
     return dict(fair=float(black_vec(q["F"], [K0], q["T"], v0, [cp], q["DF"])[0]), iv=v0,
-                vega=float(vega(q["F"], K0, q["T"], v0, q["DF"])), inside=bool(k[0] <= k0 <= k[-1]),
+                vega=float(vega(q["F"], K0, q["T"], v0, q["DF"])), inside=bool(lo <= k0 <= hi),
                 arb_free=free)
