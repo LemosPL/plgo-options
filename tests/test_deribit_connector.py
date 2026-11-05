@@ -703,32 +703,90 @@ def test_get_connector_is_one_instance_and_never_production_by_default(monkeypat
     assert deribit.get_connector() is deribit.get_connector()
 
 
-def test_status_route_is_read_only_and_reports_the_testnet_suite(fake, monkeypatch):
+def _probe(**kw) -> dict:
+    return {"configured": True, "authenticated": True, "healthy": True, "locked": False,
+            "unreachable": False, "error": None} | kw
+
+
+def _status(monkeypatch, tests: dict | None = None, enabled: bool = True):
+    from plgo_options.execution import status
+    passed = {"status": "passed", "detail": ""}
+    monkeypatch.setattr(status, "TESTS", {"paper": passed, "deribit-testnet": passed,
+                                          "deribit-production": passed} | (tests or {}))
+    monkeypatch.setattr(status, "DERIBIT_CONNECTOR_PRODUCTION", enabled)
+    return status
+
+
+def test_testnet_row_stage_needs_a_connection_and_a_recorded_run(monkeypatch):
+    not_run = {"status": "not_run", "detail": ""}
+    status = _status(monkeypatch, {"deribit-testnet": not_run})
+    row = status._testnet_row(_probe())
+    assert row["connection"] == "Connected" and row["stage"] == "Not tested"
+    assert "test_deribit_testnet" in row["next_step"]
+    row = _status(monkeypatch)._testnet_row(_probe())
+    assert row["stage"] == "Tested on testnet" and row["next_step"] is None
+    row = _status(monkeypatch)._testnet_row(_probe(configured=False, authenticated=False))
+    assert row["connection"] == "No key" and row["stage"] == "Not tested"
+
+
+@pytest.mark.parametrize("probe,connection,step", [
+    (dict(authenticated=False, error="invalid_credentials"), "Key refused", "invalid_credentials"),
+    (dict(authenticated=False, unreachable=True, error="down"), "Unreachable", "down"),
+    (dict(healthy=False, locked=True), "Connected, ETH locked", "locked"),
+    (dict(healthy=False), "Connected, unhealthy", "unhealthy"),
+])
+def test_connection_problems_are_named(monkeypatch, probe, connection, step):
+    row = _status(monkeypatch)._testnet_row(_probe(**probe))
+    assert row["connection"] == connection and not row["connected"] and step in row["next_step"]
+
+
+def test_production_is_ready_only_when_everything_agrees(monkeypatch):
+    not_run = {"status": "not_run", "detail": ""}
+    ready = _status(monkeypatch)._production_row(_probe())
+    assert ready["ready"] and ready["stage"] == "Ready in prod"
+
+    row = _status(monkeypatch, {"deribit-testnet": not_run})._production_row(_probe())
+    assert not row["ready"] and "testnet" in row["next_step"]
+    row = _status(monkeypatch, {"deribit-production": not_run})._production_row(_probe())
+    assert not row["ready"] and "production key" in row["next_step"]
+    row = _status(monkeypatch, enabled=False)._production_row(_probe())
+    assert not row["ready"] and "DERIBIT_CONNECTOR_PRODUCTION" in row["next_step"]
+    row = _status(monkeypatch)._production_row(_probe(healthy=False, locked=True))
+    assert not row["ready"] and row["stage"] == "Not ready"
+
+
+def test_shared_key_never_crosses_to_the_other_network(monkeypatch):
+    from plgo_options.execution import deribit
+    monkeypatch.setattr(deribit, "DERIBIT_CLIENT_ID", "shared")
+    monkeypatch.setattr(deribit, "DERIBIT_CLIENT_SECRET", "s")
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET_CLIENT_ID", "")
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET", True)
+    assert deribit.deribit_keys(True) == ("shared", "s") and deribit.deribit_keys(False) == ("", "")
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET", False)
+    assert deribit.deribit_keys(True) == ("", "") and deribit.deribit_keys(False) == ("shared", "s")
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET_CLIENT_ID", "own")
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET_CLIENT_SECRET", "t")
+    assert deribit.deribit_keys(True) == ("own", "t")
+
+
+def test_connectors_route_is_read_only_and_lists_all_three(fake, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from plgo_options.execution import deribit, status
     from plgo_options.web.routes import execution
 
-    monkeypatch.setattr(execution, "get_connector", lambda: _connector(fake))
+    real = deribit.DeribitConnector
+
+    def on_the_fake(*a, **kw):
+        return real(*a, **kw, transport=httpx.MockTransport(fake.handler))
+
+    monkeypatch.setattr(status, "DeribitConnector", on_the_fake)
+    monkeypatch.setattr(status, "deribit_keys", lambda _testnet: ("id", "secret"))
     app = FastAPI()
     app.include_router(execution.router, prefix="/api/execution")
-    body = TestClient(app).get("/api/execution/connector").json()
-    assert body["healthy"] and body["trading_enabled"] is False
-    assert body["testnet_suite"]["status"] == "not_run"
+    rows = TestClient(app).get("/api/execution/connectors").json()["connectors"]
+    assert [r["id"] for r in rows] == ["paper", "deribit-testnet", "deribit-production"]
+    assert rows[1]["connection"] == "Connected" and rows[1]["stage"] == "Not tested"
+    assert rows[2]["stage"] == "Not ready"
     assert not [m for m, _ in fake.calls if m in ("private/buy", "private/sell", "private/cancel")]
-
-
-def test_status_route_survives_a_refused_connector(monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from plgo_options.web.routes import execution
-
-    def refused():
-        raise ConnectorError("refusing production")
-
-    monkeypatch.setattr(execution, "get_connector", refused)
-    app = FastAPI()
-    app.include_router(execution.router, prefix="/api/execution")
-    body = TestClient(app).get("/api/execution/connector").json()
-    assert not body["healthy"] and body["error"] == "refusing production"

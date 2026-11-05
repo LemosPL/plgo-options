@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=26">
+  <link rel="stylesheet" href="/static/style.css?v=27">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -199,6 +199,10 @@
       <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a2 2 0 00-2 2v1H4.5A1.5 1.5 0 003 5.5v7A1.5 1.5 0 004.5 14h7a1.5 1.5 0 001.5-1.5v-7A1.5 1.5 0 0011.5 4H10V3a2 2 0 00-2-2zm-1 3V3a1 1 0 112 0v1H7zM6 8a1 1 0 110 2 1 1 0 010-2zm4 0a1 1 0 110 2 1 1 0 010-2z"/></svg>
       Agents
       <span class="nav-badge" id="nav-badge-agents"></span>
+    </li>
+    <li class="nav-item" data-page="connectors">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M5 1h1v3h4V1h1v3h1a1 1 0 011 1v3a4 4 0 01-4 4h-.5v3h-1v-3H7a4 4 0 01-4-4V5a1 1 0 011-1h1V1z"/></svg>
+      Connectors
     </li>
   </ul>
   <div class="sidebar-bottom">
@@ -1240,15 +1244,6 @@
           <div class="risk-metric"><span class="risk-label">Available</span><span class="risk-value" id="exec-available">--</span></div>
         </div>
         <div id="exec-auth-error" style="display:none;margin-top:.5rem;padding:.5rem;background:var(--red);color:white;border-radius:4px;font-size:.8rem"></div>
-        <h2 style="margin-top:1rem">Trading Connector</h2>
-        <div class="risk-grid">
-          <div class="risk-metric"><span class="risk-label">Network</span><span class="risk-value" id="conn-network">--</span></div>
-          <div class="risk-metric"><span class="risk-label">API key</span><span class="risk-value" id="conn-key">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Healthy</span><span class="risk-value" id="conn-healthy">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Testnet tests</span><span class="risk-value" id="conn-suite">--</span></div>
-          <div class="risk-metric"><span class="risk-label">Trading</span><span class="risk-value" id="conn-trading">--</span></div>
-        </div>
-        <div id="conn-detail" style="margin-top:.5rem;font-size:.8rem;color:var(--text-muted, inherit)"></div>
       </section>
 
       <!-- Orders to execute -->
@@ -3762,6 +3757,26 @@
     <div id="cp-content"></div>
   </div>
 
+  <div id="page-connectors" class="page">
+    <section class="card">
+      <div class="collat-header">
+        <div class="collat-header-left">
+          <h2 class="collat-title">Connectors</h2>
+          <span id="conn-status" class="optv3-muted" style="font-size:.75rem"></span>
+        </div>
+        <div class="collat-header-right rr-controls">
+          <button id="conn-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="conn-table-wrap">
+        <table id="conn-table">
+          <thead><tr><th>Connector</th><th>Network</th><th>Connection</th><th>Tests</th><th>Stage</th><th>Next step</th></tr></thead>
+          <tbody id="conn-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
   <div id="page-greeks" class="page">
     <section class="card">
       <div class="collat-header">
@@ -4367,7 +4382,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=206"></script>
+<script src="/static/app.js?v=207"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>

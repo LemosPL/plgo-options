@@ -13,16 +13,9 @@ from plgo_options.config import (
     DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET,
     DERIBIT_EXEC_URL, DERIBIT_TESTNET, REQUEST_TIMEOUT,
 )
-from plgo_options.execution.deribit import ConnectorError, get_connector
+from plgo_options.execution.status import connector_statuses
 
 router = APIRouter()
-
-# Where the connector stands against Constantin's order of work. Update it by hand
-# when tests/test_deribit_testnet.py has really been run; nothing here measures it.
-CONNECTOR_TESTNET_SUITE = {
-    "status": "not_run",
-    "detail": "Needs a working key from test.deribit.com: 15 scenarios not yet run on testnet.",
-}
 
 # In-memory token cache
 _auth_token: str | None = None
@@ -137,17 +130,10 @@ async def execution_status():
     return result
 
 
-@router.get("/connector")
-async def connector_status():
-    """Where the trading connector stands. Read-only: no route sends orders through it yet."""
-    base = {"testnet_suite": CONNECTOR_TESTNET_SUITE, "trading_enabled": False}
-    try:
-        return base | await get_connector().diagnostics()
-    except ConnectorError as exc:  # e.g. production not opted in
-        return base | {"network": "testnet" if DERIBIT_TESTNET else "production",
-                       "configured": bool(DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET),
-                       "authenticated": False, "scope": None, "locked": None,
-                       "healthy": False, "error": str(exc)}
+@router.get("/connectors")
+async def connectors():
+    """Every connector's live connection and test stage, for the Connectors screen. Read-only."""
+    return {"connectors": await connector_statuses()}
 
 
 @router.post("/order")

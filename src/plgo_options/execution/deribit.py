@@ -47,6 +47,8 @@ from plgo_options.config import (
     DERIBIT_CLIENT_SECRET,
     DERIBIT_CONNECTOR_PRODUCTION,
     DERIBIT_TESTNET,
+    DERIBIT_TESTNET_CLIENT_ID,
+    DERIBIT_TESTNET_CLIENT_SECRET,
     REQUEST_TIMEOUT,
 )
 
@@ -173,7 +175,7 @@ class DeribitConnector:
     def from_env(cls, **kwargs: Any) -> "DeribitConnector":
         """Keys and network from config.py. Testnet unless ``DERIBIT_TESTNET=0`` and
         ``DERIBIT_CONNECTOR_PRODUCTION=1`` are both set."""
-        return cls(DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET, testnet=DERIBIT_TESTNET,
+        return cls(*deribit_keys(DERIBIT_TESTNET), testnet=DERIBIT_TESTNET,
                    allow_production=DERIBIT_CONNECTOR_PRODUCTION, **kwargs)
 
     async def close(self) -> None:
@@ -291,7 +293,7 @@ class DeribitConnector:
             "network": "testnet" if self.testnet else "production",
             "configured": bool(self._client_id and self._client_secret),
             "authenticated": False, "scope": None, "locked": None,
-            "healthy": False, "error": None,
+            "healthy": False, "unreachable": False, "error": None,
         }
         try:
             out["locked"] = _locked(await self._rpc("public/status"), self.currency)
@@ -300,6 +302,7 @@ class DeribitConnector:
             out["healthy"] = await self.healthy()
         except ConnectorError as exc:
             out["error"] = str(exc)
+            out["unreachable"] = isinstance(exc, TransportError)
         return out
 
     # -- placing --------------------------------------------------------------
@@ -526,6 +529,16 @@ class DeribitConnector:
 
     def _mark_down(self) -> None:
         self._down_until = self._clock() + self._rate_cooldown
+
+
+def deribit_keys(testnet: bool) -> tuple[str, str]:
+    """The key for a network. The shared DERIBIT_CLIENT_* pair belongs to whichever
+    network DERIBIT_TESTNET names, so it can never be sent to the other one."""
+    if testnet and DERIBIT_TESTNET_CLIENT_ID:
+        return DERIBIT_TESTNET_CLIENT_ID, DERIBIT_TESTNET_CLIENT_SECRET
+    if testnet == DERIBIT_TESTNET:
+        return DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET
+    return "", ""
 
 
 _connector: DeribitConnector | None = None

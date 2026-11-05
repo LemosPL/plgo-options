@@ -1484,6 +1484,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
       }, 50);
     }
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
+    if (pg === "connectors") connectorsLoad();
     if (pg === "deals" && !dealsLoaded) dealsInit();
     if (pg === "deals") {
       setTimeout(() => {
@@ -9351,31 +9352,50 @@ async function execInit() {
   if (execLoaded) return;
   execLoaded = true;
   await execCheckStatus();
-  execCheckConnector();
   execRenderOrders();
 }
 
-async function execCheckConnector() {
-  const show = (id, text, cls) => {
-    const $el = document.getElementById(id);
-    $el.textContent = text;
-    $el.className = "risk-value" + (cls ? " " + cls : "");
-  };
+// Connectors screen: live connection and test stage of each connector
+async function connectorsLoad() {
+  const $status = document.getElementById("conn-status");
+  const $rows = document.getElementById("conn-rows");
+  $status.textContent = "Checking...";
   try {
-    const c = await get("/api/execution/connector");
-    show("conn-network", c.network);
-    show("conn-key", c.authenticated ? "Valid" : c.configured ? "Rejected" : "Missing",
-         c.authenticated ? "mtm-pos" : "mtm-neg");
-    show("conn-healthy", c.healthy ? "Yes" : "No", c.healthy ? "mtm-pos" : "mtm-neg");
-    show("conn-suite", c.testnet_suite.status === "passed" ? "Passed" : "Not run",
-         c.testnet_suite.status === "passed" ? "mtm-pos" : "mtm-neg");
-    show("conn-trading", c.trading_enabled ? "On" : "Off");
-    const notes = [c.testnet_suite.detail, c.locked ? "ETH trading is locked on this network." : "", c.error];
-    document.getElementById("conn-detail").textContent = notes.filter(Boolean).join(" ");
+    const { connectors } = await get("/api/execution/connectors");
+    const state = (text, good) => {
+      const $s = document.createElement("span");
+      $s.className = "conn-state " + (good ? "good" : "bad");
+      $s.textContent = text;
+      return $s;
+    };
+    const cell = (...children) => {
+      const $td = document.createElement("td");
+      $td.append(...children);
+      return $td;
+    };
+    $rows.replaceChildren(...connectors.map(c => {
+      const $tr = document.createElement("tr");
+      const $detail = document.createElement("div");
+      $detail.className = "conn-detail";
+      $detail.textContent = c.test_detail;
+      const $next = cell(c.next_step || "None");
+      $next.className = "conn-next";
+      $tr.append(
+        cell(c.name),
+        cell(c.network),
+        cell(state(c.connection, c.connected)),
+        cell(state(c.tested ? "Passed" : "Not run", c.tested), $detail),
+        cell(state(c.stage, c.ready || c.id === "paper")),
+        $next,
+      );
+      return $tr;
+    }));
+    $status.textContent = "Checked " + new Date().toLocaleTimeString();
   } catch (e) {
-    show("conn-healthy", "Error", "mtm-neg");
+    $status.textContent = "Could not load connector status: " + e.message;
   }
 }
+document.getElementById("conn-refresh").addEventListener("click", connectorsLoad);
 
 async function execCheckStatus() {
   try {

@@ -22,6 +22,9 @@ DERIBIT_CLIENT_ID = os.environ.get("DERIBIT_CLIENT_ID", "")
 DERIBIT_CLIENT_SECRET = os.environ.get("DERIBIT_CLIENT_SECRET", "")
 DERIBIT_TESTNET = os.environ.get("DERIBIT_TESTNET", "1") == "1"
 DERIBIT_EXEC_URL = "https://test.deribit.com/api/v2" if DERIBIT_TESTNET else DERIBIT_BASE_URL
+# A testnet key of its own, so both networks can be checked side by side.
+DERIBIT_TESTNET_CLIENT_ID = os.environ.get("DERIBIT_TESTNET_CLIENT_ID", "")
+DERIBIT_TESTNET_CLIENT_SECRET = os.environ.get("DERIBIT_TESTNET_CLIENT_SECRET", "")
 # The execution connector stays off production until this is set as well, whatever
 # DERIBIT_TESTNET says: set it only once the testnet suite has passed.
 DERIBIT_CONNECTOR_PRODUCTION = os.environ.get("DERIBIT_CONNECTOR_PRODUCTION", "0") == "1"
