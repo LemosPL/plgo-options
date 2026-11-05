@@ -45,6 +45,7 @@ from plgo_options.config import (
     DERIBIT_BASE_URL,
     DERIBIT_CLIENT_ID,
     DERIBIT_CLIENT_SECRET,
+    DERIBIT_CONNECTOR_PRODUCTION,
     DERIBIT_TESTNET,
     REQUEST_TIMEOUT,
 )
@@ -157,6 +158,7 @@ class DeribitConnector:
 
         self._token: str | None = None
         self._token_expiry = 0.0
+        self._scope: str | None = None
         self._auth_lock = asyncio.Lock()
         self._server_offset = 0.0  # server clock minus ours, for valid_until
         self._down_until = 0.0
@@ -168,10 +170,11 @@ class DeribitConnector:
         self._doubts: dict[str, tuple[OrderIntent, float]] = {}  # intent_id -> (intent, deadline)
 
     @classmethod
-    def from_env(cls, allow_production: bool = False, **kwargs: Any) -> "DeribitConnector":
-        """Keys and network from config.py. Testnet unless ``DERIBIT_TESTNET=0``."""
+    def from_env(cls, **kwargs: Any) -> "DeribitConnector":
+        """Keys and network from config.py. Testnet unless ``DERIBIT_TESTNET=0`` and
+        ``DERIBIT_CONNECTOR_PRODUCTION=1`` are both set."""
         return cls(DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET, testnet=DERIBIT_TESTNET,
-                   allow_production=allow_production, **kwargs)
+                   allow_production=DERIBIT_CONNECTOR_PRODUCTION, **kwargs)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -281,6 +284,23 @@ class DeribitConnector:
             logger.warning("Deribit connector unhealthy: %s", exc)
             return False
         return not self._doubts
+
+    async def diagnostics(self) -> dict[str, Any]:
+        """What the status screen shows. Read-only, and never includes the secret."""
+        out: dict[str, Any] = {
+            "network": "testnet" if self.testnet else "production",
+            "configured": bool(self._client_id and self._client_secret),
+            "authenticated": False, "scope": None, "locked": None,
+            "healthy": False, "error": None,
+        }
+        try:
+            out["locked"] = _locked(await self._rpc("public/status"), self.currency)
+            await self._access_token()
+            out |= {"authenticated": True, "scope": self._scope}
+            out["healthy"] = await self.healthy()
+        except ConnectorError as exc:
+            out["error"] = str(exc)
+        return out
 
     # -- placing --------------------------------------------------------------
 
@@ -458,6 +478,7 @@ class DeribitConnector:
                 "grant_type": "client_credentials", "client_id": self._client_id,
                 "client_secret": self._client_secret}, token=None)
             _check_scope(result.get("scope", ""))
+            self._scope = result.get("scope", "")
             self._token = result["access_token"]
             self._token_expiry = self._clock() + float(result.get("expires_in", 900))
             return self._token
@@ -505,6 +526,18 @@ class DeribitConnector:
 
     def _mark_down(self) -> None:
         self._down_until = self._clock() + self._rate_cooldown
+
+
+_connector: DeribitConnector | None = None
+
+
+def get_connector() -> DeribitConnector:
+    """The one connector for this process. Trading code gets it here and nowhere else:
+    a second instance would have its own memory of what was submitted."""
+    global _connector
+    if _connector is None:
+        _connector = DeribitConnector.from_env()
+    return _connector
 
 
 def _check_scope(scope: str) -> None:

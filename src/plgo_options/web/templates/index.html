@@ -1240,6 +1240,15 @@
           <div class="risk-metric"><span class="risk-label">Available</span><span class="risk-value" id="exec-available">--</span></div>
         </div>
         <div id="exec-auth-error" style="display:none;margin-top:.5rem;padding:.5rem;background:var(--red);color:white;border-radius:4px;font-size:.8rem"></div>
+        <h2 style="margin-top:1rem">Trading Connector</h2>
+        <div class="risk-grid">
+          <div class="risk-metric"><span class="risk-label">Network</span><span class="risk-value" id="conn-network">--</span></div>
+          <div class="risk-metric"><span class="risk-label">API key</span><span class="risk-value" id="conn-key">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Healthy</span><span class="risk-value" id="conn-healthy">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Testnet tests</span><span class="risk-value" id="conn-suite">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Trading</span><span class="risk-value" id="conn-trading">--</span></div>
+        </div>
+        <div id="conn-detail" style="margin-top:.5rem;font-size:.8rem;color:var(--text-muted, inherit)"></div>
       </section>
 
       <!-- Orders to execute -->
@@ -4358,7 +4367,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=205"></script>
+<script src="/static/app.js?v=206"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>

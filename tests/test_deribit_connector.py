@@ -666,3 +666,69 @@ async def test_work_order_stops_on_an_exchange_rejection(fake):
     fake.fail_next["private/buy"] = (10009, "not_enough_funds")
     rep = await work_order(_req(), _connector(fake), sleep=fake.clock_sleep)
     assert rep.outcome == "rejected" and rep.detail == "not_enough_funds"
+
+
+# -- status and wiring ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_diagnostics_on_a_good_key_shows_scope_not_secrets(fake):
+    d = await _connector(fake).diagnostics()
+    assert d["network"] == "testnet" and d["authenticated"] and d["healthy"]
+    assert d["scope"] == OK_SCOPE and "secret" not in str(d).lower()
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_without_a_key_says_so(fake):
+    c = DeribitConnector("", "", transport=httpx.MockTransport(fake.handler))
+    d = await c.diagnostics()
+    assert not d["configured"] and not d["authenticated"] and not d["healthy"]
+    assert "not configured" in d["error"] and d["locked"] is False
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_reports_a_rejected_key(fake):
+    fake.fail_next["public/auth"] = (13004, "invalid_credentials")
+    d = await _connector(fake).diagnostics()
+    assert d["configured"] and not d["authenticated"] and "invalid_credentials" in d["error"]
+
+
+def test_get_connector_is_one_instance_and_never_production_by_default(monkeypatch):
+    from plgo_options.execution import deribit
+    monkeypatch.setattr(deribit, "_connector", None)
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET", False)
+    monkeypatch.setattr(deribit, "DERIBIT_CONNECTOR_PRODUCTION", False)
+    with pytest.raises(ConnectorError, match="testnet first"):
+        deribit.get_connector()
+    monkeypatch.setattr(deribit, "DERIBIT_TESTNET", True)
+    assert deribit.get_connector() is deribit.get_connector()
+
+
+def test_status_route_is_read_only_and_reports_the_testnet_suite(fake, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from plgo_options.web.routes import execution
+
+    monkeypatch.setattr(execution, "get_connector", lambda: _connector(fake))
+    app = FastAPI()
+    app.include_router(execution.router, prefix="/api/execution")
+    body = TestClient(app).get("/api/execution/connector").json()
+    assert body["healthy"] and body["trading_enabled"] is False
+    assert body["testnet_suite"]["status"] == "not_run"
+    assert not [m for m, _ in fake.calls if m in ("private/buy", "private/sell", "private/cancel")]
+
+
+def test_status_route_survives_a_refused_connector(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from plgo_options.web.routes import execution
+
+    def refused():
+        raise ConnectorError("refusing production")
+
+    monkeypatch.setattr(execution, "get_connector", refused)
+    app = FastAPI()
+    app.include_router(execution.router, prefix="/api/execution")
+    body = TestClient(app).get("/api/execution/connector").json()
+    assert not body["healthy"] and body["error"] == "refusing production"

@@ -9351,7 +9351,30 @@ async function execInit() {
   if (execLoaded) return;
   execLoaded = true;
   await execCheckStatus();
+  execCheckConnector();
   execRenderOrders();
+}
+
+async function execCheckConnector() {
+  const show = (id, text, cls) => {
+    const $el = document.getElementById(id);
+    $el.textContent = text;
+    $el.className = "risk-value" + (cls ? " " + cls : "");
+  };
+  try {
+    const c = await get("/api/execution/connector");
+    show("conn-network", c.network);
+    show("conn-key", c.authenticated ? "Valid" : c.configured ? "Rejected" : "Missing",
+         c.authenticated ? "mtm-pos" : "mtm-neg");
+    show("conn-healthy", c.healthy ? "Yes" : "No", c.healthy ? "mtm-pos" : "mtm-neg");
+    show("conn-suite", c.testnet_suite.status === "passed" ? "Passed" : "Not run",
+         c.testnet_suite.status === "passed" ? "mtm-pos" : "mtm-neg");
+    show("conn-trading", c.trading_enabled ? "On" : "Off");
+    const notes = [c.testnet_suite.detail, c.locked ? "ETH trading is locked on this network." : "", c.error];
+    document.getElementById("conn-detail").textContent = notes.filter(Boolean).join(" ");
+  } catch (e) {
+    show("conn-healthy", "Error", "mtm-neg");
+  }
 }
 
 async function execCheckStatus() {
