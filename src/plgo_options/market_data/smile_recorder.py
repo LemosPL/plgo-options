@@ -97,9 +97,17 @@ async def expiry_books(expiries: list[str] | None = None, n_expiries: int = 3,
         names = [i["instrument_name"] for i in inst if i["instrument_name"].split("-")[1] in expiries]
         sem = asyncio.Semaphore(12)
 
-        async def one(name: str) -> dict:
+        async def one(name: str) -> dict | None:
+            # Deribit sometimes errors on one book (e.g. 400 internal_server_error on a deep
+            # OTM strike) while serving its top level: fall back to the touch, else drop the
+            # book rather than lose the whole expiry.
             async with sem:
-                return await get("get_order_book", instrument_name=name, depth=depth)
+                for d in dict.fromkeys((depth, 1)):
+                    try:
+                        return await get("get_order_book", instrument_name=name, depth=d)
+                    except httpx.HTTPStatusError:
+                        continue
+                return None
 
         # One burst per expiry, with a pause for Deribit's rate-limit credits to refill:
         # read all at once, the first ~90 books come back in 0.5 s and the rest are
@@ -110,7 +118,7 @@ async def expiry_books(expiries: list[str] | None = None, n_expiries: int = 3,
             if k:
                 await asyncio.sleep(EXPIRY_PAUSE)
             books = await asyncio.gather(*(one(nm) for nm in names if nm.split("-")[1] == e))
-            by_exp[e] = [{key: b.get(key) for key in BOOK_KEYS} for b in books]
+            by_exp[e] = [{key: b.get(key) for key in BOOK_KEYS} for b in books if b]
         t1 = time.time()
     return by_exp, t0, t1
 

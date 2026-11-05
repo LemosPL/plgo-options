@@ -99,3 +99,24 @@ def test_tick_written_once_and_read_back(tmp_path, monkeypatch):
     async def body():
         return b"".join([c async for c in resp.body_iterator])
     assert zipfile.ZipFile(io.BytesIO(asyncio.run(body()))).namelist() == ["2026-11-03/150000.json.gz"]
+
+
+def test_a_book_deribit_will_not_serve_falls_back_to_the_touch_then_is_dropped(monkeypatch):
+    # Deribit answers 400 internal_server_error on some deep OTM books at depth > 1
+    import httpx
+
+    names = ["ETH-25DEC26-2500-C", "ETH-25DEC26-6000-C", "ETH-25DEC26-7000-C"]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        p = req.url.params
+        if req.url.path.endswith("get_instruments"):
+            return httpx.Response(200, json={"result": [{"instrument_name": n} for n in names]})
+        n, depth = p["instrument_name"], p["depth"]
+        if n.endswith("7000-C") or (n.endswith("6000-C") and depth != "1"):
+            return httpx.Response(400, json={"error": {"code": 11094, "message": "internal_server_error"}})
+        return httpx.Response(200, json={"result": {"instrument_name": n, "bids": [], "asks": [[0.001, 1.0]]}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(rec.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    books, _, _ = asyncio.run(rec.expiry_books(["25DEC26"]))
+    assert [b["instrument_name"] for b in books["25DEC26"]] == names[:2]
