@@ -7,6 +7,8 @@ People-facing:
     GET  /api/execution-bot/status               kill switch, last tick, order counts, modes available
     GET  /api/execution-bot/orders               parent orders, open ones first
     POST /api/execution-bot/orders               create one (paper only for now)
+    POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
+    POST /api/execution-bot/orders/batch         create several (the reviewed preview)
     GET  /api/execution-bot/orders/{id}          the order, its ticks and fills
     POST /api/execution-bot/orders/{id}/{action} pause | resume | cancel
 """
@@ -23,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot
+from plgo_options.execution import bot, from_optimizer
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
 from plgo_options.web.auth import current_user
@@ -84,26 +86,69 @@ async def orders(limit: int = 100):
     return {"orders": await store.list_orders(limit)}
 
 
+async def _check(req: OrderCreate, now: float) -> str | None:
+    """Why the order cannot be created, or None."""
+    if req.mode == "live":
+        return "live execution is not available until the Deribit connector passes on testnet"
+    if not INSTRUMENT.fullmatch(req.instrument):
+        return "instrument must look like ETH-25DEC26-2500-C"
+    if not req.start_vp <= req.end_vp <= req.hard_vp:
+        return "thresholds must satisfy start_vp <= end_vp <= hard_vp"
+    if req.qty != int(req.qty):
+        return "qty must be a whole number of contracts"
+    if parse_exp(req.instrument.split("-")[1]).timestamp() <= now + req.hours * 3600:
+        return "the option expires before the deadline"
+    if not await _listed(req.instrument):
+        return f"{req.instrument} is not an active Deribit instrument"
+    return None
+
+
+async def _create(req: OrderCreate, by: str, now: float) -> int:
+    return await store.create_order(req.instrument, req.side, req.qty, now + req.hours * 3600, req.start_vp,
+                                    req.end_vp, req.hard_vp, req.cap, req.mode, by, req.note, now)
+
+
 @router.post("/orders")
 async def create(req: OrderCreate, request: Request):
-    if req.mode == "live":
-        raise HTTPException(400, "live execution is not available until the Deribit connector passes on testnet")
-    if not INSTRUMENT.fullmatch(req.instrument):
-        raise HTTPException(400, "instrument must look like ETH-25DEC26-2500-C")
-    if not req.start_vp <= req.end_vp <= req.hard_vp:
-        raise HTTPException(400, "thresholds must satisfy start_vp <= end_vp <= hard_vp")
-    if req.qty != int(req.qty):
-        raise HTTPException(400, "qty must be a whole number of contracts")
     now = time.time()
-    deadline = now + req.hours * 3600
-    if parse_exp(req.instrument.split("-")[1]).timestamp() <= deadline:
-        raise HTTPException(400, "the option expires before the deadline")
-    if not await _listed(req.instrument):
-        raise HTTPException(400, f"{req.instrument} is not an active Deribit instrument")
-    user = current_user(request) or {}
-    oid = await store.create_order(req.instrument, req.side, req.qty, deadline, req.start_vp, req.end_vp,
-                                   req.hard_vp, req.cap, req.mode, user.get("email", ""), req.note, now)
+    if err := await _check(req, now):
+        raise HTTPException(400, err)
+    oid = await _create(req, (current_user(request) or {}).get("email", ""), now)
     return {"id": oid, "order": await store.get_order(oid)}
+
+
+class Batch(BaseModel):
+    orders: list[OrderCreate]
+
+
+@router.post("/orders/batch")
+async def create_batch(req: Batch, request: Request):
+    """Every valid order is created; the others come back with their reason."""
+    now, by = time.time(), (current_user(request) or {}).get("email", "")
+    created, refused = [], []
+    for o in req.orders:
+        if err := await _check(o, now):
+            refused.append({"instrument": o.instrument, "reason": err})
+        else:
+            created.append(await _create(o, by, now))
+    return {"created": created, "refused": refused}
+
+
+class PreviewReq(BaseModel):
+    trades: list[dict]
+    asset: str = "ETH"
+    start_vp: float = 0.5
+    hours: float = 12.0
+
+
+@router.post("/preview")
+async def preview(req: PreviewReq):
+    if req.asset != "ETH":
+        raise HTTPException(400, f"the execution bot trades Deribit ETH options only, not {req.asset}")
+    try:
+        return await from_optimizer.preview(req.trades, req.asset, req.start_vp, req.hours)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
 
 
 @router.get("/orders/{oid}")

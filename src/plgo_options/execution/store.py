@@ -115,10 +115,14 @@ async def get_order(oid: int) -> dict[str, Any] | None:
 
 
 async def list_orders(limit: int = 100) -> list[dict[str, Any]]:
-    """Working and paused orders first, then the most recent finished ones."""
+    """Working and paused orders first, then the most recent finished ones; each with its last tick."""
     db = await get_db()
     cur = await db.execute(
-        "SELECT * FROM exec_orders ORDER BY status NOT IN ('working','paused'), id DESC LIMIT ?", (limit,))
+        "SELECT o.*, t.action AS last_action, t.detail AS last_detail, t.best_cost AS last_best_cost,"
+        " t.theta_usd AS last_theta_usd, t.ts AS last_ts FROM exec_orders o"
+        " LEFT JOIN exec_ticks t ON t.order_id = o.id"
+        " AND t.ts = (SELECT MAX(ts) FROM exec_ticks WHERE order_id = o.id)"
+        " ORDER BY o.status NOT IN ('working','paused'), o.id DESC LIMIT ?", (limit,))
     return [dict(r) for r in await cur.fetchall()]
 
 

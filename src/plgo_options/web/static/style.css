@@ -1841,3 +1841,19 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .sb-leg-row { display: flex; gap: .5rem; align-items: center; margin: .25rem 0; }
 .sb-leg-row select, .sb-leg-row input { width: 9rem; font-size: .82rem; }
 .sb-leg-row button { width: auto; padding: .1rem .45rem; }
+
+/* Execution Bot page: the optimizer pages' table look, numbers right-aligned
+   (text columns carry their own text-align:left) */
+#page-execbot .pf-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+#page-execbot .pf-table thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface); color: var(--muted); font-weight: 600;
+  text-align: right; padding: .5rem .65rem; white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+#page-execbot .pf-table tbody td {
+  text-align: right; padding: .45rem .65rem; white-space: nowrap;
+  border-bottom: 1px solid var(--row-border, var(--border));
+  font-variant-numeric: tabular-nums;
+}
+#page-execbot .pf-table tbody tr:hover { background: var(--hover-bg); }

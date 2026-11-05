@@ -203,3 +203,62 @@ def test_routes_create_act_and_refuse_live(tmp_path, monkeypatch):
         assert st["counts"] == {"cancelled": 1} and st["modes"] == {"paper": True, "live": False}
         assert (await routes.detail(oid))["order"]["id"] == oid
     run(body)
+
+
+def test_optimizer_legs_kept_named_netted_and_skipped_with_reasons():
+    from plgo_options.execution.from_optimizer import deribit_legs
+    trades = [
+        {"counterparty": "Deribit", "opt": "C", "strike": 2500, "expiry": "2026-12-25", "qty": 300, "side": "Buy"},
+        {"counterparty": "Deribit", "opt": "C", "strike": 2500, "instrument": "ETH-25DEC26-2500-C", "qty": -100,
+         "side": "Sell", "is_unwind": True},                                       # nets with the first: buy 200
+        {"counterparty": "deribit", "opt": "P", "strike": 2000.0, "expiry": "2027-03-26", "qty": -50.4, "side": "Sell"},
+        {"counterparty": "Deribit", "opt": "P", "strike": 1800, "expiry": "2026-12-25", "qty": 10, "side": "Buy"},
+        {"counterparty": "Deribit", "opt": "P", "strike": 1800, "expiry": "2026-12-25", "qty": 10, "side": "Sell"},
+        {"counterparty": "Flowdesk", "opt": "C", "strike": 3000, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
+        {"counterparty": "Deribit", "opt": "", "strike": 0, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
+        {"counterparty": "Deribit", "opt": "C", "strike": 2512.5, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
+    ]
+    legs, skipped = deribit_legs(trades)
+    assert [(x["instrument"], x["side"], x["qty"]) for x in legs] == [
+        ("ETH-25DEC26-2500-C", "buy", 200), ("ETH-26MAR27-2000-P", "sell", 50)]
+    reasons = sorted(s["reason"] for s in skipped)
+    assert reasons == ["booked with Flowdesk, not Deribit", "nets to zero",
+                       "no Deribit expiry code or whole strike", "not an option leg"]
+
+
+def test_preview_prices_listed_legs_and_drops_the_rest(monkeypatch):
+    from plgo_options.execution import from_optimizer
+    monkeypatch.setattr(from_optimizer.time, "time", lambda: NOW)
+    trades = [{"counterparty": "Deribit", "opt": "C", "strike": 2400, "expiry": "2026-12-25", "qty": 40, "side": "Buy"},
+              {"counterparty": "Deribit", "opt": "C", "strike": 2450, "expiry": "2026-12-25", "qty": 5, "side": "Buy"}]
+
+    async def listed(_):
+        return {NAME}
+
+    async def books(expiries):
+        assert expiries == [EXPIRY]
+        return {EXPIRY: _books(-1.0)}, NOW, NOW + 1
+
+    out = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
+    (leg,) = out["legs"]
+    assert leg["instrument"] == NAME and leg["qty"] == 40 and leg["now_qty"] == 40
+    assert leg["best_cost_usd"] == pytest.approx(-1 + 0.687, abs=0.15) and leg["vega"] > 0
+    assert "not listed" in out["skipped"][0]["reason"]
+
+
+def test_batch_creates_the_valid_orders_and_lists_them_with_their_last_tick(tmp_path, monkeypatch):
+    run = _db(tmp_path, "bot4.db")
+
+    async def listed(name):
+        return name == NAME
+    monkeypatch.setattr(routes, "_listed", listed)
+    req = Request({"type": "http", "session": {}, "headers": []})
+
+    async def body():
+        mk = lambda inst, **kw: routes.OrderCreate(instrument=inst, side="buy", qty=10, hours=12, **kw)  # noqa: E731
+        r = await routes.create_batch(routes.Batch(orders=[mk(NAME), mk("ETH-25DEC26-9999-C"), mk(NAME, mode="live")]), req)
+        assert len(r["created"]) == 1 and len(r["refused"]) == 2
+        await store.add_tick(r["created"][0], NOW, "wait", best_cost=2.5, theta_usd=1.75, detail="best $2.50 > $1.75")
+        (o,) = (await routes.orders())["orders"]
+        assert (o["last_action"], o["last_best_cost"], o["last_theta_usd"]) == ("wait", 2.5, 1.75)
+    run(body)

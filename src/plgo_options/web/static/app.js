@@ -11005,6 +11005,17 @@ function optv2ExpiryText(t) {
   return String(exp).slice(0, 10);
 }
 
+// Send the solution to the Execution Bot page (execbot.js): every trade, unwinds
+// included; the server keeps the Deribit option legs, nets them per instrument
+// and prices them against the spline for review before any order is created.
+document.getElementById("btn-optv2-send-to-exec")?.addEventListener("click", () => {
+  const trades = (optv2OptResult && optv2OptResult.trades) || [];
+  if (!trades.length) { alert("No optimizer trades to send. Run the optimizer first."); return; }
+  if (currentAsset !== "ETH") { alert("The Execution Bot trades Deribit ETH options only."); return; }
+  if (typeof window.execbotReceive !== "function") { alert("The Execution Bot page did not load; refresh the app."); return; }
+  window.execbotReceive(trades, { asset: currentAsset, source: "Optimizer v2" });
+});
+
 // Send the optimizer's proposed trades to the Pricing screen so they can be
 // priced/quoted (per-counterparty methodology, vol surface, etc.). Mirrors the
 // opt2 chat "Send to Pricing" flow: load legs, switch page, auto-price.
