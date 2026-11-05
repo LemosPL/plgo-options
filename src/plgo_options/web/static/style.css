@@ -848,6 +848,11 @@ select { margin-bottom: .5rem; }
 .conn-state::before { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--muted); flex: none; }
 .conn-state.good::before { background: var(--green); }
 .conn-state.bad::before { background: var(--red); }
+.conn-code { background: var(--bg, transparent); border: 1px solid var(--border); border-radius: 6px; padding: .75rem; margin-top: .75rem; font-size: .78rem; overflow-x: auto; white-space: pre; }
+.conn-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: .6rem .9rem; }
+.conn-form label { display: block; font-size: .78rem; color: var(--muted); }
+.conn-form input:not([type=checkbox]), .conn-form select { display: block; width: 100%; margin-top: .2rem; }
+.conn-form small { display: block; margin-top: .15rem; }
 .conn-detail { color: var(--muted); font-size: .75rem; margin-top: .15rem; }
 .status-dot {
   display: inline-block;

@@ -1484,7 +1484,7 @@ document.querySelectorAll(".nav-item").forEach(item => {
       }, 50);
     }
     if (pg === "portfolio" && !portfolioLoaded) loadPortfolio();
-    if (pg === "connectors") connectorsLoad();
+    if (pg === "connectors") { connectorsLoad(); connectorApiLoad(); }
     if (pg === "deals" && !dealsLoaded) dealsInit();
     if (pg === "deals") {
       setTimeout(() => {
@@ -9439,7 +9439,99 @@ async function connectorsLoad() {
     $status.textContent = "Could not load connector status: " + e.message;
   }
 }
-document.getElementById("conn-refresh").addEventListener("click", connectorsLoad);
+document.getElementById("conn-refresh").addEventListener("click", () => {
+  connectorsLoad();
+  connectorApiLoad();
+});
+
+// API calls: the catalog from the server, and a form to run each one
+let connApiNetwork = "";
+
+async function connectorApiLoad() {
+  try {
+    const cat = await get("/api/connector/catalog");
+    connApiNetwork = cat.network;
+    document.getElementById("conn-api-context").textContent =
+      `${cat.network} · Kill switch ${cat.kill_switch ? "ON" : "off"}`;
+    document.getElementById("conn-python").textContent = cat.python_example;
+    document.getElementById("conn-api-rows").replaceChildren(...cat.calls.map(call => {
+      const $tr = document.createElement("tr");
+      const text = (v, tag) => {
+        const $td = document.createElement("td");
+        const $c = document.createElement(tag || "span");
+        $c.textContent = v;
+        $td.append($c);
+        return $td;
+      };
+      const $btn = document.createElement("button");
+      $btn.className = "btn-secondary";
+      $btn.style.width = "auto";
+      $btn.textContent = "Open";
+      $btn.addEventListener("click", () => connectorApiOpen(call));
+      const $action = document.createElement("td");
+      $action.append($btn);
+      $tr.append(text(call.name), text(`${call.method} ${call.path}`, "code"), text(call.python, "code"),
+                 text(call.summary), text(call.sends_orders ? "Sends orders" : "Read only"), $action);
+      return $tr;
+    }));
+  } catch (e) {
+    document.getElementById("conn-api-context").textContent = "Could not load the API calls: " + e.message;
+  }
+}
+
+function connectorApiOpen(call) {
+  document.getElementById("conn-run").style.display = "";
+  document.getElementById("conn-run-title").textContent = `${call.name}: ${call.method} ${call.path}`;
+  const $result = document.getElementById("conn-run-result");
+  $result.style.display = "none";
+  const inputs = call.params.map(p => {
+    const $label = document.createElement("label");
+    $label.textContent = p.name + (p.required ? " *" : "");
+    let $in;
+    if (p.type === "select") {
+      $in = document.createElement("select");
+      $in.append(...p.options.map(o => new Option(o, o)));
+      if (p.default) $in.value = p.default;
+    } else {
+      $in = document.createElement("input");
+      $in.type = p.type === "bool" ? "checkbox" : p.type === "number" ? "number" : "text";
+      if (p.type === "number") $in.step = "any";
+      if (p.type === "id") $in.value = "manual-" + Date.now();
+      else if (p.type === "bool") $in.checked = !!p.default;
+      else if (p.default != null) $in.value = p.default;
+    }
+    $label.append($in);
+    if (p.help) {
+      const $help = document.createElement("small");
+      $help.textContent = p.help;
+      $label.append($help);
+    }
+    return { p, $label, $in };
+  });
+  document.getElementById("conn-run-form").replaceChildren(...inputs.map(i => i.$label));
+
+  const $send = document.getElementById("conn-run-send");
+  $send.textContent = call.sends_orders ? "Send to Deribit" : "Run";
+  $send.onclick = async () => {
+    let path = call.path;
+    const body = {};
+    for (const { p, $in } of inputs) {
+      const value = p.type === "bool" ? $in.checked : p.type === "number"
+        ? ($in.value === "" ? null : Number($in.value)) : $in.value.trim();
+      if (p.in === "path") path = path.replace(`{${p.name}}`, encodeURIComponent(value));
+      else if (value !== null && value !== "") body[p.name] = value;
+    }
+    if (call.sends_orders && !confirm(`${call.name} on Deribit ${connApiNetwork}?`)) return;
+    $result.style.display = "";
+    $result.textContent = "Running...";
+    try {
+      const out = call.method === "GET" ? await get(path) : await post(path, body);
+      $result.textContent = JSON.stringify(out, null, 2);
+    } catch (e) {
+      $result.textContent = "Error: " + e.message;
+    }
+  };
+}
 
 async function execCheckStatus() {
   try {

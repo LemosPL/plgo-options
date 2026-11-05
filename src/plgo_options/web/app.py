@@ -36,6 +36,7 @@ from plgo_options.web.routes import optimization
 from plgo_options.web.routes import optimizer
 from plgo_options.web.routes import execution
 from plgo_options.web.routes import execution_bot
+from plgo_options.web.routes import connector_api
 from plgo_options.web.routes import holistic
 from plgo_options.web.routes import collateral
 from plgo_options.web.routes import reconciliation
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(optimizer.router, prefix="/api/optimizer", tags=["optimizer"])
     app.include_router(execution.router, prefix="/api/execution", tags=["execution"])
     app.include_router(execution_bot.router, prefix="/api/execution-bot", tags=["execution-bot"])
+    app.include_router(connector_api.router, prefix="/api/connector", tags=["connector"])
     app.include_router(holistic.router, prefix="/api/holistic", tags=["holistic"])
     app.include_router(collateral.router, prefix="/api/collateral", tags=["collateral"])
     app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["reconciliation"])
