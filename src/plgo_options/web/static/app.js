@@ -9385,7 +9385,7 @@ async function connectorsLoad() {
         cell(c.network),
         cell(state(c.connection, c.connected)),
         cell(state(c.tested ? "Passed" : "Not run", c.tested), $detail),
-        cell(state(c.stage, c.ready || c.id === "paper")),
+        cell(state(c.stage, c.ready)),
         $next,
       );
       return $tr;

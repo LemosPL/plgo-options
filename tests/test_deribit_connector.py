@@ -711,7 +711,7 @@ def _probe(**kw) -> dict:
 def _status(monkeypatch, tests: dict | None = None, enabled: bool = True):
     from plgo_options.execution import status
     passed = {"status": "passed", "detail": ""}
-    monkeypatch.setattr(status, "TESTS", {"paper": passed, "deribit-testnet": passed,
+    monkeypatch.setattr(status, "TESTS", {"deribit-testnet": passed,
                                           "deribit-production": passed} | (tests or {}))
     monkeypatch.setattr(status, "DERIBIT_CONNECTOR_PRODUCTION", enabled)
     return status
@@ -769,7 +769,7 @@ def test_shared_key_never_crosses_to_the_other_network(monkeypatch):
     assert deribit.deribit_keys(True) == ("own", "t")
 
 
-def test_connectors_route_is_read_only_and_lists_all_three(fake, monkeypatch):
+def test_connectors_route_is_read_only_and_lists_both_networks(fake, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -786,7 +786,8 @@ def test_connectors_route_is_read_only_and_lists_all_three(fake, monkeypatch):
     app = FastAPI()
     app.include_router(execution.router, prefix="/api/execution")
     rows = TestClient(app).get("/api/execution/connectors").json()["connectors"]
-    assert [r["id"] for r in rows] == ["paper", "deribit-testnet", "deribit-production"]
-    assert rows[1]["connection"] == "Connected" and rows[1]["stage"] == "Not tested"
-    assert rows[2]["stage"] == "Not ready"
+    assert [r["id"] for r in rows] == ["deribit-testnet", "deribit-production"]
+    assert {r["name"] for r in rows} == {"Deribit ETH"}
+    assert rows[0]["connection"] == "Connected" and rows[0]["stage"] == "Not tested"
+    assert rows[1]["stage"] == "Not ready"
     assert not [m for m, _ in fake.calls if m in ("private/buy", "private/sell", "private/cancel")]

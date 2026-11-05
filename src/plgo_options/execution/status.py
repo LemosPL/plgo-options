@@ -1,4 +1,4 @@
-"""Where every connector stands, for the Connectors screen.
+"""Where the Deribit ETH connector stands on each network, for the Connectors screen.
 
 Connection is checked live on each call, read-only. Test results can't be
 measured from a running server, so ``TESTS`` is a record: change a connector to
@@ -16,7 +16,6 @@ from plgo_options.config import DERIBIT_CONNECTOR_PRODUCTION
 from .deribit import DeribitConnector, deribit_keys
 
 TESTS: dict[str, dict[str, str]] = {
-    "paper": {"status": "passed", "detail": "tests/test_execution.py, offline"},
     "deribit-testnet": {"status": "not_run", "detail": "tests/test_deribit_testnet.py, 15 scenarios"},
     "deribit-production": {"status": "not_run", "detail": "Runs after testnet"},
 }
@@ -49,15 +48,6 @@ def _key_step(probe: dict[str, Any], network: str, variables: str) -> str | None
     return None
 
 
-def _paper_row() -> dict[str, Any]:
-    return {
-        "id": "paper", "name": "Paper", "network": "Simulated fills",
-        "connection": "No connection needed", "connected": True,
-        "tested": TESTS["paper"]["status"] == "passed", "test_detail": TESTS["paper"]["detail"],
-        "stage": "Simulation only", "ready": False, "next_step": None,
-    }
-
-
 def _testnet_row(probe: dict[str, Any]) -> dict[str, Any]:
     test = TESTS["deribit-testnet"]
     tested = test["status"] == "passed"
@@ -67,7 +57,7 @@ def _testnet_row(probe: dict[str, Any]) -> dict[str, Any]:
     if step is None and not tested:
         step = "Run tests/test_deribit_testnet.py"
     return {
-        "id": "deribit-testnet", "name": "Deribit", "network": "Testnet",
+        "id": "deribit-testnet", "name": "Deribit ETH", "network": "Testnet",
         "connection": connection, "connected": connected,
         "tested": tested, "test_detail": test["detail"],
         "stage": "Tested on testnet" if tested and connected else "Not tested",
@@ -90,7 +80,7 @@ def _production_row(probe: dict[str, Any]) -> dict[str, Any]:
             step = "Set DERIBIT_CONNECTOR_PRODUCTION=1"
     ready = step is None
     return {
-        "id": "deribit-production", "name": "Deribit", "network": "Production",
+        "id": "deribit-production", "name": "Deribit ETH", "network": "Production",
         "connection": connection, "connected": connected,
         "tested": tested, "test_detail": test["detail"],
         "stage": "Ready in prod" if ready else "Not ready",
@@ -108,4 +98,4 @@ async def _probe(testnet: bool) -> dict[str, Any]:
 
 async def connector_statuses() -> list[dict[str, Any]]:
     testnet, production = await asyncio.gather(_probe(True), _probe(False))
-    return [_paper_row(), _testnet_row(testnet), _production_row(production)]
+    return [_testnet_row(testnet), _production_row(production)]
