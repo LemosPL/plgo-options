@@ -8,11 +8,14 @@
                     with Gatheral's butterfly density g(k) >= 0 enforced by penalty
     fit_spline      cubic smoothing spline of implied vol (GCV), refitted with the same
                     butterfly penalty when it has negative density between the strikes
+    otm_quotes      one expiry's two-sided out-of-the-money strikes: mids, half-spreads, mid vols
+    spline_fair     one option's fair value from the spline fitted WITHOUT its strike
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import math
 import re
 
 import numpy as np
@@ -222,3 +225,41 @@ def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True) -> tuple[BSpline, b
                           (g < G_FLOOR)[:, None] * dg * PENALTY, (w < 0)[:, None] * dw * PENALTY])
     fixed = BSpline(t, least_squares(res, spl.c, jac=jac).x, 3)
     return fixed, True, ok(fixed)
+
+
+def otm_quotes(expiry: str, books: list[dict], now: dt.datetime, min_strikes: int = 8) -> dict | None:
+    """The two-sided out-of-the-money strikes of one expiry (put below the parity
+    forward, call above), with mids, half-spreads and mid vols. None if too few."""
+    g = book_frame(books, expiry, now)
+    F, DF, _, _ = fit_forward(g)
+    T = float(g["T"].iloc[0])
+    o = g[(g.cp == "C") == (g.K >= F)].sort_values("K")
+    o = o[np.isfinite(o.bid) & np.isfinite(o.ask) & (o.ask > o.bid)]
+    ivb = np.array([implied(r.bid, F, r.K, T, r.cp, DF) for r in o.itertuples()])
+    iva = np.array([implied(r.ask, F, r.K, T, r.cp, DF) for r in o.itertuples()])
+    ok = np.isfinite(ivb) & np.isfinite(iva)
+    o = o[ok]
+    if len(o) < min_strikes:
+        return None
+    mid = ((o.bid + o.ask) / 2).to_numpy()
+    iv_mid = np.array([implied(m_, F, r.K, T, r.cp, DF) for m_, r in zip(mid, o.itertuples())])
+    return dict(K=o.K.to_numpy(), CP=o.cp.to_list(), mid=mid, iv_mid=iv_mid,
+                half=((o.ask - o.bid) / 2).to_numpy(), mark=o.mark.to_numpy(), F=F, T=T, DF=DF,
+                spot=float(g.spot.median()), atm=float(np.median((ivb[ok] + iva[ok]) / 2)))
+
+
+def spline_fair(q: dict, K0: float, cp: str) -> dict:
+    """Fair value of (K0, cp) from the arbitrage-free smoothing spline through the OTM
+    mid vols, fitted WITHOUT strike K0 so its own quote cannot pull the curve towards
+    itself. USD price, vol (fraction), vega (USD per vol point), whether K0 lies inside
+    the fitted strikes (outside, the spline extrapolates) and whether it is arb-free."""
+    keep = q["K"] != K0
+    K, iv = q["K"][keep], q["iv_mid"][keep]
+    vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K, iv)])
+    k = np.log(K / q["F"])
+    spl, _, free = fit_spline(k, iv * 100, q["half"][keep] / vg, q["T"])
+    k0 = math.log(K0 / q["F"])
+    v0 = max(float(spl(k0)) / 100, 1e-4)
+    return dict(fair=float(black_vec(q["F"], [K0], q["T"], v0, [cp], q["DF"])[0]), iv=v0,
+                vega=float(vega(q["F"], K0, q["T"], v0, q["DF"])), inside=bool(k[0] <= k0 <= k[-1]),
+                arb_free=free)

@@ -35,6 +35,7 @@ from plgo_options.web.routes import trades
 from plgo_options.web.routes import optimization
 from plgo_options.web.routes import optimizer
 from plgo_options.web.routes import execution
+from plgo_options.web.routes import execution_bot
 from plgo_options.web.routes import holistic
 from plgo_options.web.routes import collateral
 from plgo_options.web.routes import reconciliation
@@ -48,6 +49,7 @@ from plgo_options.web.routes import smile_recorder
 from plgo_options.web.routes import agents as agents_routes
 from plgo_options.agents.decisions import apply_pending as apply_decision_sheets
 from plgo_options.agents.store import init_agent_tables
+from plgo_options.execution.store import init_exec_tables
 from plgo_options.web import auth as auth_mod
 from plgo_options.config import SESSION_MAX_AGE_SECONDS, SESSION_SECRET
 
@@ -60,6 +62,7 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 async def lifespan(app: FastAPI):
     await init_db()
     await init_agent_tables()
+    await init_exec_tables()
     await apply_decision_sheets()
     await auth_mod.init_auth_tables()
     yield
@@ -84,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(optimization.router, prefix="/api/optimization", tags=["optimization"])
     app.include_router(optimizer.router, prefix="/api/optimizer", tags=["optimizer"])
     app.include_router(execution.router, prefix="/api/execution", tags=["execution"])
+    app.include_router(execution_bot.router, prefix="/api/execution-bot", tags=["execution-bot"])
     app.include_router(holistic.router, prefix="/api/holistic", tags=["holistic"])
     app.include_router(collateral.router, prefix="/api/collateral", tags=["collateral"])
     app.include_router(reconciliation.router, prefix="/api/reconciliation", tags=["reconciliation"])

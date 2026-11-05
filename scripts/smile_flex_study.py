@@ -54,34 +54,14 @@ from scipy.optimize import least_squares
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from plgo_options.pricing.smile_fit import (K_RANGE, PENALTY, black_vec, book_frame, fit_forward,  # noqa: E402
-                                            fit_spline, fit_svi, implied, svi_w, vega)
+from plgo_options.pricing.smile_fit import (K_RANGE, PENALTY, black_vec, fit_spline, fit_svi,  # noqa: E402
+                                            otm_quotes as quotes, svi_w, vega)
 
 KG = np.linspace(-K_RANGE, K_RANGE, 801)
 KG_CHECK = np.linspace(-K_RANGE, K_RANGE, 8001)
 # The fit holds g(k) above a small margin, not just zero: in the far wings g is
 # small, and the correction's tail tipped it to about -0.001 between grid points.
 G_FLOOR = 0.01
-
-
-def quotes(expiry: str, books: list[dict], now: dt.datetime) -> dict | None:
-    """The scored OTM strikes of one expiry, as the recorder scores them."""
-    g = book_frame(books, expiry, now)
-    F, DF, _, _ = fit_forward(g)
-    T = float(g["T"].iloc[0])
-    o = g[(g.cp == "C") == (g.K >= F)].sort_values("K")
-    o = o[np.isfinite(o.bid) & np.isfinite(o.ask) & (o.ask > o.bid)]
-    ivb = np.array([implied(r.bid, F, r.K, T, r.cp, DF) for r in o.itertuples()])
-    iva = np.array([implied(r.ask, F, r.K, T, r.cp, DF) for r in o.itertuples()])
-    ok = np.isfinite(ivb) & np.isfinite(iva)
-    o = o[ok]
-    if len(o) < 8:
-        return None
-    mid = ((o.bid + o.ask) / 2).to_numpy()
-    iv_mid = np.array([implied(m_, F, r.K, T, r.cp, DF) for m_, r in zip(mid, o.itertuples())])
-    return dict(K=o.K.to_numpy(), CP=o.cp.to_list(), mid=mid, iv_mid=iv_mid,
-                half=((o.ask - o.bid) / 2).to_numpy(), mark=o.mark.to_numpy(), F=F, T=T, DF=DF,
-                atm=float(np.median((ivb[ok] + iva[ok]) / 2)))
 
 
 def basis(kmin: float, kmax: float, n: int):

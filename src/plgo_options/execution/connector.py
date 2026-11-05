@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .models import AccountState, BookTop, OrderIntent, OrderState, Position
+from .models import AccountState, BookDepth, BookTop, OrderIntent, OrderState, Position
 
 
 class Connector(Protocol):
@@ -28,6 +28,8 @@ class Connector(Protocol):
     async def order(self, order_id: str) -> OrderState: ...
 
     async def book(self, instrument: str) -> BookTop: ...
+
+    async def book_depth(self, instrument: str, depth: int = 10) -> BookDepth: ...
 
     async def positions(self) -> list[Position]: ...
 

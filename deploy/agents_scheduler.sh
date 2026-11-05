@@ -67,5 +67,16 @@ else
   gcloud scheduler jobs create http smile-recorder "${rec_args[@]}" --headers="$rec_hdrs"
 fi
 
+# Execution bot (execution/bot.py): works the open parent orders once a minute,
+# paper only for now. With no open order a tick returns at once. It checks the
+# kill switch itself before sending anything.
+bot_args=(--project="$PROJECT" --location="$REGION" --schedule="* * * * *" --time-zone="Etc/UTC"
+          --uri="$SERVICE_URL/api/execution-bot/tick" --http-method=POST --attempt-deadline=90s)
+if gcloud scheduler jobs describe execution-bot --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
+  gcloud scheduler jobs update http execution-bot "${bot_args[@]}" --update-headers="$rec_hdrs"
+else
+  gcloud scheduler jobs create http execution-bot "${bot_args[@]}" --headers="$rec_hdrs"
+fi
+
 echo "Scheduler jobs in place. Pause everything with the Kill switch on the Agents page,"
 echo "or: gcloud scheduler jobs pause agents-row-watcher --location=$REGION"

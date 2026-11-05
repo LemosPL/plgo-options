@@ -77,7 +77,10 @@ def quarterlies(instruments: list[dict], n: int, now: float) -> list[str]:
     return sorted(out, key=out.get)[:n]
 
 
-async def snapshot(n_expiries: int = 3, depth: int = 10) -> tuple[dict[str, list[dict]], float, float]:
+async def expiry_books(expiries: list[str] | None = None, n_expiries: int = 3,
+                       depth: int = 10) -> tuple[dict[str, list[dict]], float, float]:
+    """Every ETH option order book of the given expiries (default: the next n
+    quarterlies), depth levels deep: ({expiry: books}, t0, t1)."""
     async with httpx.AsyncClient(timeout=20) as c:
         async def get(method: str, **params) -> dict | list:
             for attempt in range(5):
@@ -89,7 +92,8 @@ async def snapshot(n_expiries: int = 3, depth: int = 10) -> tuple[dict[str, list
             raise RuntimeError(f"{method} {params}: rate limited")
 
         inst = await get("get_instruments", currency="ETH", kind="option", expired="false")
-        expiries = quarterlies(inst, n_expiries, time.time())
+        if expiries is None:
+            expiries = quarterlies(inst, n_expiries, time.time())
         names = [i["instrument_name"] for i in inst if i["instrument_name"].split("-")[1] in expiries]
         sem = asyncio.Semaphore(12)
 
@@ -109,6 +113,10 @@ async def snapshot(n_expiries: int = 3, depth: int = 10) -> tuple[dict[str, list
             by_exp[e] = [{key: b.get(key) for key in BOOK_KEYS} for b in books]
         t1 = time.time()
     return by_exp, t0, t1
+
+
+async def snapshot(n_expiries: int = 3, depth: int = 10) -> tuple[dict[str, list[dict]], float, float]:
+    return await expiry_books(None, n_expiries, depth)
 
 
 def analyse(expiry: str, books: list[dict], now: dt.datetime) -> tuple[list[dict], dict]:

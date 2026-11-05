@@ -9,8 +9,14 @@ deliberately pessimistic:
       price, checked whenever the order is polled. Sitting at the touch never
       fills, so paper results understate passive fills, never overstate them.
 
+With a ``depth`` source (several book levels), a marketable limit order walks
+the levels up to its limit price instead, each level filling at its own price
+and size: how a large taker order actually clears. The book is not depleted
+between calls, so repeated takes see the same liquidity again: optimistic.
+
 Fees come from ``fee_fn``; the default is a flat rate on qty x price, a
-placeholder until it is checked against Deribit's current fee schedule.
+placeholder until it is checked against Deribit's current fee schedule;
+``deribit_option_fee`` is Deribit's option taker fee.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from typing import Any
 
 from .models import (
     AccountState,
+    BookDepth,
     BookTop,
     Fill,
     OrderIntent,
@@ -31,6 +38,7 @@ from .models import (
 )
 
 QuoteSource = Callable[[str], Awaitable[BookTop]]
+DepthSource = Callable[[str], Awaitable[BookDepth]]
 FeeFn = Callable[[str, float, float, bool], float]  # (instrument, qty, price, maker) -> fee
 
 
@@ -38,6 +46,12 @@ def flat_fee(maker_rate: float = 0.0, taker_rate: float = 0.0005) -> FeeFn:
     def fee(_instrument: str, qty: float, price: float, maker: bool) -> float:
         return (maker_rate if maker else taker_rate) * qty * price
     return fee
+
+
+def deribit_option_fee(_instrument: str, qty: float, price: float, _maker: bool) -> float:
+    """Deribit's option fee in ETH: 0.03% of the underlying per contract, capped at
+    12.5% of the option price (price in ETH, so the underlying is 1)."""
+    return qty * min(0.0003, 0.125 * price)
 
 
 def deribit_quotes(client: Any) -> QuoteSource:
@@ -61,8 +75,9 @@ def deribit_quotes(client: Any) -> QuoteSource:
 class PaperConnector:
     def __init__(self, quotes: QuoteSource, fee_fn: FeeFn | None = None,
                  equity: float = 0.0, currency: str = "ETH",
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, depth: DepthSource | None = None) -> None:
         self._quotes = quotes
+        self._depth = depth
         self._fee = fee_fn or flat_fee()
         self._equity = equity
         self._currency = currency
@@ -103,7 +118,9 @@ class PaperConnector:
             if crosses:
                 return self._reject(state, "post_only would take liquidity")
             return state
-        if crosses:
+        if crosses and self._depth is not None:
+            await self._take_levels(state)
+        elif crosses:
             self._fill(state, min(intent.qty, size or intent.qty), touch, maker=False)
         if intent.time_in_force == "IOC" or state.remaining == 0:
             return self._close(state)
@@ -124,6 +141,14 @@ class PaperConnector:
     async def book(self, instrument: str) -> BookTop:
         return await self._quotes(instrument)
 
+    async def book_depth(self, instrument: str, depth: int = 10) -> BookDepth:
+        if self._depth is not None:
+            d = await self._depth(instrument)
+            return BookDepth(instrument, d.bids[:depth], d.asks[:depth], d.mark, d.ts)
+        b = await self._quotes(instrument)  # top of book only
+        return BookDepth(instrument, [] if b.best_bid is None else [(b.best_bid, b.bid_size or 0.0)],
+                         [] if b.best_ask is None else [(b.best_ask, b.ask_size or 0.0)], b.mark, b.ts)
+
     async def positions(self) -> list[Position]:
         return [Position(instrument=i, size=s, avg_price=p)
                 for i, (s, p) in self._positions.items() if s]
@@ -136,6 +161,16 @@ class PaperConnector:
         return self.is_healthy
 
     # -- fill model -----------------------------------------------------------
+
+    async def _take_levels(self, state: OrderState) -> None:
+        """Walk the opposite side's levels up to the limit, each at its own price."""
+        intent = state.intent
+        book = await self._depth(intent.instrument)
+        for price, amt in (book.asks if intent.side == "buy" else book.bids):
+            if state.remaining <= 0 or not _within(intent.side, price, intent.limit_price):
+                break
+            if amt > 0:
+                self._fill(state, min(state.remaining, amt), price, maker=False)
 
     async def _match_resting(self, state: OrderState) -> None:
         intent = state.intent

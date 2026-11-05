@@ -125,6 +125,17 @@ class BookTop:
 
 
 @dataclass(frozen=True)
+class BookDepth:
+    """Several levels of the order book, best first: (price, amount) per level."""
+
+    instrument: str
+    bids: list[tuple[float, float]]
+    asks: list[tuple[float, float]]
+    mark: float | None = None
+    ts: float = 0.0
+
+
+@dataclass(frozen=True)
 class Position:
     instrument: str
     size: float  # signed, instrument units
