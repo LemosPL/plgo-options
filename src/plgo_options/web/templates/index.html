@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=27">
+  <link rel="stylesheet" href="/static/style.css?v=28">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -634,6 +634,26 @@
         <div class="risk-metric">
           <span class="risk-label">&nu;</span>
           <span class="risk-value" id="pf-total-vega">--</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Deribit ETH account: shown beside the book, never added to its totals -->
+    <section class="card" id="pf-deribit" style="display:none">
+      <h2>Deribit ETH Account <span id="pf-deribit-network" class="optv3-muted" style="font-size:.75rem"></span></h2>
+      <div id="pf-deribit-error" class="optv3-muted" style="font-size:.85rem"></div>
+      <div id="pf-deribit-body" style="display:none">
+        <div class="risk-grid">
+          <div class="risk-metric"><span class="risk-label">Equity (ETH)</span><span class="risk-value" id="pf-deribit-equity">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Initial margin (ETH)</span><span class="risk-value" id="pf-deribit-im">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Maintenance margin (ETH)</span><span class="risk-value" id="pf-deribit-mm">--</span></div>
+          <div class="risk-metric"><span class="risk-label">Available (ETH)</span><span class="risk-value" id="pf-deribit-available">--</span></div>
+        </div>
+        <div class="conn-table-wrap">
+          <table>
+            <thead><tr><th>Instrument</th><th>Size</th><th>Avg price</th><th>Delta</th></tr></thead>
+            <tbody id="pf-deribit-rows"></tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -4488,7 +4508,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=208"></script>
+<script src="/static/app.js?v=209"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>

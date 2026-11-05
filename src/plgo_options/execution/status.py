@@ -9,11 +9,12 @@ A connector is only ever called ready when both agree.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from typing import Any
 
-from plgo_options.config import DERIBIT_CONNECTOR_PRODUCTION
+from plgo_options.config import DERIBIT_CONNECTOR_PRODUCTION, DERIBIT_TESTNET
 
-from .deribit import DeribitConnector, deribit_keys
+from .deribit import ConnectorError, DeribitConnector, deribit_keys
 
 TESTS: dict[str, dict[str, str]] = {
     "deribit-testnet": {"status": "not_run", "detail": "tests/test_deribit_testnet.py, 15 scenarios"},
@@ -94,6 +95,24 @@ async def _probe(testnet: bool) -> dict[str, Any]:
     async with DeribitConnector(client_id, client_secret, testnet=testnet,
                                 allow_production=not testnet) as connector:
         return await connector.diagnostics()
+
+
+async def deribit_portfolio() -> dict[str, Any]:
+    """The Deribit ETH account on the configured network, for Portfolio P&L. Read-only."""
+    client_id, client_secret = deribit_keys(DERIBIT_TESTNET)
+    out: dict[str, Any] = {"network": "Testnet" if DERIBIT_TESTNET else "Production",
+                           "connected": False, "account": None, "positions": [], "error": None}
+    if not client_id:
+        return out | {"error": "No Deribit API key set up"}
+    async with DeribitConnector(client_id, client_secret, testnet=DERIBIT_TESTNET,
+                                allow_production=not DERIBIT_TESTNET) as connector:
+        try:
+            account = await connector.account()
+            positions = await connector.positions()
+        except ConnectorError as exc:
+            return out | {"error": str(exc)}
+    return out | {"connected": True, "account": asdict(account),
+                  "positions": [asdict(p) for p in positions]}
 
 
 async def connector_statuses() -> list[dict[str, Any]]:

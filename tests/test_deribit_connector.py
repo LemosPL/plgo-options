@@ -791,3 +791,34 @@ def test_connectors_route_is_read_only_and_lists_both_networks(fake, monkeypatch
     assert rows[0]["connection"] == "Connected" and rows[0]["stage"] == "Not tested"
     assert rows[1]["stage"] == "Not ready"
     assert not [m for m, _ in fake.calls if m in ("private/buy", "private/sell", "private/cancel")]
+
+
+@pytest.mark.asyncio
+async def test_deribit_portfolio_reads_account_and_positions(fake, monkeypatch):
+    from plgo_options.execution import deribit, status
+
+    real = deribit.DeribitConnector
+
+    def on_the_fake(*a, **kw):
+        return real(*a, **kw, transport=httpx.MockTransport(fake.handler))
+
+    fake.positions = [{"instrument_name": PERP, "size": -500.0, "average_price": 2500.0,
+                       "delta": -0.2}]
+    monkeypatch.setattr(status, "DeribitConnector", on_the_fake)
+    monkeypatch.setattr(status, "deribit_keys", lambda _testnet: ("id", "secret"))
+    d = await status.deribit_portfolio()
+    assert d["connected"] and d["account"]["equity"] == 12.5
+    assert d["positions"][0]["instrument"] == PERP and d["positions"][0]["size"] == -500.0
+    assert not [m for m, _ in fake.calls if m in ("private/buy", "private/sell", "private/cancel")]
+
+    fake.fail_next["public/auth"] = (13004, "invalid_credentials")
+    d = await status.deribit_portfolio()
+    assert not d["connected"] and "invalid_credentials" in d["error"]
+
+
+@pytest.mark.asyncio
+async def test_deribit_portfolio_without_a_key_says_so(monkeypatch):
+    from plgo_options.execution import status
+    monkeypatch.setattr(status, "deribit_keys", lambda _testnet: ("", ""))
+    d = await status.deribit_portfolio()
+    assert not d["connected"] and d["error"] == "No Deribit API key set up"

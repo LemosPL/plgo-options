@@ -3919,7 +3919,51 @@ let pfOldSet = new Set();  // trade IDs in old portfolio (user-selected)
 let pfNewSet = new Set();  // trade IDs in new portfolio (user-selected)
 
 // ── Load ──────────────────────────────────────────────────
+// Deribit ETH account card: read-only, beside the book and outside its totals
+async function pfLoadDeribit() {
+  const $card = document.getElementById("pf-deribit");
+  $card.style.display = currentAsset === "ETH" ? "" : "none";
+  if (currentAsset !== "ETH") return;
+  const $error = document.getElementById("pf-deribit-error");
+  const $body = document.getElementById("pf-deribit-body");
+  const eth = v => (v ?? 0).toFixed(4);
+  try {
+    const d = await get("/api/execution/deribit-portfolio");
+    document.getElementById("pf-deribit-network").textContent = d.network;
+    $body.style.display = d.connected ? "" : "none";
+    $error.textContent = d.connected ? "" : `Not connected: ${d.error}`;
+    if (!d.connected) return;
+    document.getElementById("pf-deribit-equity").textContent = eth(d.account.equity);
+    document.getElementById("pf-deribit-im").textContent = eth(d.account.initial_margin);
+    document.getElementById("pf-deribit-mm").textContent = eth(d.account.maintenance_margin);
+    document.getElementById("pf-deribit-available").textContent = eth(d.account.available_funds);
+    const $rows = document.getElementById("pf-deribit-rows");
+    if (!d.positions.length) {
+      const $td = document.createElement("td");
+      $td.colSpan = 4;
+      $td.textContent = "No open positions";
+      const $tr = document.createElement("tr");
+      $tr.append($td);
+      $rows.replaceChildren($tr);
+      return;
+    }
+    $rows.replaceChildren(...d.positions.map(p => {
+      const $tr = document.createElement("tr");
+      for (const v of [p.instrument, p.size, p.avg_price, p.delta ?? "--"]) {
+        const $td = document.createElement("td");
+        $td.textContent = v;
+        $tr.append($td);
+      }
+      return $tr;
+    }));
+  } catch (e) {
+    $body.style.display = "none";
+    $error.textContent = "Could not load the Deribit account: " + e.message;
+  }
+}
+
 async function loadPortfolio() {
+  pfLoadDeribit();
   const $btn = document.getElementById("btn-refresh-portfolio");
   $btn.classList.add("loading");
   $btn.textContent = "Loading…";

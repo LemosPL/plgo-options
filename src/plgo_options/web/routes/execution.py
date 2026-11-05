@@ -13,7 +13,7 @@ from plgo_options.config import (
     DERIBIT_CLIENT_ID, DERIBIT_CLIENT_SECRET,
     DERIBIT_EXEC_URL, DERIBIT_TESTNET, REQUEST_TIMEOUT,
 )
-from plgo_options.execution.status import connector_statuses
+from plgo_options.execution.status import connector_statuses, deribit_portfolio
 
 router = APIRouter()
 
@@ -134,6 +134,12 @@ async def execution_status():
 async def connectors():
     """Every connector's live connection and test stage, for the Connectors screen. Read-only."""
     return {"connectors": await connector_statuses()}
+
+
+@router.get("/deribit-portfolio")
+async def deribit_portfolio_route():
+    """Deribit ETH balance, margin and positions, for Portfolio P&L. Read-only."""
+    return await deribit_portfolio()
 
 
 @router.post("/order")
