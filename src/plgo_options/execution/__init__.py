@@ -11,6 +11,7 @@ Modules:
     models     The v1 messages: OrderIntent, OrderState, Fill, BookTop, Position, AccountState
     connector  The Connector protocol Lucas implements against Deribit
     paper      PaperConnector: fills against live (or stubbed) books, no account needed
+    deribit    DeribitConnector: the same protocol against the Deribit API, testnet by default
     algo       work_order: walks one parent order from passive to aggressive, never past its limit
     hedge      Phase 1: a delta_hedger.RehedgeDecision -> an ExecutionRequest on the perp
 
