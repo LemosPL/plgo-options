@@ -6,7 +6,8 @@ The cost of taking one book level, USD per contract, is
     buy:  level price - fair + taker fee        sell:  fair - level price + taker fee
 
 with fair from smile_fit.spline_fair: the arbitrage-free smoothing spline through
-the expiry's out-of-the-money mid vols, every strike included (the traded one too). The fee
+the expiry's out-of-the-money vols, every strike included (the traded one too), each at
+its mid tilted 0.15 of the half-spread toward the bigger side (smile_fit.MICRO_KAPPA). The fee
 is Deribit's (pricing.exchange_quotes.deribit_option_fee_usd).
 
 The threshold is in vol points (x the option's vega = USD), so one setting carries

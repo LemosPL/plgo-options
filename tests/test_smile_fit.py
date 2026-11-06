@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from plgo_options.pricing.smile_fit import fit_spline, spline_density, svi_iv
 
@@ -88,3 +89,30 @@ def test_quotes_carry_sizes_only_when_every_strike_has_them():
     q = otm_quotes("25DEC26", books(15.0), now)
     assert (q["size"] == 15.0).all()                    # the thinner side
     assert otm_quotes("25DEC26", books(None), now)["size"] is None   # the book summary: no sizes
+
+
+def test_spline_leans_a_fraction_of_the_half_spread_toward_the_bigger_side():
+    import datetime as dt
+
+    from plgo_options.pricing.smile_fit import MICRO_KAPPA, black, otm_quotes, spline_fair
+
+    S, now = 2290.0, dt.datetime(2026, 11, 3, 15, tzinfo=dt.timezone.utc)
+    tt = (dt.datetime(2026, 12, 25, 8, tzinfo=dt.timezone.utc) - now).total_seconds() / (365 * 86400)
+
+    def books(bsize, asize):
+        out = []
+        for K in STRIKES:
+            v = float(svi_iv(SVI, [K], F, tt)[0])
+            for cp in ("C", "P"):
+                fair = black(F, K, tt, v, cp)
+                out.append({"instrument_name": f"ETH-25DEC26-{K:g}-{cp}", "best_bid_price": max(fair - 2, 0.5) / S,
+                            "best_ask_price": (fair + 2) / S, "best_bid_amount": bsize, "best_ask_amount": asize,
+                            "mark_price": fair / S, "mark_iv": v * 100, "underlying_price": F, "index_price": S,
+                            "estimated_delivery_price": S, "open_interest": 0.0, "stats": {}})
+        return out
+    K0 = 2400.0
+    flat, bids, none = (otm_quotes("25DEC26", books(b, a), now) for b, a in ((40.0, 40.0), (70.0, 10.0), (None, None)))
+    assert np.allclose(bids["imb"], 0.75) and none["imb"] is None
+    f_flat, f_bids = spline_fair(flat, K0, "C"), spline_fair(bids, K0, "C")
+    assert spline_fair(none, K0, "C")["fair"] == pytest.approx(f_flat["fair"], abs=0.01)   # no sizes: the mid
+    assert f_bids["fair"] - f_flat["fair"] == pytest.approx(MICRO_KAPPA * 0.75 * 2.0, rel=0.05)  # $2 half-spread
