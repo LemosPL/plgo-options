@@ -4049,9 +4049,9 @@
       </div>
       <p style="font-size:.74rem;color:var(--muted);margin:.35rem 0 .75rem;max-width:80ch">
         Works large Deribit option orders as a taker, every 5 seconds on the server. Each pass prices the option
-        against the smoothing spline fitted through every strike of its expiry, and takes every book level whose
-        cost (distance to the spline plus the taker fee) is under the threshold, up to the cap; after a fill the
-        option rests 5 minutes. The threshold rises from its start to its end one hour before the deadline, then
+        against the smoothing spline fitted through every strike of its expiry, and takes the top of the book when
+        its cost (distance to the spline plus the taker fee) is under the threshold, up to the cap and the size
+        shown there; after a fill the option rests 5 minutes. The threshold rises from its start to its end one hour before the deadline, then
         holds a hard limit it never exceeds: what is still open at the deadline stays unfilled. Paper fills use
         the real book, but do not take liquidity out of it.
       </p>

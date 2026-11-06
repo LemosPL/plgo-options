@@ -13,7 +13,8 @@ prices it (--loo: fitted without it, so its own quote does not pull the curve), 
 fee is Deribit's min(0.0003 ETH, 12.5% of the premium).
 
 A policy sets a threshold theta(hours elapsed, share filled). At each snapshot the order
-takes every level costing <= theta, at most --cap contracts; in the last hour it takes
+takes the top of the book if it costs <= theta (--levels: that many levels, as long as each
+costs <= theta), at most --cap contracts; in the last hour it takes
 any level (urgency), and what is still open at the deadline is reported as a shortfall.
 Every snapshot with a full window of data after it is a start time; results average
 over them.
@@ -156,6 +157,7 @@ def main() -> None:
     ap.add_argument("--ramp")
     ap.add_argument("--step")
     ap.add_argument("--behind")
+    ap.add_argument("--levels", type=int, default=1, help="book levels taken per snapshot (the bot: 1)")
     ap.add_argument("--loo", action="store_true", help="fair from the spline fitted without the strike")
     ap.add_argument("--dir", type=Path, default=ROOT / "data" / "cache" / "smile_recorder")
     args = ap.parse_args()
@@ -174,7 +176,8 @@ def main() -> None:
         x = lv[lv.side == side]
         touch = x[x.level == 0].cost
         depth = x.groupby("ts").amt.sum()
-        print(f"\n{side.upper()} {args.qty:,.0f} within {args.hours:g} h, at most {cap or 'any'} per snapshot")
+        print(f"\n{side.upper()} {args.qty:,.0f} within {args.hours:g} h, at most {cap or 'any'} per snapshot, "
+              f"{'the top of the book' if args.levels == 1 else f'{args.levels} levels'}")
         print(f"  touch: cost median ${touch.median():.2f} (25%-75% ${touch.quantile(.25):.2f}-${touch.quantile(.75):.2f}), "
               f"size median {x[x.level == 0].amt.median():,.0f}; visible depth median {depth.median():,.0f}")
         print(f"  {'cost <=':>10}{'snapshots with some':>21}{'mean available':>16}")
@@ -184,7 +187,7 @@ def main() -> None:
         policies = parse_policies(args, vg if args.vol else 1.0, touch, args.hours)
         rows = []
         for label, theta in policies.items():
-            r = simulate(x, theta, args.qty, args.hours, cap)
+            r = simulate(x[x.level < args.levels], theta, args.qty, args.hours, cap)
             rows.append((label, r))
         n = len(rows[0][1])
         if n == 0:
@@ -198,7 +201,7 @@ def main() -> None:
             print(f"  {label:26}{c.mean():>7.2f} ({c.mean() / vg:4.2f}){c.quantile(.9):>8.2f}{c.max():>8.2f}"
                   f"{r.urgent.mean():>15,.0f}{r.hours.median():>10.1f}{r.shortfall.mean():>10,.0f}")
     print("\nlast-hour qty: crossed at any cost in the final hour; shortfall: not filled even then "
-          "(the recorded book is 10 levels deep). Start times overlap: treat small differences as noise.")
+          "(from the levels taken). Start times overlap: treat small differences as noise.")
 
 
 if __name__ == "__main__":

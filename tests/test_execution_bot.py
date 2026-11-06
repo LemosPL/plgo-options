@@ -43,13 +43,16 @@ def test_threshold_ramps_to_the_end_an_hour_early_then_holds_the_hard_limit():
     assert threshold_vp(o, NOW + 11 * H) == threshold_vp(o, NOW + 13 * H) == 0.9   # never above hard_vp
 
 
-def test_decide_takes_levels_under_the_threshold_up_to_the_cap():
+def test_decide_takes_the_top_of_book_only_up_to_its_size_and_the_cap():
     fair = dict(fair=100.0, iv=0.5, vega=4.0, inside=True)        # threshold 0.5 vp = $2.00
     px = lambda usd: usd / S                                       # noqa: E731
     book = BookDepth(NAME, bids=[(px(97), 100)], asks=[(px(100.5), 25), (px(101), 30), (px(103), 99)])
     d = decide(_order(), NOW, fair, S, book)
-    # levels cost 0.5 / 1.0 / 3.0 + fee 0.69: the first two qualify, capped at 40
-    assert d.action == "take" and d.qty == 40 and d.limit_price == pytest.approx(px(101))
+    # levels cost 0.5 / 1.0 / 3.0 + fee 0.69: the second is cheap enough too, but only the top is taken
+    assert d.action == "take" and d.qty == 25 and d.limit_price == pytest.approx(px(100.5))
+    assert d.est_cost == d.best_cost
+    big = BookDepth(NAME, bids=[], asks=[(px(100.5), 99)])
+    assert decide(_order(), NOW, fair, S, big).qty == 40                       # the cap
     assert d.best_cost == pytest.approx(level_cost("buy", px(100.5), S, 100.0)) == pytest.approx(0.5 + 0.687)
     assert decide(_order(filled=45), NOW, fair, S, book).qty == 5             # the remainder, not the cap
     sell = decide(_order(side="sell"), NOW, fair, S, book)                      # bid 97: costs 3.69 > 2.00

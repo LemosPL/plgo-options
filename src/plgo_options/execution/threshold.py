@@ -15,12 +15,13 @@ created to ``end_vp`` one hour before the deadline, then sits at ``hard_vp`` for
 final hour. It never goes above ``hard_vp``: whatever is still open at the deadline
 stays unfilled and is reported, rather than crossed at any price.
 
-Each pass (every 5 s) takes every level costing <= the threshold, best first, up to
-``cap`` contracts and the remaining size, as one IOC limit order at the worst level
-taken; after a fill the option rests 5 minutes (execution/bot.py).
+Each pass (every 5 s) takes the top of the book only, when it costs <= the threshold:
+up to ``cap`` contracts, the remaining size and the size shown there, as one IOC limit
+order at that price; after a fill the option rests 5 minutes (execution/bot.py).
 scripts/execution_threshold_study.py replays the same rule on recorded books; with
-5-minute snapshots (3-5 Nov 2026), 25DEC26 2500C, 10,000 over 12 h, a ramp of 0.5 -> 0.7
-vol points cost ~$1.85 per contract, filled in ~7 h, against ~$5 for taking it all at once.
+5-minute snapshots (3-6 Nov 2026), 25DEC26 2500C, 10,000 over 12 h, the top of the book
+only, a ramp of 0.5 -> 0.7 vol points cost ~$1.80 per contract, filled in ~8 h, against
+~$5 for taking it all at once.
 """
 
 from __future__ import annotations
@@ -94,8 +95,8 @@ class Decision:
     theta_usd: float
     best_cost: float | None  # USD per contract at the touch
     qty: float = 0.0
-    limit_price: float | None = None  # ETH, worst level taken
-    est_cost: float | None = None  # USD per contract, average over the levels taken
+    limit_price: float | None = None  # ETH, the top of the book
+    est_cost: float | None = None  # USD per contract
     detail: str = ""
 
 
@@ -112,16 +113,11 @@ def decide(o: ThresholdOrder, now: float, fair: dict, S: float, book: BookDepth,
     best = costs[0][2]
     if not fair["inside"]:  # the spline extrapolates past its last strike: no fair value to trust
         return Decision("outside", th_vp, th, best, detail="strike outside the spline's quoted range")
-    room = math.floor(min(o.cap, o.remaining) / qty_step + 1e-9) * qty_step
-    take, paid, limit = 0.0, 0.0, None
-    for p, a, c in costs:
-        if c > th or take >= room:
-            break
-        q = min(a, room - take)
-        take, paid, limit = take + q, paid + q * c, p
-    take = math.floor(take / qty_step + 1e-9) * qty_step
-    if take <= 0:
+    top, size, _ = costs[0]  # the top of the book only: never walk down the levels
+    take = math.floor(min(o.cap, o.remaining, size) / qty_step + 1e-9) * qty_step
+    if best > th:
         return Decision("wait", th_vp, th, best,
                         detail=f"best ${best:.2f} > threshold ${th:.2f}")
-    return Decision("take", th_vp, th, best, take, limit, paid / take if take else None,
-                    detail=f"{take:g} at <= {limit} ETH")
+    if take <= 0:
+        return Decision("wait", th_vp, th, best, detail=f"top of book shows {size:g}, under one contract")
+    return Decision("take", th_vp, th, best, take, top, best, detail=f"{take:g} at {top} ETH")

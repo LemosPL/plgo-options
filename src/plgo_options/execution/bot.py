@@ -7,17 +7,17 @@ Each scheduler call holds the lease and runs a pass every 5 seconds for 55 secon
     3) a fill on the same option in the last 5 minutes: it rests (cooldown), so the
        book can refill and our taking does not chase it
     4) otherwise: the expiry's smile from one Deribit book summary call, the working
-       options' own order books 10 levels deep, the spline's fair value (smile_fit:
+       options' own top of book with its size, the spline's fair value (smile_fit:
        one spline per expiry through every strike, the traded one included), the
        threshold decision (threshold.decide), and for a take, one IOC limit order
-       through the connector, its fills recorded
+       at the top of the book through the connector, its fills recorded
 
 Takes, fills, errors and expiries are recorded on the pass they happen; the routine
 outcomes (wait, cooldown, halted, ...) once a minute, on its first pass, so the DB
 (on GCS FUSE on Cloud Run) is not written every 5 seconds.
 
-Paper mode only for now: the PaperConnector fills against the same depth-10 book
-the decision saw. Live orders are refused at creation until the Deribit connector
+Paper mode only for now: the PaperConnector fills against the same book the
+decision saw. Live orders are refused at creation until the Deribit connector
 (Lucas) passes on testnet.
 """
 
@@ -64,7 +64,7 @@ def _summary_book(s: dict) -> dict:
 
 async def _books(expiries: list[str], instruments: list[str]) -> dict[str, list[dict]]:
     """The smile from one book summary call (every ETH option's top of book, fresh to
-    the second), and the instruments' own books 10 levels deep (1 if Deribit errors)."""
+    the second), and the instruments' own top of book with its size."""
     async with httpx.AsyncClient(timeout=10) as c:
         async def get(method: str, **params) -> Any:
             r = await c.get(f"{API}/{method}", params=params)
@@ -72,12 +72,10 @@ async def _books(expiries: list[str], instruments: list[str]) -> dict[str, list[
             return r.json()["result"]
 
         async def book(name: str) -> dict | None:
-            for depth in (10, 1):
-                try:
-                    return await get("get_order_book", instrument_name=name, depth=depth)
-                except httpx.HTTPStatusError:
-                    continue
-            return None
+            try:
+                return await get("get_order_book", instrument_name=name, depth=1)
+            except httpx.HTTPStatusError:
+                return None
 
         summary, *own = await asyncio.gather(get("get_book_summary_by_currency", currency="ETH", kind="option"),
                                              *(book(n) for n in instruments))
