@@ -7,7 +7,8 @@ instrument's best bid and ask, price and amount, whenever they change, and its c
 quote on subscribe: all 258 ETH quarterly options arrive within ~0.05 s of one subscribe
 request, then ~100 messages (~27 KB) a second.
 
-The execution bot (execution/bot.py) holds one feed for each 55-second scheduler call.
+The execution bot (execution/bot.py) holds one feed for each 55-second scheduler call;
+the quote recorder (market_data/quote_recorder.py) writes down every message of one.
 """
 
 from __future__ import annotations
@@ -25,10 +26,12 @@ WS_URL = "wss://www.deribit.com/ws/api/v2"
 
 class QuoteFeed:
     """``quotes``: {instrument: {best_bid_price, best_bid_amount, best_ask_price,
-    best_ask_amount, timestamp}}, kept current while the feed is ``alive``."""
+    best_ask_amount, timestamp}}, kept current while the feed is ``alive``.
+    ``on_message(channel, data)``, if given, sees every message, extra channels included."""
 
-    def __init__(self, url: str = WS_URL, connect: Callable[..., Any] = websockets.connect) -> None:
-        self.url, self._connect = url, connect
+    def __init__(self, url: str = WS_URL, connect: Callable[..., Any] = websockets.connect,
+                 on_message: Callable[[str, dict], None] | None = None) -> None:
+        self.url, self._connect, self._on_message = url, connect, on_message
         self.quotes: dict[str, dict] = {}
         self.error: str | None = None
         self._ws: Any = None
@@ -38,14 +41,15 @@ class QuoteFeed:
     def alive(self) -> bool:
         return self._task is not None and not self._task.done() and self.error is None
 
-    async def start(self, instruments: Iterable[str], timeout: float = 5.0) -> bool:
-        """Connect, subscribe, and wait (up to ``timeout``) for every instrument's first
-        quote. False, with ``error`` set, when the feed cannot be used."""
+    async def start(self, instruments: Iterable[str], timeout: float = 5.0, extra: Iterable[str] = ()) -> bool:
+        """Connect, subscribe (to the instruments' quotes and any ``extra`` channels), and
+        wait (up to ``timeout``) for every instrument's first quote. False, with ``error``
+        set, when the feed cannot be used."""
         names = sorted(set(instruments))
         try:
             self._ws = await asyncio.wait_for(self._connect(self.url, max_size=2 ** 22), timeout)
             await self._ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "public/subscribe",
-                                            "params": {"channels": [f"quote.{n}" for n in names]}}))
+                                            "params": {"channels": [f"quote.{n}" for n in names] + list(extra)}}))
         except Exception as e:
             self.error = f"{type(e).__name__}: {e}"
             return False
@@ -60,8 +64,11 @@ class QuoteFeed:
             async for raw in self._ws:
                 msg = json.loads(raw)
                 if msg.get("method") == "subscription":
-                    q = msg["params"]["data"]
-                    self.quotes[q["instrument_name"]] = q
+                    ch, q = msg["params"]["channel"], msg["params"]["data"]
+                    if ch.startswith("quote."):
+                        self.quotes[q["instrument_name"]] = q
+                    if self._on_message is not None:
+                        self._on_message(ch, q)
                 elif "error" in msg:
                     self.error = f"Deribit: {msg['error'].get('message', msg['error'])}"
                     return

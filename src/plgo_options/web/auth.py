@@ -53,7 +53,7 @@ PUBLIC_PREFIXES = ("/login", "/auth/", "/api/auth/", "/api/version",
 # their own routers; a browser session is not involved. Narrow on purpose:
 # /api/agents/status and /api/agents/proposals are UI reads and stay protected.
 MACHINE_PREFIXES = ("/api/agents/run/", "/api/signals/", "/api/smile-recorder/tick",
-                    "/api/execution-bot/tick")
+                    "/api/execution-bot/tick", "/api/quote-recorder/tick")
 
 SCHEMA = [
     """CREATE TABLE IF NOT EXISTS app_users (

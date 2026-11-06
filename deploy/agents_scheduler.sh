@@ -78,5 +78,21 @@ else
   gcloud scheduler jobs create http execution-bot "${bot_args[@]}" --headers="$rec_hdrs"
 fi
 
+# Quote recorder (market_data/quote_recorder.py): every top-of-book change of the next
+# 3 ETH quarterlies from Deribit's WebSocket, one file a minute under DB_DIR/quote_recorder.
+# Research data for the spline's weights; it stops by itself after QUOTE_RECORD_UNTIL
+# (UTC date, default two weeks from running this script). Not an agent: the kill switch
+# does not pause it; gcloud scheduler jobs pause quote-recorder --location=$REGION does.
+QUOTE_RECORD_UNTIL="${QUOTE_RECORD_UNTIL:-$(date -u -v+14d +%F 2>/dev/null || date -u -d '+14 days' +%F)}"
+quo_args=(--project="$PROJECT" --location="$REGION" --schedule="* * * * *" --time-zone="Etc/UTC"
+          --uri="$SERVICE_URL/api/quote-recorder/tick?until=$QUOTE_RECORD_UNTIL" --http-method=POST
+          --attempt-deadline=90s)
+if gcloud scheduler jobs describe quote-recorder --project="$PROJECT" --location="$REGION" >/dev/null 2>&1; then
+  gcloud scheduler jobs update http quote-recorder "${quo_args[@]}" --update-headers="$rec_hdrs"
+else
+  gcloud scheduler jobs create http quote-recorder "${quo_args[@]}" --headers="$rec_hdrs"
+fi
+echo "Quote recorder runs until $QUOTE_RECORD_UNTIL (UTC)."
+
 echo "Scheduler jobs in place. Pause everything with the Kill switch on the Agents page,"
 echo "or: gcloud scheduler jobs pause agents-row-watcher --location=$REGION"
