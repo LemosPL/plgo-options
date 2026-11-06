@@ -6,9 +6,11 @@ prices and sizes are from the same moment), then:
 
     1) forward + discount factor from put-call parity (deribit_smile_scanner.fit_forward)
     2) out-of-the-money side only: Black vols of each bid and each ask
-    3) microprice per strike: (bid x ask size + ask x bid size) / (bid size + ask size)
+    3) shrunk microprice per strike: mid + MICRO_KAPPA (0.15) x I x half-spread, with
+       I = (bid size - ask size) / (bid size + ask size), the execution bot's target
+       (smile_fit.MICRO_KAPPA; the naive microprice is MICRO_KAPPA = 1)
     4) two cubic smoothing splines of implied vol against log-moneyness, one
-       through the mid vols and one through the microprice vols, each strike
+       through the mid vols and one through the shrunk-microprice vols, each strike
        weighted by 1 / half-spread^2 in vol points x log(1 + the smaller of its bid
        and ask size) (smile_fit.size_weight), smoothness chosen by
        generalized cross-validation; drawn only across the scored strikes (a
@@ -43,7 +45,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from plgo_options.pricing.smile_fit import (black_vec, book_frame, fit_forward, fit_spline, implied,  # noqa: E402
+from plgo_options.pricing.smile_fit import (MICRO_KAPPA, black_vec, book_frame, fit_forward, fit_spline, implied,  # noqa: E402
                                            parse_exp, spline_density, vega)
 
 TEMPLATE = Path(__file__).with_name("smile_showcase.html")
@@ -98,7 +100,9 @@ def build(expiry: str) -> dict:
                  bsize=float(r.bsize), asize=float(r.asize))
         two_sided = q["bid_usd"] is not None and q["ask_usd"] is not None and q["ask_usd"] > q["bid_usd"]
         if two_sided and r.bsize > 0 and r.asize > 0:
-            q["micro_usd"] = round((q["bid_usd"] * r.asize + q["ask_usd"] * r.bsize) / (r.bsize + r.asize), 4)
+            imb = (r.bsize - r.asize) / (r.bsize + r.asize)
+            q["micro_usd"] = round((q["bid_usd"] + q["ask_usd"]) / 2
+                                   + MICRO_KAPPA * imb * (q["ask_usd"] - q["bid_usd"]) / 2, 4)
         quotes.append(q)
 
     scored = [q for q in quotes if "micro_usd" in q]

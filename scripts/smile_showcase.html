@@ -168,8 +168,8 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
     <div class="switches">
       <div class="switch"><span class="switch-label">Measured against</span>
         <div class="seg" role="group" aria-label="Target price">
-          <button type="button" data-t="mid" aria-pressed="true">Mid</button>
-          <button type="button" data-t="micro" aria-pressed="false">Microprice</button>
+          <button type="button" data-t="micro" aria-pressed="true">Shrunk microprice</button>
+          <button type="button" data-t="mid" aria-pressed="false">Mid</button>
         </div>
       </div>
       <div class="switch"><span class="switch-label">Strikes weighted by</span>
@@ -187,7 +187,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
       <div class="score"><span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="4" fill="var(--card)" stroke="var(--mark)" stroke-width="2"/></svg>Deribit mark</span><b id="fe-mark"></b><small id="fe-mark-in"></small></div>
     </div>
     <div class="formula">option error = |fitted price − target| ÷ ((ask − bid) ÷ 2) &nbsp;·&nbsp; fit error = √( Σ wᵢ · errorᵢ² ÷ Σ wᵢ )<br>
-      target = mid = (bid + ask) ÷ 2, &nbsp;or&nbsp; microprice = (bid × ask size + ask × bid size) ÷ (bid size + ask size)</div>
+      target = shrunk microprice = mid + 0.15 × I × (ask − bid) ÷ 2, &nbsp;I = (bid size − ask size) ÷ (bid size + ask size), &nbsp;or&nbsp; mid = (bid + ask) ÷ 2</div>
     <div id="errchart"></div>
     <p class="note" id="err-note"></p>
   </div>
@@ -208,7 +208,7 @@ footer { font-size: 12.5px; color: var(--ink-3); border-top: 1px solid var(--rul
     <summary id="table-summary">Every quote, strike by strike</summary>
     <div class="tablewrap">
       <table class="quotes">
-        <thead><tr><th>Strike</th><th>Option</th><th>Bid ($)</th><th>Ask ($)</th><th>Bid size</th><th>Ask size</th><th>Microprice ($)</th><th>Bid vol</th><th>Ask vol</th><th>Deribit mark</th><th>Spline</th><th>Mark error</th><th>Spline error</th></tr></thead>
+        <thead><tr><th>Strike</th><th>Option</th><th>Bid ($)</th><th>Ask ($)</th><th>Bid size</th><th>Ask size</th><th>Shrunk microprice ($)</th><th>Bid vol</th><th>Ask vol</th><th>Deribit mark</th><th>Spline</th><th>Mark error</th><th>Spline error</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -226,8 +226,8 @@ const asof = new Date(D.asof);
 const asofText = asof.toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
 
 /* The page shows one target at a time; each quote's fit and errors follow it. */
-let target = "mid";
-const TNAME = { mid: "mid", micro: "microprice" };
+let target = "micro";
+const TNAME = { mid: "mid", micro: "shrunk microprice" };
 const tgtPrice = (q, t = target) => t === "mid" ? (q.bid_usd + q.ask_usd) / 2 : q.micro_usd;
 const errOf = (q, price, t = target) => q.micro_usd == null || price == null ? null : Math.abs(price - tgtPrice(q, t)) / ((q.ask_usd - q.bid_usd) / 2);
 for (const q of D.quotes) {
@@ -254,8 +254,8 @@ const cap1 = x => x[0].toUpperCase() + x.slice(1);
 document.getElementById("lead").textContent =
   `At-the-money vol is ${fmt(D.atm_iv, 1)}%, and downside is priced richer than upside: ${fmt(D.iv_80, 1)}% at 80% of the forward against ${fmt(D.iv_120, 1)}% at 120%. ` +
   (winner("mid") === winner("micro")
-    ? `${cap1(WHO[winner("mid")])} sits closer to the quotes whether they are scored against the plain mid or the size-weighted microprice.`
-    : `Scored against the plain mid, ${WHO[winner("mid")]} comes out closer; against the size-weighted microprice, ${WHO[winner("micro")]} does.`);
+    ? `${cap1(WHO[winner("mid")])} sits closer to the quotes whether they are scored against the plain mid or the shrunk microprice.`
+    : `Scored against the plain mid, ${WHO[winner("mid")]} comes out closer; against the shrunk microprice, ${WHO[winner("micro")]} does.`);
 
 const facts = [
   ["Snapshot", asofText],
@@ -271,8 +271,8 @@ const steps = [
   `<b>Forward.</b> Taken from put–call parity, not the index: a spread-weighted regression of call minus put across near-the-money strikes gives a forward of $${fmt(D.forward, 2)} and a discount factor of ${D.DF.toFixed(4)}.`,
   `<b>One option per strike.</b> Below the forward the put, above it the call, so every point is the more liquid, out-of-the-money side.`,
   `<b>Bid and ask vols.</b> Each bid and each ask is converted separately into a Black implied volatility at that forward, which gives a vol band per strike instead of a single point.`,
-  `<b>Mid or microprice.</b> The mid ignores how much is offered on each side. The microprice weights the bid and ask by the size on the opposite side, so it leans toward the thinner side, where the price is more likely to move.`,
-  `<b>Smoothing spline.</b> A cubic smoothing spline through the implied vols of the target, once for the mid and once for the microprice, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder) and by the size on its thinner side, log(1 + size), so a quote only a few contracts deep pulls less, with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes. A spline that follows the mids can inherit their arbitrage: far from the money, wide one-sided quotes sometimes put a call's mid above that of a lower strike. So the curve is tested for butterfly arbitrage (Gatheral's density test), and where it fails it is refitted with the same objective plus a penalty that rules arbitrage out. ` +
+  `<b>Shrunk microprice.</b> The mid ignores how much is offered on each side. The textbook microprice weights the bid and ask by the size on the opposite side, which moves the price all the way toward the thinner side when one side is much deeper. On Deribit's quotes that trusts the imbalance about ten times too much: what showed up in the next mids, 5 minutes and an hour later, was closer to a sixth of it. So the target is the mid moved 0.15 of the half-spread per unit of imbalance, I = (bid size − ask size) ÷ (bid size + ask size): up toward the ask when the bid is deeper, down toward the bid when the ask is, never more than 15% of the half-spread. This is the curve the execution bot prices against; the mid is kept for comparison.`,
+  `<b>Smoothing spline.</b> A cubic smoothing spline through the implied vols of the target, once for the shrunk microprice and once for the mid, each strike weighted by its bid–ask spread in vol points (tighter quotes pull harder) and by the size on its thinner side, log(1 + size), so a quote only a few contracts deep pulls less, with the amount of smoothing chosen by generalized cross-validation rather than by hand. It bends wherever the quotes do, but it has no shape beyond them, so it is drawn only across the quoted strikes. A spline that follows the mids can inherit their arbitrage: far from the money, wide one-sided quotes sometimes put a call's mid above that of a lower strike. So the curve is tested for butterfly arbitrage (Gatheral's density test), and where it fails it is refitted with the same objective plus a penalty that rules arbitrage out. ` +
     (["mid", "micro"].some(t => D.fits[t].repaired)
       ? `On this snapshot the plain spline had butterfly arbitrage between $${(D.fits.mid.arb_bad || D.fits.micro.arb_bad).map(x => x.toLocaleString("en-US")).join(" and $")}; the refit ${D.fits.mid.arb_free && D.fits.micro.arb_free ? "removed" : "reduced"} it, moving the curve by at most ${Math.max(D.fits.mid.max_move_vp, D.fits.micro.max_move_vp).toFixed(2)} vol points at a quoted strike.`
       : `On this snapshot both splines were free of butterfly arbitrage as fitted, so no refit was needed.`),
@@ -468,7 +468,7 @@ function draw() {
         `<tr><td>Bid</td><td>${pct(q.bid_iv)}</td><td>$${fmt(q.bid_usd)}</td></tr>` +
         `<tr><td>Ask</td><td>${pct(q.ask_iv)}</td><td>$${fmt(q.ask_usd)}</td></tr>` +
         `<tr><td>Size</td><td>${q.bsize ? q.bsize.toLocaleString("en-US") : "–"}</td><td>${q.asize ? q.asize.toLocaleString("en-US") : "–"}</td></tr>` +
-        `<tr><td>Microprice</td><td></td><td>${q.micro_usd == null ? "–" : "$" + fmt(q.micro_usd)}</td></tr>` +
+        `<tr><td>Shrunk microprice</td><td></td><td>${q.micro_usd == null ? "–" : "$" + fmt(q.micro_usd)}</td></tr>` +
         `<tr><td>Spline</td><td>${pct(q[`spl_iv_${target}`])}</td><td>${q[`spl_usd_${target}`] == null ? "–" : "$" + fmt(q[`spl_usd_${target}`])}</td></tr>` +
         `<tr><td>Deribit mark</td><td>${pct(q.mark_iv)}</td><td>$${fmt(q.mark_usd)}</td></tr></table>`;
       tip.hidden = false;

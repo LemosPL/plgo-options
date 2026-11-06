@@ -91,7 +91,7 @@ def test_quotes_carry_sizes_only_when_every_strike_has_them():
     assert otm_quotes("25DEC26", books(None), now)["size"] is None   # the book summary: no sizes
 
 
-def test_spline_leans_a_fraction_of_the_half_spread_toward_the_bigger_side():
+def test_spline_leans_a_fraction_of_the_half_spread_toward_the_thinner_side():
     import datetime as dt
 
     from plgo_options.pricing.smile_fit import MICRO_KAPPA, black, otm_quotes, spline_fair
@@ -115,4 +115,4 @@ def test_spline_leans_a_fraction_of_the_half_spread_toward_the_bigger_side():
     assert np.allclose(bids["imb"], 0.75) and none["imb"] is None
     f_flat, f_bids = spline_fair(flat, K0, "C"), spline_fair(bids, K0, "C")
     assert spline_fair(none, K0, "C")["fair"] == pytest.approx(f_flat["fair"], abs=0.01)   # no sizes: the mid
-    assert f_bids["fair"] - f_flat["fair"] == pytest.approx(MICRO_KAPPA * 0.75 * 2.0, rel=0.05)  # $2 half-spread
+    assert f_bids["fair"] - f_flat["fair"] == pytest.approx(MICRO_KAPPA * 0.75 * 2.0, rel=0.05)  # deeper bid: up, $2 half-spread

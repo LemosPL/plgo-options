@@ -7,8 +7,8 @@ The cost of taking one book level, USD per contract, is
 
 with fair from smile_fit.spline_fair: the arbitrage-free smoothing spline through
 the expiry's out-of-the-money vols, every strike included (the traded one too), each at
-its mid tilted 0.15 of the half-spread toward the bigger side (smile_fit.MICRO_KAPPA). The fee
-is Deribit's (pricing.exchange_quotes.deribit_option_fee_usd).
+its mid moved toward the thinner side by 0.15 x the size imbalance x the half-spread
+(smile_fit.MICRO_KAPPA). The fee is Deribit's (pricing.exchange_quotes.deribit_option_fee_usd).
 
 The threshold is in vol points (x the option's vega = USD), so one setting carries
 across strikes and expiries. It ramps linearly from ``start_vp`` when the order is
