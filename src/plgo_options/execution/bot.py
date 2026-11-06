@@ -6,11 +6,17 @@ Each scheduler call holds the lease and runs a pass every 5 seconds for 55 secon
     2) the kill switch on: nothing sent, the pass recorded as halted
     3) a fill on the same option in the last 5 minutes: it rests (cooldown), so the
        book can refill and our taking does not chase it
-    4) otherwise: the expiry's smile from one Deribit book summary call, the working
-       options' own top of book with its size, the spline's fair value (smile_fit:
-       one spline per expiry through every strike, the traded one included), the
+    4) otherwise: the expiry's smile, every strike's top of book with its size from a
+       WebSocket quote feed (market_data/deribit_quotes.py, one per scheduler call) and
+       the forward, index and marks from one book summary call; the spline's fair value
+       (smile_fit: one spline per expiry through every strike, the traded one included,
+       weighted by spread and the thinner side's size), the
        threshold decision (threshold.decide), and for a take, one IOC limit order
        at the top of the book through the connector, its fills recorded
+
+Without the feed (it failed to start, or dropped), a pass reads the worked options' own
+books over HTTP and the summary's prices for the rest, which have no sizes, so the
+spline falls back to spread-only weights.
 
 Takes, fills, errors and expiries are recorded on the pass they happen; the routine
 outcomes (wait, cooldown, halted, ...) once a minute, on its first pass, so the DB
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -33,6 +40,7 @@ from typing import Any
 import httpx
 
 from plgo_options.agents.store import kill_switch_on
+from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile
 
@@ -62,29 +70,51 @@ def _summary_book(s: dict) -> dict:
             "stats": {"volume": s.get("volume")}}
 
 
-async def _books(expiries: list[str], instruments: list[str]) -> dict[str, list[dict]]:
-    """The smile from one book summary call (every ETH option's top of book, fresh to
-    the second), and the instruments' own top of book with its size."""
-    async with httpx.AsyncClient(timeout=10) as c:
-        async def get(method: str, **params) -> Any:
-            r = await c.get(f"{API}/{method}", params=params)
-            r.raise_for_status()
-            return r.json()["result"]
+def _with_quote(b: dict, q: dict) -> dict:
+    """A book with its top of book (prices and sizes) from the quote feed."""
+    bid, ask = q.get("best_bid_price") or None, q.get("best_ask_price") or None
+    ba, aa = q.get("best_bid_amount") or 0.0, q.get("best_ask_amount") or 0.0
+    return {**b, "best_bid_price": bid, "best_ask_price": ask, "best_bid_amount": ba, "best_ask_amount": aa,
+            "bids": [[bid, ba]] if bid and ba else [], "asks": [[ask, aa]] if ask and aa else []}
 
+
+async def _get(c: httpx.AsyncClient, method: str, **params) -> Any:
+    r = await c.get(f"{API}/{method}", params=params)
+    r.raise_for_status()
+    return r.json()["result"]
+
+
+async def _names(expiries: list[str]) -> list[str]:
+    """Every listed option of the expiries."""
+    async with httpx.AsyncClient(timeout=10) as c:
+        summary = await _get(c, "get_book_summary_by_currency", currency="ETH", kind="option")
+    return [s["instrument_name"] for s in summary if s["instrument_name"].split("-")[1] in expiries]
+
+
+async def _books(expiries: list[str], instruments: list[str], feed: QuoteFeed | None = None) -> dict[str, list[dict]]:
+    """Every option of the expiries from one book summary call (forward, index, marks,
+    and top of book prices fresh to the second, but no sizes), each with its live top
+    of book and sizes from the feed when it is alive. Instruments the feed does not
+    cover are read over HTTP, top of book with its size."""
+    live = feed.quotes if feed is not None and feed.alive else {}
+    need = [n for n in instruments if n not in live]
+    async with httpx.AsyncClient(timeout=10) as c:
         async def book(name: str) -> dict | None:
             try:
-                return await get("get_order_book", instrument_name=name, depth=1)
+                return await _get(c, "get_order_book", instrument_name=name, depth=1)
             except httpx.HTTPStatusError:
                 return None
 
-        summary, *own = await asyncio.gather(get("get_book_summary_by_currency", currency="ETH", kind="option"),
-                                             *(book(n) for n in instruments))
+        summary, *own = await asyncio.gather(_get(c, "get_book_summary_by_currency", currency="ETH", kind="option"),
+                                             *(book(n) for n in need))
     own_by = {b["instrument_name"]: b for b in own if b}
     out: dict[str, list[dict]] = {e: [] for e in expiries}
     for s in summary:
-        e = s["instrument_name"].split("-")[1]
+        name = s["instrument_name"]
+        e = name.split("-")[1]
         if e in out:
-            out[e].append(own_by.get(s["instrument_name"]) or _summary_book(s))
+            b = _summary_book(s)
+            out[e].append(_with_quote(b, live[name]) if name in live else own_by.get(name) or b)
     return out
 
 
@@ -239,11 +269,15 @@ async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
                                         "halted": out.get("halted", False)})
 
 
-async def run_minute(books_fn: BooksFn = _books, halted: Callable[[], Awaitable[bool]] = kill_switch_on,
+async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Awaitable[bool]] = kill_switch_on,
                      period: float = PERIOD, span: float = SPAN, clock: Callable[[], float] = time.time,
-                     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep) -> dict[str, Any]:
+                     sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+                     feed_fn: Callable[[], QuoteFeed] = QuoteFeed,
+                     names_fn: Callable[[list[str]], Awaitable[list[str]]] = _names) -> dict[str, Any]:
     """What one scheduler call does: a pass every ``period`` seconds for ``span``
-    seconds under one lease, stopping early when no order is left working."""
+    seconds under one lease, stopping early when no order is left working. Unless
+    ``books_fn`` is given, the passes read a quote feed held for the call over every
+    option of the working orders' expiries."""
     start = clock()
     if not await store.working_orders():
         return {"ts": start, "passes": 0, "orders": []}
@@ -252,8 +286,15 @@ async def run_minute(books_fn: BooksFn = _books, halted: Callable[[], Awaitable[
             return {"ts": start, "skipped": "another tick is running"}
         await sleep(1.0)  # the previous call's last pass is finishing
     start = clock()
-    passes, takes, last = 0, [], {"orders": []}
+    passes, takes, last, feed = 0, [], {"orders": []}, None
     try:
+        if books_fn is None:
+            feed = feed_fn()
+            try:
+                await feed.start(await names_fn(sorted({o.expiry for o in await store.working_orders()})))
+            except Exception as e:  # no feed: the passes read over HTTP
+                feed.error = feed.error or f"{type(e).__name__}: {e}"
+            books_fn = functools.partial(_books, feed=feed)
         while True:
             last = await _pass(clock(), books_fn, halted, record=passes == 0)
             passes += 1
@@ -263,7 +304,17 @@ async def run_minute(books_fn: BooksFn = _books, halted: Callable[[], Awaitable[
                 break
             await sleep(max(0.0, nxt - clock()))
         return {"ts": start, "passes": passes, "takes": takes, "orders": last["orders"],
-                "halted": last.get("halted", False)}
+                "halted": last.get("halted", False), "quotes": _feed_state(feed)}
     finally:
+        state = _feed_state(feed)
+        if feed is not None:
+            await feed.close()
         await store.release_lock(LOCK, {"ts": start, "passes": passes, "takes": len(takes),
-                                        "n": len(last["orders"]), "halted": last.get("halted", False)})
+                                        "n": len(last["orders"]), "halted": last.get("halted", False),
+                                        "quotes": state})
+
+
+def _feed_state(feed: QuoteFeed | None) -> str | None:
+    if feed is None:
+        return None
+    return "live" if feed.alive else f"HTTP ({feed.error or 'feed not started'})"

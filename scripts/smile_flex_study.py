@@ -124,7 +124,9 @@ def spline_fit(q: dict, idx: np.ndarray, arb_free: bool):
     K, iv = q["K"][idx], q["iv_mid"][idx]
     ok = np.isfinite(iv)
     vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K[ok], iv[ok])])
-    spl, _, free = fit_spline(np.log(K[ok] / q["F"]), iv[ok] * 100, q["half"][idx][ok] / vg, q["T"], arb_free)
+    size = None if q.get("size") is None else q["size"][idx][ok]
+    spl, _, free = fit_spline(np.log(K[ok] / q["F"]), iv[ok] * 100, q["half"][idx][ok] / vg, q["T"], arb_free,
+                              size=size)
     return spl, free
 
 

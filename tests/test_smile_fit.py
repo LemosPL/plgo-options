@@ -51,3 +51,40 @@ def test_arbitraged_wing_is_refitted_without_moving_the_body():
     body = K <= 3600
     assert (np.abs(spl(k[body]) - raw(k[body])) / hv[body]).max() < 0.1   # half-spreads
     assert spl(np.log(4800 / 2315.0)) < raw(np.log(4800 / 2315.0)) - 5  # the wing comes down
+
+
+def test_a_thin_quote_pulls_the_spline_less_than_a_deep_one():
+    k, iv, hv = _smile({2400: 1.5})                     # 2400's mid 1.5 vol points off the smile
+    j = int(np.flatnonzero(STRIKES == 2400)[0])
+    true = svi_iv(SVI, STRIKES, F, T)[j] * 100
+    deep = np.full(len(k), 300.0)
+    thin = deep.copy()
+    thin[j] = 1.0                                        # one contract on its thinner side
+    pull = {name: fit_spline(k, iv, hv, T, size=s)[0](k[j]) - true
+            for name, s in (("spread only", None), ("deep", deep), ("thin", thin))}
+    assert abs(pull["deep"] - pull["spread only"]) < 0.02      # equal sizes: the same fit
+    assert 0 < pull["thin"] < 0.9 * pull["deep"]           # log weights: a gentle discount, ~8x less weight
+
+
+def test_quotes_carry_sizes_only_when_every_strike_has_them():
+    import datetime as dt
+
+    from plgo_options.pricing.smile_fit import black, otm_quotes
+
+    S, now = 2290.0, dt.datetime(2026, 11, 3, 15, tzinfo=dt.timezone.utc)
+    tt = (dt.datetime(2026, 12, 25, 8, tzinfo=dt.timezone.utc) - now).total_seconds() / (365 * 86400)
+
+    def books(bsize):
+        out = []
+        for K in STRIKES:
+            v = float(svi_iv(SVI, [K], F, tt)[0])
+            for cp in ("C", "P"):
+                fair = black(F, K, tt, v, cp)
+                out.append({"instrument_name": f"ETH-25DEC26-{K:g}-{cp}", "best_bid_price": max(fair - 2, 0.5) / S,
+                            "best_ask_price": (fair + 2) / S, "best_bid_amount": bsize, "best_ask_amount": 40.0,
+                            "mark_price": fair / S, "mark_iv": v * 100, "underlying_price": F, "index_price": S,
+                            "estimated_delivery_price": S, "open_interest": 0.0, "stats": {}})
+        return out
+    q = otm_quotes("25DEC26", books(15.0), now)
+    assert (q["size"] == 15.0).all()                    # the thinner side
+    assert otm_quotes("25DEC26", books(None), now)["size"] is None   # the book summary: no sizes

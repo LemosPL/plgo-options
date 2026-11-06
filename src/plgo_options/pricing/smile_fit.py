@@ -6,9 +6,11 @@
     book_frame      order books of one expiry -> one row per instrument, USD
     fit_svi         raw SVI fitted in price to a target, |price - target| / half-spread,
                     with Gatheral's butterfly density g(k) >= 0 enforced by penalty
-    fit_spline      cubic smoothing spline of implied vol (GCV), refitted with the same
-                    butterfly penalty when it has negative density between the strikes
-    otm_quotes      one expiry's two-sided out-of-the-money strikes: mids, half-spreads, mid vols
+    fit_spline      cubic smoothing spline of implied vol (GCV), weighted by spread and quote
+                    size, refitted with the same butterfly penalty when it has negative
+                    density between the strikes
+    otm_quotes      one expiry's two-sided out-of-the-money strikes: mids, half-spreads,
+                    mid vols, sizes
     spline_smile    the arbitrage-free spline through an expiry's OTM mid vols, fitted once
     spline_fair     one option's fair value from that spline (its own strike included)
 """
@@ -174,9 +176,17 @@ def _gcv_lam(k, y, wt, spl) -> float:
     return 10.0 ** minimize_scalar(miss, bounds=(ll - 0.25, ll + 0.25), method="bounded").x
 
 
-def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True) -> tuple[BSpline, bool, bool]:
+def size_weight(size) -> np.ndarray:
+    """log(1 + the thinner side's size): a quote is only as good as its thinner side. On the
+    recorded books (3-6 Nov 2026) it beat spread-only weights at forecasting each strike's
+    own mid 5 min and 1 h ahead, most for quotes a few contracts deep."""
+    return np.log1p(np.maximum(np.asarray(size, float), 1.0))
+
+
+def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True, size=None) -> tuple[BSpline, bool, bool]:
     """Cubic smoothing spline of implied vol (vol points) against log-moneyness k (sorted),
-    weights 1 / half-spread^2 in vol points, smoothness by GCV.
+    weights 1 / half-spread^2 in vol points, times size_weight(size) when the quotes' sizes
+    are given (the smaller of bid and ask size, contracts), smoothness by GCV.
 
     The spline follows the mids, and wide one-sided quotes in the wings can have mids that
     are themselves arbitraged (a call mid above a lower strike's). With arb_free, a spline
@@ -185,6 +195,8 @@ def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True) -> tuple[BSpline, b
     fit's butterfly penalty, on the same knots, starting from the GCV coefficients.
     Returns the spline, whether it was repaired, and whether g >= 0 and w > 0 hold."""
     k, y, half_vp = np.asarray(k, float), np.asarray(iv_pct, float), np.asarray(half_vp, float)
+    if size is not None:  # one error scale for the GCV fit and the repair: weight = 1 / sd^2
+        half_vp = half_vp / np.sqrt(size_weight(size))
     wt = 1 / half_vp ** 2
     spl = make_smoothing_spline(k, y, w=wt)
     kc = np.linspace(k[0], k[-1], 8001)
@@ -231,7 +243,9 @@ def fit_spline(k, iv_pct, half_vp, T, arb_free: bool = True) -> tuple[BSpline, b
 
 def otm_quotes(expiry: str, books: list[dict], now: dt.datetime, min_strikes: int = 8) -> dict | None:
     """The two-sided out-of-the-money strikes of one expiry (put below the parity
-    forward, call above), with mids, half-spreads and mid vols. None if too few."""
+    forward, call above), with mids, half-spreads, mid vols and the smaller of bid and
+    ask size (None unless every strike has its sizes: Deribit's book summary has none).
+    None if too few."""
     g = book_frame(books, expiry, now)
     F, DF, _, _ = fit_forward(g)
     T = float(g["T"].iloc[0])
@@ -245,20 +259,24 @@ def otm_quotes(expiry: str, books: list[dict], now: dt.datetime, min_strikes: in
         return None
     mid = ((o.bid + o.ask) / 2).to_numpy()
     iv_mid = np.array([implied(m_, F, r.K, T, r.cp, DF) for m_, r in zip(mid, o.itertuples())])
+    size = np.minimum(o.bsize, o.asize).to_numpy()
     return dict(K=o.K.to_numpy(), CP=o.cp.to_list(), mid=mid, iv_mid=iv_mid,
-                half=((o.ask - o.bid) / 2).to_numpy(), mark=o.mark.to_numpy(), F=F, T=T, DF=DF,
+                half=((o.ask - o.bid) / 2).to_numpy(), size=size if (size > 0).all() else None,
+                mark=o.mark.to_numpy(), F=F, T=T, DF=DF,
                 spot=float(g.spot.median()), atm=float(np.median((ivb[ok] + iva[ok]) / 2)))
 
 
 def spline_smile(q: dict, drop: float | None = None) -> tuple[Any, tuple[float, float], bool]:
     """The arbitrage-free smoothing spline through otm_quotes' mid vols, in vol points
-    against k = log(K/F), every strike included unless ``drop`` is given:
+    against k = log(K/F), weighted by spread and size, every strike included unless
+    ``drop`` is given:
     (spline, (k of the lowest strike, k of the highest), arb-free)."""
     keep = q["K"] != drop
     K, iv = q["K"][keep], q["iv_mid"][keep]
     vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K, iv)])
     k = np.log(K / q["F"])
-    spl, _, free = fit_spline(k, iv * 100, q["half"][keep] / vg, q["T"])
+    size = q.get("size")
+    spl, _, free = fit_spline(k, iv * 100, q["half"][keep] / vg, q["T"], size=None if size is None else size[keep])
     return spl, (float(k[0]), float(k[-1])), free
 
 

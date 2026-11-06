@@ -9,7 +9,8 @@ prices and sizes are from the same moment), then:
     3) microprice per strike: (bid x ask size + ask x bid size) / (bid size + ask size)
     4) two cubic smoothing splines of implied vol against log-moneyness, one
        through the mid vols and one through the microprice vols, each strike
-       weighted by 1 / half-spread^2 in vol points, smoothness chosen by
+       weighted by 1 / half-spread^2 in vol points x log(1 + the smaller of its bid
+       and ask size) (smile_fit.size_weight), smoothness chosen by
        generalized cross-validation; drawn only across the scored strikes (a
        spline has no shape beyond its data). Where it has butterfly arbitrage
        (Gatheral's g(k) < 0) between them, it is refitted with a no-arbitrage
@@ -104,6 +105,7 @@ def build(expiry: str) -> dict:
     K = np.array([q["K"] for q in scored])
     CP = [q["cp"] for q in scored]
     half = np.array([(q["ask_usd"] - q["bid_usd"]) / 2 for q in scored])
+    size = np.array([min(q["bsize"], q["asize"]) for q in scored])   # the thinner side
     atm = float(np.median([(q["bid_iv"] + q["ask_iv"]) / 200 for q in scored]))
     k = np.log(K / F)
     kk = np.linspace(k.min(), k.max(), 8001)
@@ -116,8 +118,8 @@ def build(expiry: str) -> dict:
         ok_t = np.isfinite(iv_t)
         vg = np.array([vega(F, Kj, T, v, DF) for Kj, v in zip(K, np.where(ok_t, iv_t, atm))])
         half_vp = half / vg                         # half-spread in vol points
-        raw, _, _ = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T, arb_free=False)
-        spl, repaired, arb_free = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T)
+        raw, _, _ = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T, arb_free=False, size=size[ok_t])
+        spl, repaired, arb_free = fit_spline(k[ok_t], iv_t[ok_t] * 100, half_vp[ok_t], T, size=size[ok_t])
         bad = kk[spline_density(raw, kk, T)[1] < 0]         # where the plain spline had arbitrage
         splines[name] = spl
         fits[name] = dict(n=int(ok_t.sum()), arb_free=arb_free, repaired=repaired,

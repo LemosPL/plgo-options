@@ -335,3 +335,144 @@ def test_the_bot_reads_the_smile_from_the_book_summary_and_its_options_books(mon
     assert own["asks"] == full[NAME]["asks"]                         # its own book, levels and all
     other = next(b for b in books if b["instrument_name"] != NAME)
     assert other["bids"] is None and other["best_bid_price"] > 0     # the summary's top of book
+
+
+def test_quote_feed_keeps_every_instruments_top_of_book_and_notices_a_drop():
+    import json
+
+    import websockets
+
+    from plgo_options.market_data.deribit_quotes import QuoteFeed
+    names = [f"ETH-{EXPIRY}-{K}-C" for K in (2400, 2500)]
+    go_on = asyncio.Event()
+
+    async def server(ws):
+        sub = json.loads(await ws.recv())
+        chans = sub["params"]["channels"]
+        await ws.send(json.dumps({"jsonrpc": "2.0", "id": sub["id"], "result": chans}))
+        for c in chans:                                  # the current quote on subscribe
+            n = c.split(".", 1)[1]
+            await ws.send(json.dumps({"method": "subscription", "params": {"channel": c, "data": {
+                "instrument_name": n, "best_bid_price": 0.04, "best_bid_amount": 10.0,
+                "best_ask_price": 0.045, "best_ask_amount": 20.0, "timestamp": 1}}}))
+        await go_on.wait()
+        await ws.send(json.dumps({"method": "subscription", "params": {"channel": chans[0], "data": {
+            "instrument_name": names[0], "best_bid_price": 0.041, "best_bid_amount": 3.0,
+            "best_ask_price": 0.0, "best_ask_amount": 0.0, "timestamp": 2}}}))
+        await asyncio.sleep(0.05)
+
+    async def go():
+        async with websockets.serve(server, "127.0.0.1", 0) as srv:
+            port = srv.sockets[0].getsockname()[1]
+            feed = QuoteFeed(f"ws://127.0.0.1:{port}")
+            assert await feed.start(names, timeout=2)
+            assert set(feed.quotes) == set(names) and feed.alive
+            go_on.set()
+            for _ in range(100):
+                if feed.quotes[names[0]]["timestamp"] == 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert feed.quotes[names[0]]["best_bid_amount"] == 3.0
+            for _ in range(100):                         # the server hangs up
+                if not feed.alive:
+                    break
+                await asyncio.sleep(0.01)
+            assert not feed.alive and feed.error
+            await feed.close()
+        dead = QuoteFeed("ws://127.0.0.1:9")             # nothing listening
+        assert not await dead.start(names, timeout=1) and dead.error
+    asyncio.run(go())
+
+
+class _Feed:
+    def __init__(self, quotes, alive=True):
+        self.quotes, self.alive, self.error, self.started, self.closed = quotes, alive, None, None, False
+
+    async def start(self, names, timeout=5.0):
+        self.started = names
+        return self.alive
+
+    async def close(self):
+        self.closed = True
+
+
+def _summary_rows():
+    return [{"instrument_name": b["instrument_name"], "bid_price": b["best_bid_price"],
+             "ask_price": b["best_ask_price"], "mark_price": b["mark_price"], "mark_iv": b["mark_iv"],
+             "underlying_price": F, "estimated_delivery_price": S, "open_interest": 0.0, "volume": 0.0}
+            for b in _books()]
+
+
+def _mock_http(monkeypatch, calls):
+    import httpx
+    full = {b["instrument_name"]: b for b in _books(-3.0)}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(req.url.path.rsplit("/", 1)[1])
+        if req.url.path.endswith("get_book_summary_by_currency"):
+            return httpx.Response(200, json={"result": _summary_rows()})
+        return httpx.Response(200, json={"result": full[req.url.params["instrument_name"]]})
+    real = httpx.AsyncClient
+    monkeypatch.setattr(bot.httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+
+def test_books_take_prices_and_sizes_from_a_live_feed_and_fall_back_without_it(monkeypatch):
+    calls = []
+    _mock_http(monkeypatch, calls)
+    quotes = {b["instrument_name"]: {"best_bid_price": b["best_bid_price"], "best_bid_amount": 7.0,
+                                     "best_ask_price": b["best_ask_price"], "best_ask_amount": 9.0}
+              for b in _books(-3.0)}
+    books = asyncio.run(bot._books([EXPIRY], [NAME], feed=_Feed(quotes)))[EXPIRY]
+    assert calls == ["get_book_summary_by_currency"]                  # no per-instrument reads
+    own = next(b for b in books if b["instrument_name"] == NAME)
+    assert own["asks"] == [[quotes[NAME]["best_ask_price"], 9.0]] and own["mark_iv"] > 0
+    q = bot.otm_quotes(EXPIRY, books, dt.datetime.fromtimestamp(NOW, dt.timezone.utc))
+    assert (q["size"] == 7.0).all()                                   # sizes reach the fit
+    calls.clear()
+    books = asyncio.run(bot._books([EXPIRY], [NAME], feed=_Feed(quotes, alive=False)))[EXPIRY]
+    assert sorted(calls) == ["get_book_summary_by_currency", "get_order_book"]
+    assert bot.otm_quotes(EXPIRY, books, dt.datetime.fromtimestamp(NOW, dt.timezone.utc))["size"] is None
+
+
+def test_a_minute_holds_one_feed_over_the_working_expiries_and_reports_it(tmp_path, monkeypatch):
+    run = _db(tmp_path, "bot6.db")
+    calls = []
+    _mock_http(monkeypatch, calls)
+    clock = {"t": NOW}
+    feeds = []
+
+    def feed_fn():
+        quotes = {b["instrument_name"]: {"best_bid_price": b["best_bid_price"], "best_bid_amount": 50.0,
+                                         "best_ask_price": b["best_ask_price"], "best_ask_amount": 60.0}
+                  for b in _books(4.0)}
+        feeds.append(_Feed(quotes))
+        return feeds[-1]
+
+    async def names(expiries):
+        assert expiries == [EXPIRY]
+        return [f"ETH-{EXPIRY}-{K}-{cp}" for K in STRIKES for cp in "CP"]
+
+    async def sleep(s):
+        clock["t"] += s
+
+    async def off():
+        return False
+
+    async def body():
+        await store.create_order(NAME, "buy", 50, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
+        out = await bot.run_minute(None, off, clock=lambda: clock["t"], sleep=sleep, feed_fn=feed_fn, names_fn=names)
+        (feed,) = feeds
+        assert len(feed.started) == 2 * len(STRIKES) and feed.closed
+        assert out["quotes"] == "live" and (await store.last_run(bot.LOCK))["quotes"] == "live"
+        assert "get_order_book" not in calls and out["passes"] == 12
+        feeds.clear()
+
+        def broken():
+            f = _Feed({}, alive=False)
+            f.error = "ConnectionRefusedError: refused"
+            feeds.append(f)
+            return f
+        clock["t"] = NOW + 60
+        out = await bot.run_minute(None, off, clock=lambda: clock["t"], sleep=sleep, feed_fn=broken, names_fn=names)
+        assert out["quotes"] == "HTTP (ConnectionRefusedError: refused)" and "get_order_book" in calls
+    run(body)
