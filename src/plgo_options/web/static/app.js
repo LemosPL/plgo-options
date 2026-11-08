@@ -4580,15 +4580,31 @@ function pfHaircutRate(cp, asset, totalQty) {
   return flat + (excess / Math.abs(totalQty)) * (rate - flat);
 }
 
-function pfCollMapValueAt(qtys, spot, applyHaircut, cp) {
-  const prices = pfCollateralMap.prices || {};
+// Other tokens (ETH/BTC on the FIL page, FIL/BTC on the ETH page) move with
+// the book's asset by a power law: P(S) = P0 x (S/S0)^beta, beta from the
+// "other tokens β" input. beta = 1 -> same % move as the page asset;
+// beta = 0 -> held flat at today's map price (the old behaviour). A power law
+// is a straight shift on the log x-axis, so each token's price axis lines up.
+function pfCollBeta() {
+  const v = parseFloat(document.getElementById("pf-collateral-beta")?.value);
+  return Number.isFinite(v) ? v : 1;
+}
+function pfTokenPriceAt(asset, spot) {
+  if (asset === currentAsset) return spot;
+  if (asset === "USDC") return 1;
+  const p0 = ((pfCollateralMap && pfCollateralMap.prices) || {})[asset] || 0;
+  const s0 = pfData && pfData.eth_spot;
+  if (!p0 || !s0 || !(spot > 0)) return p0;
+  return p0 * Math.pow(spot / s0, pfCollBeta());
+}
+
+function pfCollMapValueAt(qtys, spot, applyHaircut, cp, onlyAsset) {
   let sum = 0;
   for (const asset of Object.keys(qtys)) {
+    if (onlyAsset && asset !== onlyAsset) continue;
     const q = qtys[asset] || 0;
     if (!q) continue;
-    const px = asset === currentAsset ? spot
-      : asset === "USDC" ? 1
-      : (prices[asset] || 0);
+    const px = pfTokenPriceAt(asset, spot);
     // Threshold is measured against the counterparty's total holding of the
     // asset across both books, then the blended rate hits this book's slice.
     const totalQty = (cp && cp.qtys && cp.qtys[asset]) || q;
@@ -4598,9 +4614,22 @@ function pfCollMapValueAt(qtys, spot, applyHaircut, cp) {
   return sum;
 }
 
-function pfCollMapCurve(cptys, spots, applyHaircut) {
+function pfCollMapCurve(cptys, spots, applyHaircut, onlyAsset) {
   return spots.map(s => cptys.reduce((sum, c) =>
-    sum + pfCollMapValueAt(pfBookQtysFor(c), s, applyHaircut, c), 0));
+    sum + pfCollMapValueAt(pfBookQtysFor(c), s, applyHaircut, c, onlyAsset), 0));
+}
+
+// Tokens actually allocated to this book across `cptys`, in a fixed order.
+const PF_COLL_TOKEN_ORDER = ["ETH", "FIL", "BTC", "WAVE", "USDC"];
+const PF_COLL_TOKEN_COLOR = { ETH: "#a371f7", FIL: "#f778ba", BTC: "#db6d28", WAVE: "#56d4dd", USDC: "#8b949e" };
+function pfCollateralTokens(cptys) {
+  const have = new Set();
+  for (const c of cptys) {
+    const q = pfBookQtysFor(c);
+    for (const a of Object.keys(q)) if (q[a]) have.add(a);
+  }
+  return [...PF_COLL_TOKEN_ORDER.filter(a => have.has(a)),
+          ...[...have].filter(a => !PF_COLL_TOKEN_ORDER.includes(a))];
 }
 
 // Counterparties with any collateral allocated to the current book.
@@ -4687,15 +4716,107 @@ function pfCollateralTraces(spots) {
   const name = (fCpty ? `${fCpty} collateral` : "Collateral posted")
     + ` · ${currentAsset} book` + (applyHaircut ? " (post-haircut)" : "");
 
-  // customdata keeps the true (positive) posted $ for the hover.
-  return [{
-    x: spots, y: invert ? curve.map(v => -v) : curve, type: "scatter", mode: "lines",
-    name,
+  const cptys = pfCollateralActiveCptys();
+  const tokens = pfCollateralTokens(cptys);
+  const byToken = (document.getElementById("pf-collateral-by-token")?.checked ?? true) && tokens.length > 1;
+  const sign = v => invert ? -v : v;
+  const out = [];
+
+  // One line per token: its USD value along the ladder (page asset at the
+  // ladder spot, other tokens on the beta mapping, USDC flat). They sum to the
+  // total line exactly. customdata = [true $ value, token price at that spot].
+  if (byToken) {
+    for (const a of tokens) {
+      const c = pfCollMapCurve(cptys, spots, applyHaircut, a);
+      if (c.every(v => Math.abs(v) < 1)) continue;
+      const tn = `${a} collateral`;
+      out.push({
+        x: spots, y: c.map(sign), type: "scatter", mode: "lines",
+        name: tn,
+        customdata: c.map((v, i) => [v, pfTokenPriceAt(a, spots[i])]),
+        line: { color: PF_COLL_TOKEN_COLOR[a] || "#8b949e", width: 1.5, dash: "dot" },
+        legendgroup: "collateral",
+        hovertemplate: a === "USDC"
+          ? tn + ": $%{customdata[0]:,.0f}<extra></extra>"
+          : tn + ": $%{customdata[0]:,.0f} @ " + a + " $%{customdata[1]:,.4~f}<extra></extra>",
+      });
+    }
+  }
+
+  // Total = sum of all tokens. customdata keeps the true (positive) posted $.
+  const totalName = byToken ? `Total collateral · ${currentAsset} book` + (applyHaircut ? " (post-haircut)" : "") : name;
+  out.push({
+    x: spots, y: curve.map(sign), type: "scatter", mode: "lines",
+    name: totalName,
     customdata: curve,
-    line: { color: "#d29922", width: 2, dash: "dash" },
+    line: { color: "#d29922", width: byToken ? 2.5 : 2, dash: "dash" },
     legendgroup: "collateral",
-    hovertemplate: name + ": $%{customdata:,.0f} posted<extra></extra>",
-  }];
+    hovertemplate: totalName + ": $%{customdata:,.0f} posted<extra></extra>",
+  });
+  return out;
+}
+
+/** Extra top x-axes: one per collateral token that isn't the page asset or
+ *  USDC, showing that token's price at each ladder point (beta mapping). Ticks
+ *  sit at round token prices, placed at the page-asset spot that implies them;
+ *  the axes are matched to the main x so zooming keeps them aligned. None when
+ *  beta = 0 (the prices don't move, so there is nothing to show). */
+function pfTokenPriceAxes(spots) {
+  const res = { axes: {}, traces: [], n: 0, yDomain: null };
+  const toggle = document.getElementById("pf-show-collateral");
+  if (!toggle || !toggle.checked || !spots.length) return res;
+  const beta = pfCollBeta();
+  const s0 = pfData.eth_spot;
+  const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
+  if (!beta || !s0) return res;
+  const tokens = pfCollateralTokens(pfCollateralActiveCptys())
+    .filter(a => a !== currentAsset && a !== "USDC" && prices[a] > 0);
+  if (!tokens.length) return res;
+
+  const sMin = Math.min(...spots), sMax = Math.max(...spots);
+  const fmtPx = p => p >= 10000 ? `$${(p / 1000).toFixed(0)}k`
+    : p >= 1000 ? `$${+(p / 1000).toFixed(1)}k`
+    : p >= 10 ? `$${p.toFixed(0)}`
+    : p >= 1 ? `$${+p.toFixed(2)}`
+    : `$${+p.toPrecision(2)}`;
+  const GAP = 0.09;                       // paper height per stacked axis
+  const top = 1 - GAP * (tokens.length - 1);
+
+  tokens.forEach((a, k) => {
+    const p0 = prices[a];
+    const pA = pfTokenPriceAt(a, sMin), pB = pfTokenPriceAt(a, sMax);
+    const lo = Math.min(pA, pB), hi = Math.max(pA, pB);
+    // Round prices across the visible range; denser mantissas if it's narrow.
+    const pick = ms => {
+      const v = [];
+      for (let e = Math.floor(Math.log10(lo)) - 1; e <= Math.ceil(Math.log10(hi)) + 1; e++)
+        for (const m of ms) { const p = m * Math.pow(10, e); if (p >= lo && p <= hi) v.push(p); }
+      return v;
+    };
+    let pv = pick([1, 2, 5]);
+    if (pv.length < 4) pv = pick([1, 1.5, 2, 3, 5, 7]);
+    if (pv.length < 3) pv = pick([1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9]);
+    const id = k + 2;
+    const col = PF_COLL_TOKEN_COLOR[a] || "#8b949e";
+    res.axes[`xaxis${id}`] = {
+      title: { text: `${a} price (β=${beta} vs ${currentAsset})`, font: { size: 11, color: col }, standoff: 2 },
+      type: "log", overlaying: "x", matches: "x", side: "top",
+      tickvals: pv.map(p => s0 * Math.pow(p / p0, 1 / beta)),
+      ticktext: pv.map(fmtPx),
+      tickfont: { size: 10, color: col }, color: col,
+      showgrid: false, zeroline: false,
+      ...(k === 0 ? { anchor: "y" } : { anchor: "free", position: top + GAP * k }),
+    };
+    // Invisible carrier trace so Plotly lays the axis out over the same extent.
+    res.traces.push({
+      x: [sMin, sMax], y: [null, null], xaxis: `x${id}`, yaxis: "y",
+      type: "scatter", mode: "lines", showlegend: false, hoverinfo: "skip",
+      line: { width: 0 },
+    });
+  });
+  res.n = tokens.length;
+  if (res.n > 1) res.yDomain = [0, top];
+  return res;
 }
 
 // The payoff chart is the P&L matrix drawn as lines: same bridge valuation
@@ -4815,6 +4936,8 @@ function pfRenderPayoffChart() {
     });
   }
   traces.push(...collTraces);
+  const tokAxes = pfTokenPriceAxes(spots);
+  traces.push(...tokAxes.traces);
 
   const cc = chartColors();
   const assetLabel = currentAsset + " Spot Price (USD)";
@@ -4830,8 +4953,10 @@ function pfRenderPayoffChart() {
       title: "Portfolio value / Collateral (USD" + (collInvert ? ", collateral negative)" : ")"),
       color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
       tickformat: "$,.2s", rangemode: "tozero",
+      ...(tokAxes.yDomain ? { domain: tokAxes.yDomain } : {}),
     },
-    margin: { t: 50, r: 260, b: 50, l: 80 },
+    ...tokAxes.axes,
+    margin: { t: tokAxes.n ? 110 : 50, r: 260, b: 50, l: 80 },
     showlegend: true,
     legend: {
       font: { color: cc.muted, size: 10 },
@@ -5001,8 +5126,9 @@ document.getElementById("btn-pf-expiring-10d").addEventListener("click", () => {
 // Counterparty filter also re-scopes the posted-collateral overlay; the
 // collateral toggles just redraw the chart.
 ["pf-filter-cpty", "pf-show-collateral", "pf-collateral-haircut",
- "pf-collateral-invert", "pf-collateral-residual"].forEach(id => {
-  document.getElementById(id).addEventListener("change", () => { if (pfData) pfRenderPayoffChart(); });
+ "pf-collateral-invert", "pf-collateral-residual", "pf-collateral-by-token",
+ "pf-collateral-beta"].forEach(id => {
+  document.getElementById(id)?.addEventListener("change", () => { if (pfData) pfRenderPayoffChart(); });
 });
 
 document.querySelectorAll("#pf-positions-table .sortable").forEach(th => {

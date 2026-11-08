@@ -675,6 +675,12 @@
       <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)">
         <input type="checkbox" id="pf-collateral-residual"> residual (collateral + payoff)
       </label>
+      <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)" title="One dotted line per collateral token; they sum to the bold Total collateral line.">
+        <input type="checkbox" id="pf-collateral-by-token" checked> per-token lines
+      </label>
+      <label class="toggle-label" style="margin:0;font-size:.8rem;color:var(--muted)" title="How the other collateral tokens (e.g. ETH/BTC on the FIL page) move with this book's asset: price = today × (spot / today's spot)^β. 1 = same % move, 0 = held flat at today's price. Each moving token gets its own price axis along the top of the chart.">
+        other tokens β <input type="number" id="pf-collateral-beta" value="1" step="0.1" style="width:55px">
+      </label>
       <span style="font-size:.72rem;color:var(--muted)">
         Shows the collateral allocated to <b>this book</b> (matches the page asset) from the Collateral page. <b>Counterparty</b> filter below: <b>All</b> = total, or pick one.
       </span>
@@ -4538,7 +4544,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=210"></script>
+<script src="/static/app.js?v=211"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>
