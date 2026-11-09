@@ -3,7 +3,7 @@
     exec_orders   one parent order: what to trade, by when, the threshold ramp, progress
     exec_ticks    the order's passes: fair value, threshold, best cost, action; takes as they
                   happen, the routine ones once a minute; what the Execution page charts
-    exec_fills    every fill, with its cost against the spline at the time and Deribit's mark
+    exec_fills    every fill, with its cost against the spline at the time, Deribit's mark and the mid
     exec_lock     a lease so two scheduler calls never work the same orders at once
 """
 
@@ -62,6 +62,7 @@ SCHEMA = [
         fair_usd REAL NOT NULL,
         mode TEXT NOT NULL,
         mark_usd REAL,
+        mid_usd REAL,
         UNIQUE (order_id, trade_id)
     )""",
     """CREATE TABLE IF NOT EXISTS exec_lock (
@@ -79,10 +80,12 @@ async def init_exec_tables() -> None:
     db = await get_db()
     for stmt in SCHEMA:
         await db.execute(stmt)
-    # Deribit's mark at each fill (9 Nov 2026); earlier fills have none.
+    # Deribit's mark and the screen mid at each fill (9 Nov 2026); earlier fills have none.
     cur = await db.execute("PRAGMA table_info(exec_fills)")
-    if "mark_usd" not in {r[1] for r in await cur.fetchall()}:
-        await db.execute("ALTER TABLE exec_fills ADD COLUMN mark_usd REAL")
+    have = {r[1] for r in await cur.fetchall()}
+    for col in ("mark_usd", "mid_usd"):
+        if col not in have:
+            await db.execute(f"ALTER TABLE exec_fills ADD COLUMN {col} REAL")
     await db.commit()
 
 
@@ -157,14 +160,54 @@ async def add_fills(oid: int, fills: list[dict[str, Any]]) -> None:
     for f in fills:
         cur = await db.execute(
             "INSERT OR IGNORE INTO exec_fills (order_id, ts, intent_id, trade_id, price_eth, price_usd, qty,"
-            " fee_usd, cost_usd, fair_usd, mode, mark_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " fee_usd, cost_usd, fair_usd, mode, mark_usd, mid_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (oid, f["ts"], f["intent_id"], f["trade_id"], f["price_eth"], f["price_usd"], f["qty"],
-             f["fee_usd"], f["cost_usd"], f["fair_usd"], f["mode"], f.get("mark_usd")))
+             f["fee_usd"], f["cost_usd"], f["fair_usd"], f["mode"], f.get("mark_usd"), f.get("mid_usd")))
         if cur.rowcount:  # a fill seen twice is counted once
             await db.execute("UPDATE exec_orders SET filled = filled + ?, cost_usd = cost_usd + ?,"
                              " fees_usd = fees_usd + ? WHERE id = ?",
                              (f["qty"], f["qty"] * f["cost_usd"], f["fee_usd"], oid))
     await db.commit()
+
+
+async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
+    """Each order with fills, most recent first: what its fills cost against the spline, Deribit's
+    mark and the screen mid, before the fee, in USD and in vol points (USD over the filled
+    contracts' vega at each fill), and the fee. A reference a fill lacks leaves that fill out of
+    its column, with the contracts it covers in *_qty."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT o.id, o.instrument, o.side, o.qty AS order_qty, o.filled, o.status, o.mode, f.ts, f.qty,"
+        " f.price_usd, f.fair_usd, f.mark_usd, f.mid_usd, f.fee_usd, t.vega FROM exec_fills f"
+        " JOIN exec_orders o ON o.id = f.order_id"
+        " LEFT JOIN exec_ticks t ON t.order_id = f.order_id AND t.ts = f.ts"
+        " WHERE o.id IN (SELECT order_id FROM exec_fills GROUP BY order_id ORDER BY MAX(ts) DESC LIMIT ?)",
+        (limit,))
+    legs: dict[int, dict[str, Any]] = {}
+    for r in await cur.fetchall():
+        g = legs.setdefault(r["id"], {k: r[k] for k in ("id", "instrument", "side", "order_qty", "filled",
+                                                         "status", "mode")} | {"last_ts": 0.0, "fee_usd": 0.0})
+        g["last_ts"] = max(g["last_ts"], r["ts"])
+        g["fee_usd"] += r["fee_usd"]
+        g["fee_vega"] = g.get("fee_vega", 0.0) + (r["qty"] * r["vega"] if r["vega"] else 0.0)
+        g["fee_vp_usd"] = g.get("fee_vp_usd", 0.0) + (r["fee_usd"] if r["vega"] else 0.0)
+        sign = 1.0 if r["side"] == "buy" else -1.0
+        for name, ref in (("spline", r["fair_usd"]), ("mark", r["mark_usd"]), ("mid", r["mid_usd"])):
+            if ref is None:
+                continue
+            g[f"{name}_usd"] = g.get(f"{name}_usd", 0.0) + sign * (r["price_usd"] - ref) * r["qty"]
+            g[f"{name}_qty"] = g.get(f"{name}_qty", 0.0) + r["qty"]
+            if r["vega"]:
+                g[f"{name}_vp_usd"] = g.get(f"{name}_vp_usd", 0.0) + sign * (r["price_usd"] - ref) * r["qty"]
+                g[f"{name}_vega"] = g.get(f"{name}_vega", 0.0) + r["qty"] * r["vega"]
+    out = []
+    for g in sorted(legs.values(), key=lambda g: -g["last_ts"]):
+        for name in ("spline", "mark", "mid", "fee"):
+            v = g.pop(f"{name}_vega", 0.0)
+            g[f"{name}_vp"] = g.pop(f"{name}_vp_usd", 0.0) / v if v else None
+            g[f"{name}_vega"] = v
+        out.append(g)
+    return out
 
 
 async def last_fill_ts(instruments: list[str]) -> dict[str, float]:

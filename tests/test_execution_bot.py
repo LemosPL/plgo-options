@@ -150,6 +150,15 @@ def test_ticks_wait_take_up_to_the_cap_then_fill(tmp_path):
         assert 0 < first["mark_usd"] - first["fair_usd"] < 4.0
         assert [t["action"] for t in d["ticks"]] == ["wait", "take", "cooldown", "take"]
         assert d["ticks"][0]["best_cost"] > d["ticks"][0]["theta_usd"] > d["ticks"][1]["best_cost"]
+        assert first["price_usd"] > first["mid_usd"]                   # a buy crosses to the ask
+        (leg,) = await store.leg_costs()
+        fills = d["fills"]
+        assert leg["id"] == oid and leg["filled"] == 50 and leg["fee_usd"] == pytest.approx(sum(f["fee_usd"] for f in fills))
+        assert leg["spline_usd"] == pytest.approx(sum(f["qty"] * (f["price_usd"] - f["fair_usd"]) for f in fills))
+        assert leg["mid_qty"] == leg["mark_qty"] == 50
+        vega = sum(f["qty"] * t["vega"] for f in fills for t in d["ticks"] if t["ts"] == f["ts"])
+        assert leg["mid_vp"] == pytest.approx(sum(f["qty"] * (f["price_usd"] - f["mid_usd"]) for f in fills) / vega)
+        assert leg["mid_vp"] > leg["spline_vp"]                         # the ask is cheap against the spline
         assert (await bot.run_tick(NOW + 480, books, off))["orders"] == []   # nothing left to work
     run(body)
 

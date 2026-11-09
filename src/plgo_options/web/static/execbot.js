@@ -94,6 +94,35 @@
     }).join("");
   }
 
+  // ── cost per leg ──────────────────────────────────────────────
+  function costs(legs) {
+    if (!legs.length) {
+      $("xb-costs").innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:1rem">No fills yet.</td></tr>`;
+      return;
+    }
+    const vp = (v) => v == null ? "—" : fmt(v, 2);
+    // vega-weighted over the legs that have the reference
+    const pool = (name) => {
+      const w = legs.reduce((a, g) => a + (g[name + "_vp"] != null ? g[name + "_vega"] : 0), 0);
+      return w ? legs.reduce((a, g) => a + (g[name + "_vp"] != null ? g[name + "_vp"] * g[name + "_vega"] : 0), 0) / w : null;
+    };
+    const sum = (k) => legs.some((g) => g[k] != null) ? legs.reduce((a, g) => a + (g[k] || 0), 0) : null;
+    const allIn = (m, f) => m != null && f != null ? m + f : null;
+    const partial = (g, name) => g[name + "_qty"] != null && g[name + "_qty"] < g.filled
+      ? ` <span style="color:var(--muted)" title="covers ${fmt(g[name + "_qty"])} of ${fmt(g.filled)} contracts">*</span>` : "";
+    const row = (g) => `<tr data-id="${g.id}" style="cursor:pointer">
+      <td>${g.id}</td><td style="text-align:left">${g.side === "buy" ? "Buy" : "Sell"} ${esc(g.instrument)}${g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`}</td>
+      <td>${fmt(g.filled)} / ${fmt(g.order_qty)}${g.status === "working" ? "" : ` <span style="color:var(--muted)">${esc(g.status)}</span>`}</td>
+      <td>${vp(g.mid_vp)}${partial(g, "mid")}</td><td>${vp(g.spline_vp)}</td><td>${vp(g.mark_vp)}${partial(g, "mark")}</td>
+      <td>${vp(g.fee_vp)}</td><td>${vp(allIn(g.mark_vp, g.fee_vp))}</td>
+      <td>${usd(g.spline_usd, 0)}</td><td>${usd(g.mark_usd, 0)}</td><td>${usd(g.fee_usd, 0)}</td></tr>`;
+    $("xb-costs").innerHTML = legs.map(row).join("")
+      + `<tr style="font-weight:600;border-top:2px solid var(--border)"><td></td><td style="text-align:left">All</td>
+      <td>${fmt(legs.reduce((a, g) => a + g.filled, 0))}</td><td>${vp(pool("mid"))}</td><td>${vp(pool("spline"))}</td>
+      <td>${vp(pool("mark"))}</td><td>${vp(pool("fee"))}</td><td>${vp(allIn(pool("mark"), pool("fee")))}</td>
+      <td>${usd(sum("spline_usd"), 0)}</td><td>${usd(sum("mark_usd"), 0)}</td><td>${usd(sum("fee_usd"), 0)}</td></tr>`;
+  }
+
   // ── detail ────────────────────────────────────────────────────
   async function detail() {
     if (selected == null) { $("xb-detail").style.display = "none"; return; }
@@ -157,9 +186,11 @@
 
   async function load() {
     try {
-      const [st, os] = await Promise.all([api("GET", "/api/execution-bot/status"), api("GET", "/api/execution-bot/orders")]);
+      const [st, os, cs] = await Promise.all([api("GET", "/api/execution-bot/status"), api("GET", "/api/execution-bot/orders"),
+        api("GET", "/api/execution-bot/costs")]);
       header(st);
       rows(os.orders);
+      costs(cs.legs);
       await detail();
     } catch (e) {
       status("Load failed: " + e.message, true);
@@ -278,6 +309,10 @@
       await load();
       return;
     }
+    const tr = ev.target.closest("tr[data-id]");
+    if (tr) { selected = parseInt(tr.dataset.id, 10); await load(); }
+  });
+  $("xb-costs")?.addEventListener("click", async (ev) => {
     const tr = ev.target.closest("tr[data-id]");
     if (tr) { selected = parseInt(tr.dataset.id, 10); await load(); }
   });

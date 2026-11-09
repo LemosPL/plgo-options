@@ -4118,6 +4118,22 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2>Cost per leg</h2>
+      <p style="font-size:.74rem;color:var(--muted);margin:.2rem 0 .6rem;max-width:80ch">
+        What each order's fills cost, before the fee, against three references at the moment of the fill: the screen
+        mid, the smoothing spline the bot works to, and Deribit's mark. Vol points are the cost over the filled
+        contracts' vega; “All-in” adds the fee to the cost against the mark. “All” weights the legs shown by vega.
+        Paper fills assume the whole top of the book with no impact.</p>
+      <div class="chain-wrapper">
+        <table class="pf-table">
+          <thead><tr><th>#</th><th style="text-align:left">Leg</th><th>Filled</th><th>vs mid (vp)</th><th>vs spline (vp)</th>
+            <th>vs mark (vp)</th><th>Fee (vp)</th><th>All-in vs mark (vp)</th><th>vs spline ($)</th><th>vs mark ($)</th><th>Fees ($)</th></tr></thead>
+          <tbody id="xb-costs"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" id="xb-detail" style="display:none">
       <h2 id="xb-detail-title"></h2>
       <div id="xb-detail-cards" class="collat-summary-grid"></div>
@@ -4549,6 +4565,6 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=6"></script>
+<script src="/static/execbot.js?v=7"></script>
 </body>
 </html>

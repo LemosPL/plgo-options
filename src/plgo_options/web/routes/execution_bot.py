@@ -10,6 +10,7 @@ People-facing:
     POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
     POST /api/execution-bot/orders/batch         create several (the reviewed preview)
     GET  /api/execution-bot/orders/{id}          the order, its ticks and fills
+    GET  /api/execution-bot/costs                each leg's fill cost vs the spline, the mark and the mid
     POST /api/execution-bot/orders/{id}/{action} pause | resume | cancel
 """
 
@@ -149,6 +150,11 @@ async def preview(req: PreviewReq):
         return await from_optimizer.preview(req.trades, req.asset, req.start_vp, req.hours)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
+
+
+@router.get("/costs")
+async def costs(limit: int = 50):
+    return {"legs": await store.leg_costs(limit)}
 
 
 @router.get("/orders/{oid}")
