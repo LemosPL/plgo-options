@@ -13,7 +13,7 @@ def test_defaults_give_deribit_its_cost_and_everyone_else_theirs():
     vp = _with_exchange_costs(None, DEFAULT_BID_ASK_VOL_PTS_BY_ASSET["ETH"], "bid_ask_vol_pts", "ETH")
     assert R(vp, "Deribit", 0.75) == 0.6 and R(vp, "Flowdesk", 0.75) == 5.0
     assert R(_with_exchange_costs(None, {"KeyRock": 1.0}, "netting_pct", "ETH"), "Deribit", 1.0) == 0.0
-    assert R(_with_exchange_costs(None, {}, "box_fee_bps", "ETH"), "Deribit", 0.0) == 160.0
+    assert R(_with_exchange_costs(None, {}, "box_fee_bps", "ETH"), "Deribit", 0.0) == 40.0
 
 
 def test_the_page_values_win_and_fil_has_no_deribit():
@@ -32,3 +32,15 @@ def test_a_deribit_spread_pays_each_leg_in_full():
     netting = _with_exchange_costs(None, {"KeyRock": 1.0}, "netting_pct", "ETH")
     vp = _with_exchange_costs(None, 5.0, "bid_ask_vol_pts", "ETH")
     assert sum(_structure_leg_costs_usd(legs, vp, netting_pct=netting)) == 0.6 * (300 + 250)
+
+
+def test_a_deribit_roll_unwind_still_pays_the_screen_not_the_rfq_box_price():
+    from types import SimpleNamespace
+    from plgo_options.optimization.optimizer_v3 import EXCHANGE_COSTS_BY_ASSET, OptimizerV3
+    p = SimpleNamespace(net_qty=-10.0, opt="C", strike=1700.0, expiry_date="2026-12-25", counterparty="Deribit",
+                        mark_price_usd=470.0, vega=0.0)
+    box = _with_exchange_costs(None, {}, "box_fee_bps", "ETH")
+    (t,) = OptimizerV3._build_roll_unwind_trades(SimpleNamespace(), "ETH", [p], bid_ask_vol_pts=0.0, box_fee_bps=box)
+    roll = EXCHANGE_COSTS_BY_ASSET["ETH"]["Deribit"]["roll_fee_bps"]
+    assert roll > box["Deribit"]
+    assert t["cost_usd"] == round(10 * 470.0 * roll / 1e4, 2)

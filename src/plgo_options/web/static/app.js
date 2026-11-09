@@ -12011,9 +12011,9 @@ function optDefaultVolPts(asset, cpty) {
 // Deribit lists ETH options only (no FIL), so for ETH Optimizer v2 always offers it as a
 // counterparty, seeded with its measured costs (engine's EXCHANGE_COSTS_BY_ASSET, 9 Nov
 // 2026): 0.6 vol pts a leg, fee included; no netting, the bot crosses each leg on its own;
-// a box crossed on screen ~1.6% of notional.
+// a box by Block RFQ ~0.4% of notional (~1.6% crossed on screen).
 const OPT_DERIBIT = "Deribit";
-const OPT_DERIBIT_ETH_COSTS = { volPts: 0.6, nettingPct: 0, boxFeePct: 1.6 };
+const OPT_DERIBIT_ETH_COSTS = { volPts: 0.6, nettingPct: 0, boxFeePct: 0.4 };  // box by Block RFQ
 
 // The counterparties a cost input list shows: the loaded book's, plus Deribit on
 // Optimizer v2 for ETH.

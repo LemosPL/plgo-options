@@ -101,10 +101,15 @@ _NETTING_PCT_FALLBACK = 1.0
 # only (no FIL). Measured 9 Nov 2026 on the paper execution bot's fills and the quote
 # recorder: each leg costs ~0.33 vol pts of half-spread plus ~0.26 of taker fee; the bot
 # crosses every leg on its own, so a structure gets no netting credit; a box crossed on
-# screen costs ~163 bps of its notional, nearly all of it the two deep in-the-money legs'
-# spreads (the same bps price a single in-the-money roll unwind: ~$11 on a $690 option).
+# screen costs ~125-163 bps of its notional, nearly all of it the two deep in-the-money legs'
+# spreads. A box goes by Block RFQ instead: market makers quote it as one structure near
+# rates, and the combo discount waives the cheaper side's fees (~$1.3 of the $2.55 a box
+# pays on screen), so 40 bps (~3%/yr over 46 days) until real RFQ fills replace it. A single
+# in-the-money roll unwind still crosses the screen, hence its own roll_fee_bps (~$11 on a
+# $690 option).
 EXCHANGE_COSTS_BY_ASSET: dict[str, dict[str, dict[str, float]]] = {
-    "ETH": {"Deribit": {"bid_ask_vol_pts": 0.6, "netting_pct": 0.0, "box_fee_bps": 160.0}},
+    "ETH": {"Deribit": {"bid_ask_vol_pts": 0.6, "netting_pct": 0.0, "box_fee_bps": 40.0,
+                        "roll_fee_bps": 160.0}},
 }
 
 
@@ -411,7 +416,10 @@ class OptimizerV3(BaseOptimizer):
             # on top of the vega cost: closing a large ITM position is
             # economically similar to unwinding a box — real dollar bid-ask
             # proportional to notional, not to vol risk that's already gone.
-            roll_fee_bp = CollateralOptimization._resolve(box_fee_bps, counterparty, default=_BOX_FEE_BPS_FALLBACK)
+            # An exchange's measured screen cost wins: its box_fee_bps is a Block RFQ price.
+            roll_fee_bp = EXCHANGE_COSTS_BY_ASSET.get(token, {}).get(counterparty, {}).get("roll_fee_bps")
+            if roll_fee_bp is None:
+                roll_fee_bp = CollateralOptimization._resolve(box_fee_bps, counterparty, default=_BOX_FEE_BPS_FALLBACK)
             notional_cost = notional * float(roll_fee_bp or 0.0) / 10_000.0
 
             trades.append({
