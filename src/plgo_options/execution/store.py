@@ -3,7 +3,7 @@
     exec_orders   one parent order: what to trade, by when, the threshold ramp, progress
     exec_ticks    the order's passes: fair value, threshold, best cost, action; takes as they
                   happen, the routine ones once a minute; what the Execution page charts
-    exec_fills    every fill, with its cost against the spline at the time
+    exec_fills    every fill, with its cost against the spline at the time and Deribit's mark
     exec_lock     a lease so two scheduler calls never work the same orders at once
 """
 
@@ -61,6 +61,7 @@ SCHEMA = [
         cost_usd REAL NOT NULL,
         fair_usd REAL NOT NULL,
         mode TEXT NOT NULL,
+        mark_usd REAL,
         UNIQUE (order_id, trade_id)
     )""",
     """CREATE TABLE IF NOT EXISTS exec_lock (
@@ -78,6 +79,10 @@ async def init_exec_tables() -> None:
     db = await get_db()
     for stmt in SCHEMA:
         await db.execute(stmt)
+    # Deribit's mark at each fill (9 Nov 2026); earlier fills have none.
+    cur = await db.execute("PRAGMA table_info(exec_fills)")
+    if "mark_usd" not in {r[1] for r in await cur.fetchall()}:
+        await db.execute("ALTER TABLE exec_fills ADD COLUMN mark_usd REAL")
     await db.commit()
 
 
@@ -152,9 +157,9 @@ async def add_fills(oid: int, fills: list[dict[str, Any]]) -> None:
     for f in fills:
         cur = await db.execute(
             "INSERT OR IGNORE INTO exec_fills (order_id, ts, intent_id, trade_id, price_eth, price_usd, qty,"
-            " fee_usd, cost_usd, fair_usd, mode) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " fee_usd, cost_usd, fair_usd, mode, mark_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (oid, f["ts"], f["intent_id"], f["trade_id"], f["price_eth"], f["price_usd"], f["qty"],
-             f["fee_usd"], f["cost_usd"], f["fair_usd"], f["mode"]))
+             f["fee_usd"], f["cost_usd"], f["fair_usd"], f["mode"], f.get("mark_usd")))
         if cur.rowcount:  # a fill seen twice is counted once
             await db.execute("UPDATE exec_orders SET filled = filled + ?, cost_usd = cost_usd + ?,"
                              " fees_usd = fees_usd + ? WHERE id = ?",

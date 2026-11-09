@@ -146,6 +146,8 @@ def test_ticks_wait_take_up_to_the_cap_then_fill(tmp_path):
         assert [f["qty"] for f in d["fills"]] == [25, 25]
         first = d["fills"][0]
         assert first["cost_usd"] == pytest.approx(first["price_usd"] - first["fair_usd"] + 0.687, abs=0.01)
+        # the books' mark is the true smile; the spline leans toward the strike's $3-cheap ask
+        assert 0 < first["mark_usd"] - first["fair_usd"] < 4.0
         assert [t["action"] for t in d["ticks"]] == ["wait", "take", "cooldown", "take"]
         assert d["ticks"][0]["best_cost"] > d["ticks"][0]["theta_usd"] > d["ticks"][1]["best_cost"]
         assert (await bot.run_tick(NOW + 480, books, off))["orders"] == []   # nothing left to work

@@ -175,12 +175,14 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
         await _tick(o, now, "rejected", record, detail=st.reject_reason or "", **ctx)
         return {"id": o.id, "action": "rejected", "detail": st.reject_reason}
     fills = []
+    mark = book.get("mark_price")
     for f in st.fills:
         usd = f.price * S
         # a fresh paper connector each pass restarts its ids: key paper fills by the intent too
         fills.append(dict(ts=now, intent_id=f.intent_id, trade_id=f"{f.intent_id}/{f.trade_id}",
                           price_eth=f.price, price_usd=usd,
                           qty=f.qty, fee_usd=f.fee * S, mode=o.mode, fair_usd=fair["fair"],
+                          mark_usd=mark * S if mark is not None else None,
                           cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd)
                           + deribit_option_fee_usd(S, usd)))
     await store.add_fills(o.id, fills)

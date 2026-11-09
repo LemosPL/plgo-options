@@ -107,11 +107,18 @@
     const fair0 = t.find((x) => x.fair_usd != null)?.fair_usd;
     const px = o.filled ? f.reduce((s, x) => s + x.qty * x.price_usd, 0) / o.filled : null;
     const vsStart = px != null && fair0 != null ? (o.side === "buy" ? px - fair0 : fair0 - px) : null;
+    // Cost against Deribit's mark at the fill, fee included like the spline's; fills from before 9 Nov have no mark
+    const vsMark = (r) => r.mark_usd == null ? null : (o.side === "buy" ? r.price_usd - r.mark_usd : r.mark_usd - r.price_usd) + r.fee_usd / r.qty;
+    const fm = f.filter((r) => r.mark_usd != null), qm = fm.reduce((s, x) => s + x.qty, 0);
+    const avgMark = qm ? fm.reduce((s, x) => s + x.qty * vsMark(x), 0) / qm : null;
+    const vegaMark = qm ? fm.reduce((s, x) => s + x.qty * (vegaAt(x.ts) || 0), 0) / qm : null;
     const card = (label, value, sub) => `<div class="collat-metric"><div class="collat-metric-label">${label}</div>
       <div class="collat-metric-value">${value}</div><div class="collat-metric-sub">${sub}</div></div>`;
     $("xb-detail-cards").innerHTML =
       card("Filled", `${fmt(o.filled)} / ${fmt(o.qty)}`, `${f.length} fill(s)`)
       + card("Avg cost vs spline", usd(avg), vegaAvg ? `${fmt(avg / vegaAvg, 2)} vol pts, fee included` : "fee included")
+      + card("Avg cost vs Deribit mark", usd(avgMark), avgMark == null ? "no fill with a mark yet"
+          : `${vegaMark ? fmt(avgMark / vegaMark, 2) + " vol pts, " : ""}fee included${qm < o.filled ? ` · ${fmt(qm)} of ${fmt(o.filled)} filled` : ""}`)
       + card("Total cost", usd(o.cost_usd, 0), `of which fees ${usd(o.fees_usd, 0)}`)
       + card("Avg price vs fair at start", usd(vsStart), fair0 != null ? `fair at start ${usd(fair0)}; includes the market's move` : "—")
       + card("Threshold", `${fmt(o.start_vp, 2)} → ${fmt(o.end_vp, 2)} vp`, `then ${fmt(o.hard_vp, 2)} vp in the final hour · cap ${fmt(o.cap)}/take`);
@@ -139,8 +146,8 @@
 
     $("xb-fills").innerHTML = f.length ? f.slice().reverse().map((r) => `<tr><td style="text-align:left">${whenS(r.ts)}</td>
       <td>${fmt(r.qty)}</td><td>${fmt(r.price_eth, 4)}</td><td>${usd(r.price_usd)}</td><td>${usd(r.fair_usd)}</td>
-      <td>${usd(r.fee_usd / r.qty)}</td><td>${usd(r.cost_usd)}</td></tr>`).join("")
-      : `<tr><td colspan="7" style="text-align:center;color:var(--muted)">No fills yet</td></tr>`;
+      <td>${usd(r.mark_usd)}</td><td>${usd(r.fee_usd / r.qty)}</td><td>${usd(r.cost_usd)}</td><td>${usd(vsMark(r))}</td></tr>`).join("")
+      : `<tr><td colspan="9" style="text-align:center;color:var(--muted)">No fills yet</td></tr>`;
     const last = t.slice(-12).reverse();
     $("xb-ticks").innerHTML = last.map((r) => `<tr><td style="text-align:left">${whenS(r.ts)}</td><td style="text-align:left">${esc(ACTION[r.action] || r.action)}</td>
       <td>${usd(r.best_cost)}</td><td>${usd(r.theta_usd)}</td><td>${usd(r.fair_usd)}</td>
