@@ -56,7 +56,7 @@
       card("Mode", "Paper", esc(st.live_note || ""))
       + card("Kill switch", st.kill_switch ? "ON" : "off", st.kill_switch ? "nothing is sent while it is on" : "Agents page controls it",
         st.kill_switch ? "color:var(--red)" : "")
-      + card("Last run", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) · ${fmt(lt.passes || 1)} pass(es) · ${fmt(lt.takes || 0)} take(s)${lt.quotes ? ` · quotes ${esc(lt.quotes)}` : ""}${lt.halted ? " · halted" : ""}` : "no run yet: is the scheduler job deployed?")
+      + card("Last run", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) · ${fmt(lt.passes || 1)} pass(es) · ${fmt(lt.takes || 0)} take(s)${lt.quotes ? ` · quotes ${esc(lt.quotes)}` : ""}${lt.halted ? " · halted" : ""}${lt.failed ? ` · ${fmt(lt.failed)} failed (${esc(lt.error || "")})` : ""}` : "no run yet: is the scheduler job deployed?")
       + card("Working", fmt(c.working || 0), `${fmt(c.paused || 0)} paused`)
       + card("Finished", fmt((c.filled || 0) + (c.expired || 0) + (c.cancelled || 0)),
         `${fmt(c.filled || 0)} filled · ${fmt(c.expired || 0)} expired · ${fmt(c.cancelled || 0)} cancelled`);

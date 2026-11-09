@@ -231,7 +231,14 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
     for o in active:
         by_exp[o.expiry].append(o)
     t0 = time.time()
-    books = await books_fn(sorted(by_exp), sorted({o.instrument for o in active}))
+    try:
+        books = await books_fn(sorted(by_exp), sorted({o.instrument for o in active}))
+    except Exception as ex:  # Deribit hiccup (a 5xx, a timeout): this pass trades nothing, the next tries again
+        out["error"] = detail = f"Deribit: {type(ex).__name__}: {ex}"
+        for o in active:
+            await _tick(o, now, "no_book", record, detail=detail)
+            out["orders"].append({"id": o.id, "action": "no_book", "detail": detail})
+        return out
     out["books_secs"] = round(time.time() - t0, 2)
     for e, orders in by_exp.items():
         try:
@@ -288,7 +295,7 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
             return {"ts": start, "skipped": "another tick is running"}
         await sleep(1.0)  # the previous call's last pass is finishing
     start = clock()
-    passes, takes, last, feed = 0, [], {"orders": []}, None
+    passes, takes, last, feed, errors = 0, [], {"orders": []}, None, []
     try:
         if books_fn is None:
             feed = feed_fn()
@@ -298,7 +305,12 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
                 feed.error = feed.error or f"{type(e).__name__}: {e}"
             books_fn = functools.partial(_books, feed=feed)
         while True:
-            last = await _pass(clock(), books_fn, halted, record=passes == 0)
+            try:
+                last = await _pass(clock(), books_fn, halted, record=passes == 0)
+            except Exception as ex:  # one failed pass must not cost the rest of the minute
+                last = {"orders": [], "error": f"{type(ex).__name__}: {ex}"}
+            if last.get("error"):
+                errors.append(last["error"])
             passes += 1
             takes += [r for r in last["orders"] if r["action"] == "take"]
             nxt = start + passes * period
@@ -306,14 +318,16 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
                 break
             await sleep(max(0.0, nxt - clock()))
         return {"ts": start, "passes": passes, "takes": takes, "orders": last["orders"],
-                "halted": last.get("halted", False), "quotes": _feed_state(feed)}
+                "halted": last.get("halted", False), "quotes": _feed_state(feed),
+                "failed": len(errors), "error": errors[-1] if errors else None}
     finally:
         state = _feed_state(feed)
         if feed is not None:
             await feed.close()
         await store.release_lock(LOCK, {"ts": start, "passes": passes, "takes": len(takes),
                                         "n": len(last["orders"]), "halted": last.get("halted", False),
-                                        "quotes": state})
+                                        "quotes": state, "failed": len(errors),
+                                        "error": errors[-1] if errors else None})
 
 
 def _feed_state(feed: QuoteFeed | None) -> str | None:

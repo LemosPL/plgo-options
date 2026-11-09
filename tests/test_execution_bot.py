@@ -316,6 +316,33 @@ def test_a_minute_runs_a_pass_every_5_seconds_and_records_routine_passes_once(tm
     run(body)
 
 
+def test_a_failed_pass_costs_that_pass_only(tmp_path):
+    run = _db(tmp_path, "bot5b.db")
+    clock = {"t": NOW}
+
+    async def books(expiries, instruments):
+        if clock["t"] in (NOW, NOW + 5):                               # Deribit 525 on the first two passes
+            raise RuntimeError("Server error '525 <none>'")
+        return {EXPIRY: _books(-3.0)}
+
+    async def sleep(s):
+        clock["t"] += s
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 500, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
+        out = await bot.run_minute(books, off, clock=lambda: clock["t"], sleep=sleep)
+        assert out["passes"] == 12 and out["failed"] == 2 and "525" in out["error"]
+        assert [r["qty"] for r in out["takes"]] == [25]                # the third pass trades
+        d = await store.order_detail(oid)
+        assert [(t["ts"] - NOW, t["action"]) for t in d["ticks"]] == [(0, "no_book"), (10, "take")]
+        assert "525" in d["ticks"][0]["detail"]
+        assert (await store.last_run(bot.LOCK))["failed"] == 2
+    run(body)
+
+
 def test_the_bot_reads_the_smile_from_the_book_summary_and_its_options_books(monkeypatch):
     import httpx
     summ = [{"instrument_name": b["instrument_name"], "bid_price": b["best_bid_price"],
