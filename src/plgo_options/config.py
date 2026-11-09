@@ -73,7 +73,7 @@ SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE_SECONDS", 24 * 360
 _DEFAULT_ALLOWED = (
     "chris@protocol.ai,patrick@protocol.ai,"
     "constantin.denuelle@protocol.ai,lucas.lemos@pl-at.ch,"
-    "connor.dales@protocol.ai,juan@benet.ai"
+    "connor.dales@protocol.ai,juan@benet.ai,juan@protocol.ai"
 )
 ALLOWED_EMAILS = frozenset(
     e.strip().lower()
