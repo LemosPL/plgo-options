@@ -44,7 +44,6 @@ from plgo_options.agents.validate import curve_tests, horizon_days, tolerance_fo
 KEY_MONEYNESS = (-0.45, -0.20, 0.0, 0.35, 0.85)
 # Where the result is compared with the target (spot itself is the anchor).
 TRACK_MONEYNESS = (-0.45, -0.30, -0.20, -0.10, 0.10, 0.20, 0.35, 0.60, 0.85)
-DEFAULT_VOL_PTS = {"ETH": 5.0, "FIL": 40.0}
 
 
 def build_grid(preset: OptimizerPreset) -> list[dict[str, Any]]:
@@ -142,7 +141,7 @@ def run_kwargs(asset: str, preset: OptimizerPreset, variant: dict[str, Any],
         parametric_low_floor_ratio=preset.target_down_ratio,
         parametric_trough_payoff=preset.target_trough_payoff,
         parametric_high_plateau_ratio=preset.target_up_ratio,
-        bid_ask_vol_pts=DEFAULT_VOL_PTS.get(asset.upper(), 5.0),
+        bid_ask_vol_pts=None,  # the engine's defaults: per asset, and Deribit's measured cost for ETH
         target_profile_file=target_file,
         enable_composite_unwind=preset.enable_composite_unwind,
     )

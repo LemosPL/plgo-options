@@ -47,14 +47,18 @@ def _engine(pnl: dict, asset: str):
 def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict]]:
     """(engine trade dicts, per-leg pricing rows) for a proposal's legs."""
     from plgo_options.optimization.math_utils import bs_price
+    from plgo_options.optimization.collateral_optimization import CollateralOptimization
     from plgo_options.optimization.option_smile import OptionSmile
+    from plgo_options.optimization.optimizer_v3 import _with_exchange_costs
     from plgo_options.pricing.cpty_pricing import resolve_price
 
     S = float(opt.spot)
     smiles = [s for s in opt.vol_surface if s.get("dte", 0) > 0]
     smile = OptionSmile([{"expiry_code": s["expiry_code"], "expiry_date": s["expiry_date"],
                           "strikes": s["strikes"], "ivs": [iv / 100.0 for iv in s["ivs"]]} for s in smiles])
-    vol_pts = DEFAULT_VOL_PTS.get(asset.upper(), 5.0)
+    # per counterparty, as the engine charges them: Deribit's measured cost for ETH
+    vol_pts_by_cp = _with_exchange_costs(None, DEFAULT_VOL_PTS.get(asset.upper(), 5.0), "bid_ask_vol_pts",
+                                         asset.upper())
     trades, rows = [], []
     now = datetime.now()
     for l in legs:
@@ -94,6 +98,7 @@ def price_legs(opt, asset: str, legs: list[dict]) -> tuple[list[dict], list[dict
         elif cp is not None:
             px, by = float(cp[0]), f"{l.get('counterparty')} methodology"
         else:
+            vol_pts = CollateralOptimization._resolve(vol_pts_by_cp, str(l.get("counterparty") or ""), 5.0)
             vega_pt = abs(bs_price(S, K, T, 0.0, sigma + 0.01, o) - bs_price(S, K, T, 0.0, max(sigma - 0.01, 1e-4), o)) / 2
             px = mid + sign * vega_pt * vol_pts
             px, by = max(px, 0.0), f"mid ± {vol_pts:g} vol pts"

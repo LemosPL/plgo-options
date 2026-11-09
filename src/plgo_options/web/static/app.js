@@ -12001,10 +12001,27 @@ function optv3PopulateCounterparties() {
 // DEFAULT_BID_ASK_VOL_PTS_BY_ASSET so the inputs seed with the same fallback.
 const OPT_DEFAULT_VOL_PTS = { ETH: 5, FIL: 40 };
 function optDefaultVolPts(asset, cpty) {
+  if (asset === "ETH" && cpty === OPT_DERIBIT) return OPT_DERIBIT_ETH_COSTS.volPts;
   const a = OPT_DEFAULT_VOL_PTS[asset];
   if (a == null) return 0.75;
   if (typeof a === "number") return a;
   return a[cpty] != null ? a[cpty] : 0.75;
+}
+
+// Deribit lists ETH options only (no FIL), so for ETH Optimizer v2 always offers it as a
+// counterparty, seeded with its measured costs (engine's EXCHANGE_COSTS_BY_ASSET, 9 Nov
+// 2026): 0.6 vol pts a leg, fee included; no netting, the bot crosses each leg on its own;
+// a box crossed on screen ~1.6% of notional.
+const OPT_DERIBIT = "Deribit";
+const OPT_DERIBIT_ETH_COSTS = { volPts: 0.6, nettingPct: 0, boxFeePct: 1.6 };
+
+// The counterparties a cost input list shows: the loaded book's, plus Deribit on
+// Optimizer v2 for ETH.
+function optCostCptys(listId, data) {
+  const cps = new Set(((data && data.positions) || []).map(p => p.counterparty).filter(Boolean));
+  const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
+  if (asset === "ETH" && listId.startsWith("optv2-")) cps.add(OPT_DERIBIT);
+  return [...cps].sort();
 }
 
 // Render one editable VOLpts input per counterparty in the loaded book,
@@ -12012,7 +12029,7 @@ function optDefaultVolPts(asset, cpty) {
 function optRenderVolPts(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
-  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const cps = optCostCptys(listId, data);
   const asset = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
   const prev = {};
   box.querySelectorAll(".opt-volpts-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
@@ -12085,11 +12102,11 @@ function optPerpCostDict(listId) {
 function optRenderBoxFee(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
-  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const cps = optCostCptys(listId, data);
   const prev = {};
   box.querySelectorAll(".opt-boxfee-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
   box.innerHTML = cps.length ? cps.map(cp => {
-    const v = prev[cp] != null ? prev[cp] : 1;
+    const v = prev[cp] != null ? prev[cp] : cp === OPT_DERIBIT ? OPT_DERIBIT_ETH_COSTS.boxFeePct : 1;
     return `<div class="optv3-field"><label>${cp}<input type="number" class="opt-boxfee-input" data-cpty="${cp}" value="${v}" step="0.1" min="0" style="width:5rem"></label></div>`;
   }).join("") : '<p class="optv3-hint" style="margin:0">No counterparties in the loaded book.</p>';
 }
@@ -12118,6 +12135,7 @@ function optBoxFeeDict(listId) {
 // as of writing).
 const OPT_DEFAULT_NETTING_PCT = { KeyRock: 100 };
 function optDefaultNettingPct(cpty) {
+  if (cpty === OPT_DERIBIT) return OPT_DERIBIT_ETH_COSTS.nettingPct;  // listed for ETH only
   return OPT_DEFAULT_NETTING_PCT[cpty] != null ? OPT_DEFAULT_NETTING_PCT[cpty] : 100;
 }
 
@@ -12126,7 +12144,7 @@ function optDefaultNettingPct(cpty) {
 function optRenderNettingPct(listId, data) {
   const box = document.getElementById(listId);
   if (!box || !data) return;
-  const cps = [...new Set((data.positions || []).map(p => p.counterparty).filter(Boolean))].sort();
+  const cps = optCostCptys(listId, data);
   const prev = {};
   box.querySelectorAll(".opt-nettingpct-input").forEach(i => { prev[i.dataset.cpty] = i.value; });
   box.innerHTML = cps.length ? cps.map(cp => {

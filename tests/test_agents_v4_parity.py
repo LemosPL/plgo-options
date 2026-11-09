@@ -61,7 +61,7 @@ def test_agent_params_match_v4_page(monkeypatch):
         mu_factor=2.3, cash_neutrality_factor=0.05, target_expiry="25DEC26", unwind_discount=0.2,
         new_position_penalty=0.04, roll_dte_threshold=7, roll_itm_only=False,
         collateral_budget_pct=0.05, max_qty=5000, max_trades=5, enable_box_neutralizer=True,
-        enable_composite_unwind=True, counterparties=["Flowdesk"], bid_ask_vol_pts=5.0,
+        enable_composite_unwind=True, counterparties=["Flowdesk"], bid_ask_vol_pts=None,  # engine defaults
         enable_delta_rehedge=False, delta_band_usd=150000, target_profile_file=None,
         parametric_trough_payoff=-17_500_000, parametric_low_floor_ratio=0.85,
         parametric_high_plateau_ratio=0.75,

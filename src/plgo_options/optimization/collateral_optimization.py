@@ -46,9 +46,10 @@ class CollateralOptimization:
 
     @staticmethod
     def _resolve(param, cp, default=0.0):
-        """Return per-CP value from a dict, or the scalar itself, or default."""
+        """Return per-CP value from a dict (its "*" entry for a CP it does not name), or
+        the scalar itself, or default."""
         if isinstance(param, dict):
-            return param.get(cp, default)
+            return param.get(cp, param.get("*", default))
         if param is None:
             return default
         return param

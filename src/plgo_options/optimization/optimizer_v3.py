@@ -96,6 +96,30 @@ DEFAULT_NETTING_PCT_BY_CPTY: dict[str, float] = {
 # preserves today's full-netting behavior for anyone not explicitly tuned.
 _NETTING_PCT_FALLBACK = 1.0
 
+# An exchange's real costs, measured rather than quoted, filled in for that exchange
+# whenever the caller's per-counterparty values leave it out. Deribit lists ETH options
+# only (no FIL). Measured 9 Nov 2026 on the paper execution bot's fills and the quote
+# recorder: each leg costs ~0.33 vol pts of half-spread plus ~0.26 of taker fee; the bot
+# crosses every leg on its own, so a structure gets no netting credit; a box crossed on
+# screen costs ~163 bps of its notional, nearly all of it the two deep in-the-money legs'
+# spreads (the same bps price a single in-the-money roll unwind: ~$11 on a $690 option).
+EXCHANGE_COSTS_BY_ASSET: dict[str, dict[str, dict[str, float]]] = {
+    "ETH": {"Deribit": {"bid_ask_vol_pts": 0.6, "netting_pct": 0.0, "box_fee_bps": 160.0}},
+}
+
+
+def _with_exchange_costs(param, default, name: str, asset: str):
+    """``param`` (``default`` when None), with each exchange's measured ``name`` cost
+    added for an exchange it does not name. An explicit scalar still means every
+    counterparty; a scalar default becomes the "*" entry beside the exchanges'."""
+    exchanges = {cp: c[name] for cp, c in EXCHANGE_COSTS_BY_ASSET.get(asset, {}).items()}
+    value = default if param is None else param
+    if not exchanges or (param is not None and not isinstance(param, dict)):
+        return value
+    if isinstance(value, dict):
+        return {**exchanges, **value}
+    return {"*": value, **exchanges}
+
 
 def _attach_cpty_prices(trades, spot, asset):
     """Annotate each option trade dict with cpty_price_usd: the counterparty's
@@ -1373,12 +1397,12 @@ class OptimizerV3(BaseOptimizer):
         # this asset's default vol-point spreads when no explicit override is given.
         # (bid_ask_atm_pct is retained as an accepted param for back-compat but no
         # longer drives cost, so it needs no default here.)
-        if bid_ask_vol_pts is None:
-            bid_ask_vol_pts = DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {})
-        if netting_pct is None:
-            netting_pct = DEFAULT_NETTING_PCT_BY_CPTY
-        if box_fee_bps is None:
-            box_fee_bps = DEFAULT_BOX_FEE_BPS_BY_ASSET.get(self.asset, {})
+        # Exchanges (Deribit for ETH) get their measured costs unless the caller names them.
+        bid_ask_vol_pts = _with_exchange_costs(
+            bid_ask_vol_pts, DEFAULT_BID_ASK_VOL_PTS_BY_ASSET.get(self.asset, {}), "bid_ask_vol_pts", self.asset)
+        netting_pct = _with_exchange_costs(netting_pct, DEFAULT_NETTING_PCT_BY_CPTY, "netting_pct", self.asset)
+        box_fee_bps = _with_exchange_costs(
+            box_fee_bps, DEFAULT_BOX_FEE_BPS_BY_ASSET.get(self.asset, {}), "box_fee_bps", self.asset)
 
         _parametric_overrides = {
             k: v for k, v in {
