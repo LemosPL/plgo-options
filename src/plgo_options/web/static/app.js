@@ -8,8 +8,11 @@ let legs = [];          // {side, type, strike, premium, quantity}
 let volSurface = null;  // cached Deribit vol surface {eth_spot, smiles: [{expiry_code, dte, strikes, ivs}]}
 
 // ─── Asset-aware formatting helpers ─────────────────────────
-const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v).toFixed(0);
+const fmtSpot = (v) => currentAsset === "FIL" ? Number(v).toFixed(4) : Number(v).toFixed(0);
 const fmtStrike = (v) => currentAsset === "FIL" ? Number(v).toFixed(2) : Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
+// Decimals for the page asset's PRICE (spot, spot-ladder rows) — FIL 4, ETH 0.
+// Strikes keep their own decimals (fmtStrike, optv*Dp): a 1.25 strike stays "1.25".
+function assetSpotDp() { return (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 4 : 0; }
 const fmtPrem = (v) => {
   const n = Number(v);
   if (currentAsset === "FIL") return n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
@@ -524,7 +527,7 @@ async function init() {
   // Spot
   if (spotData) {
     ethSpot = spotData.eth_spot || spotData.fil_spot;
-    const fracDigits = currentAsset === "FIL" ? 2 : 2;
+    const fracDigits = currentAsset === "FIL" ? 4 : 2;
     $spot.textContent = `$${ethSpot.toLocaleString(undefined, { maximumFractionDigits: fracDigits })}`;
     $spotMin.value = currentAsset === "FIL" ? 0.2 : Math.round(ethSpot * 0.4);
     $spotMax.value = currentAsset === "FIL" ? 3.0 : Math.round(ethSpot * 2.0);
@@ -4091,7 +4094,7 @@ function pfRenderSummary() {
   const sel = all.filter(p => pfSelected.has(p.id));
 
   document.getElementById("pf-spot").textContent =
-    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: currentAsset === "FIL" ? 2 : 0 })}`;
+    `$${pfData.eth_spot.toLocaleString(undefined, { maximumFractionDigits: currentAsset === "FIL" ? 4 : 0 })}`;
   document.getElementById("pf-count").textContent = all.length;
   document.getElementById("pf-selected-count").textContent = sel.length;
 
@@ -5003,7 +5006,7 @@ function pfRenderMtmGrid() {
   const spots = pfData.spot_ladder;
   const horizons = pfPnlHorizons();
   const ethSpot = pfData.eth_spot;
-  const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 2 : 0;
+  const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 4 : 0;  // spot-row labels (prices)
   const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
 
   const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
@@ -7986,7 +7989,7 @@ function opt2RenderMatrix() {
 
     const cs = "font-family:monospace;text-align:center";
     let row = `<tr${isSpot ? ' style="background:rgba(88,166,255,0.08);font-weight:600"' : ""}>`;
-    row += `<td style="${cs}">$${currentAsset === "FIL" ? ks.toFixed(2) : ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
+    row += `<td style="${cs}">$${currentAsset === "FIL" ? ks.toFixed(4) : ks.toLocaleString()}${isSpot ? " (spot)" : ""}</td>`;
     row += `<td style="${cs}" class="${fmtCls(bVal)}">${fmtM(bVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(cVal)}">${fmtM(cVal)}</td>`;
     row += `<td style="${cs}" class="${fmtCls(diff)}">${fmtM(diff)}</td>`;
@@ -10580,7 +10583,7 @@ function optv2ParametricOverrides() {
 function optv2UpdateTargetShapeReadouts() {
   const spot = (optv2Data && optv2Data.eth_spot) || 0;
   const dp = optv2Dp();
-  const fmtSpot = v => "$" + optv2Fmt(v, dp);
+  const fmtSpot = v => "$" + optv2Fmt(v, assetSpotDp());
   const o = optv2ParametricOverrides();
   const asymmetric = document.getElementById("optv2-target-asymmetric-toggle")?.checked || false;
   const downBreakeven = spot * (1 - o.parametric_low_floor_ratio);
@@ -10832,7 +10835,7 @@ function optv2RenderProfileTable() {
     const resid = (a != null) ? a - tv : null;
     const hl = si === spotIdx ? ' class="row-highlight"' : '';
     return `<tr${hl}>`
-      + `<td style="font-weight:600">$${optv2Fmt(s, optv2Dp())}</td>`
+      + `<td style="font-weight:600">$${optv2Fmt(s, assetSpotDp())}</td>`
       + `${cell(b)}${cell(a)}`
       + `<td class="num"><input class="optv2-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
       + `${cell(resid)}</tr>`;
@@ -11737,13 +11740,13 @@ function optv2RenderStrategyGroups(trades, wrapId = "optv2-strategy-groups") {
 // opts.geometric — render uniform-% rows (interpolated onto geometric price
 // levels) plus a "% move" column, instead of the equal-dollar ladder rows.
 // Opt-in per call site so v2 and v3 keep their existing tables unchanged;
-// only v4 asks for it. opts.dp sets price decimals (FIL needs 2).
+// only v4 asks for it. opts.dp sets the spot-row price decimals (FIL 4).
 // The optimizer result's Before/After matrices. P&L from today by default;
 // with "Absolute value" ticked each cell adds the book's MTM (before: today's,
 // after: after the trades, net of cost), so it reads as the book's value then.
 function optv2RenderResultMatrices(data) {
   const absolute = !!document.getElementById("optv2-matrix-absolute")?.checked;
-  const optv2MatrixOpts = { dp: optv3Dp(), assetLabel: currentAsset };
+  const optv2MatrixOpts = { dp: assetSpotDp(), assetLabel: currentAsset };
   if (data.before && data.before.payoff_by_horizon) {
     optv2RenderCompareMatrix(data, "before", "optv2-matrix-thead", "optv2-matrix-tbody",
       { ...optv2MatrixOpts, offset: absolute ? (data.current_book_mtm || 0) : 0 });
@@ -12569,7 +12572,7 @@ function optv3RenderMatrix() {
     const tr = document.createElement("tr");
     if (si === nearestIdx) tr.classList.add("row-highlight");
     const tdSpot = document.createElement("td");
-    tdSpot.textContent = "$" + optv2Fmt(s, optv3Dp()); tdSpot.style.fontWeight = "600";
+    tdSpot.textContent = "$" + optv2Fmt(s, assetSpotDp()); tdSpot.style.fontWeight = "600";
     tr.appendChild(tdSpot);
     OPTV2_HORIZONS.forEach(h => {
       const hKey = String(h);
@@ -12822,7 +12825,7 @@ function optv3RenderResult(data) {
     // dp/assetLabel: see optv2MatrixOpts above — same shared renderer,
     // same "ETH Spot" / 0-decimal-on-FIL bug without them.
     optv2RenderCompareMatrix(data, "before", "optv3-matrix-thead", "optv3-matrix-tbody",
-      { dp: optv3Dp(), assetLabel: currentAsset });
+      { dp: assetSpotDp(), assetLabel: currentAsset });
   }
   optv3RenderAfterMatrix();
 
@@ -13078,7 +13081,7 @@ function optv3RenderAfterMatrix() {
   $afterPanel.style.display = "";
   $matrixGrid.style.gridTemplateColumns = "1fr 1fr";
   optv2RenderCompareMatrix(dataSel, "after", "optv3-matrix-after-main-thead", "optv3-matrix-after-main-tbody",
-    { dp: optv3Dp(), assetLabel: currentAsset });
+    { dp: assetSpotDp(), assetLabel: currentAsset });
 }
 
 // Append a bold totals row to a trade table already rendered by optv2RenderTradeTable.
@@ -13893,7 +13896,7 @@ function optv4ParametricOverrides() {
 function optv4UpdateTargetShapeReadouts() {
   const spot = (optv4Data && optv4Data.eth_spot) || 0;
   const dp = optv4Dp();
-  const fmtSpot = v => "$" + optv2Fmt(v, dp);
+  const fmtSpot = v => "$" + optv2Fmt(v, assetSpotDp());
   const o = optv4ParametricOverrides();
   const asymmetric = document.getElementById("optv4-target-asymmetric-toggle")?.checked || false;
   const downBreakeven = spot * (1 - o.parametric_low_floor_ratio);
@@ -14389,7 +14392,7 @@ function optv4MatrixOpts() {
       : (optv4Data && optv4Data.eth_spot)) || 0;
   return {
     geometric: true,
-    dp: optv4Dp(),
+    dp: assetSpotDp(),
     assetLabel: (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH",
     spot,
   };
@@ -14851,12 +14854,12 @@ function optv4RenderResult(data) {
           const netCells = n
             ? `<td class="num" style="color:${n.net >= 0 ? "var(--green)" : "var(--red)"}">`
               + `${n.net >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(n.net), 0)}</td>`
-              + `<td class="num">${optv2Fmt(n.spot, optv4Dp())}</td>`
+              + `<td class="num">${optv2Fmt(n.spot, assetSpotDp())}</td>`
             : `<td class="num">—</td><td class="num">—</td>`;
           return `<tr><td>${cp}</td>`
             + `<td class="num" style="color:${pnl >= 0 ? "var(--green)" : "var(--red)"}">`
             + `${pnl >= 0 ? "+$" : "-$"}${optv2Fmt(Math.abs(pnl), 0)}</td>`
-            + `<td class="num">${optv2Fmt(v.spot, optv4Dp())}</td>${netCells}</tr>`;
+            + `<td class="num">${optv2Fmt(v.spot, assetSpotDp())}</td>${netCells}</tr>`;
         }).join("");
     } else {
       $stressBody.innerHTML = "";
@@ -15573,7 +15576,7 @@ function optv4RenderProfileTable() {
     const resid = (a != null) ? a - tv : null;
     const hl = k === spotRow ? ' class="row-highlight"' : '';
     return `<tr${hl}>`
-      + `<td style="font-weight:600">$${optv2Fmt(s, optv4Dp())}</td>`
+      + `<td style="font-weight:600">$${optv2Fmt(s, assetSpotDp())}</td>`
       + `${cell(b)}${cell(a)}`
       + `<td class="num"><input class="optv4-target-input" type="number" step="1000" data-x="${s}" value="${Math.round(tv)}"></td>`
       + `${cell(resid)}</tr>`;
@@ -17103,7 +17106,7 @@ function collatRenderMap() {
   // Spot pill (live reference prices)
   const lp = m.live_prices || {};
   const $pill = document.getElementById("collat-spot-pill");
-  if ($pill) $pill.textContent = `ETH $${(lp.ETH || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · FIL $${(lp.FIL || 0).toFixed(3)} · BTC $${(lp.BTC || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · as of ${new Date().toLocaleTimeString()}`;
+  if ($pill) $pill.textContent = `ETH $${(lp.ETH || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · FIL $${(lp.FIL || 0).toFixed(4)} · BTC $${(lp.BTC || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} · as of ${new Date().toLocaleTimeString()}`;
 
   // Summary tiles
   const totHc = cps.reduce((s, c) => s + (c.collateral_haircut_usd || 0), 0);
@@ -17483,7 +17486,7 @@ function collatRender() {
   // Spot pill
   const spotParts = [];
   if (spots.ETH) spotParts.push(`ETH $${Number(spots.ETH).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
-  if (spots.FIL) spotParts.push(`FIL $${Number(spots.FIL).toFixed(3)}`);
+  if (spots.FIL) spotParts.push(`FIL $${Number(spots.FIL).toFixed(4)}`);
   const $pill = document.getElementById("collat-spot-pill");
   if ($pill) $pill.textContent = spotParts.length ? spotParts.join(" · ") : "";
 
