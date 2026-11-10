@@ -514,3 +514,49 @@ def test_a_minute_holds_one_feed_over_the_working_expiries_and_reports_it(tmp_pa
         out = await bot.run_minute(None, off, clock=lambda: clock["t"], sleep=sleep, feed_fn=broken, names_fn=names)
         assert out["quotes"] == "HTTP (ConnectionRefusedError: refused)" and "get_order_book" in calls
     run(body)
+
+
+def test_rfq_structures_a_box_apart_the_rest_in_units_with_a_delta_hedge(monkeypatch):
+    from plgo_options.execution import rfq
+    monkeypatch.setattr(rfq.time, "time", lambda: NOW)
+    d = "2026-12-25"
+    box = [{"counterparty": "Deribit", "opt": o, "strike": k, "expiry": d, "qty": 821, "side": s,
+            "strategy": "BOX_NEUTRALIZER", "strategy_instrument": "BOX 1800/2800"}
+           for o, k, s in (("C", 1800, "Sell"), ("P", 1800, "Buy"), ("C", 2800, "Buy"), ("P", 2800, "Sell"))]
+    rest = [{"counterparty": "Deribit", "opt": "P", "strike": 2000, "expiry": d, "qty": 5000, "side": "Buy"},
+            {"counterparty": "Deribit", "opt": "P", "strike": 2200, "expiry": d, "qty": 2573, "side": "Sell"},
+            {"counterparty": "Deribit", "opt": "C", "strike": 2500, "expiry": d, "qty": 3406, "side": "Buy"},
+            {"counterparty": "Deribit", "opt": "C", "strike": 2800, "expiry": d, "qty": 40, "side": "Buy"}]
+
+    async def listed(_):
+        return {f"ETH-{EXPIRY}-{k}-{c}" for k in STRIKES for c in "CP"}
+
+    async def books(expiries):
+        assert expiries == [EXPIRY]
+        return {EXPIRY: _books()}, NOW, NOW + 1
+
+    assert rfq.ratios([5000, 2573, 3406, 40], 100) == ([50, 25, 34, 0], 100, [0, 73, 6, 40])
+    assert rfq.ratios([800, 400], 100) == ([2, 1], 400, [0, 0])
+    out = asyncio.run(rfq.preview_rfq(box + rest, unit=100, allowance_vp=0.2, box_bps=40, hedge=True,
+                                      listed_fn=listed, books_fn=books))
+    b, s = out["structures"]
+    assert b["kind"] == "box" and b["amount"] == 821 and [x["ratio"] for x in b["legs"]] == [1, 1, 1, 1]
+    assert b["hedge"] is None and abs(b["delta_eth"]) < 0.01                  # a box has no delta
+    assert -b["fair_usd"] == pytest.approx(1000, abs=1)       # we sell the box: receive its width (the fixture's DF is 1)
+    assert b["allowance_usd"] == pytest.approx(0.004 * 1000)                  # 40 bps of the 1000 strike width
+    assert s["kind"] == "directional" and s["amount"] == 100
+    assert [(x["instrument"][12:], x["ratio"]) for x in s["legs"]] == [("2000-P", 50), ("2200-P", 25), ("2500-C", 34)]
+    assert s["allowance_usd"] == pytest.approx(0.2 * sum(x["ratio"] * x["vega"] for x in s["legs"]), rel=1e-3)
+    assert s["limit_usd"] == pytest.approx(s["fair_usd"] + s["allowance_usd"], abs=0.02)
+    # crossing each leg at the touch against its fair value, plus the fee; the book is +/- $4 around the true smile
+    touch = lambda x: x["ask_usd"] - x["fair_usd"] if x["side"] == "buy" else x["fair_usd"] - x["bid_usd"]  # noqa: E731
+    fees = sum(x["ratio"] * min(0.0003 * S, 0.125 * (x["ask_usd"] if x["side"] == "buy" else x["bid_usd"])) for x in s["legs"])
+    assert s["screen_cost_usd"] == pytest.approx(sum(x["ratio"] * touch(x) for x in s["legs"]) + fees, abs=1)   # legs rounded to cents
+    assert all(abs(touch(x) - 4) < 1 for x in s["legs"])
+    assert s["rfq_fee_usd"] < s["screen_fee_usd"]                             # the combo discount waives one side
+    assert s["hedge"]["instrument_name"] == "ETH-25DEC26"
+    assert s["hedge"]["direction"] == ("sell" if s["delta_eth"] > 0 else "buy")
+    assert s["hedge"]["amount"] == pytest.approx(abs(s["delta_eth"]) * 100 * F, rel=0.01)
+    plain = asyncio.run(rfq.preview_rfq(rest, listed_fn=listed, books_fn=books))["structures"][0]
+    assert plain["hedge"] is None and plain["delta_total_eth"] == pytest.approx(s["delta_eth"] * 100, abs=0.1)
+    assert sorted((x["instrument"][12:], x["qty"]) for x in out["leftovers"]) == [("2200-P", 73), ("2500-C", 6), ("2800-C", 40)]

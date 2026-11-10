@@ -8,6 +8,7 @@ People-facing:
     GET  /api/execution-bot/orders               parent orders, open ones first
     POST /api/execution-bot/orders               create one (paper only for now)
     POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
+    POST /api/execution-bot/rfq-preview          the same solution as Block RFQ structures (nothing sent)
     POST /api/execution-bot/orders/batch         create several (the reviewed preview)
     GET  /api/execution-bot/orders/{id}          the order, its ticks and fills
     GET  /api/execution-bot/costs                each leg's fill cost vs the spline, the mark and the mid
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer
+from plgo_options.execution import bot, from_optimizer, rfq
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
 from plgo_options.web.auth import current_user
@@ -155,6 +156,25 @@ async def preview(req: PreviewReq):
 @router.get("/costs")
 async def costs(limit: int = 50):
     return {"legs": await store.leg_costs(limit)}
+
+
+class RfqPreviewReq(BaseModel):
+    trades: list[dict]
+    asset: str = "ETH"
+    unit: int = Field(100, ge=1, description="contracts per unit of the directional structure")
+    allowance_vp: float = Field(0.2, ge=0, description="worst price over fair, vol points x the structure's vega")
+    box_bps: float = Field(40.0, ge=0, description="a box's worst price over fair, bps of its strike width")
+    hedge: bool = Field(False, description="add a future hedge leg for the directional structure's delta")
+
+
+@router.post("/rfq-preview")
+async def rfq_preview(req: RfqPreviewReq):
+    if req.asset != "ETH":
+        raise HTTPException(400, f"Block RFQ is for Deribit ETH options only, not {req.asset}")
+    try:
+        return await rfq.preview_rfq(req.trades, req.asset, req.unit, req.allowance_vp, req.box_bps, req.hedge)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
 
 
 @router.get("/orders/{oid}")

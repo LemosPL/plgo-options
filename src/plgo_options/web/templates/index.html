@@ -4090,6 +4090,21 @@
       </div>
       <p style="font-size:.72rem;color:var(--muted);margin-top:.5rem">“Best cost now” is the touch against the spline, fee included;
         “Takeable now” is what the start threshold would take this minute, before the per-tick cap.</p>
+
+      <h3 style="font-size:.9rem;margin:1.2rem 0 .3rem">As Block RFQ <span style="font-weight:400;color:var(--muted);font-size:.75rem">preview only: nothing is sent</span></h3>
+      <p style="font-size:.72rem;color:var(--muted);margin:0 0 .6rem;max-width:85ch">
+        Each box goes out as its own structure; the other legs of an expiry as one, in round units (ratios of the unit,
+        what rounding leaves over goes to the bot). Market makers quote the whole structure as one price; “Limit” is the
+        worst we would accept: the spline's fair value plus the allowance. “Screen” is crossing every leg at the touch now,
+        fees included. RFQ fees assume Deribit's combo discount (the cheaper side's fees waived) at the screen rate.</p>
+      <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;font-size:.78rem;margin-bottom:.75rem">
+        <label title="contracts per unit of the directional structure">Unit<br><input id="xb-q-unit" type="number" value="100" min="1" step="50" style="width:5rem"></label>
+        <label title="worst price over fair, vol points x the structure's vega">Allowance (vp)<br><input id="xb-q-vp" type="number" value="0.2" min="0" step="0.05" style="width:5rem"></label>
+        <label title="a box's worst price over fair, bps of its strike width">Box allowance (bps)<br><input id="xb-q-bps" type="number" value="40" min="0" step="5" style="width:5rem"></label>
+        <label title="a future leg for the structure's net delta: changes the portfolio the optimizer chose"><input id="xb-q-hedge" type="checkbox"> Hedge the delta</label>
+        <button id="xb-q-go" class="btn-secondary" style="width:auto">Preview as Block RFQ</button>
+      </div>
+      <div id="xb-rfq"></div>
     </section>
 
     <section class="card" id="xb-new" style="display:none">
@@ -4565,6 +4580,6 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=4"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=7"></script>
+<script src="/static/execbot.js?v=8"></script>
 </body>
 </html>

@@ -238,6 +238,60 @@
     $("xb-r-create").disabled = !legs.length;
   }
 
+  // ── review as Block RFQ (preview only) ────────────────────────
+  async function rfqPreview() {
+    if (!review) return;
+    const n = (id) => parseFloat($(id).value);
+    $("xb-rfq").innerHTML = `<div style="color:var(--muted);font-size:.78rem">Reading the Deribit books and fitting the spline…</div>`;
+    let d;
+    try {
+      d = await api("POST", "/api/execution-bot/rfq-preview", { trades: review.trades, asset: review.meta.asset || "ETH",
+        unit: Math.max(1, Math.round(n("xb-q-unit"))), allowance_vp: n("xb-q-vp"), box_bps: n("xb-q-bps"),
+        hedge: $("xb-q-hedge").checked });
+    } catch (e) {
+      $("xb-rfq").innerHTML = `<div style="color:var(--red);font-size:.78rem">${esc(e.message)}</div>`;
+      return;
+    }
+    const side = (s) => s === "buy" ? "Buy" : "Sell";
+    const pay = (v) => v == null ? "—" : v >= 0 ? `pay ${usd(v)}` : `receive ${usd(-v)}`;
+    const card = (s) => {
+      const t = s.total;
+      const title = s.kind === "box" ? `Box · ${s.expiry}` : `${s.expiry} legs`;
+      const delta = s.hedge
+        ? `hedge: ${side(s.hedge.direction)} $${fmt(s.hedge.amount)} ${esc(s.hedge.instrument_name)} (${fmt(s.hedge.delta_eth, 1)} ETH delta)`
+        : `delta ${fmt(s.delta_total_eth, 1)} ETH (${usd(s.delta_total_usd, 0)}), not hedged`;
+      return `<div style="border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;margin-bottom:.75rem">
+        <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem;font-size:.82rem">
+          <b>${esc(title)} · amount ${fmt(s.amount)} × ratios</b>
+          <span style="color:var(--muted)">${esc(delta)}</span></div>
+        <div class="chain-wrapper" style="margin-top:.4rem"><table class="pf-table">
+          <thead><tr><th style="text-align:left">Leg</th><th>Ratio</th><th>Contracts</th><th>Fair ($)</th><th>Bid ($)</th><th>Ask ($)</th>
+            <th>Vol</th><th>Vega</th><th>Delta</th><th>Screen ($/contract)</th></tr></thead>
+          <tbody>${s.legs.map((l) => `<tr><td style="text-align:left">${side(l.side)} ${esc(l.instrument)}</td><td>${l.ratio}</td>
+            <td>${fmt(l.qty)}</td><td>${usd(l.fair_usd)}</td><td>${usd(l.bid_usd)}</td><td>${usd(l.ask_usd)}</td>
+            <td>${fmt(l.iv, 1)}%</td><td>${fmt(l.vega, 2)}</td><td>${fmt(l.delta, 2)}</td><td>${usd(l.cross_usd)}</td></tr>`).join("")}</tbody>
+        </table></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(11rem,1fr));gap:.4rem .9rem;font-size:.78rem;margin-top:.5rem">
+          <div><span style="color:var(--muted)">Fair, per unit</span><br>${pay(s.fair_usd)} <span style="color:var(--muted)">(${fmt(s.fair_eth, 4)} ETH)</span></div>
+          <div><span style="color:var(--muted)">Limit, per unit</span><br>${pay(s.limit_usd)} <span style="color:var(--muted)">(${fmt(s.limit_eth, 4)} ETH)</span></div>
+          <div><span style="color:var(--muted)">Allowance</span><br>${usd(t.allowance_usd, 0)} <span style="color:var(--muted)">· ${esc(s.allowance_basis)}</span></div>
+          <div><span style="color:var(--muted)">Screen, all legs</span><br>${usd(t.screen_cost_usd, 0)} <span style="color:var(--muted)">fees ${usd(t.screen_fee_usd, 0)} included</span></div>
+          <div><span style="color:var(--muted)">RFQ fees (est.)</span><br>${usd(t.rfq_fee_usd, 0)}</div>
+          <div><span style="color:var(--muted)">Total at fair</span><br>${pay(t.fair_usd)}</div>
+        </div></div>`;
+    };
+    const left = d.leftovers.length
+      ? `<div style="font-size:.78rem;margin-top:.25rem"><b>To the bot on screen (${d.leftovers.length})</b>`
+        + d.leftovers.map((x) => `<div>${side(x.side)} ${fmt(x.qty)} ${esc(x.instrument)} — <span style="color:var(--muted)">${esc(x.why)}</span></div>`).join("")
+        + `</div>` : "";
+    const sk = d.skipped.length
+      ? `<div style="font-size:.78rem;margin-top:.5rem"><b>Not in an RFQ (${d.skipped.length})</b>`
+        + d.skipped.map((s) => `<div>${esc(s.trade)} — <span style="color:var(--muted)">${esc(s.reason)}</span></div>`).join("") + `</div>` : "";
+    $("xb-rfq").innerHTML = (d.structures.length ? d.structures.map(card).join("")
+      : `<div style="color:var(--muted);font-size:.78rem">No Deribit structure in this solution.</div>`)
+      + left + sk + `<div style="font-size:.72rem;color:var(--muted);margin-top:.4rem">Priced ${when(d.asof)}.</div>`;
+  }
+
   async function createFromReview() {
     const p = params();
     const qtys = {};
@@ -265,6 +319,7 @@
 
   window.execbotReceive = function (trades, meta) {
     review = { trades, meta: meta || {}, data: null };
+    $("xb-rfq").innerHTML = "";
     document.querySelector('.nav-item[data-page="execbot"]')?.click();
     reprice();
     $("xb-review").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -296,6 +351,7 @@
   $("xb-r-reprice")?.addEventListener("click", reprice);
   $("xb-r-create")?.addEventListener("click", createFromReview);
   $("xb-r-discard")?.addEventListener("click", () => { review = null; $("xb-review").style.display = "none"; });
+  $("xb-q-go")?.addEventListener("click", rfqPreview);
   $("xb-orders")?.addEventListener("click", async (ev) => {
     const b = ev.target.closest("button");
     if (b) {
