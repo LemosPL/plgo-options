@@ -204,8 +204,12 @@ def load(expiry: str) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
 
 # ---------- step 2: work the orders ----------
 def work(steps, S, data, legs, t0: float, hours: float, start_vp: float, end_vp: float,
-         hard_vp: float, cap: float) -> dict | None:
-    """One window from t0: the fills of each leg, and the arrival fair values."""
+         hard_vp: float, cap: float, cooldown: float = COOLDOWN) -> dict | None:
+    """One window from t0: the fills of each leg, and the arrival fair values.
+
+    What a take consumed stays consumed while the recorded quote is unchanged (same price and
+    size as when we took): the recording never saw our paper takes, so without this a short
+    rest would take the same contracts again. A changed quote counts as the maker refilling."""
     j0 = int(np.searchsorted(steps, t0))
     j1 = int(np.searchsorted(steps, t0 + hours * H))
     if j1 >= len(steps) or j0 >= j1:
@@ -219,6 +223,7 @@ def work(steps, S, data, legs, t0: float, hours: float, start_vp: float, end_vp:
                              deadline_ts=t0 + hours * H, start_vp=start_vp, end_vp=end_vp,
                              hard_vp=hard_vp, cap=cap) for i, (n, side, q) in enumerate(legs)]
     last_fill = [-1e18] * len(legs)
+    taken: list[tuple | None] = [None] * len(legs)   # (price, recorded size, contracts we took)
     fills: list[dict] = []
     done_ts = [None] * len(legs)
     for j in range(j0, j1):
@@ -226,13 +231,22 @@ def work(steps, S, data, legs, t0: float, hours: float, start_vp: float, end_vp:
             continue
         t = float(steps[j])
         for i, o in enumerate(orders):
-            if o.remaining <= 0 or t - last_fill[i] < COOLDOWN or not np.isfinite(data["fair"][j, i]):
+            if o.remaining <= 0 or t - last_fill[i] < cooldown or not np.isfinite(data["fair"][j, i]):
                 continue
             fair = dict(fair=data["fair"][j, i], iv=data["iv"][j, i], vega=data["vega"][j, i],
                         inside=bool(data["inside"][j, i]))
             bid, ask = data["bid"][j, i], data["ask"][j, i]
-            bids = [(bid, data["bsize"][j, i])] if np.isfinite(bid) else []
-            asks = [(ask, data["asize"][j, i])] if np.isfinite(ask) else []
+            bsz, asz = data["bsize"][j, i], data["asize"][j, i]
+            px, sz = (ask, asz) if o.side == "buy" else (bid, bsz)
+            left = sz
+            if taken[i] is not None and taken[i][:2] == (px, sz):
+                left = sz - taken[i][2]                      # the same quote we already hit
+            if o.side == "buy":
+                asz = left
+            else:
+                bsz = left
+            bids = [(bid, bsz)] if np.isfinite(bid) and bsz > 0 else []
+            asks = [(ask, asz)] if np.isfinite(ask) and asz > 0 else []
             d = decide(o, t, fair, float(S[j]), BookDepth(o.instrument, bids, asks, None, t))
             if d.action != "take":
                 continue
@@ -245,6 +259,8 @@ def work(steps, S, data, legs, t0: float, hours: float, start_vp: float, end_vp:
                               theta=d.theta_vp))
             orders[i] = o = replace(o, filled=o.filled + d.qty)
             last_fill[i] = t
+            prev = taken[i][2] if taken[i] is not None and taken[i][:2] == (px, sz) else 0.0
+            taken[i] = (px, sz, prev + d.qty)
             if o.remaining <= 0:
                 done_ts[i] = t
     return dict(t0=t0, cover=cover, fills=fills, orders=orders, done_ts=done_ts)
@@ -268,6 +284,29 @@ def summarize(run: dict, legs) -> dict:
                 usd_arrival=sum(x["qty"] * x["arrival"] for x in f), max_theta=max((x["theta"] for x in f), default=0))
 
 
+def grid(steps, S, data, legs, a, start: float, cooldowns: list[float], caps: list[float]) -> None:
+    """The rest after a fill and the cap per take, at one threshold ramp."""
+    t_first = math.ceil(steps[0] / H) * H
+    windows = np.arange(t_first, steps[-1] - a.hours * H, a.every * H)
+    print(f"\nstart {start:g}, end {max(start, a.end):g}, hard {a.hard:g}; windows of {a.hours:g} h every {a.every:g} h; "
+          f"vol points per contract, mean over windows\n")
+    print(f"{'rest (s)':>8} {'cap':>5} {'windows':>7} {'filled':>7} {'all done':>8} {'hours':>11} {'takes':>6} "
+          f"{'vs spline':>9} {'vs mark':>8} {'fee':>6} {'vs arrival':>16} {'$ spline+fee':>12}")
+    for cd in cooldowns:
+        for cap in caps:
+            rows = []
+            for t0 in windows:
+                r = work(steps, S, data, legs, float(t0), a.hours, start, max(start, a.end), a.hard, cap, cd)
+                if r is None or r["cover"] < a.min_cover:
+                    continue
+                rows.append(summarize(r, legs) | {"takes": len(r["fills"])})
+            d = pd.DataFrame(rows)
+            print(f"{cd:>8.0f} {cap:>5.0f} {len(d):>7} {d.filled.mean():>7.1%} {d.all_done.mean():>8.0%} "
+                  f"{d.hours.mean():>5.1f} ({d.hours.max():>4.1f}) {d.takes.mean():>6.0f} {d.spline.mean():>9.3f} "
+                  f"{d.mark.mean():>8.3f} {d.fee.mean():>6.3f} {d.arrival.mean():>7.3f} (±{d.arrival.std():.2f}) "
+                  f"{(d.usd_spline + d.usd_fee).mean():>12,.0f}", flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--expiry", default="25DEC26")
@@ -278,6 +317,8 @@ def main() -> None:
     p.add_argument("--end", type=float, default=0.7)
     p.add_argument("--hard", type=float, default=0.9)
     p.add_argument("--cap", type=float, default=500)
+    p.add_argument("--cooldown", type=float, default=COOLDOWN, help="seconds an option rests after a fill")
+    p.add_argument("--grid", help="cooldowns x caps, e.g. 60,300:250,500,1000 (one start, --starts' first)")
     p.add_argument("--hours", type=float, default=12)
     p.add_argument("--every", type=float, default=2, help="hours between window starts")
     p.add_argument("--min-cover", type=float, default=0.95, help="share of steps with data a window needs")
@@ -318,12 +359,17 @@ def main() -> None:
         return
 
     starts = [float(x) for x in a.starts.split(",")]
+    if a.grid:
+        cds, caps = ([float(x) for x in part.split(",")] for part in a.grid.split(":"))
+        grid(steps, S, data, legs, a, starts[0], cds, caps)
+        return
     t_first = math.ceil(steps[0] / H) * H
     windows = np.arange(t_first, steps[-1] - a.hours * H, a.every * H)
     res = {s: [] for s in starts}
     used = []
     for t0 in windows:
-        runs = {s: work(steps, S, data, legs, float(t0), a.hours, s, max(s, a.end), a.hard, a.cap) for s in starts}
+        runs = {s: work(steps, S, data, legs, float(t0), a.hours, s, max(s, a.end), a.hard, a.cap, a.cooldown)
+                for s in starts}
         if any(r is None or r["cover"] < a.min_cover for r in runs.values()):
             continue
         used.append(t0)
