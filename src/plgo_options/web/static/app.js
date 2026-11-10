@@ -1910,6 +1910,26 @@ function tmWireDecay() {
   });
 }
 
+// Stop-loss / take-profit status pill for a forward (`levels` from the
+// forward book: fwd.level_watch). Shared by the trades table and forwards.js.
+function fwdLevelsBadge(levels) {
+  if (!levels || levels.status === "none") return "";
+  const dp = assetSpotDp() || 2;
+  const px = v => "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: dp });
+  const d = x => x && x.dist_pct != null ? ` (${x.dist_pct >= 0 ? "+" : ""}${x.dist_pct.toFixed(1)}%)` : "";
+  const tip = [levels.stop ? `Stop ${px(levels.stop.level)}${d(levels.stop)}` : "",
+               levels.target ? `Target ${px(levels.target.level)}${d(levels.target)}` : ""].filter(Boolean).join(" · ");
+  const map = {
+    stop_hit:    ["STOP HIT", "fw-lv-hit-stop"],
+    target_hit:  ["TARGET HIT", "fw-lv-hit-target"],
+    near_stop:   ["near stop", "fw-lv-near-stop"],
+    near_target: ["near target", "fw-lv-near-target"],
+    watching:    ["SL/TP set", "fw-lv-watch"],
+  };
+  const [txt, cls] = map[levels.status] || ["", ""];
+  return txt ? `<span class="fw-lv ${cls}" title="${escAttr(tip)}">${txt}</span>` : "";
+}
+
 function tmForwardRowHtml(t, f) {
   const fw = t.fwd;
   const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
@@ -1922,7 +1942,7 @@ function tmForwardRowHtml(t, f) {
       <td style="text-align:left">${fw.counterparty}</td>
       <td>${fw.trade_date || ""}</td>
       <td style="text-align:left" class="${sideColor}">${t.side}</td>
-      <td style="text-align:left"><span class="tm-fwd-badge">Forward</span></td>
+      <td style="text-align:left"><span class="tm-fwd-badge">Forward</span> ${fwdLevelsBadge(fw.levels)}</td>
       <td style="text-align:left">${t.instrument}</td>
       <td>${t.expiry}</td>
       <td>${t.days_remaining}</td>
@@ -2493,7 +2513,40 @@ function tmEditForward(fid) {
   document.getElementById("tf-fwd-price").value = f.forward_price;
   document.getElementById("tf-fwd-ref").value = f.external_ref || "";
   document.getElementById("tf-fwd-note").value = f.note || "";
+  document.getElementById("tf-fwd-sl").value = f.stop_loss ?? "";
+  document.getElementById("tf-fwd-tp").value = f.take_profit ?? "";
+  tfFwdLevelsPreview();
 }
+
+// Live preview under the Stop / Target inputs: distance from spot and the
+// forward's MTM if spot gets there (qty x (level - forward price), signed).
+function tfFwdLevelsPreview() {
+  const $p = document.getElementById("tf-fwd-levels-preview");
+  if (!$p) return;
+  const num = id => { const v = parseFloat(document.getElementById(id).value); return v > 0 ? v : null; };
+  const side = document.getElementById("tf-fwd-side").value;
+  const qty = num("tf-fwd-qty"), K = num("tf-fwd-price");
+  const sl = num("tf-fwd-sl"), tp = num("tf-fwd-tp");
+  const spot = ethSpot || 0;
+  if (!(sl || tp)) { $p.textContent = ""; return; }
+  const sgn = side === "buy" ? 1 : -1;
+  const dp = assetSpotDp() || 2;
+  const part = (label, L) => {
+    if (!L) return "";
+    const dist = spot ? ` (${L >= spot ? "+" : ""}${((L / spot - 1) * 100).toFixed(1)}% from spot)` : "";
+    const pnl = qty && K ? sgn * qty * (L - K) : null;
+    const pnlTxt = pnl == null ? "" : ` → MTM ${pnl < 0 ? "−" : "+"}$${Math.abs(Math.round(pnl)).toLocaleString()}`;
+    return `${label} $${L.toLocaleString(undefined, { maximumFractionDigits: 6 })}${dist}${pnlTxt}`;
+  };
+  let warn = "";
+  if (sl && tp && (sgn < 0 ? !(sl > tp) : !(sl < tp))) {
+    warn = ` <span style="color:var(--red)">· ${sgn < 0 ? "Short: stop must be above take profit" : "Long: stop must be below take profit"}</span>`;
+  }
+  $p.innerHTML = `Spot $${spot.toLocaleString(undefined, { maximumFractionDigits: dp })} · `
+    + [part("Stop", sl), part("Target", tp)].filter(Boolean).join(" · ") + warn;
+}
+["tf-fwd-sl", "tf-fwd-tp", "tf-fwd-side", "tf-fwd-qty", "tf-fwd-price"].forEach(id =>
+  document.getElementById(id)?.addEventListener("input", tfFwdLevelsPreview));
 
 async function tfSaveForward() {
   const fid = document.getElementById("tf-fwd-id").value;
@@ -2507,13 +2560,17 @@ async function tfSaveForward() {
     maturity_date: document.getElementById("tf-expiry").value,
     external_ref: document.getElementById("tf-fwd-ref").value.trim(),
     note: document.getElementById("tf-fwd-note").value.trim(),
+    // Blank = no level (null also clears one on an amend).
+    stop_loss: parseFloat(document.getElementById("tf-fwd-sl").value) > 0 ? parseFloat(document.getElementById("tf-fwd-sl").value) : null,
+    take_profit: parseFloat(document.getElementById("tf-fwd-tp").value) > 0 ? parseFloat(document.getElementById("tf-fwd-tp").value) : null,
   };
   if (!body.counterparty || !(body.qty > 0) || !(body.forward_price > 0) || !body.trade_date || !body.maturity_date) {
     alert("Fill in counterparty, trade date, maturity, qty and forward price.");
     return;
   }
   const verb = fid ? "Amend" : "Book";
-  if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}?`)) return;
+  const lv = [body.stop_loss ? `stop ${body.stop_loss}` : "", body.take_profit ? `target ${body.take_profit}` : ""].filter(Boolean).join(", ");
+  if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}${lv ? ` · ${lv}` : ""}?`)) return;
   try {
     const r = await fetch(fid ? `/api/forwards/trades/${fid}` : "/api/forwards/trades", {
       method: fid ? "PUT" : "POST", credentials: "same-origin",
@@ -2544,6 +2601,9 @@ function tmOpenModal(trade = null) {
   if (qtyUnit) qtyUnit.textContent = currentAsset;
 
   document.getElementById("tf-fwd-id").value = "";
+  ["tf-fwd-sl", "tf-fwd-tp"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
+  const $lvPrev = document.getElementById("tf-fwd-levels-preview");
+  if ($lvPrev) $lvPrev.textContent = "";
   document.getElementById("tf-forward-section").style.display = "none";
   document.getElementById("tf-ref-spot-field").style.display = "";
   document.getElementById("tf-expiry-label").textContent = "Expiry";
@@ -4921,6 +4981,30 @@ function pfRenderPayoffChart() {
       line: { color: "#3fb950", width: 1.5, dash: "dashdot" },
       legendgroup: "spot",
     });
+
+    // Forward stop-loss / take-profit levels: one vertical line per level of
+    // each forward row in the book (Old or New), so you can see where on the
+    // curve each would trigger. Toggle them as a group from the legend.
+    const yLo = Math.min(0, ...allY), yHi = Math.max(0, ...allY);
+    let shownStop = false, shownTarget = false;
+    for (const f of pfForwardRows()) {
+      if (!pfOldSet.has(f.id) && !pfNewSet.has(f.id)) continue;
+      const lv = f.levels || {};
+      for (const [x, isStop] of [[lv.stop, true], [lv.target, false]]) {
+        if (!x || !x.level) continue;
+        const hit = x.status === "hit";
+        const label = `${isStop ? "Stop" : "Target"} $${fmtSpot(x.level)} · ${f.counterparty} ${f.side} ${Math.round(f.qty).toLocaleString()}`;
+        traces.push({
+          x: [x.level, x.level], y: [yLo, yHi], type: "scatter", mode: "lines",
+          name: isStop ? "Forward stop loss" : "Forward take profit",
+          legendgroup: isStop ? "fwd_stop" : "fwd_target",
+          showlegend: isStop ? !shownStop : !shownTarget,
+          line: { color: isStop ? "#f85149" : "#3fb950", width: hit ? 2.5 : 1.5, dash: "dot" },
+          hovertemplate: `${label}${hit ? " · HIT" : ""}<br>MTM there: $${Math.round(x.mtm_at).toLocaleString()}<extra></extra>`,
+        });
+        if (isStop) shownStop = true; else shownTarget = true;
+      }
+    }
   }
   traces.push(...collTraces);
   const tokAxes = pfTokenPriceAxes(spots);

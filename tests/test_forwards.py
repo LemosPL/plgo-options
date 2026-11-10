@@ -167,3 +167,56 @@ def test_confirmed_forward_is_booked_once(monkeypatch):
         await db.close()
 
     asyncio.run(go())
+
+
+# ── stop-loss / take-profit levels ─────────────────────────────────────────
+
+def test_level_watch_follows_the_side():
+    # Sold at 1.10: stop above spot, target below.
+    w = fwd.level_watch("sell", 1_000_000, 1.10, 1.00, 0.0, 0.1, 1.20, 0.90)
+    assert w["status"] == "watching"
+    assert w["stop"]["mtm_at"] == pytest.approx(-100_000)      # 1m x (1.10 - 1.20)
+    assert w["target"]["mtm_at"] == pytest.approx(200_000)
+    assert w["stop"]["dist_pct"] == pytest.approx(20.0)
+    assert fwd.level_watch("sell", 1, 1.1, 1.21, 0, 0, 1.20, 0.90)["status"] == "stop_hit"
+    assert fwd.level_watch("sell", 1, 1.1, 0.89, 0, 0, 1.20, 0.90)["status"] == "target_hit"
+    assert fwd.level_watch("sell", 1, 1.1, 1.19, 0, 0, 1.20, 0.90)["status"] == "near_stop"
+    # Bought: stop below, target above.
+    assert fwd.level_watch("buy", 1, 1.0, 0.95, 0, 0, 0.96, None)["status"] == "stop_hit"
+    assert fwd.level_watch("buy", 1, 1.0, 1.0, 0, 0, None, None)["status"] == "none"
+
+
+def test_levels_book_amend_clear_and_validate(monkeypatch):
+    db = _with_db(monkeypatch, spot=1.0)
+    t = _book(stop_loss=1.25, take_profit=0.95)
+    assert (t["stop_loss"], t["take_profit"]) == (1.25, 0.95)
+    book = asyncio.run(route.get_book("FIL"))
+    assert book["trades"][0]["levels"]["status"] == "watching"
+
+    # Amend one level; the other is kept.
+    t = asyncio.run(route.amend_forward(t["id"], route.ForwardEdit(take_profit=0.98), REQ))
+    assert (t["stop_loss"], t["take_profit"]) == (1.25, 0.98)
+    # Explicit null clears.
+    t = asyncio.run(route.amend_forward(t["id"], route.ForwardEdit(stop_loss=None), REQ))
+    assert t["stop_loss"] is None and t["take_profit"] == 0.98
+
+    # Wrong way round for a short: stop below target.
+    with pytest.raises(HTTPException):
+        _book(stop_loss=0.90, take_profit=1.20)
+    with pytest.raises(HTTPException):
+        asyncio.run(route.amend_forward(t["id"], route.ForwardEdit(stop_loss=0.90), REQ))
+    asyncio.run(db.close())
+
+
+def test_levels_migration_adds_columns_to_an_old_table():
+    async def run():
+        db = await aiosqlite.connect(":memory:")
+        old = repo.FORWARD_TRADES_SCHEMA.replace("    stop_loss REAL,\n    take_profit REAL,\n", "")
+        assert "stop_loss" not in old
+        await db.execute(old)
+        await repo.ensure_tables(db)
+        cur = await db.execute("PRAGMA table_info(forward_trades)")
+        cols = {r[1] for r in await cur.fetchall()}
+        await db.close()
+        return cols
+    assert {"stop_loss", "take_profit"} <= asyncio.run(run())

@@ -73,6 +73,9 @@ def _value_row(row: dict, spot: float, carry: float, today: date) -> dict:
     out = {**row, **v, "days_to_maturity": (mat - today).days, "matured": mat <= today,
            "signed_qty": fwd.side_sign(row["side"]) * float(row["qty"])}
     out["recon"] = _recon(row, v)
+    # Stop-loss / take-profit monitor: spot against the booked levels, live.
+    out["levels"] = fwd.level_watch(row["side"], float(row["qty"]), float(row["forward_price"]), spot, carry, T,
+                                    row.get("stop_loss"), row.get("take_profit"))
     return out
 
 
@@ -136,6 +139,9 @@ class ForwardIn(BaseModel):
     maturity_date: str
     external_ref: str = ""
     note: str = ""
+    # Spot price levels to follow against the market; optional.
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
 
 
 class ForwardEdit(BaseModel):
@@ -148,6 +154,12 @@ class ForwardEdit(BaseModel):
     maturity_date: str | None = None
     external_ref: str | None = None
     note: str | None = None
+    # Send null to clear a level; leave the key out to keep it.
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+
+
+LEVEL_FIELDS = ("stop_loss", "take_profit")
 
 
 class SettleIn(BaseModel):
@@ -183,6 +195,10 @@ def _check(f: dict) -> dict:
             f[k] = _date(f[k], k).isoformat()
     if "trade_date" in f and "maturity_date" in f and f["maturity_date"] <= f["trade_date"]:
         raise HTTPException(status_code=400, detail="maturity_date must be after trade_date")
+    if "side" in f:
+        err = fwd.check_levels_order(f["side"], f.get("stop_loss"), f.get("take_profit"))
+        if err:
+            raise HTTPException(status_code=400, detail=err)
     return f
 
 
@@ -220,7 +236,14 @@ async def amend_forward(fid: int, body: ForwardEdit, request: Request):
     if not row or row["status"] != "open":
         raise HTTPException(status_code=404, detail="No open forward with that id")
     f = {k: v for k, v in body.model_dump().items() if v is not None}
-    merged = _check({**{k: row[k] for k in ("trade_date", "maturity_date")}, **f})
+    # Levels can be cleared: an explicit null in the body sets them to NULL.
+    for k in LEVEL_FIELDS:
+        if k in body.model_fields_set:
+            f[k] = getattr(body, k)
+    # Validate the stop/target order against the side and levels as they will
+    # stand after this edit, not just the fields sent.
+    base = {k: row[k] for k in ("trade_date", "maturity_date", "side", *LEVEL_FIELDS)}
+    merged = _check({**base, **f})
     f.update({k: merged[k] for k in f})
     await repo.update_forward(db, fid, f, _user(request))
     return await repo.get_forward(db, fid)

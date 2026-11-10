@@ -1862,3 +1862,14 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
   font-variant-numeric: tabular-nums;
 }
 #page-execbot .pf-table tbody tr:hover { background: var(--hover-bg); }
+
+/* Forward stop-loss / take-profit status pill (fwdLevelsBadge) */
+.fw-lv { display:inline-block; padding:0 .4rem; border-radius:999px; font-size:.68rem; font-weight:600;
+  line-height:1.5; white-space:nowrap; border:1px solid currentColor; vertical-align:middle; }
+.fw-lv-watch       { color:var(--muted); }
+.fw-lv-near-stop   { color:#d29922; }
+.fw-lv-near-target { color:#3fb950; }
+.fw-lv-hit-stop    { color:#fff; background:var(--red); border-color:var(--red); }
+.fw-lv-hit-target  { color:#fff; background:var(--green); border-color:var(--green); }
+.fw-lv-cell { white-space:nowrap; font-size:.78rem; line-height:1.35; }
+.fw-lv-cell .optv3-muted { font-size:.7rem; }

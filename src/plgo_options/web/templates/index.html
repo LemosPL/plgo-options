@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=29">
+  <link rel="stylesheet" href="/static/style.css?v=30">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -4352,6 +4352,13 @@
           <label class="modal-field">Ticket / ref
             <input type="text" id="tf-fwd-ref">
           </label>
+          <label class="modal-field" title="Spot price at which you'd cut the position. Sell (short): above spot. Buy (long): below spot. Leave blank for none.">Stop loss — spot ($)
+            <input type="number" id="tf-fwd-sl" step="any" min="0" placeholder="optional">
+          </label>
+          <label class="modal-field" title="Spot price at which you'd take the gain. Sell (short): below spot. Buy (long): above spot. Leave blank for none.">Take profit — spot ($)
+            <input type="number" id="tf-fwd-tp" step="any" min="0" placeholder="optional">
+          </label>
+          <div id="tf-fwd-levels-preview" class="modal-field" style="grid-column:1 / -1;font-size:.75rem;color:var(--muted)"></div>
           <label class="modal-field" style="grid-column:1 / -1">Note
             <input type="text" id="tf-fwd-note" placeholder="e.g. cash-settled vs Deribit 0800 UTC fixing">
           </label>
@@ -4576,10 +4583,10 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=216"></script>
+<script src="/static/app.js?v=217"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
-<script src="/static/forwards.js?v=4"></script>
+<script src="/static/forwards.js?v=5"></script>
 <script src="/static/sandbox.js?v=2"></script>
 <script src="/static/execbot.js?v=8"></script>
 </body>

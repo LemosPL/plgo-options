@@ -55,7 +55,38 @@
       + card("MTM", usd(t.mtm), `vs fair forward at spot ${fmt(book.spot, pxDp())}`, signStyle(t.mtm))
       + card("Carry / day", usd(t.theta), `${fmt(book.carry * 100, 2)}% a year carry`, signStyle(t.theta))
       + card("Realised P&L", usd(book.realised_pnl_usd), `${fmt(book.settled.length)} settled`, signStyle(book.realised_pnl_usd))
-      + card("Reconciliation", recon, "vs counterparty figures");
+      + card("Reconciliation", recon, "vs counterparty figures")
+      + levelsCard();
+  }
+
+  // ── stop-loss / take-profit monitor ───────────────────────────
+  // Levels are spot prices booked on each forward (New Trade -> Forward /
+  // Edit). The book is valued at live spot, so each load re-checks them.
+  function levelsCard() {
+    const lv = book.trades.map((t) => t.levels || {}).filter((l) => l.status && l.status !== "none");
+    if (!lv.length) return `<div class="collat-metric"><div class="collat-metric-label">Stop / Target</div>
+      <div class="collat-metric-value">—</div><div class="collat-metric-sub">none set · add in Edit</div></div>`;
+    const n = (k) => lv.filter((l) => l.status === k).length;
+    const hits = n("stop_hit") + n("target_hit"), near = n("near_stop") + n("near_target");
+    const value = hits ? `<span style="color:var(--red)">${hits} hit</span>` : near ? `<span style="color:#d29922">${near} near</span>` : "Watching";
+    const bits = [n("stop_hit") && `${n("stop_hit")} stop hit`, n("target_hit") && `${n("target_hit")} target hit`,
+                  n("near_stop") && `${n("near_stop")} near stop`, n("near_target") && `${n("near_target")} near target`].filter(Boolean);
+    return `<div class="collat-metric"><div class="collat-metric-label">Stop / Target</div>
+      <div class="collat-metric-value">${value}</div>
+      <div class="collat-metric-sub">${lv.length} with levels${bits.length ? " · " + bits.join(" · ") : ""} · near = within ${lv[0].near_pct}%</div></div>`;
+  }
+
+  function levelLine(label, x) {
+    if (!x) return "";
+    const col = x.status === "hit" ? (label === "SL" ? "var(--red)" : "var(--green)") : x.status === "near" ? "#d29922" : "";
+    return `<div style="${col ? "color:" + col : ""}">${label} ${fmt(x.level, pxDp())}
+      <span class="optv3-muted">${x.dist_pct >= 0 ? "+" : ""}${fmt(x.dist_pct, 1)}% · ${usd(x.mtm_at)}</span>${x.status === "hit" ? " <b>HIT</b>" : ""}</div>`;
+  }
+
+  function levelsCell(t) {
+    const l = t.levels;
+    if (!l || l.status === "none") return `<span class="optv3-muted">—</span>`;
+    return `<div class="fw-lv-cell">${levelLine("SL", l.stop)}${levelLine("TP", l.target)}</div>`;
   }
 
   function reconBadge(r) {
@@ -67,7 +98,7 @@
   function reconRow(t) {
     const val = (v) => (v == null ? "" : v);
     const br = t.recon.breaks.map((b) => `<li><b>${esc(b.field)}</b>: ours ${fmt(b.ours, b.field === "mtm" ? 0 : pxDp())}, theirs ${fmt(b.theirs, b.field === "mtm" ? 0 : pxDp())} (diff ${fmt(b.diff, b.field === "mtm" ? 0 : pxDp())})</li>`).join("");
-    return `<tr class="fw-recon-row"><td colspan="14">
+    return `<tr class="fw-recon-row"><td colspan="15">
       <div class="fw-recon">
         <b>Counterparty figures for #${t.id}</b>
         <label>Their qty <input type="number" id="fw-rq" step="any" value="${val(t.cpty_qty)}" placeholder="${fmt(t.qty, qtyDp())}"></label>
@@ -96,6 +127,7 @@
         <td class="num" style="${signStyle(t.mtm)}">${fmt(t.mtm)}</td>
         <td class="num" style="${signStyle(t.delta)}">${fmt(t.delta, qtyDp())}</td>
         <td class="num" style="${signStyle(t.theta)}">${fmt(t.theta)}</td>
+        <td title="Distance from spot · this forward's MTM if spot gets there">${levelsCell(t)}</td>
         <td>${reconBadge(t.recon)}</td>
         <td class="fw-actions">
           <button class="btn-secondary" data-act="edit" data-id="${t.id}">Edit</button>
@@ -104,19 +136,19 @@
           <button class="btn-secondary" data-act="delete" data-id="${t.id}" style="color:var(--red)">Delete</button>
         </td>
       </tr>${reconOpen === t.id ? reconRow(t) : ""}`).join("")
-      || `<tr><td colspan="14" style="text-align:center;color:var(--muted)">No open ${esc(asset())} forwards. Book one above.</td></tr>`;
+      || `<tr><td colspan="15" style="text-align:center;color:var(--muted)">No open ${esc(asset())} forwards. Book one above.</td></tr>`;
     const t = book.totals;
     $("fw-positions").innerHTML = `
       <table class="pf-table fw-table">
         <thead><tr><th>#</th><th>Counterparty</th><th>Side</th><th class="num">Qty</th><th class="num">Forward price</th>
           <th>Trade date</th><th>Maturity</th><th class="num">Days</th><th class="num" title="Spot x (1 + carry x time to maturity)">Fair forward</th>
-          <th class="num">MTM ($)</th><th class="num">Delta</th><th class="num" title="$ per day">Carry/day</th><th>Recon</th><th></th></tr></thead>
+          <th class="num">MTM ($)</th><th class="num">Delta</th><th class="num" title="$ per day">Carry/day</th><th title="Stop loss / take profit (spot levels): distance from live spot and the forward's MTM there">Stop / Target</th><th>Recon</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
         ${book.trades.length ? `<tfoot><tr class="rr-total-row"><td></td><td><b>Total</b></td><td></td>
           <td class="num"><b style="${signStyle(t.net_qty)}">${fmt(t.net_qty, qtyDp())}</b></td><td colspan="5"></td>
           <td class="num"><b style="${signStyle(t.mtm)}">${fmt(t.mtm)}</b></td>
           <td class="num"><b style="${signStyle(t.delta)}">${fmt(t.delta, qtyDp())}</b></td>
-          <td class="num"><b style="${signStyle(t.theta)}">${fmt(t.theta)}</b></td><td colspan="2"></td></tr></tfoot>` : ""}
+          <td class="num"><b style="${signStyle(t.theta)}">${fmt(t.theta)}</b></td><td colspan="3"></td></tr></tfoot>` : ""}
       </table>`;
   }
 
@@ -153,12 +185,28 @@
     cards(); positions(); byCounterparty(); settled();
   }
 
-  async function load() {
-    status("Loading…");
+  // Follow the market: while any open forward has a level and the Trades page
+  // is on screen, re-value the book (live spot) every minute.
+  const LEVELS_REFRESH_MS = 60_000;
+  let levelsTimer = null;
+  function scheduleLevelsRefresh() {
+    clearTimeout(levelsTimer);
+    const anyLevels = book && book.trades.some((t) => t.levels && t.levels.status !== "none");
+    if (!anyLevels) return;
+    levelsTimer = setTimeout(() => {
+      const onPage = document.getElementById("page-trades")?.classList.contains("active");
+      if (onPage && !document.hidden && reconOpen == null) load(true); else scheduleLevelsRefresh();
+    }, LEVELS_REFRESH_MS);
+  }
+
+  async function load(quiet) {
+    if (quiet !== true) status("Loading…");
     try {
       book = await api("GET", `/api/forwards/book?asset=${asset()}`);
       render();
-      status("Spot " + fmt(book.spot, pxDp()) + " · as of " + new Date().toLocaleTimeString());
+      status("Spot " + fmt(book.spot, pxDp()) + " · as of " + new Date().toLocaleTimeString()
+        + (book.trades.some((t) => t.levels && t.levels.status !== "none") ? " · stop/target re-checked every minute" : ""));
+      scheduleLevelsRefresh();
     } catch (e) {
       status("Failed to load: " + e.message, true);
     }

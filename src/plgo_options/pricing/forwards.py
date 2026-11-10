@@ -56,3 +56,61 @@ def value(side: str, qty: float, forward_price: float, spot: float, carry: float
 def settlement_pnl(side: str, qty: float, forward_price: float, fixing: float) -> float:
     """Cash paid to us (+) or by us (-) at maturity."""
     return side_sign(side) * qty * (fixing - forward_price)
+
+
+# ── Stop-loss / take-profit levels ───────────────────────────────────────
+# Levels are prices of the UNDERLYING spot (the market you watch), booked per
+# forward. Direction follows the side: a forward we SOLD loses as spot rises,
+# so its stop sits above spot and its target below; a forward we BOUGHT is the
+# mirror image. A level is "hit" once spot has reached it, "near" when spot is
+# within NEAR_PCT of it.
+NEAR_PCT = 2.0
+
+
+def level_watch(side: str, qty: float, forward_price: float, spot: float, carry: float, T: float,
+                stop_loss: float | None, take_profit: float | None, near_pct: float = NEAR_PCT) -> dict:
+    """Where spot is against this forward's stop / target, and the MTM at each."""
+    sgn = side_sign(side)
+
+    def one(level: float | None, kind: str) -> dict | None:
+        if not level or level <= 0:
+            return None
+        # Stop is hit by an ADVERSE move (up for a short, down for a long),
+        # target by a favourable one.
+        adverse_up = sgn < 0
+        up = adverse_up if kind == "stop" else not adverse_up
+        hit = spot >= level if up else spot <= level
+        dist_pct = (level / spot - 1.0) * 100.0 if spot > 0 else None
+        near = (not hit) and dist_pct is not None and abs(dist_pct) <= near_pct
+        return {
+            "level": level,
+            "dist_pct": dist_pct,                       # + = level above spot
+            "mtm_at": value(side, qty, forward_price, level, carry, T)["mtm"],
+            "status": "hit" if hit else "near" if near else "ok",
+        }
+
+    stop, target = one(stop_loss, "stop"), one(take_profit, "target")
+    if stop and stop["status"] == "hit":
+        overall = "stop_hit"
+    elif target and target["status"] == "hit":
+        overall = "target_hit"
+    elif stop and stop["status"] == "near":
+        overall = "near_stop"
+    elif target and target["status"] == "near":
+        overall = "near_target"
+    elif stop or target:
+        overall = "watching"
+    else:
+        overall = "none"
+    return {"stop": stop, "target": target, "status": overall, "near_pct": near_pct}
+
+
+def check_levels_order(side: str, stop_loss: float | None, take_profit: float | None) -> str | None:
+    """Error text if the stop and target are the wrong way round for the side."""
+    if not stop_loss or not take_profit:
+        return None
+    if side_sign(side) < 0 and not stop_loss > take_profit:
+        return "for a sell (short) forward the stop loss must be above the take profit"
+    if side_sign(side) > 0 and not stop_loss < take_profit:
+        return "for a buy (long) forward the stop loss must be below the take profit"
+    return None

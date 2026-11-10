@@ -77,6 +77,9 @@ def _forward_positions(book: dict, ladder: list[float], horizons: list[int],
             "mtm_by_horizon": [round(val(spot, h), 2) for h in MATRIX_HORIZONS],
             "value_path": [round(val(spot, c["days"]), 2) for c in decay_cal],
             "db_status": "active",
+            "stop_loss": t.get("stop_loss"),
+            "take_profit": t.get("take_profit"),
+            "levels": t.get("levels"),
         })
     return out
 
@@ -943,7 +946,8 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         "trades": [
             {k: t[k] for k in ("id", "counterparty", "side", "qty", "signed_qty", "forward_price",
                                "trade_date", "maturity_date", "days_to_maturity", "fair_forward", "mtm",
-                               "delta", "delta_usd", "theta", "external_ref", "note", "recon")}
+                               "delta", "delta_usd", "theta", "external_ref", "note", "recon",
+                               "stop_loss", "take_profit", "levels")}
             for t in fwd_book["trades"]
         ],
     }
