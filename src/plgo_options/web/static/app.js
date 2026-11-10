@@ -3991,7 +3991,8 @@ async function loadPortfolio() {
       expiredFallback = true;
       $incExpired.checked = true;   // keep the toggle honest about what is shown
     }
-    pfSelected = new Set(pfData.positions.filter(p => p.db_status === "active").map(p => p.id));
+    pfSelected = new Set(pfData.positions.concat(pfData.forward_positions || [])
+      .filter(p => p.db_status === "active").map(p => p.id));
     pfRolled = new Map();
 
     // Posted-collateral overlay data — sourced from the Collateral Map
@@ -4004,10 +4005,11 @@ async function loadPortfolio() {
       pfCollateralMap = null;
     }
 
-    // Default: expired → Old only, active → both Old AND New
+    // Default: expired → Old only, active → both Old AND New. Forward rows
+    // (always live) default like an active leg.
     pfOldSet = new Set();
     pfNewSet = new Set();
-    for (const p of pfData.positions) {
+    for (const p of pfData.positions.concat(pfData.forward_positions || [])) {
       if (p.db_status === "expired") {
         pfOldSet.add(p.id);
       } else {
@@ -4017,7 +4019,8 @@ async function loadPortfolio() {
     }
 
     // Populate counterparty filter
-    const cptys = [...new Set(pfData.positions.map(p => p.counterparty || "").filter(Boolean))].sort();
+    const pfAllRows = pfData.positions.concat(pfData.forward_positions || []);
+    const cptys = [...new Set(pfAllRows.map(p => p.counterparty || "").filter(Boolean))].sort();
     const $cpF = document.getElementById("pf-filter-cpty");
     $cpF.innerHTML = '<option value="">All</option>';
     cptys.forEach(c => {
@@ -4027,7 +4030,7 @@ async function loadPortfolio() {
     });
 
     // Populate expiry filter
-    const expiries = [...new Set(pfData.positions.map(p => p.expiry.split("T")[0]))].sort();
+    const expiries = [...new Set(pfAllRows.map(p => p.expiry.split("T")[0]))].sort();
     const $expF = document.getElementById("pf-filter-expiry");
     $expF.innerHTML = '<option value="">All</option>';
     expiries.forEach(e => {
@@ -4090,7 +4093,7 @@ function pfRenderAll() {
 
 // ── Summary banner ────────────────────────────────────────
 function pfRenderSummary() {
-  const all = pfData.positions;
+  const all = pfRows();
   const sel = all.filter(p => pfSelected.has(p.id));
 
   document.getElementById("pf-spot").textContent =
@@ -4098,16 +4101,15 @@ function pfRenderSummary() {
   document.getElementById("pf-count").textContent = all.length;
   document.getElementById("pf-selected-count").textContent = sel.length;
 
-  // Forwards ride with the live book when "Include forwards" is ticked.
-  const fwMtm = pfForwardsOn() ? pfForwardTrades().reduce((s, t) => s + (t.mtm || 0), 0) : 0;
-  const baselineMtm = all.reduce((s, p) => s + p.current_mtm, 0) + fwMtm;
-  const scenarioMtm = pfCalcScenarioMtm() + fwMtm;
+  // Forward rows are in `all` / `sel` (pfRows), so their MTM is already summed.
+  const baselineMtm = all.reduce((s, p) => s + p.current_mtm, 0);
+  const scenarioMtm = pfCalcScenarioMtm();
   const delta = scenarioMtm - baselineMtm;
 
   document.getElementById("pf-entry-prem").textContent =
     `$${sel.reduce((s, p) => s + Math.abs(p.premium_usd), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
-  const mtmTotal = sel.reduce((s, p) => s + (p.current_mtm || 0), 0) + fwMtm;
+  const mtmTotal = sel.reduce((s, p) => s + (p.current_mtm || 0), 0);
   const $remPrem = document.getElementById("pf-remaining-prem");
   $remPrem.textContent = `$${mtmTotal.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   $remPrem.className = `risk-value ${mtmTotal >= 0 ? "mtm-pos" : "mtm-neg"}`;
@@ -4151,8 +4153,8 @@ function pfRenderSummary() {
         : "none";
       $hedge.className = "risk-value";
     }
-    // Forwards (Forwards screen): net qty and MTM. Their delta is already in
-    // net_delta above; the curves and matrix add them via pfBookCurves.
+    // Forwards: net qty and MTM. Their delta is already in net_delta above;
+    // the curves and matrix pick them up as rows (pfRows).
     const $fwd = document.getElementById("pf-forwards");
     if ($fwd) {
       const q = t.forward_qty || 0, m = t.forward_mtm || 0;
@@ -4171,7 +4173,7 @@ function pfRenderSummary() {
 
 function pfCalcScenarioMtm() {
   let total = 0;
-  for (const p of pfData.positions) {
+  for (const p of pfRows()) {
     if (!pfSelected.has(p.id)) continue;
     if (pfRolled.has(p.id)) {
       const newDte = pfRolled.get(p.id).newDte;
@@ -4200,7 +4202,7 @@ function pfGetFilteredPositions() {
   const fType = document.getElementById("pf-filter-type").value;
   const fSide = document.getElementById("pf-filter-side").value;
 
-  let list = [...pfData.positions];
+  let list = pfRows();
   if (fCpty) list = list.filter(p => (p.counterparty || "") === fCpty);
   if (fExpiry) list = list.filter(p => p.expiry.split("T")[0] === fExpiry);
   if (fType) list = list.filter(p => p.opt === fType);
@@ -4243,7 +4245,8 @@ function pfRenderTable() {
   for (const pos of list) {
     const checked = pfSelected.has(pos.id);
     const rolled = pfRolled.has(pos.id);
-    const typeColor = pos.opt === "C" ? "var(--green)" : "var(--red)";
+    const isFwd = !!pos.is_forward;
+    const typeColor = isFwd ? "var(--accent)" : pos.opt === "C" ? "var(--green)" : "var(--red)";
     const sideClass = pos.side === "Long" ? "qty-long" : pos.side === "Short" ? "qty-short" : "";
     const isExpired = pos.db_status === "expired";
     const rowClass = (isExpired ? "pf-row-expired " : "") + (!checked ? "pf-row-excluded" : "") + (rolled ? " pf-row-rolled" : "");
@@ -4286,26 +4289,26 @@ function pfRenderTable() {
       `<td><input type="checkbox" class="pf-new-check" data-id="${pos.id}" ${isNew ? "checked" : ""} style="accent-color:var(--accent)"></td>` +
       `<td style="text-align:left">${pos.counterparty}</td>` +
       `<td>${pos.trade_id ?? ""}</td>` +
-      `<td>${pos.trade_date}</td>` +
+      `<td>${pos.trade_date ?? ""}</td>` +
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
       `<td style="text-align:left;color:${typeColor}">${pos.option_type}</td>` +
       `<td style="text-align:left;font-size:.8rem">${pos.instrument}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.strike, _sd)}</td>` +
-      `<td class="${otmClass}">${pos.pct_otm_live}%</td>` +
+      `<td style="font-family:monospace"${isFwd ? ' title="Forward price"' : ""}>${fmtNum(pos.strike, isFwd ? Math.max(_sd, assetSpotDp()) : _sd)}</td>` +
+      `<td class="${otmClass}">${pos.pct_otm_live != null ? pos.pct_otm_live + "%" : "—"}</td>` +
       `<td style="font-family:monospace">${fmtNum(pos.qty)}</td>` +
-      `<td style="font-family:monospace">${fmtNum(pos.premium_per, 2)}</td>` +
-      `<td style="font-family:monospace">$${fmtNum(pos.premium_usd)}</td>` +
-      `<td>${pos.iv_pct.toFixed(1)}%</td>` +
+      `<td style="font-family:monospace">${isFwd ? "—" : fmtNum(pos.premium_per, 2)}</td>` +
+      `<td style="font-family:monospace">${isFwd ? "—" : "$" + fmtNum(pos.premium_usd)}</td>` +
+      `<td>${isFwd ? "—" : pos.iv_pct.toFixed(1) + "%"}</td>` +
       `<td class="${pos.current_mtm >= 0 ? 'mtm-pos' : 'mtm-neg'}" style="font-family:monospace">` +
         `$${fmtNum(pos.current_mtm)}</td>` +
       `<td class="${(pos.collateral_call_usd || 0) > 0 ? 'mtm-neg' : ''}" style="font-family:monospace" ` +
         `title="Collateral the counterparty would call on this position">` +
         `${(pos.collateral_call_usd || 0) > 0 ? '$' + fmtNum(pos.collateral_call_usd) : '—'}</td>` +
-      `<td style="text-align:center"><input type="checkbox" class="pf-roll" data-id="${pos.id}" ${rolled ? "checked" : ""}></td>` +
-      `<td><input type="number" class="roll-dte-input" data-id="${pos.id}" value="${rollDte}" ` +
-        `${rolled ? "" : "disabled"} min="1" step="1"></td>` +
+      `<td style="text-align:center">${isFwd ? "—" : `<input type="checkbox" class="pf-roll" data-id="${pos.id}" ${rolled ? "checked" : ""}>`}</td>` +
+      (isFwd ? `<td></td>` : `<td><input type="number" class="roll-dte-input" data-id="${pos.id}" value="${rollDte}" ` +
+        `${rolled ? "" : "disabled"} min="1" step="1"></td>`) +
       `<td style="font-family:monospace;white-space:nowrap">${rollCurMarkHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollNewMarkHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollIvHtml}</td>` +
@@ -4378,7 +4381,7 @@ function pfSumCurves(positionIds, horizon) {
   const spots = pfData.spot_ladder;
   const result = new Array(spots.length).fill(0);
 
-  for (const p of pfData.positions) {
+  for (const p of pfRows()) {
     if (!positionIds.has(p.id)) continue;
 
     if (pfRolled.has(p.id) && horizon !== "__baseline__") {
@@ -4407,7 +4410,7 @@ function pfBaselineCurve(horizon) {
   const key = String(horizon);
   const spots = pfData.spot_ladder;
   const result = new Array(spots.length).fill(0);
-  for (const p of pfData.positions) {
+  for (const p of pfRows()) {
     const curve = p.payoff_by_horizon[key];
     if (curve) for (let i = 0; i < spots.length; i++) result[i] += curve[i];
   }
@@ -4420,7 +4423,7 @@ function pfSumCurveForSet(positionIds, horizon) {
   const key = String(horizon);
   const spots = pfData.spot_ladder;
   const result = new Array(spots.length).fill(0);
-  for (const p of pfData.positions) {
+  for (const p of pfRows()) {
     if (!positionIds.has(p.id)) continue;
     const curve = p.payoff_by_horizon[key];
     if (curve) for (let i = 0; i < spots.length; i++) result[i] += curve[i];
@@ -4441,7 +4444,7 @@ function pfMatrixCurve(positionIds, horizon) {
   const spots = pfData.spot_ladder;
   const result = new Array(spots.length).fill(0);
   let rolled = null;
-  for (const p of pfData.positions) {
+  for (const p of pfRows()) {
     if (!positionIds.has(p.id)) continue;
     if (pfRolled.has(p.id)) { (rolled = rolled || []).push(p); continue; }
     const curve = (p.pnl_by_horizon && p.pnl_by_horizon[key]) || p.payoff_by_horizon[key];
@@ -4479,55 +4482,36 @@ function pfMatrixCurve(positionIds, horizon) {
  *  — a curve on the chart is the matrix column of the same name. */
 function pfBookCurves(set, horizons) {
   const curves = {};
-  const withFwd = set === pfForwardSet();
-  for (const h of horizons) {
-    const c = pfMatrixCurve(set, h);
-    if (withFwd) {
-      const f = pfForwardCurve(h);
-      if (f) for (let i = 0; i < c.length; i++) c[i] += f[i];
-    }
-    curves[h] = c;
-  }
+  for (const h of horizons) curves[h] = pfMatrixCurve(set, h);
   return curves;
 }
 
-/** Cash-settled forwards (Forwards screen) on the chart and matrix. They are
- *  live book, so they ride with the New set (or the only set when there is no
- *  Old/New split), honour the counterparty filter, and switch off with
- *  "Include forwards". Value at horizon h is a level like the option curves:
- *  qty x (S x (1 + carry x T_rem) - forward price), T_rem = days left after h;
- *  past maturity it is the cash settlement qty x (S - forward price). */
+/** Cash-settled forwards on the Portfolio P&L screen are ROWS, like the
+ *  option legs: /pnl ships them as `forward_positions` (opt "F", is_forward,
+ *  curves on the same spot ladder and horizons — value at horizon h is
+ *  qty x (S x (1 + carry x T_rem) - forward price), cash settlement past
+ *  maturity). They sit in the positions table, take Old/New ticks, follow the
+ *  table filters, and feed the curves, matrix, residual and summary through
+ *  the same sums as the options. "Include forwards" off removes the rows.
+ *
+ *  Kept OUT of pfData.positions on purpose: the Roll and Sandbox tabs share
+ *  pfData and reprice every position as an option. Portfolio-screen code reads
+ *  pfRows() instead. */
 function pfForwardsOn() {
   const t = document.getElementById("pf-include-forwards");
   return !t || t.checked;
 }
-function pfForwardSet() {
-  const n = pfData.positions.some(p => pfNewSet.has(p.id));
-  return n ? pfNewSet : pfOldSet;
+function pfForwardRows() {
+  return (pfForwardsOn() && pfData && pfData.forward_positions) || [];
 }
-function pfForwardTrades() {
-  const trades = (pfData && pfData.forwards && pfData.forwards.trades) || [];
-  const cp = (document.getElementById("pf-filter-cpty")?.value || "").trim().toLowerCase();
-  return cp ? trades.filter(t => String(t.counterparty || "").trim().toLowerCase() === cp) : trades;
-}
-function pfForwardCurve(horizon) {
-  if (!pfForwardsOn()) return null;
-  const trades = pfForwardTrades();
-  if (!trades.length) return null;
-  const spots = pfData.spot_ladder;
-  const carry = (pfData.forwards && pfData.forwards.carry) || 0;
-  const out = new Array(spots.length).fill(0);
-  for (const t of trades) {
-    const Trem = Math.max((t.days_to_maturity || 0) - horizon, 0) / 365;
-    for (let i = 0; i < spots.length; i++) {
-      out[i] += t.signed_qty * (spots[i] * (1 + carry * Trem) - t.forward_price);
-    }
-  }
-  return out;
+function pfRows() {
+  return pfData.positions.concat(pfForwardRows());
 }
 
 document.getElementById("pf-include-forwards")?.addEventListener("change", () => {
-  if (typeof pfOnSelectionChange === "function") pfOnSelectionChange();
+  if (!pfData) return;
+  pfRenderTable();          // forward rows appear / disappear
+  pfOnSelectionChange();
 });
 
 /** Horizons shared by the P&L matrix and the payoff chart (Now/16/30/…/150d). */
@@ -4858,8 +4842,8 @@ function pfRenderPayoffChart() {
   const C = optv4ChartColors();
   const traces = [];
 
-  const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
-  const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
+  const oldPositions = pfRows().filter(p => pfOldSet.has(p.id));
+  const newPositions = pfRows().filter(p => pfNewSet.has(p.id));
 
   // Matches the matrix header: h=0 is today's mark, not an expiry payoff.
   function horizonLabel(prefix, h) {
@@ -5009,8 +4993,8 @@ function pfRenderMtmGrid() {
   const dp = (typeof currentAsset !== "undefined" && currentAsset === "FIL") ? 4 : 0;  // spot-row labels (prices)
   const label = (typeof currentAsset !== "undefined" && currentAsset) ? currentAsset : "ETH";
 
-  const oldPositions = pfData.positions.filter(p => pfOldSet.has(p.id));
-  const newPositions = pfData.positions.filter(p => pfNewSet.has(p.id));
+  const oldPositions = pfRows().filter(p => pfOldSet.has(p.id));
+  const newPositions = pfRows().filter(p => pfNewSet.has(p.id));
   const hasOldAndNew = oldPositions.length > 0 && newPositions.length > 0;
 
   // Build header row
