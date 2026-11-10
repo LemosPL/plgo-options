@@ -138,9 +138,9 @@ def test_ticks_wait_take_up_to_the_cap_then_fill(tmp_path):
         assert out["orders"][0]["action"] == "take" and out["orders"][0]["qty"] == 25   # the cap
         o = await store.get_order(oid)
         assert o["filled"] == 25 and o["status"] == "working"
-        out = await bot.run_tick(NOW + 180, books, off)                # the option rests 5 minutes
+        out = await bot.run_tick(NOW + 180, books, off)                # the option rests 2 minutes
         assert out["orders"][0]["action"] == "cooldown"
-        await bot.run_tick(NOW + 421, books, off)                      # then the last 25
+        await bot.run_tick(NOW + 241, books, off)                      # 2 minutes on: the last 25
         d = await store.order_detail(oid)
         assert d["order"]["filled"] == 50 and d["order"]["status"] == "filled"
         assert [f["qty"] for f in d["fills"]] == [25, 25]

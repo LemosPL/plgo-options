@@ -17,8 +17,8 @@ index and each leg's fair value, vol, vega, whether it is inside the spline, its
 book and Deribit's mark vol, an hour a file under data/cache/execution_replay/<expiry>/.
 
 Step 2 (default) works the same parent orders from each window start (every --every hours
-with a full window recorded) for each start threshold, with the bot's cap and 5-minute
-rest after a fill, and reports per threshold, over the windows:
+with a full window recorded) for each start threshold, with the bot's cap and rest after a
+fill, and reports per threshold, over the windows:
 
   * filled share, and hours until the last leg finished;
   * cost per contract against the spline, Deribit's mark and the fee, in vol points
@@ -30,8 +30,9 @@ rest after a fill, and reports per threshold, over the windows:
 --validate replays the 9 Nov 2026 paper run (orders 16-19, start 0.5) and prints it next to
 the fills the bot recorded, to check the replay sees what the bot saw.
 
-Caveats: fills take the recorded top of book, which our taking does not deplete (the 5-minute
-rest stands in for the book refilling); the bot's own feed and the recorder's are two
+Caveats: the recording never saw our takes, so what a take consumed stays consumed only until
+the maker changes that quote, then counts as refilled at the recorded price (a maker who was
+really hit may requote worse); the bot's own feed and the recorder's are two
 WebSocket connections, so the same second can differ slightly.
 
     .venv/bin/python -u scripts/execution_replay.py --precompute
@@ -67,7 +68,7 @@ from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile
 QUOTES = ROOT / "data" / "cache" / "quote_recorder"
 SMILES = ROOT / "data" / "cache" / "smile_recorder"
 CACHE = ROOT / "data" / "cache" / "execution_replay"
-STEP, COOLDOWN, H = 5.0, 300.0, 3600.0
+STEP, COOLDOWN, H = 5.0, 120.0, 3600.0   # the bot's rest after a fill (execution/bot.py)
 # The 9 Nov 2026 paper run: Optimizer v2's Thursday solution on 25DEC26, the box left out
 LEGS = [("ETH-25DEC26-2000-P", "buy", 5000), ("ETH-25DEC26-2200-P", "sell", 2573),
         ("ETH-25DEC26-2400-C", "buy", 5000), ("ETH-25DEC26-2500-C", "buy", 3406)]
@@ -337,7 +338,7 @@ def main() -> None:
         import sqlite3
         db = sqlite3.connect(ROOT / "data" / "plgo_options.db")
         t0 = db.execute("select min(created_ts) from exec_orders where id between 16 and 19").fetchone()[0]
-        run = work(steps, S, data, legs, t0, 12, 0.5, 0.7, 0.9, 500)
+        run = work(steps, S, data, legs, t0, 12, 0.5, 0.7, 0.9, 500, 300.0)   # the run rested 5 minutes
         rows = db.execute("""select o.instrument, f.ts, f.qty, f.price_usd, f.fair_usd, t.vega from exec_fills f
                              join exec_orders o on o.id = f.order_id
                              join exec_ticks t on t.order_id = f.order_id and t.ts = f.ts

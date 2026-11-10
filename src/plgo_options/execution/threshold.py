@@ -18,7 +18,7 @@ stays unfilled and is reported, rather than crossed at any price.
 
 Each pass (every 5 s) takes the top of the book only, when it costs <= the threshold:
 up to ``cap`` contracts, the remaining size and the size shown there, as one IOC limit
-order at that price; after a fill the option rests 5 minutes (execution/bot.py).
+order at that price; after a fill the option rests 2 minutes (execution/bot.py).
 scripts/execution_threshold_study.py replays the same rule on recorded books; with
 5-minute snapshots (3-6 Nov 2026), 25DEC26 2500C, 10,000 over 12 h, the top of the book
 only, a ramp of 0.5 -> 0.7 vol points cost ~$1.80 per contract, filled in ~8 h, against

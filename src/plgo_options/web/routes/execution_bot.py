@@ -51,7 +51,7 @@ class OrderCreate(BaseModel):
     start_vp: float = Field(0.5, ge=0, description="threshold at the start, vol points")
     end_vp: float = Field(0.7, ge=0, description="threshold one hour before the deadline, vol points")
     hard_vp: float = Field(0.9, ge=0, description="threshold in the final hour; never exceeded")
-    cap: float = Field(500, ge=1, description="max contracts per take (the option then rests 5 minutes)")
+    cap: float = Field(500, ge=1, description="max contracts per take (the option then rests 2 minutes)")
     mode: Literal["paper", "live"] = "paper"
     note: str = ""
 

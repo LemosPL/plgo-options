@@ -4,7 +4,7 @@ Each scheduler call holds the lease and runs a pass every 5 seconds for 55 secon
 (run_minute). A pass, for every working parent order (execution/store.py):
     1) past its deadline: expired, the unfilled remainder reported, nothing crossed
     2) the kill switch on: nothing sent, the pass recorded as halted
-    3) a fill on the same option in the last 5 minutes: it rests (cooldown), so the
+    3) a fill on the same option in the last 2 minutes: it rests (cooldown), so the
        book can refill and our taking does not chase it
     4) otherwise: the expiry's smile, every strike's top of book with its size from a
        WebSocket quote feed (market_data/deribit_quotes.py, one per scheduler call) and
@@ -51,7 +51,11 @@ from .threshold import QTY_STEP, ThresholdOrder, decide
 
 LOCK, LOCK_TTL = "exec_tick", 120.0
 PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
-COOLDOWN = 300.0           # after a fill, the option rests 5 minutes
+# After a fill the option rests 2 minutes. Replayed on 7-9 Nov 2026 quotes
+# (scripts/execution_replay.py --grid), 120 s against 300 s finished ~1.5 h sooner and
+# ~0.01 vol points cheaper; shorter rests gain little more, and live makers may requote
+# worse after being hit, which no replay shows.
+COOLDOWN = 120.0
 ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted"}  # recorded once a minute
 API = "https://www.deribit.com/api/v2/public"
 # books_fn(expiries, instruments) -> {expiry: books}: every option of the expiries, and
