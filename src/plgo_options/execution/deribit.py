@@ -100,6 +100,9 @@ _OUTCOME_UNKNOWN = {10001, 11094, 13028}  # error, internal_server_error, tempor
 _ALREADY_CLOSED = {10010, 11008, 11044}  # already_closed, already_filled, not_open_order
 _ORDER_NOT_FOUND = 10004
 
+# What the Block RFQ client (block_rfq.py) needs on top: create and accept, then read the trades.
+BLOCK_RFQ_SCOPES = ("block_rfq:read_write", "block_trade:read")
+
 _FILL_EPSILON = 1e-9
 _HISTORY_PAGE = 1000
 _HISTORY_MAX_PAGES = 10
@@ -298,7 +301,9 @@ class DeribitConnector:
         try:
             out["locked"] = _locked(await self._rpc("public/status"), self.currency)
             await self._access_token()
-            out |= {"authenticated": True, "scope": self._scope}
+            out |= {"authenticated": True, "scope": self._scope,
+                    "block_rfq_missing": [x for x in BLOCK_RFQ_SCOPES
+                                          if x not in (self._scope or "").split()]}
             out["healthy"] = await self.healthy()
         except ConnectorError as exc:
             out["error"] = str(exc)

@@ -49,6 +49,14 @@ def _key_step(probe: dict[str, Any], network: str, variables: str) -> str | None
     return None
 
 
+def _block_rfq(probe: dict[str, Any]) -> str | None:
+    """The key's Block RFQ scopes, once it has authenticated."""
+    missing = probe.get("block_rfq_missing")
+    if missing is None:
+        return None
+    return "Block RFQ scopes granted" if not missing else "Block RFQ needs " + ", ".join(missing)
+
+
 def _testnet_row(probe: dict[str, Any]) -> dict[str, Any]:
     test = TESTS["deribit-testnet"]
     tested = test["status"] == "passed"
@@ -63,6 +71,7 @@ def _testnet_row(probe: dict[str, Any]) -> dict[str, Any]:
         "tested": tested, "test_detail": test["detail"],
         "stage": "Tested on testnet" if tested and connected else "Not tested",
         "ready": tested and connected, "next_step": step,
+        "block_rfq": _block_rfq(probe),
     }
 
 
@@ -86,6 +95,7 @@ def _production_row(probe: dict[str, Any]) -> dict[str, Any]:
         "tested": tested, "test_detail": test["detail"],
         "stage": "Ready in prod" if ready else "Not ready",
         "ready": ready, "next_step": step,
+        "block_rfq": _block_rfq(probe),
     }
 
 

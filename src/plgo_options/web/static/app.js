@@ -9550,10 +9550,13 @@ async function connectorsLoad() {
       $detail.textContent = c.test_detail;
       const $next = cell(c.next_step || "None");
       $next.className = "conn-next";
+      const $rfq = document.createElement("div");
+      $rfq.className = "conn-detail";
+      $rfq.textContent = c.block_rfq || "";
       $tr.append(
         cell(c.name),
         cell(c.network),
-        cell(state(c.connection, c.connected)),
+        cell(state(c.connection, c.connected), $rfq),
         cell(state(c.tested ? "Passed" : "Not run", c.tested), $detail),
         cell(state(c.stage, c.ready)),
         $next,
