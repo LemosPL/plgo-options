@@ -246,3 +246,42 @@ async def test_hedge_leg_goes_as_a_json_string(fake):
 async def test_anonymous_needs_five_makers(fake):
     with pytest.raises(ConnectorError, match="5 makers"):
         await _client(fake).create(LEGS, "plgo-1", disclosed=False, makers=["A", "B"])
+
+
+# -- the page's desk (rfq_desk.py) ------------------------------------------------
+
+@pytest.fixture
+def desk(fake, monkeypatch):
+    from plgo_options.execution import rfq_desk
+    monkeypatch.setattr(rfq_desk, "_client", _client(fake))
+    monkeypatch.setattr(rfq_desk, "_sent", {})
+    return rfq_desk
+
+
+async def test_desk_shows_quotes_as_what_we_pay_against_our_limit(fake, desk):
+    fake.flip = True
+    v = await desk.send(LEGS, "directional", limit_eth=0.0125, amount=100, spot=2000.0)
+    assert v["network"] == "testnet" and v["side"] == "sell" and v["limit_usd"] == 25.0 and v["limit_total_usd"] == 2500
+    fake.quote("bids", -0.013, 100)
+    fake.quote("bids", -0.012, 100)
+    fake.now += 6
+    v = await desk.read(v["id"])
+    assert v["quotes_visible"] and [q["inside"] for q in v["quotes"]] == [False, True]
+    assert v["best"] == {"ours_eth": 0.012, "ours_usd": 24.0, "total_usd": 2400, "inside": True}
+
+
+async def test_desk_accepts_only_inside_our_limit(fake, desk):
+    v = await desk.send(LEGS, "directional", limit_eth=0.0125, amount=100, spot=2000.0)
+    fake.quote("asks", 0.013, 100)
+    with pytest.raises(ConnectorError, match="at our limit"):
+        await desk.accept(v["id"])
+    assert not _sent(fake, "accept_block_rfq")
+    fake.quote("asks", 0.012, 100)
+    v = await desk.accept(v["id"])
+    assert v["state"] == "filled" and v["acceptance"]["filled"] and len(v["acceptance"]["trades"]) == 4
+    assert _sent(fake, "accept_block_rfq")[0]["price"] == 0.0125
+
+
+async def test_desk_forgets_nothing_it_did_not_send(desk):
+    with pytest.raises(KeyError):
+        await desk.read(999)

@@ -21,7 +21,8 @@
   const active = () => $("page-execbot")?.classList.contains("active");
 
   let selected = null;     // order id shown in the detail card
-  let review = null;       // { trades, meta, data } from Optimizer v2
+  let review = null;       // { trades, meta, data, rfq } from Optimizer v2
+  const live = {};         // RFQ structure index -> { id, timer } while it is watched
 
   async function api(method, url, body) {
     const r = await fetch(url, {
@@ -241,6 +242,8 @@
   // ── review as Block RFQ (preview only) ────────────────────────
   async function rfqPreview() {
     if (!review) return;
+    Object.values(live).forEach((x) => clearTimeout(x.timer));   // the cards are redrawn: stop watching old ones
+    Object.keys(live).forEach((k) => delete live[k]);
     const n = (id) => parseFloat($(id).value);
     $("xb-rfq").innerHTML = `<div style="color:var(--muted);font-size:.78rem">Reading the Deribit books and fitting the spline…</div>`;
     let d;
@@ -252,9 +255,10 @@
       $("xb-rfq").innerHTML = `<div style="color:var(--red);font-size:.78rem">${esc(e.message)}</div>`;
       return;
     }
+    review.rfq = d;
     const side = (s) => s === "buy" ? "Buy" : "Sell";
     const pay = (v) => v == null ? "—" : v >= 0 ? `pay ${usd(v)}` : `receive ${usd(-v)}`;
-    const card = (s) => {
+    const card = (s, i) => {
       const t = s.total;
       const title = s.kind === "box" ? `Box · ${s.expiry}` : `${s.expiry} legs`;
       const delta = s.hedge
@@ -278,11 +282,16 @@
           <div><span style="color:var(--muted)">Screen, all legs</span><br>${usd(t.screen_cost_usd, 0)} <span style="color:var(--muted)">fees ${usd(t.screen_fee_usd, 0)} included</span></div>
           <div><span style="color:var(--muted)">RFQ fees (est.)</span><br>${usd(t.rfq_fee_usd, 0)}</div>
           <div><span style="color:var(--muted)">Total at fair</span><br>${pay(t.fair_usd)}</div>
-        </div></div>`;
+        </div>
+        <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+          <button class="btn-secondary xb-rfq-send" data-i="${i}" ${s.hedge ? "disabled title=\"the hedge leg is not sent yet: untick Hedge\"" : ""}>Send as RFQ (testnet)</button>
+          <span style="font-size:.72rem;color:var(--muted)">Makers quote for a few minutes; you accept or cancel here.</span></div>
+        <div class="xb-rfq-live" data-i="${i}"></div></div>`;
     };
     const left = d.leftovers.length
       ? `<div style="font-size:.78rem;margin-top:.25rem"><b>To the bot on screen (${d.leftovers.length})</b>`
         + d.leftovers.map((x) => `<div>${side(x.side)} ${fmt(x.qty)} ${esc(x.instrument)} — <span style="color:var(--muted)">${esc(x.why)}</span></div>`).join("")
+        + `<button class="btn-secondary" id="xb-rfq-left" style="margin-top:.35rem">Leftovers to the bot (paper, with the settings above)</button>`
         + `</div>` : "";
     const sk = d.skipped.length
       ? `<div style="font-size:.78rem;margin-top:.5rem"><b>Not in an RFQ (${d.skipped.length})</b>`
@@ -290,6 +299,104 @@
     $("xb-rfq").innerHTML = (d.structures.length ? d.structures.map(card).join("")
       : `<div style="color:var(--muted);font-size:.78rem">No Deribit structure in this solution.</div>`)
       + left + sk + `<div style="font-size:.72rem;color:var(--muted);margin-top:.4rem">Priced ${when(d.asof)}.</div>`;
+    document.querySelectorAll(".xb-rfq-send").forEach((b) => b.addEventListener("click", () => rfqSend(+b.dataset.i, b)));
+    $("xb-rfq-left")?.addEventListener("click", leftoversToBot);
+  }
+
+  // ── Block RFQ desk (testnet): send, watch the quotes, accept or cancel ──
+
+  async function rfqSend(i, btn) {
+    const s = review.rfq.structures[i];
+    btn.disabled = true;
+    const slot = document.querySelector(`.xb-rfq-live[data-i="${i}"]`);
+    slot.innerHTML = `<div style="font-size:.78rem;color:var(--muted);margin-top:.4rem">Sending to Deribit testnet…</div>`;
+    try {
+      const v = await api("POST", "/api/execution-bot/rfq/send", { kind: s.kind, amount: s.amount, limit_eth: s.limit_eth, spot: s.S,
+        legs: s.legs.map((l) => ({ instrument: l.instrument, side: l.side, qty: l.qty })) });
+      live[i] = { id: v.id };
+      rfqRender(i, v);
+      rfqPoll(i);
+    } catch (e) {
+      slot.innerHTML = `<div style="font-size:.78rem;color:var(--red);margin-top:.4rem">${esc(e.message)}</div>`;
+      btn.disabled = false;
+    }
+  }
+
+  function rfqPoll(i) {
+    clearTimeout(live[i]?.timer);
+    live[i].timer = setTimeout(async () => {
+      if (!live[i] || !review) return;
+      try {
+        const v = await api("GET", `/api/execution-bot/rfq/${live[i].id}`);
+        rfqRender(i, v);
+        if (v.state === "open" || v.state === "created") rfqPoll(i);
+      } catch (e) {
+        const slot = document.querySelector(`.xb-rfq-live[data-i="${i}"] .xb-rfq-err`);
+        if (slot) slot.textContent = e.message;
+        rfqPoll(i);
+      }
+    }, 2000);
+  }
+
+  function rfqRender(i, v) {
+    const slot = document.querySelector(`.xb-rfq-live[data-i="${i}"]`);
+    if (!slot) return;
+    const pay = (x) => x == null ? "—" : x >= 0 ? `pay ${usd(x)}` : `receive ${usd(-x)}`;
+    const open = v.state === "open" || v.state === "created";
+    const secs = Math.round(v.seconds_left);
+    const quotes = !v.quotes_visible ? `<div style="color:var(--muted)">Quotes show after Deribit's 5-second grace…</div>`
+      : v.quotes.length ? `<table class="pf-table" style="margin-top:.3rem"><thead><tr><th style="text-align:left">Quote, per unit</th>
+          <th>Total</th><th>Amount</th><th>Kind</th><th style="text-align:left">Makers</th><th>At our limit?</th></tr></thead><tbody>`
+          + v.quotes.map((q) => `<tr><td style="text-align:left">${pay(q.ours_usd)} <span style="color:var(--muted)">(${fmt(q.ours_eth, 5)} ETH)</span></td>
+            <td>${pay(q.ours_usd * v.amount)}</td><td>${fmt(q.amount)}</td><td>${q.all_or_none ? "all or none" : "any part"}</td>
+            <td style="text-align:left">${esc(q.makers.join(", "))}</td><td style="color:${q.inside ? "var(--green)" : "var(--red)"}">${q.inside ? "yes" : "no"}</td></tr>`).join("")
+          + `</tbody></table>`
+        : `<div style="color:var(--muted)">No quote yet.</div>`;
+    const acc = v.acceptance ? `<div style="margin-top:.3rem;color:${v.acceptance.filled ? "var(--green)" : "var(--red)"}">`
+        + (v.acceptance.filled ? `Filled: ${v.acceptance.trades.map((t) => `${t.direction} ${fmt(t.amount)} ${esc(t.instrument_name)} @ ${t.price}`).join(" · ")}`
+          : `Not filled: ${esc(v.acceptance.reason)}`) + `</div>` : "";
+    const canAccept = open && v.quotes_visible && v.best && v.best.inside;
+    slot.innerHTML = `<div style="border-top:1px dashed var(--border);margin-top:.5rem;padding-top:.45rem;font-size:.78rem">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+        <b>RFQ #${v.id} · ${esc(v.network)} · ${esc(v.state)}${open ? ` · ${secs} s left` : ""}</b>
+        <span style="color:var(--muted)">our limit ${pay(v.limit_usd)} per unit · ${pay(v.limit_total_usd)} in all ·
+          Deribit writes it ${v.side === "buy" ? "as sent" : "reversed (we sell it)"} · amount ${fmt(v.amount)}</span></div>
+      ${quotes}
+      ${v.best ? `<div style="margin-top:.3rem">Best: ${pay(v.best.ours_usd)} per unit, ${pay(v.best.total_usd)} in all</div>` : ""}
+      ${acc}
+      <div class="xb-rfq-err" style="color:var(--red)"></div>
+      ${open ? `<div style="margin-top:.4rem;display:flex;gap:.5rem">
+        <button class="btn-primary xb-rfq-accept" ${canAccept ? "" : "disabled"}>Accept the best quote</button>
+        <button class="btn-secondary xb-rfq-cancel">Cancel RFQ</button></div>` : ""}</div>`;
+    slot.querySelector(".xb-rfq-accept")?.addEventListener("click", () => rfqAct(i, "accept", v));
+    slot.querySelector(".xb-rfq-cancel")?.addEventListener("click", () => rfqAct(i, "cancel", v));
+  }
+
+  async function rfqAct(i, action, v) {
+    if (action === "accept" && !confirm(`Accept RFQ #${v.id} on ${v.network}: ${v.best.total_usd >= 0 ? "pay" : "receive"} `
+        + `${usd(Math.abs(v.best.total_usd), 0)} for the whole structure (our limit ${usd(Math.abs(v.limit_total_usd), 0)})?`)) return;
+    try {
+      rfqRender(i, await api("POST", `/api/execution-bot/rfq/${v.id}/${action}`));
+    } catch (e) {
+      const el = document.querySelector(`.xb-rfq-live[data-i="${i}"] .xb-rfq-err`);
+      if (el) el.textContent = e.message;
+    }
+  }
+
+  async function leftoversToBot() {
+    const p = params();
+    const orders = review.rfq.leftovers.map((x) => ({ instrument: x.instrument, side: x.side, qty: x.qty, ...p, mode: "paper",
+      note: `${review.meta.source || "Optimizer"}: RFQ leftover (${x.why})`.slice(0, 500) }));
+    $("xb-rfq-left").disabled = true;
+    try {
+      const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
+      const refused = r.refused.map((x) => `${x.instrument}: ${x.reason}`).join("; ");
+      status(`${r.created.length} leftover paper order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
+      await load();
+    } catch (e) {
+      status("Create failed: " + e.message, true);
+      $("xb-rfq-left").disabled = false;
+    }
   }
 
   async function createFromReview() {
@@ -319,6 +426,8 @@
 
   window.execbotReceive = function (trades, meta) {
     review = { trades, meta: meta || {}, data: null };
+    Object.values(live).forEach((x) => clearTimeout(x.timer));
+    Object.keys(live).forEach((k) => delete live[k]);
     $("xb-rfq").innerHTML = "";
     document.querySelector('.nav-item[data-page="execbot"]')?.click();
     reprice();

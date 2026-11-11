@@ -9,6 +9,9 @@ People-facing:
     POST /api/execution-bot/orders               create one (paper only for now)
     POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
     POST /api/execution-bot/rfq-preview          the same solution as Block RFQ structures (nothing sent)
+    POST /api/execution-bot/rfq/send             open a previewed structure as a Block RFQ (testnet only)
+    GET  /api/execution-bot/rfq/{id}             its state and the quotes on our side, as what we pay
+    POST /api/execution-bot/rfq/{id}/{action}    accept (whole amount at our limit, fill-or-kill) | cancel
     POST /api/execution-bot/orders/batch         create several (the reviewed preview)
     GET  /api/execution-bot/orders/{id}          the order, its ticks and fills
     GET  /api/execution-bot/costs                each leg's fill cost vs the spline, the mark and the mid
@@ -27,7 +30,8 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer, rfq
+from plgo_options.execution import bot, from_optimizer, rfq, rfq_desk
+from plgo_options.execution.deribit import ConnectorError
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
 from plgo_options.web.auth import current_user
@@ -175,6 +179,51 @@ async def rfq_preview(req: RfqPreviewReq):
         return await rfq.preview_rfq(req.trades, req.asset, req.unit, req.allowance_vp, req.box_bps, req.hedge)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
+
+
+class RfqLeg(BaseModel):
+    instrument: str
+    side: Literal["buy", "sell"]
+    qty: float = Field(gt=0)
+
+
+class RfqSend(BaseModel):
+    kind: Literal["box", "directional"]
+    legs: list[RfqLeg] = Field(min_length=1, max_length=20)
+    amount: float = Field(gt=0, description="the preview's amount: limit_eth is per unit of it")
+    limit_eth: float = Field(description="the preview's limit per unit, ETH (negative: receive at least)")
+    spot: float = Field(gt=0, description="the preview's USD per ETH, to show quotes in dollars")
+
+
+async def _desk(call):
+    try:
+        return await call
+    except KeyError as e:
+        raise HTTPException(404, str(e.args[0]))
+    except ConnectorError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.post("/rfq/send")
+async def rfq_send(req: RfqSend, request: Request):
+    for x in req.legs:
+        if not INSTRUMENT.fullmatch(x.instrument):
+            raise HTTPException(400, f"{x.instrument} is not a Deribit ETH option")
+    by = (current_user(request) or {}).get("email", "")
+    return await _desk(rfq_desk.send([x.model_dump() for x in req.legs], req.kind, req.limit_eth,
+                                     req.amount, req.spot, by))
+
+
+@router.get("/rfq/{rid}")
+async def rfq_read(rid: int):
+    return await _desk(rfq_desk.read(rid))
+
+
+@router.post("/rfq/{rid}/{action}")
+async def rfq_act(rid: int, action: Literal["accept", "cancel"]):
+    if action == "accept" and await kill_switch_on():
+        raise HTTPException(409, "the kill switch is on")
+    return await _desk(rfq_desk.accept(rid) if action == "accept" else rfq_desk.cancel(rid))
 
 
 @router.get("/orders/{oid}")
