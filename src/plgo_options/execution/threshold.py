@@ -36,6 +36,11 @@ from .models import BookDepth, Side
 
 FINAL_HOUR = 3600.0
 QTY_STEP = 1.0  # Deribit's minimum ETH option amount
+# RMS half-spreads (smile_fit.fit_error): above it the expiry's spline is not trusted and its
+# orders wait. Replayed on 3-11 Nov 2026 (2,161 snapshots): median 0.14, 99th percentile 0.85;
+# Deribit's 08:00 UTC expiry thins the books daily (1.4 to 5.0); 10 Nov's rich call wing peaked
+# at 1.13 with the spline still sane, so it keeps trading.
+MAX_FIT_ERROR = 1.25
 
 
 @dataclass(frozen=True)

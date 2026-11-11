@@ -198,6 +198,10 @@
     }
   }
 
+  // An expiry whose spline is off its quotes (thin books): its prices are not to be trusted
+  const warnBox = (ws) => (ws || []).map((w) => `<div style="border:1px solid var(--red);border-left-width:4px;border-radius:6px;
+      padding:.45rem .65rem;margin-bottom:.6rem;font-size:.78rem"><b style="color:var(--red)">Spline off its quotes</b> — ${esc(w.message)}</div>`).join("");
+
   // ── review: an optimizer solution → orders ────────────────────
   function params() {
     const n = (id) => parseFloat($(id).value);
@@ -210,6 +214,7 @@
     $("xb-review-body").innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:1rem">
       Reading the Deribit books and fitting the spline…</td></tr>`;
     $("xb-review-skipped").innerHTML = "";
+    $("xb-review-warn").innerHTML = "";
     $("xb-r-create").disabled = true;
     const p = params();
     try {
@@ -220,6 +225,7 @@
       return;
     }
     const { legs, skipped } = review.data;
+    $("xb-review-warn").innerHTML = warnBox(review.data.warnings);
     $("xb-review-sub").textContent = `${review.meta.source || "Optimizer"} · ${review.trades.length} trade(s) in the solution · `
       + `${legs.length} Deribit order(s) · priced ${when(review.data.asof)}`;
     $("xb-review-body").innerHTML = legs.length ? legs.map((l, i) => `<tr>
@@ -268,6 +274,7 @@
         <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem;font-size:.82rem">
           <b>${esc(title)} · amount ${fmt(s.amount)} × ratios</b>
           <span style="color:var(--muted)">${esc(delta)}</span></div>
+        ${s.fit_warning ? `<div style="color:var(--red);font-size:.75rem;margin-top:.3rem">Spline off its quotes: fair, limit and screen cost below are not reliable. Wait before sending.</div>` : ""}
         <div class="chain-wrapper" style="margin-top:.4rem"><table class="pf-table">
           <thead><tr><th style="text-align:left">Leg</th><th>Ratio</th><th>Contracts</th><th>Fair ($)</th><th>Bid ($)</th><th>Ask ($)</th>
             <th>Vol</th><th>Vega</th><th>Delta</th><th>Screen ($/contract)</th></tr></thead>
@@ -284,7 +291,8 @@
           <div><span style="color:var(--muted)">Total at fair</span><br>${pay(t.fair_usd)}</div>
         </div>
         <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
-          <button class="btn-secondary xb-rfq-send" data-i="${i}" ${s.hedge ? "disabled title=\"the hedge leg is not sent yet: untick Hedge\"" : ""}>Send as RFQ (testnet)</button>
+          <button class="btn-secondary xb-rfq-send" data-i="${i}" ${s.fit_warning ? "disabled title=\"the limit comes from a spline off its quotes: price again in a few minutes\""
+            : s.hedge ? "disabled title=\"the hedge leg is not sent yet: untick Hedge\"" : ""}>Send as RFQ (testnet)</button>
           <span style="font-size:.72rem;color:var(--muted)">Makers quote for a few minutes; you accept or cancel here.</span></div>
         <div class="xb-rfq-live" data-i="${i}"></div></div>`;
     };
@@ -296,7 +304,7 @@
     const sk = d.skipped.length
       ? `<div style="font-size:.78rem;margin-top:.5rem"><b>Not in an RFQ (${d.skipped.length})</b>`
         + d.skipped.map((s) => `<div>${esc(s.trade)} — <span style="color:var(--muted)">${esc(s.reason)}</span></div>`).join("") + `</div>` : "";
-    $("xb-rfq").innerHTML = (d.structures.length ? d.structures.map(card).join("")
+    $("xb-rfq").innerHTML = warnBox(d.warnings) + (d.structures.length ? d.structures.map(card).join("")
       : `<div style="color:var(--muted);font-size:.78rem">No Deribit structure in this solution.</div>`)
       + left + sk + `<div style="font-size:.72rem;color:var(--muted);margin-top:.4rem">Priced ${when(d.asof)}.</div>`;
     document.querySelectorAll(".xb-rfq-send").forEach((b) => b.addEventListener("click", () => rfqSend(+b.dataset.i, b)));

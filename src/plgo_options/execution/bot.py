@@ -47,7 +47,7 @@ from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, s
 from . import store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
 from .paper import PaperConnector, deribit_option_fee
-from .threshold import QTY_STEP, ThresholdOrder, decide
+from .threshold import MAX_FIT_ERROR, QTY_STEP, ThresholdOrder, decide
 
 LOCK, LOCK_TTL = "exec_tick", 120.0
 PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
@@ -55,11 +55,6 @@ PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
 # (scripts/execution_replay.py --grid), 120 s against 300 s finished ~1.5 h sooner and
 # ~0.01 vol points cheaper; shorter rests gain little more, and live makers may requote
 # worse after being hit, which no replay shows.
-# RMS half-spreads (smile_fit.fit_error): above it the expiry's spline is not trusted and its
-# orders wait. Replayed on 3-11 Nov 2026 (2,161 snapshots): median 0.14, 99th percentile 0.85;
-# Deribit's 08:00 UTC expiry thins the books daily (1.4 to 5.0); 10 Nov's rich call wing peaked
-# at 1.13 with the spline still sane, so it keeps trading.
-MAX_FIT_ERROR = 1.25
 COOLDOWN = 120.0
 ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted"}  # recorded once a minute
 API = "https://www.deribit.com/api/v2/public"

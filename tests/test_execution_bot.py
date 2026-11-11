@@ -583,3 +583,26 @@ def test_an_expiry_whose_spline_is_off_its_quotes_waits(monkeypatch):
     monkeypatch.setattr(bot, "fit_error", lambda q, smile: (bot.MAX_FIT_ERROR + 0.5, 6.0))
     why = bot._price(EXPIRY, _books(), orders, NOW)[1]
     assert isinstance(why, str) and "off its quotes" in why        # _work records it as no_book: no trade
+
+
+def test_both_previews_warn_when_the_spline_is_off_its_quotes(monkeypatch):
+    from plgo_options.execution import from_optimizer, rfq
+    monkeypatch.setattr(from_optimizer.time, "time", lambda: NOW)
+    monkeypatch.setattr(rfq.time, "time", lambda: NOW)
+    trades = [{"counterparty": "Deribit", "opt": "C", "strike": 2400, "expiry": "2026-12-25", "qty": 400, "side": "Buy"}]
+
+    async def listed(_):
+        return {NAME}
+
+    async def books(expiries):
+        return {EXPIRY: _books(-3.0)}, NOW, NOW + 1
+
+    clean = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
+    assert clean["warnings"] == [] and "off its quotes" not in clean["legs"][0]["note"]
+    monkeypatch.setattr(from_optimizer, "fit_error", lambda q, smile: (2.0, 9.0))
+    off = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
+    (w,) = off["warnings"]
+    assert w["expiry"] == EXPIRY and w["rms"] == 2.0 and "not reliable" in w["message"]
+    assert off["legs"][0]["note"].startswith("spline off its quotes")
+    r = asyncio.run(rfq.preview_rfq(trades, listed_fn=listed, books_fn=books))
+    assert r["warnings"] == off["warnings"] and r["structures"][0]["fit_warning"] == w["message"]

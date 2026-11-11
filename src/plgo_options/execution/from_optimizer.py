@@ -22,10 +22,10 @@ from typing import Any
 import httpx
 
 from plgo_options.market_data.smile_recorder import expiry_books
-from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair, spline_smile
+from plgo_options.pricing.smile_fit import fit_error, otm_quotes, parse_exp, spline_fair, spline_smile
 
 from .models import BookDepth
-from .threshold import ThresholdOrder, decide
+from .threshold import MAX_FIT_ERROR, ThresholdOrder, decide
 
 API = "https://www.deribit.com/api/v2/public"
 CODE = re.compile(r"\d{1,2}[A-Z]{3}\d{2}")
@@ -111,12 +111,33 @@ async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5,
                             "reason": f"{leg['instrument']} expires within the {hours:g} h deadline"})
             continue
         ok.append(leg)
+    fits: dict[str, tuple] = {}
     if ok:
         books, _, _ = await books_fn(sorted({x["instrument"].split("-")[1] for x in ok}))
-        fits: dict[str, tuple] = {}
         for leg in ok:
             leg.update(_price_now(leg, books.get(leg["instrument"].split("-")[1], []), now, start_vp, fits))
-    return {"legs": ok, "skipped": skipped, "asof": now}
+    warnings = fit_warnings(fits)
+    for leg in ok:
+        if leg["instrument"].split("-")[1] in {w["expiry"] for w in warnings}:
+            leg["note"] = "spline off its quotes: the bot waits" + (f"; {leg['note']}" if leg.get("note") else "")
+    return {"legs": ok, "skipped": skipped, "asof": now, "warnings": warnings}
+
+
+def fit_warnings(fits: dict[str, tuple]) -> list[dict]:
+    """The expiries whose spline is off its quotes (smile_fit.fit_error over the bot's MAX_FIT_ERROR):
+    their fair values are not to be trusted, and the bot does not trade them until the books refill."""
+    out = []
+    for expiry, (q, smile) in sorted(fits.items()):
+        if q is None or smile is None:
+            continue
+        rms, worst = fit_error(q, smile)
+        if rms > MAX_FIT_ERROR:
+            out.append({"expiry": expiry, "rms": round(rms, 2), "worst": round(worst, 1), "limit": MAX_FIT_ERROR,
+                        "message": f"{expiry}: the spline is {rms:.2f} half-spreads off its quotes (worst strike "
+                                   f"{worst:.1f}; normal is about 0.15, the bot waits above {MAX_FIT_ERROR:g}). "
+                                   f"The books are thin, often around Deribit's 08:00 UTC expiry: the fair values "
+                                   f"and costs below are not reliable. Try again in a few minutes."})
+    return out
 
 
 def _price_now(leg: dict, books: list[dict], now: float, start_vp: float, fits: dict[str, tuple]) -> dict:

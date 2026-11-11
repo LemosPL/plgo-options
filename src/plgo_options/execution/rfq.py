@@ -47,7 +47,7 @@ from plgo_options.market_data.smile_recorder import expiry_books
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair, spline_smile
 
-from .from_optimizer import _listed, deribit_legs
+from .from_optimizer import _listed, deribit_legs, fit_warnings
 
 BOX = "BOX_NEUTRALIZER"
 
@@ -205,5 +205,8 @@ async def preview_rfq(trades: list[dict], asset: str = "ETH", unit: int = 100, a
                 skipped += [{"trade": " + ".join(x["sources"]), "reason": f"{e}: too few two-sided strikes to price"} for x in ls]
                 continue
             out.append(price_structure(kind, ls, r, amount, fits, books, allowance_vp, box_bps, hedge))
-    return {"structures": out, "leftovers": leftovers, "skipped": skipped, "asof": now,
+    warnings = fit_warnings(fits) if structs else []
+    for s in out:
+        s["fit_warning"] = next((w["message"] for w in warnings if w["expiry"] == s["expiry"]), None)
+    return {"structures": out, "leftovers": leftovers, "skipped": skipped, "asof": now, "warnings": warnings,
             "params": {"unit": unit, "allowance_vp": allowance_vp, "box_bps": box_bps, "hedge": hedge}}
