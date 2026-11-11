@@ -307,7 +307,8 @@ def _leg_text(t: dict) -> str:
     return f"#{t['id']} {t['side']} {t['option_type']} {float(t['strike']):g} x {float(t['qty']):,.0f}"
 
 
-async def build_monitor(asset: str, spot: float, today: date | None = None) -> dict:
+async def build_monitor(asset: str, spot: float, today: date | None = None,
+                        include_embedded: bool = False) -> dict:
     a = asset.upper()
     today = today or date.today()
     db = await get_db()
@@ -331,14 +332,18 @@ async def build_monitor(asset: str, spot: float, today: date | None = None) -> d
     except Exception as e:  # noqa: BLE001 - forwards still show if the options read fails
         log.warning("option legs unavailable for monitor %s: %s", a, e)
         legs = []
-    for s in fwd.find_synthetic_forwards(legs):
+    synthetics = fwd.find_synthetic_forwards(legs)
+    embedded_count = sum(1 for s in synthetics if not s["standalone"])
+    for s in synthetics:
+        if not s["standalone"] and not include_embedded:
+            continue
         mat = _date(s["expiry"], "expiry")
         sgn = fwd.side_sign(s["side"])
         lv = levels.get(s["key"]) or {}
         watch = fwd.level_watch(s["side"], s["qty"], s["strike"], spot, 0.0, 0.0,
                                 lv.get("stop_loss"), lv.get("take_profit"))
         out.append({
-            "key": s["key"], "kind": "synthetic", "forward_id": None,
+            "key": s["key"], "kind": "synthetic", "forward_id": None, "embedded": not s["standalone"],
             "counterparty": s["counterparty"], "side": s["side"], "qty": s["qty"],
             "forward_price": s["strike"], "effective_price": s["effective_price"],
             "net_premium_usd": s["net_premium_usd"], "trade_date": s["trade_date"],
@@ -357,6 +362,7 @@ async def build_monitor(asset: str, spot: float, today: date | None = None) -> d
     summary.update(count=len(out), net_qty=sum(fwd.side_sign(p["side"]) * p["qty"] for p in out),
                    mtm=sum(p["mtm"] for p in out))
     return {"asset": a, "spot": spot, "near_pct": fwd.NEAR_PCT, "positions": out, "summary": summary,
+            "embedded_synthetics": embedded_count, "include_embedded": include_embedded,
             "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
@@ -369,15 +375,16 @@ class LevelsIn(BaseModel):
 
 
 @router.get("/monitor")
-async def get_monitor(asset: str = "FIL"):
-    """Booked + synthetic forwards with stop / target levels, at live spot."""
+async def get_monitor(asset: str = "FIL", include_embedded: bool = False):
+    """Booked + synthetic forwards with stop / target levels, at live spot.
+    include_embedded adds call/put pairs that sit inside a larger deal."""
     if asset.upper() not in ASSETS:
         raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS}")
     try:
         spot = await spot_for(asset)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"spot unavailable: {e}")
-    return await build_monitor(asset, spot)
+    return await build_monitor(asset, spot, include_embedded=include_embedded)
 
 
 @router.put("/levels")
@@ -390,7 +397,7 @@ async def put_levels(body: LevelsIn, request: Request):
         spot = await spot_for(a)
     except Exception:
         raise HTTPException(status_code=502, detail="spot unavailable, levels not saved")
-    mon = await build_monitor(a, spot)
+    mon = await build_monitor(a, spot, include_embedded=True)
     pos = next((p for p in mon["positions"] if p["key"] == body.key), None)
     if pos is None:
         raise HTTPException(status_code=404, detail=f"no open {a} forward position {body.key!r}")
@@ -399,7 +406,7 @@ async def put_levels(body: LevelsIn, request: Request):
         raise HTTPException(status_code=400, detail=err)
     db = await get_db()
     await repo.set_levels(db, body.key, a, body.stop_loss, body.take_profit, body.note, _user(request))
-    mon = await build_monitor(a, spot)
+    mon = await build_monitor(a, spot, include_embedded=True)
     return next((p for p in mon["positions"] if p["key"] == body.key), pos)
 
 

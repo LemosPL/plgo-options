@@ -209,6 +209,10 @@ def test_synthetic_forward_detection():
     # +2k net premium received on a long: all-in price 0.002 lower.
     assert long_["effective_price"] == pytest.approx(0.7564 - 0.002)
     assert short["side"] == "sell"
+    # Both pairs sit in a bigger KeyRock deal that day: embedded, not standalone.
+    assert not long_["standalone"] and not short["standalone"]
+    alone = fwd.find_synthetic_forwards([_leg(1, "Put", "Sell"), _leg(2, "Call", "Buy")])
+    assert alone[0]["standalone"]
 
 
 def _with_trades(monkeypatch, legs, spot):

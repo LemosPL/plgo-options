@@ -137,6 +137,13 @@ def find_synthetic_forwards(trades: list[dict]) -> list[dict]:
     Call/Put, strike, expiry, qty, counterparty, trade_date, premium_usd
     signed +received/-paid). Each leg is used at most once."""
     groups: dict[tuple, dict[str, list[dict]]] = {}
+    # Legs per deal (counterparty, trade date): a pair that IS the whole deal is
+    # "standalone" (booked as a forward structure); one inside a bigger deal is
+    # flagged embedded so the monitor can leave it out by default.
+    deal_legs: dict[tuple, int] = {}
+    for t in trades:
+        dk = (str(t.get("counterparty") or "").strip().lower(), str(t.get("trade_date") or "")[:10])
+        deal_legs[dk] = deal_legs.get(dk, 0) + 1
     for t in trades:
         typ = str(t.get("option_type") or "").strip().lower()
         if typ not in ("call", "put"):
@@ -169,6 +176,8 @@ def find_synthetic_forwards(trades: list[dict]) -> list[dict]:
                     "expiry": str(c["expiry"])[:10],
                     "counterparty": c.get("counterparty") or "",
                     "trade_date": str(c.get("trade_date") or "")[:10],
+                    "standalone": deal_legs.get((str(c.get("counterparty") or "").strip().lower(),
+                                                 str(c.get("trade_date") or "")[:10]), 0) == 2,
                     "call": c, "put": p,
                 })
                 break

@@ -209,7 +209,7 @@
     const rows = mon.positions.map((p, i) => {
       const lv = p.levels;
       const kind = p.kind === "synthetic"
-        ? `<span class="tm-fwd-badge" title="${esc(p.legs.join("\n"))}">Synthetic</span>`
+        ? `<span class="tm-fwd-badge" title="${esc(p.legs.join("\n"))}">Synthetic</span>${p.embedded ? ` <span class="fw-lv fw-lv-watch" title="This call/put pair is part of a larger deal">in deal</span>` : ""}`
         : `<span class="tm-fwd-badge">Forward</span>`;
       const eff = Math.abs(p.effective_price - p.forward_price) > 1e-12
         ? `<div class="optv3-muted" style="font-size:.7rem" title="All-in, with the net premium ${usd(p.net_premium_usd)}">all-in ${fmt(p.effective_price, pxDp())}</div>` : "";
@@ -251,7 +251,7 @@
     if (quiet !== true) status("Loading…");
     try {
       const [m, h] = await Promise.all([
-        api("GET", `/api/forwards/monitor?asset=${asset()}`),
+        api("GET", `/api/forwards/monitor?asset=${asset()}&include_embedded=${!!$("fm-embedded")?.checked}`),
         api("GET", `/api/forwards/history?asset=${asset()}`).catch((e) => { console.warn("history:", e); return null; }),
       ]);
       if (m.asset !== asset()) return;          // asset switched mid-flight
@@ -260,6 +260,8 @@
       renderAll();
       alerts();
       setBadge(mon);
+      const $eh = $("fm-embedded-count");
+      if ($eh) $eh.textContent = mon.embedded_synthetics ? `(${mon.embedded_synthetics})` : "(none)";
       status(`Spot $${fmt(mon.spot, pxDp())} · ${hist ? hist.source + " hourly" : "no history"} · as of ${new Date().toLocaleTimeString()}`
         + ($("fm-auto")?.checked ? " · re-checks every minute" : ""));
     } catch (e) {
@@ -317,6 +319,7 @@
   document.querySelector('.nav-item[data-page="fwmonitor"]')?.addEventListener("click", () => { lastStatus = {}; load(); });
   $("fm-refresh")?.addEventListener("click", load);
   $("fm-auto")?.addEventListener("change", schedule);
+  $("fm-embedded")?.addEventListener("change", () => load());
   $("fm-table")?.addEventListener("click", (ev) => {
     const b = ev.target.closest("button[data-act]");
     const tr = ev.target.closest("tr[data-key]");

@@ -4057,6 +4057,9 @@
           <label class="toggle-label" style="margin:0;font-size:.8rem" title="Re-value at live spot and re-check every level each minute while this page is open">
             <input type="checkbox" id="fm-auto" checked> follow live (1 min)
           </label>
+          <label class="toggle-label" style="margin:0;font-size:.8rem" title="Also list call/put pairs (same strike, size, expiry) that are only part of a larger deal. Off: only deals that are exactly the pair, i.e. booked as a forward structure.">
+            <input type="checkbox" id="fm-embedded"> pairs inside larger deals <span id="fm-embedded-count" class="optv3-muted"></span>
+          </label>
           <button id="fm-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">&#8635; Refresh</button>
         </div>
       </div>
@@ -4623,6 +4626,6 @@
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
 <script src="/static/execbot.js?v=9"></script>
-<script src="/static/fwmonitor.js?v=1"></script>
+<script src="/static/fwmonitor.js?v=2"></script>
 </body>
 </html>
