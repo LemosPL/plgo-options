@@ -560,3 +560,26 @@ def test_rfq_structures_a_box_apart_the_rest_in_units_with_a_delta_hedge(monkeyp
     plain = asyncio.run(rfq.preview_rfq(rest, listed_fn=listed, books_fn=books))["structures"][0]
     assert plain["hedge"] is None and plain["delta_total_eth"] == pytest.approx(s["delta_eth"] * 100, abs=0.1)
     assert sorted((x["instrument"][12:], x["qty"]) for x in out["leftovers"]) == [("2200-P", 73), ("2500-C", 6), ("2800-C", 40)]
+
+
+def test_fit_error_is_small_on_a_clean_smile_and_measures_a_curve_off_its_quotes():
+    from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_smile, vega
+    q = otm_quotes(EXPIRY, _books(), dt.datetime.fromtimestamp(NOW, dt.timezone.utc))
+    smile = spline_smile(q)
+    rms, worst = fit_error(q, smile)
+    assert rms < 0.2 and worst < 0.5
+    # the same spline 2 vol points too high: each strike off by 2 / its half-spread in vol points
+    half_vp = q["half"] / np.array([vega(q["F"], k, q["T"], v, q["DF"]) for k, v in zip(q["K"], q["iv_mid"])])
+    up = (lambda k: smile[0](k) + 2.0, *smile[1:])
+    rms_up, worst_up = fit_error(q, up)
+    assert worst_up == pytest.approx((2.0 / half_vp).max(), rel=0.15)
+    assert rms_up > bot.MAX_FIT_ERROR
+
+
+def test_an_expiry_whose_spline_is_off_its_quotes_waits(monkeypatch):
+    orders = [_order()]
+    priced = bot._price(EXPIRY, _books(), orders, NOW)
+    assert isinstance(priced[1], tuple)                            # a clean book is priced
+    monkeypatch.setattr(bot, "fit_error", lambda q, smile: (bot.MAX_FIT_ERROR + 0.5, 6.0))
+    why = bot._price(EXPIRY, _books(), orders, NOW)[1]
+    assert isinstance(why, str) and "off its quotes" in why        # _work records it as no_book: no trade

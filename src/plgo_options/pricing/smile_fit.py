@@ -294,6 +294,21 @@ def spline_smile(q: dict, drop: float | None = None) -> tuple[Any, tuple[float, 
     return spl, (float(k[0]), float(k[-1])), free
 
 
+def fit_error(q: dict, smile: tuple) -> tuple[float, float]:
+    """How far the spline sits from the quotes it was fitted to: (RMS, max) over the strikes of
+    |spline vol - target vol| / half-spread in vol points, every strike counted equally. About
+    0.15 on a normal book; a few units when thin quotes bend the whole curve (10 Nov 2026,
+    08:00 UTC: 4.5, the 2800 C 18 vol points over its ask)."""
+    spl = smile[0]
+    K, iv = q["K"], q["iv_mid"]
+    vg = np.array([vega(q["F"], k_, q["T"], v, q["DF"]) for k_, v in zip(K, iv)])
+    half_vp = q["half"] / vg
+    imb = q.get("imb")
+    target = iv * 100 if imb is None else iv * 100 + MICRO_KAPPA * imb * half_vp
+    r = np.abs(spl(np.log(K / q["F"])) - target) / half_vp
+    return float(np.sqrt(np.mean(r * r))), float(r.max())
+
+
 def spline_fair(q: dict, K0: float, cp: str, smile: tuple | None = None, loo: bool = False) -> dict:
     """Fair value of (K0, cp) from the arbitrage-free smoothing spline through the OTM
     shrunk-microprice vols of every strike, K0's own quote included: USD price, vol (fraction), vega

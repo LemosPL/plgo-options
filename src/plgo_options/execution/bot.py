@@ -42,7 +42,7 @@ import httpx
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
-from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile
+from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile
 
 from . import store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
@@ -55,6 +55,11 @@ PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
 # (scripts/execution_replay.py --grid), 120 s against 300 s finished ~1.5 h sooner and
 # ~0.01 vol points cheaper; shorter rests gain little more, and live makers may requote
 # worse after being hit, which no replay shows.
+# RMS half-spreads (smile_fit.fit_error): above it the expiry's spline is not trusted and its
+# orders wait. Replayed on 3-11 Nov 2026 (2,161 snapshots): median 0.14, 99th percentile 0.85;
+# Deribit's 08:00 UTC expiry thins the books daily (1.4 to 5.0); 10 Nov's rich call wing peaked
+# at 1.13 with the spline still sane, so it keeps trading.
+MAX_FIT_ERROR = 1.25
 COOLDOWN = 120.0
 ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted"}  # recorded once a minute
 API = "https://www.deribit.com/api/v2/public"
@@ -132,6 +137,12 @@ def _price(expiry: str, books: list[dict], orders: list[ThresholdOrder], now: fl
     by_name = {b["instrument_name"]: b for b in books}
     q = otm_quotes(expiry, books, dt.datetime.fromtimestamp(now, dt.timezone.utc))
     smile = spline_smile(q) if q is not None else None
+    bad = None
+    if smile is not None:
+        rms, worst = fit_error(q, smile)
+        if rms > MAX_FIT_ERROR:
+            bad = (f"{expiry}: the spline is off its quotes ({rms:.2f} half-spreads, worst strike {worst:.1f}): "
+                   f"thin books, waiting for them to refill")
     out: dict[int, tuple | str] = {}
     for o in orders:
         book = by_name.get(o.instrument)
@@ -139,6 +150,8 @@ def _price(expiry: str, books: list[dict], orders: list[ThresholdOrder], now: fl
             out[o.id] = f"{o.instrument}: no order book"
         elif q is None:
             out[o.id] = f"{expiry}: too few two-sided strikes to fit"
+        elif bad:
+            out[o.id] = bad
         else:
             out[o.id] = (spline_fair(q, o.strike, o.cp, smile), book)
     return out
