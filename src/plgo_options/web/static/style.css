@@ -1873,3 +1873,10 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .fw-lv-hit-target  { color:#fff; background:var(--green); border-color:var(--green); }
 .fw-lv-cell { white-space:nowrap; font-size:.78rem; line-height:1.35; }
 .fw-lv-cell .optv3-muted { font-size:.7rem; }
+
+/* Forwards Monitor */
+.fm-alert { margin:.25rem 0 .6rem; padding:.5rem .75rem; border-radius:6px; font-size:.8rem;
+  border:1px solid var(--red); background:rgba(248,81,73,.08); }
+#fm-table .fm-in { width:6.5rem; padding:.15rem .3rem; font-size:.8rem; }
+#fm-table .fm-note { width:9rem; }
+#fm-table tr.fm-row-sel td { background:rgba(88,166,255,.08); }

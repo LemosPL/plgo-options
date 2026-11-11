@@ -114,3 +114,63 @@ def check_levels_order(side: str, stop_loss: float | None, take_profit: float | 
     if side_sign(side) > 0 and not stop_loss < take_profit:
         return "for a buy (long) forward the stop loss must be below the take profit"
     return None
+
+
+# ── Synthetic forwards (options booked as a forward structure) ───────────
+# Long call + short put at the same strike and expiry, same size, is a long
+# forward at that strike (put-call parity, zero rate: C - P = S - K at any vol,
+# so the pair's MTM is qty x (S - K) whatever each leg is marked at). Short
+# call + long put is the short. Matched only within one deal: same
+# counterparty and trade date (the Deals convention), same expiry, same
+# strike, same qty.
+QTY_MATCH_TOL = 1e-6
+
+
+def _norm_side(s: str) -> float:
+    return side_sign(s)
+
+
+def find_synthetic_forwards(trades: list[dict]) -> list[dict]:
+    """Pairs of active option legs that together are a forward.
+
+    `trades` are rows of the trades table (side Buy/Sell, option_type
+    Call/Put, strike, expiry, qty, counterparty, trade_date, premium_usd
+    signed +received/-paid). Each leg is used at most once."""
+    groups: dict[tuple, dict[str, list[dict]]] = {}
+    for t in trades:
+        typ = str(t.get("option_type") or "").strip().lower()
+        if typ not in ("call", "put"):
+            continue
+        k = (str(t.get("counterparty") or "").strip().lower(), str(t.get("trade_date") or "")[:10],
+             str(t.get("expiry") or "")[:10], round(float(t["strike"]), 9))
+        groups.setdefault(k, {"call": [], "put": []})[typ].append(t)
+    out = []
+    for g in groups.values():
+        used: set = set()
+        for c in sorted(g["call"], key=lambda r: r["id"]):
+            sc = _norm_side(c["side"])
+            for p in sorted(g["put"], key=lambda r: r["id"]):
+                if p["id"] in used or _norm_side(p["side"]) != -sc:
+                    continue
+                q = float(c["qty"])
+                if abs(float(p["qty"]) - q) > QTY_MATCH_TOL * max(q, 1.0):
+                    continue
+                used.add(p["id"])
+                K = float(c["strike"])
+                prem = float(c.get("premium_usd") or 0.0) + float(p.get("premium_usd") or 0.0)
+                out.append({
+                    "key": f"syn:{c['id']}-{p['id']}",
+                    "side": "buy" if sc > 0 else "sell",
+                    "qty": q,
+                    "strike": K,
+                    # All-in price once the net premium is folded in.
+                    "effective_price": K - sc * prem / q if q else K,
+                    "net_premium_usd": prem,
+                    "expiry": str(c["expiry"])[:10],
+                    "counterparty": c.get("counterparty") or "",
+                    "trade_date": str(c.get("trade_date") or "")[:10],
+                    "call": c, "put": p,
+                })
+                break
+    out.sort(key=lambda s: (s["expiry"], s["counterparty"].lower(), s["key"]))
+    return out

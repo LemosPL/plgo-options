@@ -2513,40 +2513,7 @@ function tmEditForward(fid) {
   document.getElementById("tf-fwd-price").value = f.forward_price;
   document.getElementById("tf-fwd-ref").value = f.external_ref || "";
   document.getElementById("tf-fwd-note").value = f.note || "";
-  document.getElementById("tf-fwd-sl").value = f.stop_loss ?? "";
-  document.getElementById("tf-fwd-tp").value = f.take_profit ?? "";
-  tfFwdLevelsPreview();
 }
-
-// Live preview under the Stop / Target inputs: distance from spot and the
-// forward's MTM if spot gets there (qty x (level - forward price), signed).
-function tfFwdLevelsPreview() {
-  const $p = document.getElementById("tf-fwd-levels-preview");
-  if (!$p) return;
-  const num = id => { const v = parseFloat(document.getElementById(id).value); return v > 0 ? v : null; };
-  const side = document.getElementById("tf-fwd-side").value;
-  const qty = num("tf-fwd-qty"), K = num("tf-fwd-price");
-  const sl = num("tf-fwd-sl"), tp = num("tf-fwd-tp");
-  const spot = ethSpot || 0;
-  if (!(sl || tp)) { $p.textContent = ""; return; }
-  const sgn = side === "buy" ? 1 : -1;
-  const dp = assetSpotDp() || 2;
-  const part = (label, L) => {
-    if (!L) return "";
-    const dist = spot ? ` (${L >= spot ? "+" : ""}${((L / spot - 1) * 100).toFixed(1)}% from spot)` : "";
-    const pnl = qty && K ? sgn * qty * (L - K) : null;
-    const pnlTxt = pnl == null ? "" : ` → MTM ${pnl < 0 ? "−" : "+"}$${Math.abs(Math.round(pnl)).toLocaleString()}`;
-    return `${label} $${L.toLocaleString(undefined, { maximumFractionDigits: 6 })}${dist}${pnlTxt}`;
-  };
-  let warn = "";
-  if (sl && tp && (sgn < 0 ? !(sl > tp) : !(sl < tp))) {
-    warn = ` <span style="color:var(--red)">· ${sgn < 0 ? "Short: stop must be above take profit" : "Long: stop must be below take profit"}</span>`;
-  }
-  $p.innerHTML = `Spot $${spot.toLocaleString(undefined, { maximumFractionDigits: dp })} · `
-    + [part("Stop", sl), part("Target", tp)].filter(Boolean).join(" · ") + warn;
-}
-["tf-fwd-sl", "tf-fwd-tp", "tf-fwd-side", "tf-fwd-qty", "tf-fwd-price"].forEach(id =>
-  document.getElementById(id)?.addEventListener("input", tfFwdLevelsPreview));
 
 async function tfSaveForward() {
   const fid = document.getElementById("tf-fwd-id").value;
@@ -2560,17 +2527,13 @@ async function tfSaveForward() {
     maturity_date: document.getElementById("tf-expiry").value,
     external_ref: document.getElementById("tf-fwd-ref").value.trim(),
     note: document.getElementById("tf-fwd-note").value.trim(),
-    // Blank = no level (null also clears one on an amend).
-    stop_loss: parseFloat(document.getElementById("tf-fwd-sl").value) > 0 ? parseFloat(document.getElementById("tf-fwd-sl").value) : null,
-    take_profit: parseFloat(document.getElementById("tf-fwd-tp").value) > 0 ? parseFloat(document.getElementById("tf-fwd-tp").value) : null,
   };
   if (!body.counterparty || !(body.qty > 0) || !(body.forward_price > 0) || !body.trade_date || !body.maturity_date) {
     alert("Fill in counterparty, trade date, maturity, qty and forward price.");
     return;
   }
   const verb = fid ? "Amend" : "Book";
-  const lv = [body.stop_loss ? `stop ${body.stop_loss}` : "", body.take_profit ? `target ${body.take_profit}` : ""].filter(Boolean).join(", ");
-  if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}${lv ? ` · ${lv}` : ""}?`)) return;
+  if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}?`)) return;
   try {
     const r = await fetch(fid ? `/api/forwards/trades/${fid}` : "/api/forwards/trades", {
       method: fid ? "PUT" : "POST", credentials: "same-origin",
@@ -2601,9 +2564,6 @@ function tmOpenModal(trade = null) {
   if (qtyUnit) qtyUnit.textContent = currentAsset;
 
   document.getElementById("tf-fwd-id").value = "";
-  ["tf-fwd-sl", "tf-fwd-tp"].forEach(id => { const el = document.getElementById(id); if (el) el.value = ""; });
-  const $lvPrev = document.getElementById("tf-fwd-levels-preview");
-  if ($lvPrev) $lvPrev.textContent = "";
   document.getElementById("tf-forward-section").style.display = "none";
   document.getElementById("tf-ref-spot-field").style.display = "";
   document.getElementById("tf-expiry-label").textContent = "Expiry";

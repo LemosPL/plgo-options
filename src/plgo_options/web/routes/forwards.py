@@ -73,10 +73,19 @@ def _value_row(row: dict, spot: float, carry: float, today: date) -> dict:
     out = {**row, **v, "days_to_maturity": (mat - today).days, "matured": mat <= today,
            "signed_qty": fwd.side_sign(row["side"]) * float(row["qty"])}
     out["recon"] = _recon(row, v)
-    # Stop-loss / take-profit monitor: spot against the booked levels, live.
-    out["levels"] = fwd.level_watch(row["side"], float(row["qty"]), float(row["forward_price"]), spot, carry, T,
-                                    row.get("stop_loss"), row.get("take_profit"))
+    out["_T"] = T
     return out
+
+
+def _attach_levels(t: dict, lv: dict | None, spot: float, carry: float, T: float, forward_price: float) -> dict:
+    """Stop / target from the Forwards Monitor (forward_levels), checked live."""
+    lv = lv or {}
+    t["stop_loss"] = lv.get("stop_loss")
+    t["take_profit"] = lv.get("take_profit")
+    t["levels_note"] = lv.get("note") or ""
+    t["levels"] = fwd.level_watch(t["side"], float(t["qty"]), forward_price, spot, carry, T,
+                                  t["stop_loss"], t["take_profit"])
+    return t
 
 
 async def build_forward_book(asset: str, spot: float | None = None, today: date | None = None) -> dict:
@@ -89,12 +98,17 @@ async def build_forward_book(asset: str, spot: float | None = None, today: date 
         await repo.ensure_tables(db)
         rows = await repo.list_forwards(db, a, ("open",))
         carry = float((await repo.get_carry(db, a))["rate"] or 0.0)
+        levels = await repo.get_levels(db, a)
         if spot is None:
             spot = await spot_for(a) if rows else 0.0
     except Exception as e:
         log.warning("forward book unavailable for %s: %s", a, e)
         return {"asset": a, "spot": spot or 0.0, "carry": 0.0, "trades": [], "by_counterparty": [], "totals": _totals([])}
-    trades = [_value_row(r, spot, carry, today) for r in rows]
+    trades = []
+    for r in rows:
+        t = _value_row(r, spot, carry, today)
+        _attach_levels(t, levels.get(f"fwd:{r['id']}"), spot, carry, t.pop("_T"), float(r["forward_price"]))
+        trades.append(t)
     by_cp: dict[str, dict] = {}
     for t in trades:
         k = t["counterparty"].strip().lower()
@@ -139,9 +153,6 @@ class ForwardIn(BaseModel):
     maturity_date: str
     external_ref: str = ""
     note: str = ""
-    # Spot price levels to follow against the market; optional.
-    stop_loss: float | None = Field(default=None, gt=0)
-    take_profit: float | None = Field(default=None, gt=0)
 
 
 class ForwardEdit(BaseModel):
@@ -154,12 +165,6 @@ class ForwardEdit(BaseModel):
     maturity_date: str | None = None
     external_ref: str | None = None
     note: str | None = None
-    # Send null to clear a level; leave the key out to keep it.
-    stop_loss: float | None = Field(default=None, gt=0)
-    take_profit: float | None = Field(default=None, gt=0)
-
-
-LEVEL_FIELDS = ("stop_loss", "take_profit")
 
 
 class SettleIn(BaseModel):
@@ -195,10 +200,6 @@ def _check(f: dict) -> dict:
             f[k] = _date(f[k], k).isoformat()
     if "trade_date" in f and "maturity_date" in f and f["maturity_date"] <= f["trade_date"]:
         raise HTTPException(status_code=400, detail="maturity_date must be after trade_date")
-    if "side" in f:
-        err = fwd.check_levels_order(f["side"], f.get("stop_loss"), f.get("take_profit"))
-        if err:
-            raise HTTPException(status_code=400, detail=err)
     return f
 
 
@@ -236,14 +237,7 @@ async def amend_forward(fid: int, body: ForwardEdit, request: Request):
     if not row or row["status"] != "open":
         raise HTTPException(status_code=404, detail="No open forward with that id")
     f = {k: v for k, v in body.model_dump().items() if v is not None}
-    # Levels can be cleared: an explicit null in the body sets them to NULL.
-    for k in LEVEL_FIELDS:
-        if k in body.model_fields_set:
-            f[k] = getattr(body, k)
-    # Validate the stop/target order against the side and levels as they will
-    # stand after this edit, not just the fields sent.
-    base = {k: row[k] for k in ("trade_date", "maturity_date", "side", *LEVEL_FIELDS)}
-    merged = _check({**base, **f})
+    merged = _check({**{k: row[k] for k in ("trade_date", "maturity_date")}, **f})
     f.update({k: merged[k] for k in f})
     await repo.update_forward(db, fid, f, _user(request))
     return await repo.get_forward(db, fid)
@@ -292,3 +286,130 @@ async def set_carry(body: CarryIn, request: Request):
     await repo.ensure_tables(db)
     await repo.set_carry(db, body.asset, body.rate_pct / 100.0, _user(request))
     return await repo.get_carry(db, body.asset)
+
+
+# ── Forwards Monitor ─────────────────────────────────────────────
+# Every forward-like position of one asset, with its stop / target levels:
+# booked forwards (forward_trades) and synthetic forwards (a long call + short
+# put at one strike, or the reverse, booked as options, e.g. the KeyRock FIL
+# structure). Levels live in forward_levels, not on the trades, so the option
+# legs are never touched. Synthetic MTM is qty x (S - K) by put-call parity at
+# zero rate, the same assumption the options book uses.
+
+async def _active_option_legs(db, asset: str, today: date) -> list[dict]:
+    cur = await db.execute(
+        "SELECT * FROM trades WHERE asset = ? AND status = 'active' AND substr(expiry, 1, 10) >= ?",
+        (asset.upper(), today.isoformat()))
+    return [dict(r) for r in await cur.fetchall()]
+
+
+def _leg_text(t: dict) -> str:
+    return f"#{t['id']} {t['side']} {t['option_type']} {float(t['strike']):g} x {float(t['qty']):,.0f}"
+
+
+async def build_monitor(asset: str, spot: float, today: date | None = None) -> dict:
+    a = asset.upper()
+    today = today or date.today()
+    db = await get_db()
+    await repo.ensure_tables(db)
+    book = await build_forward_book(a, spot, today)
+    levels = await repo.get_levels(db, a)
+    out = []
+    for t in book["trades"]:
+        out.append({
+            "key": f"fwd:{t['id']}", "kind": "forward", "forward_id": t["id"],
+            "counterparty": t["counterparty"], "side": t["side"], "qty": float(t["qty"]),
+            "forward_price": float(t["forward_price"]), "effective_price": float(t["forward_price"]),
+            "net_premium_usd": 0.0, "trade_date": t["trade_date"], "maturity_date": t["maturity_date"],
+            "days_to_maturity": t["days_to_maturity"], "mtm": t["mtm"], "delta": t["delta"],
+            "fair_forward": t["fair_forward"], "external_ref": t.get("external_ref") or "",
+            "legs": [], "leg_ids": [], "stop_loss": t["stop_loss"], "take_profit": t["take_profit"],
+            "note": t["levels_note"], "levels": t["levels"],
+        })
+    try:
+        legs = await _active_option_legs(db, a, today)
+    except Exception as e:  # noqa: BLE001 - forwards still show if the options read fails
+        log.warning("option legs unavailable for monitor %s: %s", a, e)
+        legs = []
+    for s in fwd.find_synthetic_forwards(legs):
+        mat = _date(s["expiry"], "expiry")
+        sgn = fwd.side_sign(s["side"])
+        lv = levels.get(s["key"]) or {}
+        watch = fwd.level_watch(s["side"], s["qty"], s["strike"], spot, 0.0, 0.0,
+                                lv.get("stop_loss"), lv.get("take_profit"))
+        out.append({
+            "key": s["key"], "kind": "synthetic", "forward_id": None,
+            "counterparty": s["counterparty"], "side": s["side"], "qty": s["qty"],
+            "forward_price": s["strike"], "effective_price": s["effective_price"],
+            "net_premium_usd": s["net_premium_usd"], "trade_date": s["trade_date"],
+            "maturity_date": s["expiry"], "days_to_maturity": (mat - today).days,
+            "mtm": sgn * s["qty"] * (spot - s["strike"]), "delta": sgn * s["qty"],
+            "fair_forward": spot, "external_ref": s["call"].get("trade_id") or "",
+            "legs": [_leg_text(s["call"]), _leg_text(s["put"])],
+            "leg_ids": [s["call"]["id"], s["put"]["id"]],
+            "stop_loss": lv.get("stop_loss"), "take_profit": lv.get("take_profit"),
+            "note": lv.get("note") or "", "levels": watch,
+        })
+    rank = {"stop_hit": 0, "target_hit": 1, "near_stop": 2, "near_target": 3, "watching": 4, "none": 5}
+    out.sort(key=lambda p: (rank.get(p["levels"]["status"], 9), p["maturity_date"], p["counterparty"].lower()))
+    st = [p["levels"]["status"] for p in out]
+    summary = {k: st.count(k) for k in rank}
+    summary.update(count=len(out), net_qty=sum(fwd.side_sign(p["side"]) * p["qty"] for p in out),
+                   mtm=sum(p["mtm"] for p in out))
+    return {"asset": a, "spot": spot, "near_pct": fwd.NEAR_PCT, "positions": out, "summary": summary,
+            "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+class LevelsIn(BaseModel):
+    asset: str
+    key: str
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    note: str = ""
+
+
+@router.get("/monitor")
+async def get_monitor(asset: str = "FIL"):
+    """Booked + synthetic forwards with stop / target levels, at live spot."""
+    if asset.upper() not in ASSETS:
+        raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS}")
+    try:
+        spot = await spot_for(asset)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"spot unavailable: {e}")
+    return await build_monitor(asset, spot)
+
+
+@router.put("/levels")
+async def put_levels(body: LevelsIn, request: Request):
+    """Set / clear one position's stop loss and take profit (null clears)."""
+    a = body.asset.upper()
+    if a not in ASSETS:
+        raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS}")
+    try:
+        spot = await spot_for(a)
+    except Exception:
+        raise HTTPException(status_code=502, detail="spot unavailable, levels not saved")
+    mon = await build_monitor(a, spot)
+    pos = next((p for p in mon["positions"] if p["key"] == body.key), None)
+    if pos is None:
+        raise HTTPException(status_code=404, detail=f"no open {a} forward position {body.key!r}")
+    err = fwd.check_levels_order(pos["side"], body.stop_loss, body.take_profit)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    db = await get_db()
+    await repo.set_levels(db, body.key, a, body.stop_loss, body.take_profit, body.note, _user(request))
+    mon = await build_monitor(a, spot)
+    return next((p for p in mon["positions"] if p["key"] == body.key), pos)
+
+
+@router.get("/history")
+async def get_history(asset: str = "FIL"):
+    """Hourly spot closes (last ~30 days) for the monitor chart."""
+    from plgo_options.market_data import token_market
+    if asset.upper() not in ASSETS:
+        raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS}")
+    try:
+        return await token_market.get_hourly(asset)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"history unavailable: {e}")

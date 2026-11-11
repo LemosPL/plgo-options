@@ -65,7 +65,7 @@
   function levelsCard() {
     const lv = book.trades.map((t) => t.levels || {}).filter((l) => l.status && l.status !== "none");
     if (!lv.length) return `<div class="collat-metric"><div class="collat-metric-label">Stop / Target</div>
-      <div class="collat-metric-value">—</div><div class="collat-metric-sub">none set · add in Edit</div></div>`;
+      <div class="collat-metric-value">—</div><div class="collat-metric-sub">none set · set on Forwards Monitor</div></div>`;
     const n = (k) => lv.filter((l) => l.status === k).length;
     const hits = n("stop_hit") + n("target_hit"), near = n("near_stop") + n("near_target");
     const value = hits ? `<span style="color:var(--red)">${hits} hit</span>` : near ? `<span style="color:#d29922">${near} near</span>` : "Watching";

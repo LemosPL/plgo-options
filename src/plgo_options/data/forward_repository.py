@@ -31,8 +31,6 @@ CREATE TABLE IF NOT EXISTS forward_trades (
     recon_note TEXT NOT NULL DEFAULT '',
     recon_at TEXT,
     recon_by TEXT NOT NULL DEFAULT '',
-    stop_loss REAL,
-    take_profit REAL,
     created_by TEXT NOT NULL DEFAULT '',
     updated_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -50,26 +48,55 @@ CREATE TABLE IF NOT EXISTS forward_carry (
 """
 
 EDITABLE = ("asset", "counterparty", "side", "qty", "forward_price", "trade_date",
-            "maturity_date", "external_ref", "note", "stop_loss", "take_profit")
+            "maturity_date", "external_ref", "note")
 
-# Columns added after the table first shipped: (name, SQL type). CREATE TABLE
-# IF NOT EXISTS can't add a column to an existing table, so ensure_tables adds
-# any that are missing (prod's forward_trades predates these).
-_ADDED_COLUMNS = (("stop_loss", "REAL"), ("take_profit", "REAL"))
+# Stop-loss / take-profit levels, managed on the Forwards Monitor and kept OFF
+# the trade: one row per monitored position, keyed by the position, so the same
+# store covers a booked forward ("fwd:<forward id>") and a synthetic forward
+# built from options ("syn:<call trade id>-<put trade id>"). Levels are prices
+# of the underlying spot. Deleting the row clears the levels.
+FORWARD_LEVELS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS forward_levels (
+    key TEXT PRIMARY KEY,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    stop_loss REAL,
+    take_profit REAL,
+    note TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
 
 
 async def ensure_tables(db) -> None:
     await db.execute(FORWARD_TRADES_SCHEMA)
     await db.execute(FORWARD_CARRY_SCHEMA)
-    cur = await db.execute("PRAGMA table_info(forward_trades)")
-    have = {r[1] for r in await cur.fetchall()}
-    added = False
-    for name, typ in _ADDED_COLUMNS:
-        if name not in have:
-            await db.execute(f"ALTER TABLE forward_trades ADD COLUMN {name} {typ}")
-            added = True
-    if added:
-        await db.commit()
+    await db.execute(FORWARD_LEVELS_SCHEMA)
+
+
+async def get_levels(db, asset: str | None = None) -> dict[str, dict]:
+    """Levels by position key."""
+    q, args = "SELECT * FROM forward_levels", []
+    if asset:
+        q += " WHERE asset = ?"
+        args.append(asset.upper())
+    cur = await db.execute(q, args)
+    return {r["key"]: dict(r) for r in await cur.fetchall()}
+
+
+async def set_levels(db, key: str, asset: str, stop_loss, take_profit, note: str, user: str) -> None:
+    """Upsert one position's levels; with no stop, no target and no note the row goes."""
+    if stop_loss is None and take_profit is None and not (note or "").strip():
+        await db.execute("DELETE FROM forward_levels WHERE key = ?", (key,))
+    else:
+        await db.execute(
+            """INSERT INTO forward_levels (key, asset, stop_loss, take_profit, note, updated_by, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET asset = excluded.asset, stop_loss = excluded.stop_loss,
+                   take_profit = excluded.take_profit, note = excluded.note,
+                   updated_by = excluded.updated_by, updated_at = excluded.updated_at""",
+            (key, asset.upper(), stop_loss, take_profit, (note or "").strip(), user))
+    await db.commit()
 
 
 # Forwards booked from a counterparty confirmation, inserted once at startup
@@ -118,11 +145,10 @@ async def get_forward(db, fid: int) -> dict | None:
 async def insert_forward(db, f: dict, user: str) -> int:
     cur = await db.execute(
         """INSERT INTO forward_trades (asset, counterparty, side, qty, forward_price, trade_date,
-               maturity_date, external_ref, note, stop_loss, take_profit, created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               maturity_date, external_ref, note, created_by, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (f["asset"].upper(), f["counterparty"], f["side"], f["qty"], f["forward_price"],
-         f["trade_date"], f["maturity_date"], f.get("external_ref") or "", f.get("note") or "",
-         f.get("stop_loss"), f.get("take_profit"), user, user))
+         f["trade_date"], f["maturity_date"], f.get("external_ref") or "", f.get("note") or "", user, user))
     await db.commit()
     return cur.lastrowid
 

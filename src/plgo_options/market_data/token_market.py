@@ -175,3 +175,47 @@ async def get_funding(asset: str) -> list[dict]:
             pass
     _cache[key] = (time.monotonic() + 300.0, out)
     return out
+
+
+# Hourly closes for the Forwards Monitor chart: Kraken (720 bars = 30 days),
+# OKX 1H as fallback. Cached a few minutes; the last bar is the open hour.
+HOURLY_TTL = 300.0
+
+
+async def _kraken_hourly(http: httpx.AsyncClient, a: str) -> list[tuple[int, float]]:
+    r = await http.get(f"https://api.kraken.com/0/public/OHLC?pair={a}USD&interval=60")
+    r.raise_for_status()
+    j = r.json()
+    if j.get("error"):
+        raise RuntimeError(str(j["error"]))
+    rows = next(v for k, v in j["result"].items() if k != "last")
+    return [(int(x[0]), float(x[4])) for x in rows]
+
+
+async def _okx_hourly(http: httpx.AsyncClient, a: str) -> list[tuple[int, float]]:
+    r = await http.get(f"https://www.okx.com/api/v5/market/history-candles?instId={a}-USDT&bar=1H&limit=300")
+    r.raise_for_status()
+    return sorted((int(x[0]) // 1000, float(x[4])) for x in r.json()["data"])
+
+
+async def get_hourly(asset: str) -> dict:
+    a = check_symbol(asset)
+    key = f"hourly:{a}"
+    hit = _cache.get(key)
+    if hit and time.monotonic() < hit[0]:
+        return hit[1]
+    errors, rows, src = [], [], None
+    async with httpx.AsyncClient(timeout=TIMEOUT) as http:
+        for name, fn in (("Kraken", _kraken_hourly), ("OKX", _okx_hourly)):
+            try:
+                rows = await fn(http, a)
+                if len(rows) >= 24:
+                    src = name
+                    break
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{name}: {type(e).__name__}: {e}"[:160])
+    if len(rows) < 24:
+        raise RuntimeError(f"no hourly history for {a}: " + "; ".join(errors))
+    out = {"asset": a, "source": src, "ts": [t for t, _ in rows], "closes": [c for _, c in rows]}
+    _cache[key] = (time.monotonic() + HOURLY_TTL, out)
+    return out
