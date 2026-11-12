@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
 from plgo_options.execution import bot, from_optimizer, rfq, rfq_desk
-from plgo_options.execution.deribit import ConnectorError
+from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
 from plgo_options.web.auth import current_user
@@ -57,7 +57,7 @@ class OrderCreate(BaseModel):
     end_vp: float = Field(0.7, ge=0, description="threshold one hour before the deadline, vol points")
     hard_vp: float = Field(0.9, ge=0, description="threshold in the final hour; never exceeded")
     cap: float = Field(500, ge=1, description="max contracts per take (the option then rests 2 minutes)")
-    mode: Literal["paper", "live"] = "paper"
+    mode: Literal["paper", "testnet", "live"] = "paper"
     note: str = ""
 
 
@@ -83,8 +83,8 @@ async def status():
     for o in orders:
         counts[o["status"]] = counts.get(o["status"], 0) + 1
     return {"kill_switch": await kill_switch_on(), "last_tick": await store.last_run(bot.LOCK),
-            "counts": counts, "modes": {"paper": True, "live": False},
-            "live_note": "live execution waits for the Deribit connector to pass on testnet"}
+            "counts": counts, "modes": {"paper": True, "testnet": testnet_configured(), "live": False},
+            "live_note": "production execution waits for the bot's testnet run"}
 
 
 @router.get("/orders")
@@ -95,7 +95,9 @@ async def orders(limit: int = 100):
 async def _check(req: OrderCreate, now: float) -> str | None:
     """Why the order cannot be created, or None."""
     if req.mode == "live":
-        return "live execution is not available until the Deribit connector passes on testnet"
+        return "production execution waits for the bot's testnet run"
+    if req.mode == "testnet" and not testnet_configured():
+        return "no testnet key on this server: set DERIBIT_TESTNET_CLIENT_ID and DERIBIT_TESTNET_CLIENT_SECRET"
     if not INSTRUMENT.fullmatch(req.instrument):
         return "instrument must look like ETH-25DEC26-2500-C"
     if not req.start_vp <= req.end_vp <= req.hard_vp:

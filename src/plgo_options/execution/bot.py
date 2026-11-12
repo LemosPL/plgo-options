@@ -22,9 +22,13 @@ Takes, fills, errors and expiries are recorded on the pass they happen; the rout
 outcomes (wait, cooldown, halted, ...) once a minute, on its first pass, so the DB
 (on GCS FUSE on Cloud Run) is not written every 5 seconds.
 
-Paper mode only for now: the PaperConnector fills against the same book the
-decision saw. Live orders are refused at creation until the Deribit connector
-(Lucas) passes on testnet.
+Modes. "paper": the PaperConnector fills against the same book the decision saw.
+"testnet": the same decision (production books and spline), then the IOC goes to
+Deribit testnet through the connector, checked healthy first; it fills only if
+testnet's own book has something at our limit, so it proves the order path (labels,
+fills, fees, recording), not our costs. An IOC that meets nothing is recorded as
+no_fill and starts no rest. "live" (production) is refused at creation until testnet
+has run.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, s
 
 from . import store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
+from .deribit import testnet_connector
 from .paper import PaperConnector, deribit_option_fee
 from .threshold import MAX_FIT_ERROR, QTY_STEP, ThresholdOrder, decide
 
@@ -56,8 +61,10 @@ PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
 # ~0.01 vol points cheaper; shorter rests gain little more, and live makers may requote
 # worse after being hit, which no replay shows.
 COOLDOWN = 120.0
-ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted"}  # recorded once a minute
+ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted", "no_fill", "connector_down"}  # recorded once a minute
 API = "https://www.deribit.com/api/v2/public"
+# The venue for each non-paper mode. Production ("live") is not here until testnet has run.
+CONNECTORS: dict[str, Callable[[], Any]] = {"testnet": testnet_connector}
 # books_fn(expiries, instruments) -> {expiry: books}: every option of the expiries, and
 # the instruments' own books with their levels
 BooksFn = Callable[[list[str], list[str]], Awaitable[dict[str, list[dict]]]]
@@ -171,14 +178,20 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
         await _tick(o, now, d.action, record, detail=d.detail, **ctx)
         return {"id": o.id, "action": d.action, "detail": d.detail}
 
-    async def top(_: str) -> BookTop:
-        return BookTop(o.instrument, book.get("best_bid_price"), book.get("best_ask_price"),
-                       book.get("best_bid_amount"), book.get("best_ask_amount"), book.get("mark_price"), now)
+    if o.mode == "paper":
+        async def top(_: str) -> BookTop:
+            return BookTop(o.instrument, book.get("best_bid_price"), book.get("best_ask_price"),
+                           book.get("best_bid_amount"), book.get("best_ask_amount"), book.get("mark_price"), now)
 
-    async def levels(_: str) -> BookDepth:
-        return depth
+        async def levels(_: str) -> BookDepth:
+            return depth
 
-    conn = PaperConnector(top, fee_fn=deribit_option_fee, clock=lambda: now, depth=levels)
+        conn = PaperConnector(top, fee_fn=deribit_option_fee, clock=lambda: now, depth=levels)
+    else:
+        conn = CONNECTORS[o.mode]()
+        if not await conn.healthy():  # auth, rate limit, ETH locked, or an earlier send still in doubt
+            await _tick(o, now, "connector_down", record, detail=f"{o.mode} connector unhealthy: nothing sent", **ctx)
+            return {"id": o.id, "action": "connector_down"}
     intent = OrderIntent(intent_id=f"thr{o.id}-{int(now * 1000)}", proposal_id=f"exec-{o.id}",
                          instrument=o.instrument, side=o.side, qty=d.qty, limit_price=d.limit_price,
                          time_in_force="IOC")
@@ -186,20 +199,27 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
     if st.status is OrderStatus.REJECTED:
         await _tick(o, now, "rejected", record, detail=st.reject_reason or "", **ctx)
         return {"id": o.id, "action": "rejected", "detail": st.reject_reason}
+    if not st.fills:  # an IOC that met nothing at our limit on that venue's book: no rest, the next pass decides again
+        detail = f"IOC {o.side} {d.qty:g} at {d.limit_price} on {o.mode}: nothing there at that price"
+        await _tick(o, now, "no_fill", record, detail=detail, **ctx)
+        return {"id": o.id, "action": "no_fill", "detail": detail}
     fills = []
     mark = book.get("mark_price")
     bid, ask = book.get("best_bid_price"), book.get("best_ask_price")
     mid = (bid + ask) / 2 if bid and ask else None
     for f in st.fills:
         usd = f.price * S
+        # paper: the fee as Deribit would charge it; on a venue, the fee it charged (ETH)
+        fee_usd = deribit_option_fee_usd(S, usd) if o.mode == "paper" else f.fee * S
         # a fresh paper connector each pass restarts its ids: key paper fills by the intent too
-        fills.append(dict(ts=now, intent_id=f.intent_id, trade_id=f"{f.intent_id}/{f.trade_id}",
+        fills.append(dict(ts=now if o.mode == "paper" else (f.ts or now), intent_id=f.intent_id,
+                          trade_id=f"{f.intent_id}/{f.trade_id}" if o.mode == "paper" else f.trade_id,
                           price_eth=f.price, price_usd=usd,
-                          qty=f.qty, fee_usd=f.fee * S, mode=o.mode, fair_usd=fair["fair"],
+                          qty=f.qty, fee_usd=f.fee * S if o.mode == "paper" else fee_usd, mode=o.mode,
+                          fair_usd=fair["fair"],
                           mark_usd=mark * S if mark is not None else None,
                           mid_usd=mid * S if mid is not None else None,
-                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd)
-                          + deribit_option_fee_usd(S, usd)))
+                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_usd))
     await store.add_fills(o.id, fills)
     await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail, **ctx)
     if o.remaining - st.filled_qty < QTY_STEP:

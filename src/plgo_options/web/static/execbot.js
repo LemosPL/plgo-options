@@ -2,7 +2,7 @@
 // every 5 seconds, crossing only when the book is cheap against the smoothing spline.
 // Optimizer v2's "Send to execution" lands here through window.execbotReceive.
 (function () {
-  const ACTION = { cooldown: "resting", no_book: "no book" };
+  const ACTION = { cooldown: "resting", no_book: "no book", no_fill: "no fill", connector_down: "connector down" };
   "use strict";
 
   const $ = (id) => document.getElementById(id);
@@ -49,12 +49,17 @@
 
   // ── header ────────────────────────────────────────────────────
   function header(st) {
+    document.querySelectorAll(".xb-mode option[value=testnet]").forEach((o) => {   // offered only with a testnet key
+      o.disabled = !(st.modes && st.modes.testnet);
+      if (o.disabled && o.selected) o.parentElement.value = "paper";
+    });
     const card = (label, value, sub, style = "") => `<div class="collat-metric"><div class="collat-metric-label">${label}</div>
       <div class="collat-metric-value" style="${style}">${value}</div><div class="collat-metric-sub">${sub}</div></div>`;
     const c = st.counts || {};
     const lt = st.last_tick || {};
     $("xb-cards").innerHTML =
-      card("Mode", "Paper", esc(st.live_note || ""))
+      card("Modes", st.modes && st.modes.testnet ? "Paper · Testnet" : "Paper",
+        (st.modes && st.modes.testnet ? "" : "no testnet key on this server · ") + esc(st.live_note || ""))
       + card("Kill switch", st.kill_switch ? "ON" : "off", st.kill_switch ? "nothing is sent while it is on" : "Agents page controls it",
         st.kill_switch ? "color:var(--red)" : "")
       + card("Last run", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) · ${fmt(lt.passes || 1)} pass(es) · ${fmt(lt.takes || 0)} take(s)${lt.quotes ? ` · quotes ${esc(lt.quotes)}` : ""}${lt.halted ? " · halted" : ""}${lt.failed ? ` · ${fmt(lt.failed)} failed (${esc(lt.error || "")})` : ""}` : "no run yet: is the scheduler job deployed?")
@@ -205,7 +210,8 @@
   // ── review: an optimizer solution → orders ────────────────────
   function params() {
     const n = (id) => parseFloat($(id).value);
-    return { hours: n("xb-r-hours"), start_vp: n("xb-r-start"), end_vp: n("xb-r-end"), hard_vp: n("xb-r-hard"), cap: n("xb-r-cap") };
+    return { hours: n("xb-r-hours"), start_vp: n("xb-r-start"), end_vp: n("xb-r-end"), hard_vp: n("xb-r-hard"), cap: n("xb-r-cap"),
+      mode: $("xb-r-mode").value };
   }
 
   async function reprice() {
@@ -299,7 +305,7 @@
     const left = d.leftovers.length
       ? `<div style="font-size:.78rem;margin-top:.25rem"><b>To the bot on screen (${d.leftovers.length})</b>`
         + d.leftovers.map((x) => `<div>${side(x.side)} ${fmt(x.qty)} ${esc(x.instrument)} — <span style="color:var(--muted)">${esc(x.why)}</span></div>`).join("")
-        + `<button class="btn-secondary" id="xb-rfq-left" style="margin-top:.35rem">Leftovers to the bot (paper, with the settings above)</button>`
+        + `<button class="btn-secondary" id="xb-rfq-left" style="margin-top:.35rem">Leftovers to the bot (with the settings and mode above)</button>`
         + `</div>` : "";
     const sk = d.skipped.length
       ? `<div style="font-size:.78rem;margin-top:.5rem"><b>Not in an RFQ (${d.skipped.length})</b>`
@@ -393,13 +399,13 @@
 
   async function leftoversToBot() {
     const p = params();
-    const orders = review.rfq.leftovers.map((x) => ({ instrument: x.instrument, side: x.side, qty: x.qty, ...p, mode: "paper",
+    const orders = review.rfq.leftovers.map((x) => ({ instrument: x.instrument, side: x.side, qty: x.qty, ...p,
       note: `${review.meta.source || "Optimizer"}: RFQ leftover (${x.why})`.slice(0, 500) }));
     $("xb-rfq-left").disabled = true;
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
       const refused = r.refused.map((x) => `${x.instrument}: ${x.reason}`).join("; ");
-      status(`${r.created.length} leftover paper order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
+      status(`${r.created.length} leftover ${p.mode} order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
       await load();
     } catch (e) {
       status("Create failed: " + e.message, true);
@@ -415,14 +421,14 @@
     if (!picked.length) { status("Tick at least one order.", true); return; }
     const orders = picked.map((i) => {
       const l = review.data.legs[i];
-      return { instrument: l.instrument, side: l.side, qty: qtys[i], ...p, mode: "paper",
+      return { instrument: l.instrument, side: l.side, qty: qtys[i], ...p,
         note: `${review.meta.source || "Optimizer"}: ${l.sources.join(" + ")}`.slice(0, 500) };
     });
     $("xb-r-create").disabled = true;
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
       const refused = r.refused.map((x) => `${x.instrument}: ${x.reason}`).join("; ");
-      status(`${r.created.length} paper order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
+      status(`${r.created.length} ${p.mode} order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
       review = null;
       $("xb-review").style.display = "none";
       await load();
@@ -450,7 +456,7 @@
       const r = await api("POST", "/api/execution-bot/orders", {
         instrument: v("xb-n-inst").toUpperCase(), side: v("xb-n-side"), qty: n("xb-n-qty"), hours: n("xb-n-hours"),
         start_vp: n("xb-n-start"), end_vp: n("xb-n-end"), hard_vp: n("xb-n-hard"), cap: n("xb-n-cap"),
-        mode: "paper", note: v("xb-n-note") });
+        mode: $("xb-n-mode").value, note: v("xb-n-note") });
       status(`Paper order #${r.id} created.`);
       $("xb-new").style.display = "none";
       selected = r.id;

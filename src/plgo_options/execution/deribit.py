@@ -558,6 +558,25 @@ def get_connector() -> DeribitConnector:
     return _connector
 
 
+_testnet: DeribitConnector | None = None
+
+
+def testnet_connector() -> DeribitConnector:
+    """The one testnet connector for this process, whatever DERIBIT_TESTNET says: the execution
+    bot's testnet orders and the Block RFQ desk share it, and with it the memory of what was sent."""
+    global _testnet
+    if _testnet is None:
+        cid, secret = deribit_keys(True)
+        if not (cid and secret):
+            raise ConnectorError("no testnet key: set DERIBIT_TESTNET_CLIENT_ID and DERIBIT_TESTNET_CLIENT_SECRET")
+        _testnet = DeribitConnector(cid, secret, testnet=True)
+    return _testnet
+
+
+def testnet_configured() -> bool:
+    return all(deribit_keys(True))
+
+
 def _check_scope(scope: str) -> None:
     """The key must be able to trade and must not be able to move funds."""
     granted = set(scope.split())

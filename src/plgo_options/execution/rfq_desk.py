@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .block_rfq import GRACE_SECONDS, BlockRfqClient, Rfq
-from .deribit import ConnectorError, DeribitConnector, deribit_keys
+from .deribit import ConnectorError, testnet_connector
 
 NETWORK = "testnet"
 
@@ -41,10 +41,7 @@ _sent: dict[int, Sent] = {}
 def client() -> BlockRfqClient:
     global _client
     if _client is None:
-        cid, secret = deribit_keys(True)
-        if not (cid and secret):
-            raise ConnectorError("no testnet key: set DERIBIT_TESTNET_CLIENT_ID and DERIBIT_TESTNET_CLIENT_SECRET")
-        _client = BlockRfqClient(DeribitConnector(cid, secret, testnet=True))
+        _client = BlockRfqClient(testnet_connector())
     return _client
 
 

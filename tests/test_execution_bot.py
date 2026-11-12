@@ -215,7 +215,7 @@ def test_routes_create_act_and_refuse_live(tmp_path, monkeypatch):
             await routes.act(oid, "resume")
         assert e.value.status_code == 409
         st = await routes.status()
-        assert st["counts"] == {"cancelled": 1} and st["modes"] == {"paper": True, "live": False}
+        assert st["counts"] == {"cancelled": 1} and st["modes"] == {"paper": True, "testnet": routes.testnet_configured(), "live": False}
         assert (await routes.detail(oid))["order"]["id"] == oid
     run(body)
 
@@ -606,3 +606,73 @@ def test_both_previews_warn_when_the_spline_is_off_its_quotes(monkeypatch):
     assert off["legs"][0]["note"].startswith("spline off its quotes")
     r = asyncio.run(rfq.preview_rfq(trades, listed_fn=listed, books_fn=books))
     assert r["warnings"] == off["warnings"] and r["structures"][0]["fit_warning"] == w["message"]
+
+
+class _FakeVenue:
+    """The connector a testnet order sees: health, and what an IOC finds on that venue's book."""
+
+    def __init__(self):
+        self.ok, self.sent, self.fill = True, [], None
+
+    async def healthy(self):
+        return self.ok
+
+    async def submit(self, intent):
+        from plgo_options.execution.models import Fill, OrderState, OrderStatus
+        self.sent.append(intent)
+        fills = [] if self.fill is None else [Fill(intent.intent_id, "ord1", intent.instrument, intent.side,
+                                                   self.fill, intent.limit_price, 0.0003, False, "T77", NOW + 121)]
+        return OrderState("ord1", intent, OrderStatus.FILLED if fills else OrderStatus.CANCELLED, fills)
+
+
+def test_testnet_orders_go_through_the_connector_with_the_venues_fill_and_fee(tmp_path, monkeypatch):
+    run = _db(tmp_path, "testnet.db")
+    venue = _FakeVenue()
+    monkeypatch.setitem(bot.CONNECTORS, "testnet", lambda: venue)
+
+    async def books(expiries, instruments):
+        return {EXPIRY: _books(-3.0)}               # cheap: the bot takes
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 50, NOW + 12 * H, 0.5, 0.7, 0.9, 25, mode="testnet", now=NOW)
+        venue.ok = False
+        assert (await bot.run_tick(NOW + 60, books, off))["orders"][0]["action"] == "connector_down"
+        assert venue.sent == []                                         # unhealthy: nothing sent
+        venue.ok = True
+        out = await bot.run_tick(NOW + 90, books, off)                  # testnet's book had nothing there
+        assert out["orders"][0]["action"] == "no_fill" and len(venue.sent) == 1
+        assert venue.sent[0].time_in_force == "IOC" and venue.sent[0].qty == 25
+        venue.fill = 20.0
+        out = await bot.run_tick(NOW + 120, books, off)                 # no rest after a no_fill: it tries again
+        assert out["orders"][0]["action"] == "take" and out["orders"][0]["qty"] == 20
+        d = await store.order_detail(oid)
+        (f,) = d["fills"]
+        S = _books()[0]["estimated_delivery_price"]
+        assert f["mode"] == "testnet" and f["trade_id"] == "T77" and f["ts"] == NOW + 121
+        assert f["fee_usd"] == pytest.approx(0.0003 * S)               # the fee the venue charged
+        assert f["cost_usd"] == pytest.approx(f["price_usd"] - f["fair_usd"] + 0.0003 * S)
+        assert d["order"]["filled"] == 20 and d["order"]["status"] == "working"
+    run(body)
+
+
+def test_testnet_orders_need_a_testnet_key_and_production_stays_refused(tmp_path, monkeypatch):
+    run = _db(tmp_path, "modes.db")
+
+    async def listed(_):
+        return True
+    monkeypatch.setattr(routes, "_listed", listed)
+    req = Request({"type": "http", "headers": [], "session": {}})
+
+    async def body():
+        mk = lambda mode: routes.OrderCreate(instrument=NAME, side="buy", qty=10, hours=12, mode=mode)  # noqa: E731
+        monkeypatch.setattr(routes, "testnet_configured", lambda: False)
+        with pytest.raises(HTTPException, match="no testnet key"):
+            await routes.create(mk("testnet"), req)
+        monkeypatch.setattr(routes, "testnet_configured", lambda: True)
+        assert (await routes.create(mk("testnet"), req))["order"]["mode"] == "testnet"
+        with pytest.raises(HTTPException, match="testnet run"):
+            await routes.create(mk("live"), req)
+    run(body)

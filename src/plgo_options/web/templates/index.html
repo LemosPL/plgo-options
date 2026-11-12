@@ -2175,7 +2175,7 @@
       </div>
       <div style="margin:-.75rem 0 1.25rem">
         <button id="btn-optv2-send-to-exec" class="btn-secondary" style="width:auto"
-          title="Open the Execution Bot with this solution's Deribit legs, priced against the smoothing spline, to review and create paper orders">Send to execution</button>
+          title="Open the Execution Bot with this solution's Deribit legs, priced against the smoothing spline, to review and create orders (paper or testnet)">Send to execution</button>
         <span style="font-size:.72rem;color:var(--muted);margin-left:.6rem">Deribit legs only, netted per instrument; you review them on the Execution Bot page before anything is created. Paper trading for now.</span>
       </div>
 
@@ -4121,6 +4121,7 @@
         <label>End (vp)<br><input id="xb-r-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label title="the final hour; never exceeded">Hard limit (vp)<br><input id="xb-r-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-r-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
+        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet">Mode<br><select id="xb-r-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option></select></label>
         <button id="xb-r-reprice" class="btn-secondary" style="width:auto">Re-price</button>
       </div>
       <div class="chain-wrapper">
@@ -4131,7 +4132,7 @@
       </div>
       <div id="xb-review-skipped" style="font-size:.75rem;margin-top:.6rem"></div>
       <div style="margin-top:.75rem;display:flex;gap:.5rem">
-        <button id="xb-r-create" class="btn-primary" style="width:auto">Create paper orders</button>
+        <button id="xb-r-create" class="btn-primary" style="width:auto">Create orders</button>
         <button id="xb-r-discard" class="btn-secondary" style="width:auto">Discard</button>
       </div>
       <p style="font-size:.72rem;color:var(--muted);margin-top:.5rem">“Best cost now” is the touch against the spline, fee included;
@@ -4154,7 +4155,7 @@
     </section>
 
     <section class="card" id="xb-new" style="display:none">
-      <h2>New paper order</h2>
+      <h2>New order</h2>
       <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;font-size:.78rem">
         <label>Instrument<br><input id="xb-n-inst" placeholder="ETH-25DEC26-2500-C" style="width:12rem"></label>
         <label>Side<br><select id="xb-n-side"><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
@@ -4164,6 +4165,7 @@
         <label>End (vp)<br><input id="xb-n-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label>Hard limit (vp)<br><input id="xb-n-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-n-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
+        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet">Mode<br><select id="xb-n-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option></select></label>
         <label>Note<br><input id="xb-n-note" style="width:12rem"></label>
         <button id="xb-n-submit" class="btn-primary" style="width:auto">Create</button>
       </div>
@@ -4626,7 +4628,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=10"></script>
+<script src="/static/execbot.js?v=11"></script>
 <script src="/static/fwmonitor.js?v=2"></script>
 </body>
 </html>
