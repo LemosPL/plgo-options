@@ -154,7 +154,7 @@ def test_confirmed_forward_is_booked_once(monkeypatch):
         db = await aiosqlite.connect(":memory:")
         db.row_factory = aiosqlite.Row
         await repo.ensure_tables(db)
-        n_fwd, n_lv = len(repo.CONFIRMED_FORWARDS), len(repo.CONFIRMED_LEVELS)
+        n_fwd, n_lv = len(repo.CONFIRMED_FORWARDS), sum(1 for l in repo.CONFIRMED_LEVELS if l.get("external_ref"))
         assert await repo.seed_confirmed(db) == n_fwd + n_lv
         assert await repo.seed_confirmed(db) == 0          # idempotent
         eth = {r["external_ref"]: r for r in await repo.list_forwards(db, "ETH")}
@@ -294,3 +294,36 @@ def test_desk_levels_attach_to_the_matching_synthetic(monkeypatch):
     mon = asyncio.run(route.build_monitor("FIL", 0.75, today=date(2026, 11, 13)))
     assert next(p for p in mon["positions"] if p["key"] == "syn:12-11")["stop_loss"] is None
     asyncio.run(db.close())
+
+
+def test_confirmation_adopts_a_hand_booked_copy_and_heals_a_duplicate():
+    async def go():
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        await repo.ensure_tables(db)
+        fil = next(f for f in repo.CONFIRMED_FORWARDS if f["asset"] == "FIL")
+        eth = next(f for f in repo.CONFIRMED_FORWARDS if f["external_ref"].startswith("ad76"))
+        # Hand-booked FIL before the import: adopted, not duplicated.
+        hand_fil = await repo.insert_forward(db, {**fil, "external_ref": "", "trade_date": "2026-11-09", "note": ""}, "desk")
+        # ETH: an earlier import already duplicated a hand-booked copy (prod, 13 Nov).
+        hand_eth = await repo.insert_forward(db, {**eth, "external_ref": "", "note": ""}, "desk")
+        dup = await repo.insert_forward(db, eth, "confirmation import")
+        await repo.set_levels(db, f"fwd:{dup}", "ETH", 2300.0, 1950.0, "old", "desk orders")
+        # Hand-booked 55 ETH sale gets the desk levels by economics.
+        e55 = await repo.insert_forward(db, dict(asset="ETH", counterparty="Flowdesk", side="sell", qty=55.0,
+                                                 forward_price=1961.0, trade_date="2026-11-13",
+                                                 maturity_date="2026-11-27"), "desk")
+        await repo.seed_confirmed(db)
+        assert await repo.seed_confirmed(db) == 0
+        open_ = {r["id"]: r for r in await repo.list_forwards(db)}
+        assert dup not in open_ and hand_fil in open_ and hand_eth in open_
+        assert open_[hand_fil]["external_ref"] == fil["external_ref"] and open_[hand_fil]["trade_date"] == "2026-11-10"
+        assert sum(1 for r in open_.values() if r["external_ref"] == fil["external_ref"]) == 1
+        lv = await repo.get_levels(db)
+        assert f"fwd:{dup}" not in lv
+        assert (lv[f"fwd:{hand_eth}"]["stop_loss"], lv[f"fwd:{hand_eth}"]["take_profit"]) == (2236.5, 1900.0)
+        assert (lv[f"fwd:{hand_fil}"]["stop_loss"], lv[f"fwd:{hand_fil}"]["take_profit"]) == (0.83, 0.67)
+        assert (lv[f"fwd:{e55}"]["stop_loss"], lv[f"fwd:{e55}"]["take_profit"]) == (2236.5, 1900.0)
+        await db.close()
+
+    asyncio.run(go())

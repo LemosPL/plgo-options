@@ -129,13 +129,20 @@ CONFIRMED_FORWARDS = [
     },
 ]
 
-# Stop / target orders given by the desk, applied ONCE per (forward, version)
-# to the forward with that confirmation id; later edits on the Monitor stick.
+# Stop / target orders given by the desk, applied ONCE per (tag, version);
+# later edits on the Monitor stick. A level targets the forward carrying a
+# confirmation id ("external_ref") or every open forward matching "match"
+# (asset, side, qty, forward_price, maturity_date) for hand-booked ones.
 # Short forwards: stop above, target below.
+_ETH_NOV27 = {"stop_loss": 2236.5, "take_profit": 1900.0}
 CONFIRMED_LEVELS = [
-    {"external_ref": "e45b44b1-1592-4201-86ec-bd5a7f71a0b7", "version": 1,
-     "stop_loss": 2236.5, "take_profit": 1900.0,
+    {"external_ref": "e45b44b1-1592-4201-86ec-bd5a7f71a0b7", "version": 1, **_ETH_NOV27,
      "note": "Orders update: TP 2,500 ETH @ 1900, SL 2,500 ETH @ 2236.5"},
+    {"external_ref": "ad76a4c0-0380-4ded-8305-84d8fd4ba3a1", "version": 1, **_ETH_NOV27,
+     "note": "Same TP 1900 / SL 2236.5 as the 2,500 ETH"},
+    {"tag": "eth-sell-55-1961-27nov", "version": 1, **_ETH_NOV27,
+     "match": {"asset": "ETH", "side": "sell", "qty": 55.0, "forward_price": 1961.0, "maturity_date": "2026-11-27"},
+     "note": "Same TP 1900 / SL 2236.5 as the 2,500 ETH"},
     {"external_ref": "5e93d282-3a26-4e97-9357-4c6ccfb5f45b", "version": 1,
      "stop_loss": 0.83, "take_profit": 0.67,
      "note": "SL / TP ~10% around the 0.7544 fill"},
@@ -162,27 +169,73 @@ CREATE TABLE IF NOT EXISTS forward_seed_log (
 """
 
 
+def _same_economics(row, f) -> bool:
+    return (str(row["asset"]).upper() == f["asset"].upper() and row["side"] == f["side"]
+            and abs(float(row["qty"]) - float(f["qty"])) < 1e-9
+            and abs(float(row["forward_price"]) - float(f["forward_price"])) <= 1e-9 * max(1.0, float(f["forward_price"]))
+            and str(row["maturity_date"])[:10] == f["maturity_date"])
+
+
+async def _adopt_or_insert(db, f: dict) -> int:
+    """Book a confirmed forward without double-counting a hand-booked copy.
+
+    A hand-booked open forward with the same economics and no confirmation
+    id is ADOPTED (stamped with the id, trade date from the confirmation)
+    instead of inserting another. If an earlier import already duplicated
+    one, the imported copy is soft-deleted and its levels move across."""
+    cur = await db.execute("SELECT * FROM forward_trades WHERE status = 'open' AND external_ref = ''")
+    manual = next((dict(r) for r in await cur.fetchall() if _same_economics(r, f)), None)
+    cur = await db.execute("SELECT * FROM forward_trades WHERE external_ref = ?", (f["external_ref"],))
+    tagged = [dict(r) for r in await cur.fetchall()]
+    if tagged and not manual:
+        return 0
+    if not tagged and not manual:
+        await insert_forward(db, f, "confirmation import")
+        return 1
+    note = (manual["note"] + " · " if manual["note"] else "") + f"confirmation {f['external_ref']}"
+    await db.execute(
+        """UPDATE forward_trades SET external_ref = ?, trade_date = ?, note = ?,
+               updated_by = 'confirmation import', updated_at = datetime('now') WHERE id = ?""",
+        (f["external_ref"], f["trade_date"], note, manual["id"]))
+    for t in tagged:
+        if t["status"] != "open" or t["created_by"] != "confirmation import":
+            continue
+        await db.execute(
+            """UPDATE forward_trades SET status = 'deleted', note = ?, updated_by = 'confirmation import',
+                   updated_at = datetime('now') WHERE id = ?""",
+            (f"duplicate of hand-booked #{manual['id']}, removed", t["id"]))
+        old, new = f"fwd:{t['id']}", f"fwd:{manual['id']}"
+        cur = await db.execute("SELECT 1 FROM forward_levels WHERE key = ?", (new,))
+        if await cur.fetchone():
+            await db.execute("DELETE FROM forward_levels WHERE key = ?", (old,))
+        else:
+            await db.execute("UPDATE forward_levels SET key = ? WHERE key = ?", (new, old))
+    await db.commit()
+    return 1
+
+
 async def seed_confirmed(db) -> int:
     added = 0
     for f in CONFIRMED_FORWARDS:
-        cur = await db.execute("SELECT 1 FROM forward_trades WHERE external_ref = ?", (f["external_ref"],))
-        if await cur.fetchone():
-            continue
-        await insert_forward(db, f, "confirmation import")
-        added += 1
+        added += await _adopt_or_insert(db, f)
     await db.execute(FORWARD_SEED_LOG_SCHEMA)
     for lv in CONFIRMED_LEVELS:
-        tag = f"levels:{lv['external_ref']}:v{lv['version']}"
+        tag = f"levels:{lv.get('external_ref') or lv['tag']}:v{lv['version']}"
         cur = await db.execute("SELECT 1 FROM forward_seed_log WHERE tag = ?", (tag,))
         if await cur.fetchone():
             continue
-        cur = await db.execute(
-            "SELECT id, asset FROM forward_trades WHERE external_ref = ? AND status = 'open'", (lv["external_ref"],))
-        row = await cur.fetchone()
-        if not row:
+        if lv.get("external_ref"):
+            cur = await db.execute(
+                "SELECT * FROM forward_trades WHERE external_ref = ? AND status = 'open'", (lv["external_ref"],))
+            rows = [dict(r) for r in await cur.fetchall()]
+        else:
+            cur = await db.execute("SELECT * FROM forward_trades WHERE status = 'open'")
+            rows = [dict(r) for r in await cur.fetchall() if _same_economics(r, lv["match"])]
+        if not rows:
             continue
-        await set_levels(db, f"fwd:{row['id']}", row["asset"], lv["stop_loss"], lv["take_profit"],
-                         lv["note"], "desk orders")
+        for row in rows:
+            await set_levels(db, f"fwd:{row['id']}", row["asset"], lv["stop_loss"], lv["take_profit"],
+                             lv["note"], "desk orders")
         await db.execute("INSERT INTO forward_seed_log (tag) VALUES (?)", (tag,))
         await db.commit()
         added += 1
