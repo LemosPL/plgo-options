@@ -1937,3 +1937,4 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .tm-sel-clear { margin-left: .5rem; padding: 0 .4rem; font-size: .7rem; font-weight: 400; background: none;
   border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; }
 .tm-sel-clear:hover { color: var(--text); border-color: var(--accent); }
+.fm-legs { font-size:.72rem; font-family:'SF Mono','Fira Code',monospace; margin-top:.2rem; line-height:1.45; }

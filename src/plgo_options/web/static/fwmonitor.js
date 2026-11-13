@@ -157,7 +157,9 @@
     }
     $("fm-positions").innerHTML = positions.map((p) => {
       const k = pk(p), s = short(p);
-      const kind = p.kind === "synthetic"
+      const kind = p.kind === "net"
+        ? `<span class="tm-fwd-badge" title="Settlement buys close part of the position and sells reopen it: netted">net of ${p.legs.length} forwards</span>`
+        : p.kind === "synthetic"
         ? `<span class="tm-fwd-badge" title="${esc(p.legs.join("\n"))}">synthetic</span>${p.embedded ? ` <span class="fw-lv fw-lv-watch" title="This call/put pair is part of a larger deal">in deal</span>` : ""}`
         : `<span class="tm-fwd-badge">forward</span>`;
       const allIn = Math.abs(p.effective_price - p.forward_price) > 1e-12
@@ -172,9 +174,10 @@
         <div class="fm-card-mid">
           <div>
             <div class="fm-trade"><span style="color:${s ? "var(--red)" : "var(--green)"};font-weight:700">${s ? "SHORT" : "LONG"}</span>
-              ${fmt(p.qty)} ${p.asset} @ ${px(p.asset, p.forward_price)}${allIn}</div>
-            <div class="optv3-muted" style="font-size:.74rem">traded ${maturityText(p.trade_date)} · matures ${maturityText(p.maturity_date)} (${fmt(p.days_to_maturity)}d)${p.external_ref ? ` · <span title="${esc(p.external_ref)}">ref ${esc(String(p.external_ref).slice(0, 8))}</span>` : ""}</div>
-            ${p.legs.length ? `<div class="optv3-muted" style="font-size:.7rem">${esc(p.legs.join(" · "))}</div>` : ""}
+              ${fmt(p.qty)} ${p.asset} @ ${px(p.asset, p.forward_price)}${p.kind === "net" ? ` <span class="optv3-muted" title="Break-even: sum of signed qty x price over the net qty, so realised gains on closed legs are inside it">net entry</span>` : ""}${allIn}</div>
+            <div class="optv3-muted" style="font-size:.74rem">${p.kind === "net" ? "first traded" : "traded"} ${maturityText(p.trade_date)} · matures ${maturityText(p.maturity_date)} (${fmt(p.days_to_maturity)}d)${p.external_ref ? ` · <span title="${esc(p.external_ref)}">ref ${esc(String(p.external_ref).slice(0, 8))}</span>` : ""}</div>
+            ${p.kind === "net" ? `<div class="optv3-muted fm-legs">${p.legs.map(esc).join("<br>")}</div>`
+              : p.legs.length ? `<div class="optv3-muted" style="font-size:.7rem">${esc(p.legs.join(" · "))}</div>` : ""}
           </div>
           <div class="fm-mtm"><div class="optv3-muted" style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em">MTM</div>
             <div style="${sign(p.mtm)}">${usdK(p.mtm)}</div></div>
@@ -260,6 +263,63 @@
 
   function renderAll() { summary(); positionCards(); priceChart(); }
 
+  // ── netting: a settlement buy closes part of a short and a sell reopens it,
+  // so booked forwards of one asset, counterparty and maturity are ONE
+  // position. Legs net into a card: net qty, break-even entry (sum of signed
+  // qty x price over net qty), MTM, and stop / target on the NET (MTM at a
+  // level = each leg's MTM moved by its delta; linear). Levels belong to the
+  // legs on the net's side; editing the card writes them to each of those.
+  function levelWatch(sgn, spot, legs, lv, kind) {
+    if (!lv || !(lv > 0)) return null;
+    const up = kind === "stop" ? sgn < 0 : sgn > 0;
+    const hit = up ? spot >= lv : spot <= lv;
+    const dist = spot > 0 ? (lv / spot - 1) * 100 : null;
+    const near = !hit && dist != null && Math.abs(dist) <= 2;
+    const mtm_at = legs.reduce((t, l) => t + l.mtm + l.delta * (lv - spot), 0);
+    return { level: lv, dist_pct: dist, mtm_at, status: hit ? "hit" : near ? "near" : "ok" };
+  }
+
+  function netForwards(list) {
+    const groups = new Map(), out = [];
+    for (const p of list) {
+      if (p.kind !== "forward") { out.push(p); continue; }
+      const g = `${p.asset}|${p.counterparty.trim().toLowerCase()}|${p.maturity_date}`;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(p);
+    }
+    for (const legs of groups.values()) {
+      if (legs.length === 1) { out.push(legs[0]); continue; }
+      legs.sort((a, b) => a.trade_date.localeCompare(b.trade_date) || a.forward_id - b.forward_id);
+      const sq = (l) => (l.side === "buy" ? 1 : -1) * l.qty;
+      const net = legs.reduce((t, l) => t + sq(l), 0);
+      const sgn = net > 0 ? 1 : net < 0 ? -1 : 0;
+      const side = sgn > 0 ? "buy" : "sell";
+      const same = legs.filter((l) => (l.side === "buy" ? 1 : -1) === sgn);
+      const withLv = same.find((l) => l.stop_loss || l.take_profit) || {};
+      const spot = legs[0].spot, a = legs[0].asset;
+      const stop = sgn ? levelWatch(sgn, spot, legs, withLv.stop_loss, "stop") : null;
+      const target = sgn ? levelWatch(sgn, spot, legs, withLv.take_profit, "target") : null;
+      const st = stop?.status === "hit" ? "stop_hit" : target?.status === "hit" ? "target_hit"
+        : stop?.status === "near" ? "near_stop" : target?.status === "near" ? "near_target"
+        : stop || target ? "watching" : "none";
+      // Same levels on every leg of the net side? Otherwise say so on the card.
+      const mixed = same.some((l) => l.stop_loss !== withLv.stop_loss || l.take_profit !== withLv.take_profit);
+      const entry = sgn ? legs.reduce((t, l) => t + sq(l) * l.forward_price, 0) / net : 0;
+      out.push({
+        key: "net:" + legs.map((l) => l.forward_id).join("-"), kind: "net", asset: a, spot,
+        counterparty: legs[0].counterparty, side, qty: Math.abs(net), forward_price: entry, effective_price: entry,
+        net_premium_usd: 0, trade_date: legs[0].trade_date, maturity_date: legs[0].maturity_date,
+        days_to_maturity: legs[0].days_to_maturity, mtm: legs.reduce((t, l) => t + l.mtm, 0),
+        delta: legs.reduce((t, l) => t + l.delta, 0), external_ref: "",
+        legs: legs.map((l) => `#${l.forward_id} ${l.side === "buy" ? "Buy" : "Sell"} ${fmt(l.qty)} @ ${px(a, l.forward_price)} (${maturityText(l.trade_date)})`),
+        levelKeys: same.map((l) => l.key), stop_loss: withLv.stop_loss ?? null, take_profit: withLv.take_profit ?? null,
+        note: (withLv.note || "") + (mixed ? " · legs carry different levels: saving sets them all" : ""),
+        levels: { stop, target, status: st, near_pct: 2 },
+      });
+    }
+    return out;
+  }
+
   // ── data ─────────────────────────────────────────────────────
   const monitorUrl = (a, emb) => `/api/forwards/monitor?asset=${a}&include_embedded=${!!emb}`;
 
@@ -284,6 +344,7 @@
       embedded += r.value.embedded_synthetics || 0;
       for (const p of r.value.positions) positions.push({ ...p, asset: a, spot: r.value.spot });
     });
+    positions = netForwards(positions);
     positions.sort((x, y) => (RANK[x.levels.status] ?? 9) - (RANK[y.levels.status] ?? 9)
       || x.maturity_date.localeCompare(y.maturity_date) || x.asset.localeCompare(y.asset)
       || x.counterparty.localeCompare(y.counterparty));
@@ -321,9 +382,10 @@
     const num = (f) => { const v = parseFloat(card.querySelector(`[data-f="${f}"]`)?.value); return v > 0 ? v : null; };
     const body = { asset: p.asset, key: p.key,
       stop_loss: clear ? null : num("sl"), take_profit: clear ? null : num("tp"),
-      note: clear ? "" : (card.querySelector('[data-f="note"]')?.value || "") };
+      note: clear ? "" : (card.querySelector('[data-f="note"]')?.value || "").replace(/ · legs carry different levels.*$/, "") };
     try {
-      await api("PUT", "/api/forwards/levels", body);
+      // A netted card writes its levels to every leg on the net's side.
+      for (const key of p.levelKeys || [p.key]) await api("PUT", "/api/forwards/levels", { ...body, key });
       editing = null;
       selected = k;
       status(clear ? "Levels removed." : "Levels saved.");
@@ -348,7 +410,8 @@
   async function badgeTick() {
     if (!active()) {
       const res = await Promise.allSettled(ASSETS.map((a) => api("GET", monitorUrl(a, false))));
-      setBadge(res.flatMap((r) => (r.status === "fulfilled" ? r.value.positions : [])));
+      setBadge(netForwards(res.flatMap((r, i) => (r.status === "fulfilled"
+        ? r.value.positions.map((p) => ({ ...p, asset: ASSETS[i], spot: r.value.spot })) : []))));
     }
     setTimeout(badgeTick, BADGE_MS);
   }
