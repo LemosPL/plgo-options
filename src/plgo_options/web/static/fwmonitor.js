@@ -1,29 +1,37 @@
 // Forwards Monitor (/api/forwards/monitor, /levels, /history): every forward-
-// like position of the sidebar asset (booked forwards + synthetic forwards
-// built from options, e.g. a long call + short put at one strike), with stop-
-// loss / take-profit levels managed here, off the trade. Levels are spot
-// prices; each refresh re-checks them against live spot.
+// like position of BOTH assets (booked forwards + synthetic forwards built from
+// options), one card each with its stop / entry / spot / target ladder, levels
+// edited in the card, and the selected position on the spot chart. Levels are
+// spot prices; each refresh re-checks them against live spot.
 (function () {
   "use strict";
 
+  const ASSETS = ["ETH", "FIL"];
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const fmt = (v, dp = 0) => (v == null || !isFinite(v)) ? "—"
     : Number(v).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
   const usd = (v) => (v == null || !isFinite(v)) ? "—" : (v < 0 ? "−$" : "$") + fmt(Math.abs(v));
+  const usdK = (v) => {
+    if (v == null || !isFinite(v)) return "—";
+    const a = Math.abs(v), s = v < 0 ? "−$" : "$";
+    return a >= 1e6 ? s + fmt(a / 1e6, 2) + "M" : a >= 1e4 ? s + fmt(a / 1e3, 0) + "k" : s + fmt(a);
+  };
   const pct = (v) => (v == null || !isFinite(v)) ? "—" : (v >= 0 ? "+" : "") + fmt(v, 1) + "%";
   const sign = (v) => (v < 0 ? "color:var(--red)" : v > 0 ? "color:var(--green)" : "");
-  const asset = () => (typeof currentAsset !== "undefined" && currentAsset) || "FIL";
-  const pxDp = () => (asset() === "FIL" ? 4 : 2);
+  const dp = (a) => (a === "FIL" ? 4 : 2);
+  const px = (a, v) => fmt(v, dp(a));
   const active = () => $("page-fwmonitor")?.classList.contains("active");
   const REFRESH_MS = 60_000;
+  const HIST_MS = 10 * 60_000;
 
-  let mon = null;          // last /monitor response
-  let hist = null;         // last /history response (hourly closes)
-  let selected = null;     // position key shown on the price chart
+  let books = {};          // asset -> /monitor response (or {error})
+  let positions = [];      // all positions, each with .asset and .spot
+  const hist = {};         // asset -> {data, at}
+  let selected = null;     // position key ("ETH|fwd:3") shown on the chart
+  let editing = null;      // position key whose level form is open
   let timer = null;
-  let lastStatus = {};     // key -> status at the previous refresh (alerts)
-  let rangeNames = [];     // y labels of the distance chart, by position index
+  let lastStatus = {};
   const baseTitle = document.title;
 
   async function api(method, url, body) {
@@ -55,35 +63,189 @@
     near_stop: ["near stop", "fw-lv-near-stop"], near_target: ["near target", "fw-lv-near-target"],
     watching: ["watching", "fw-lv-watch"], none: ["no levels", "fw-lv-watch"],
   };
+  const RANK = { stop_hit: 0, target_hit: 1, near_stop: 2, near_target: 3, watching: 4, none: 5 };
   const pill = (s) => { const [t, c] = STATUS[s] || STATUS.none; return `<span class="fw-lv ${c}">${t}</span>`; };
-  const label = (p) => `${p.counterparty} ${p.side === "buy" ? "long" : "short"} ${fmt(p.qty)} @ ${fmt(p.forward_price, pxDp())}`;
+  const pk = (p) => `${p.asset}|${p.key}`;
+  const short = (p) => p.side === "sell";
+  const label = (p) => `${p.asset} ${p.counterparty} ${short(p) ? "short" : "long"} ${fmt(p.qty)} @ ${px(p.asset, p.forward_price)}`;
+  const maturityText = (d) => { const t = new Date(d + "T00:00:00Z"); return isNaN(t) ? d : t.toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" }); };
 
-  // ── cards ─────────────────────────────────────────────────────
-  function cards() {
-    const s = mon.summary;
+  // ── summary strip ─────────────────────────────────────────────
+  function summary() {
     const card = (lab, val, sub, style = "") => `<div class="collat-metric"><div class="collat-metric-label">${lab}</div>
       <div class="collat-metric-value" style="${style}">${val}</div><div class="collat-metric-sub">${sub}</div></div>`;
-    const withLv = s.count - s.none;
-    $("fm-cards").innerHTML =
-      card("Spot", "$" + fmt(mon.spot, pxDp()), `${asset()} · ${new Date().toLocaleTimeString()}`)
-      + card("Positions", fmt(s.count), `${mon.positions.filter((p) => p.kind === "synthetic").length} synthetic (options) · ${withLv} with levels`)
-      + card("Net position", fmt(s.net_qty) + " " + asset(), "booked + synthetic forwards", sign(s.net_qty))
-      + card("MTM", usd(s.mtm), "at live spot", sign(s.mtm))
-      + card("Stop hit", fmt(s.stop_hit), `${fmt(s.near_stop)} within ${mon.near_pct}%`, s.stop_hit ? "color:var(--red)" : s.near_stop ? "color:#d29922" : "")
-      + card("Target hit", fmt(s.target_hit), `${fmt(s.near_target)} within ${mon.near_pct}%`, s.target_hit ? "color:var(--green)" : s.near_target ? "color:#3fb950" : "");
+    let html = "";
+    for (const a of ASSETS) {
+      const b = books[a];
+      if (!b) continue;
+      if (b.error) { html += card(a, "—", `<span style="color:var(--red)">${esc(b.error)}</span>`); continue; }
+      const s = b.summary;
+      html += card(`${a} spot`, "$" + px(a, b.spot),
+        s.count ? `net <span style="${sign(s.net_qty)}">${s.net_qty > 0 ? "+" : ""}${fmt(s.net_qty)}</span> ${a} · MTM <span style="${sign(s.mtm)}">${usdK(s.mtm)}</span>` : "no open forwards");
+    }
+    const tot = positions.reduce((t, p) => t + p.mtm, 0);
+    const n = (k) => positions.filter((p) => p.levels.status === k).length;
+    const hitS = n("stop_hit"), hitT = n("target_hit"), nearS = n("near_stop"), nearT = n("near_target");
+    const next = positions.map((p) => p.maturity_date).sort()[0];
+    const nextDays = positions.filter((p) => p.maturity_date === next).map((p) => p.days_to_maturity)[0];
+    html += card("Forwards MTM", usdK(tot), `${positions.length} position${positions.length === 1 ? "" : "s"} · all assets`, sign(tot))
+      + card("Stops", hitS ? `${hitS} hit` : nearS ? `${nearS} near` : "clear",
+        `${positions.filter((p) => p.levels.stop).length} set · near = within 2%`,
+        hitS ? "color:var(--red)" : nearS ? "color:var(--orange)" : "")
+      + card("Targets", hitT ? `${hitT} hit` : nearT ? `${nearT} near` : "—",
+        `${positions.filter((p) => p.levels.target).length} set`,
+        hitT ? "color:var(--green)" : "")
+      + card("Next maturity", next ? maturityText(next) : "—", next ? `${fmt(nextDays)} days` : "");
+    $("fm-summary").innerHTML = html;
+  }
+
+  // ── ladder: target ← entry / spot → stop on one price scale ──────
+  function ladder(p) {
+    const lv = p.levels, S = p.spot;
+    const pts = [S, p.forward_price, lv.stop?.level, lv.target?.level].filter((v) => v != null && isFinite(v));
+    let lo = Math.min(...pts), hi = Math.max(...pts);
+    const pad = (hi - lo) * 0.12 || hi * 0.03;
+    lo -= pad; hi += pad;
+    const pos = (v) => ((v - lo) / (hi - lo)) * 100;
+    const zone = (a, b, cls) => `<div class="fm-zone ${cls}" style="left:${pos(Math.min(a, b))}%;width:${Math.abs(pos(b) - pos(a))}%"></div>`;
+    let zones = "";
+    if (lv.stop) zones += short(p) ? zone(lv.stop.level, hi, "fm-zone-loss") : zone(lo, lv.stop.level, "fm-zone-loss");
+    if (lv.target) zones += short(p) ? zone(lo, lv.target.level, "fm-zone-win") : zone(lv.target.level, hi, "fm-zone-win");
+    // Labels alternate above/below so close levels don't collide.
+    const mark = (v, cls, text, up) => `<div class="fm-mark ${cls}" style="left:${pos(v)}%"><div class="fm-tick"></div>
+      <div class="fm-tag ${up ? "fm-tag-up" : "fm-tag-dn"}">${text}</div></div>`;
+    const a = p.asset;
+    return `<div class="fm-ladder">${zones}<div class="fm-axis"></div>
+      ${lv.target ? mark(lv.target.level, "fm-m-target", `TP ${px(a, lv.target.level)}`, false) : ""}
+      ${lv.stop ? mark(lv.stop.level, "fm-m-stop", `SL ${px(a, lv.stop.level)}`, false) : ""}
+      ${mark(p.forward_price, "fm-m-entry", `entry ${px(a, p.forward_price)}`, true)}
+      ${mark(S, "fm-m-spot", `spot ${px(a, S)}`, true)}
+    </div>`;
+  }
+
+  function levelBox(p, x, kind) {
+    const isStop = kind === "stop";
+    if (!x) return `<div class="fm-lvbox"><div class="fm-lvbox-h">${isStop ? "Stop loss" : "Take profit"}</div><div class="optv3-muted">not set</div></div>`;
+    const hit = x.status === "hit", near = x.status === "near";
+    const col = hit ? (isStop ? "var(--red)" : "var(--green)") : near ? "var(--orange)" : "";
+    return `<div class="fm-lvbox ${hit ? "fm-lvbox-hit" : ""}" style="${col ? "border-color:" + col : ""}">
+      <div class="fm-lvbox-h">${isStop ? "Stop loss" : "Take profit"} ${hit ? "<b>· HIT</b>" : near ? "· near" : ""}</div>
+      <div class="fm-lvbox-v">$${px(p.asset, x.level)} <span class="optv3-muted" style="font-size:.75rem">${hit ? "reached" : pct(x.dist_pct) + " away"}</span></div>
+      <div class="optv3-muted" style="font-size:.72rem">MTM there <span style="${sign(x.mtm_at)}">${usdK(x.mtm_at)}</span>
+        · ${usdK(x.mtm_at - p.mtm)} vs now</div></div>`;
+  }
+
+  function editor(p) {
+    const s = short(p), a = p.asset;
+    return `<div class="fm-edit">
+      <label>Stop loss <input type="number" step="any" min="0" data-f="sl" value="${p.stop_loss ?? ""}" placeholder="${s ? "above" : "below"} spot"></label>
+      <label>Take profit <input type="number" step="any" min="0" data-f="tp" value="${p.take_profit ?? ""}" placeholder="${s ? "below" : "above"} spot"></label>
+      <label class="fm-edit-note">Note <input type="text" data-f="note" value="${esc(p.note || "")}" placeholder="e.g. desk order"></label>
+      <div class="fm-edit-btns">
+        <button class="btn-primary" data-act="save" style="width:auto">Save</button>
+        <button class="btn-secondary" data-act="cancel" style="width:auto">Cancel</button>
+        ${p.stop_loss || p.take_profit ? `<button class="btn-secondary" data-act="clear" style="width:auto">Remove levels</button>` : ""}
+      </div>
+      <div class="optv3-muted" style="font-size:.7rem">${s ? "Short" : "Long"}: stop ${s ? "above" : "below"}, target ${s ? "below" : "above"} · spot $${px(a, p.spot)}</div>
+    </div>`;
+  }
+
+  function positionCards() {
+    if (!positions.length) {
+      $("fm-positions").innerHTML = `<section class="card" style="text-align:center;color:var(--muted)">No open forwards or synthetic forwards.</section>`;
+      return;
+    }
+    $("fm-positions").innerHTML = positions.map((p) => {
+      const k = pk(p), s = short(p);
+      const kind = p.kind === "synthetic"
+        ? `<span class="tm-fwd-badge" title="${esc(p.legs.join("\n"))}">synthetic</span>${p.embedded ? ` <span class="fw-lv fw-lv-watch" title="This call/put pair is part of a larger deal">in deal</span>` : ""}`
+        : `<span class="tm-fwd-badge">forward</span>`;
+      const allIn = Math.abs(p.effective_price - p.forward_price) > 1e-12
+        ? ` <span class="optv3-muted" title="Net premium ${usd(p.net_premium_usd)}">(all-in ${px(p.asset, p.effective_price)})</span>` : "";
+      const st = p.levels.status;
+      const edge = st === "stop_hit" ? "fm-card-stop" : st === "target_hit" ? "fm-card-target" : st.startsWith("near") ? "fm-card-near" : "";
+      return `<section class="card fm-card ${edge} ${k === selected ? "fm-card-sel" : ""}" data-key="${esc(k)}">
+        <div class="fm-card-top">
+          <div><span class="fm-asset">${p.asset}</span> <b>${esc(p.counterparty)}</b> ${kind}</div>
+          <div>${pill(st)}</div>
+        </div>
+        <div class="fm-card-mid">
+          <div>
+            <div class="fm-trade"><span style="color:${s ? "var(--red)" : "var(--green)"};font-weight:700">${s ? "SHORT" : "LONG"}</span>
+              ${fmt(p.qty)} ${p.asset} @ ${px(p.asset, p.forward_price)}${allIn}</div>
+            <div class="optv3-muted" style="font-size:.74rem">traded ${maturityText(p.trade_date)} · matures ${maturityText(p.maturity_date)} (${fmt(p.days_to_maturity)}d)${p.external_ref ? ` · <span title="${esc(p.external_ref)}">ref ${esc(String(p.external_ref).slice(0, 8))}</span>` : ""}</div>
+            ${p.legs.length ? `<div class="optv3-muted" style="font-size:.7rem">${esc(p.legs.join(" · "))}</div>` : ""}
+          </div>
+          <div class="fm-mtm"><div class="optv3-muted" style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em">MTM</div>
+            <div style="${sign(p.mtm)}">${usdK(p.mtm)}</div></div>
+        </div>
+        ${ladder(p)}
+        <div class="fm-lvrow">${levelBox(p, p.levels.stop, "stop")}${levelBox(p, p.levels.target, "target")}</div>
+        ${p.note && k !== editing ? `<div class="optv3-muted fm-note">“${esc(p.note)}”</div>` : ""}
+        ${k === editing ? editor(p) : `<div class="fm-card-btns">
+          <button class="btn-secondary" data-act="edit" style="width:auto">${p.stop_loss || p.take_profit ? "Edit levels" : "Set levels"}</button>
+          <button class="btn-secondary" data-act="chart" style="width:auto">${k === selected ? "On chart ↓" : "Show on chart"}</button></div>`}
+      </section>`;
+    }).join("");
+  }
+
+  // ── price chart: the selected position's asset, its levels, to maturity ──
+  function priceChart() {
+    if (!window.Plotly) return;
+    const p = positions.find((x) => pk(x) === selected);
+    if (!p) { Plotly.purge("fm-price-chart"); return; }
+    const a = p.asset, h = hist[a]?.data, d = dp(a);
+    const cc = typeof chartColors === "function" ? chartColors() : { text: "#c9d1d9", paper: "transparent", plot: "transparent", muted: "#8b949e", grid: "#30363d", legendBg: "transparent" };
+    const x = h ? h.ts.map((t) => new Date(t * 1000)) : [];
+    const y = h ? h.closes.slice() : [];
+    x.push(new Date()); y.push(p.spot);
+    const mat = new Date(p.maturity_date + "T08:00:00Z");
+    const tradeD = new Date(p.trade_date + "T00:00:00Z");
+    const x0 = x[0], x1 = new Date(Math.max(Date.now() + 86400e3, mat.getTime() + 86400e3));
+    const traces = [{ x, y, type: "scatter", mode: "lines", name: `${a} spot (hourly)`,
+      line: { color: "#58a6ff", width: 1.8 }, hovertemplate: `%{x|%d %b %H:%M}<br>$%{y:.${d}f}<extra></extra>` }];
+    const hline = (lvl, name, color, dash, width = 1.5) => traces.push({
+      x: [x0, x1], y: [lvl, lvl], type: "scatter", mode: "lines", name, line: { color, dash, width }, hoverinfo: "skip" });
+    const lv = p.levels;
+    let yLo = Math.min(...y, p.forward_price), yHi = Math.max(...y, p.forward_price);
+    hline(p.forward_price, `Entry ${px(a, p.forward_price)}`, "#8b949e", "dash");
+    if (lv.stop) { hline(lv.stop.level, `Stop ${px(a, lv.stop.level)} · MTM ${usdK(lv.stop.mtm_at)}`, "#f85149", "solid", lv.stop.status === "hit" ? 3 : 2); yLo = Math.min(yLo, lv.stop.level); yHi = Math.max(yHi, lv.stop.level); }
+    if (lv.target) { hline(lv.target.level, `Target ${px(a, lv.target.level)} · MTM ${usdK(lv.target.mtm_at)}`, "#3fb950", "solid", lv.target.status === "hit" ? 3 : 2); yLo = Math.min(yLo, lv.target.level); yHi = Math.max(yHi, lv.target.level); }
+    const pad = (yHi - yLo) * 0.08 || yHi * 0.02;
+    yLo -= pad; yHi += pad;
+    const shapes = [];
+    const band = (b0, b1, color) => shapes.push({ type: "rect", xref: "paper", x0: 0, x1: 1, yref: "y", y0: b0, y1: b1, fillcolor: color, line: { width: 0 }, layer: "below" });
+    if (lv.stop) short(p) ? band(lv.stop.level, yHi, "rgba(248,81,73,0.10)") : band(yLo, lv.stop.level, "rgba(248,81,73,0.10)");
+    if (lv.target) short(p) ? band(yLo, lv.target.level, "rgba(63,185,80,0.10)") : band(lv.target.level, yHi, "rgba(63,185,80,0.10)");
+    const vline = (t, color, text) => {
+      if (t < x0 || t > x1) return;
+      shapes.push({ type: "line", xref: "x", yref: "paper", x0: t, x1: t, y0: 0, y1: 1, line: { color, width: 1, dash: "dot" } });
+    };
+    vline(tradeD, "#8b949e"); vline(mat, "#d29922");
+    const ann = [];
+    if (tradeD >= x0) ann.push({ x: tradeD, y: 1, yref: "paper", text: "traded", showarrow: false, yanchor: "bottom", font: { color: cc.muted, size: 10 } });
+    ann.push({ x: mat, y: 1, yref: "paper", text: "maturity", showarrow: false, yanchor: "bottom", font: { color: "#d29922", size: 10 } });
+    Plotly.react("fm-price-chart", traces, {
+      title: { text: `${label(p)} · ${STATUS[lv.status][0]}${h ? "" : " · no history"}`, font: { color: cc.text, size: 14 } },
+      paper_bgcolor: cc.paper, plot_bgcolor: cc.plot, shapes, annotations: ann,
+      xaxis: { color: cc.muted, gridcolor: cc.grid, range: [x0, x1] },
+      yaxis: { color: cc.muted, gridcolor: cc.grid, range: [yLo, yHi], tickformat: "." + d + "f", title: `${a} (USD)` },
+      margin: { t: 48, r: 20, b: 40, l: 70 }, showlegend: true,
+      legend: { orientation: "h", y: -0.12, font: { color: cc.muted, size: 10 }, bgcolor: cc.legendBg },
+      hovermode: "x unified",
+    }, { responsive: true });
   }
 
   // ── alerts: a level newly hit / approached since the last refresh ──
   function alerts() {
-    const now = {};
-    const fresh = [];
-    for (const p of mon.positions) {
-      const st = p.levels.status;
-      now[p.key] = st;
-      const was = lastStatus[p.key];
+    const now = {}, fresh = [];
+    for (const p of positions) {
+      const st = p.levels.status, k = pk(p);
+      now[k] = st;
+      const was = lastStatus[k];
       if (was !== undefined && was !== st && st !== "watching" && st !== "none") fresh.push(`${STATUS[st][0]}: ${label(p)}`);
     }
-    const hits = mon.positions.filter((p) => p.levels.status === "stop_hit" || p.levels.status === "target_hit");
+    const hits = positions.filter((p) => p.levels.status === "stop_hit" || p.levels.status === "target_hit");
     const $b = $("fm-alert");
     if (hits.length || fresh.length) {
       $b.style.display = "";
@@ -96,177 +258,50 @@
     lastStatus = now;
   }
 
-  // ── price chart: spot history with the selected position's levels ──
-  function priceChart() {
-    if (!window.Plotly || !hist) return;
-    const p = mon.positions.find((x) => x.key === selected) || mon.positions.find((x) => x.levels.status !== "none") || mon.positions[0];
-    if (p) selected = p.key;
-    const x = hist.ts.map((t) => new Date(t * 1000));
-    const y = hist.closes.slice();
-    // Close the line at live spot.
-    x.push(new Date()); y.push(mon.spot);
-    const x0 = x[0], x1 = new Date(Date.now() + 2 * 86400e3);
-    const traces = [{ x, y, type: "scatter", mode: "lines", name: `${asset()} spot (hourly)`,
-      line: { color: "#58a6ff", width: 1.8 }, hovertemplate: "%{x|%d %b %H:%M}<br>$%{y:." + pxDp() + "f}<extra></extra>" }];
-    const shapes = [];
-    const hline = (lvl, name, color, dash, width = 1.5) => traces.push({
-      x: [x0, x1], y: [lvl, lvl], type: "scatter", mode: "lines", name, line: { color, dash, width },
-      hovertemplate: `${name}<extra></extra>` });
-    let yLo = Math.min(...y), yHi = Math.max(...y);
-    if (p) {
-      const lv = p.levels, isShort = p.side === "sell";
-      hline(p.forward_price, `Entry ${fmt(p.forward_price, pxDp())}`, "#8b949e", "dash");
-      yLo = Math.min(yLo, p.forward_price); yHi = Math.max(yHi, p.forward_price);
-      if (lv.stop) {
-        hline(lv.stop.level, `Stop ${fmt(lv.stop.level, pxDp())} · MTM ${usd(lv.stop.mtm_at)}`, "#f85149", "solid", lv.stop.status === "hit" ? 3 : 2);
-        yLo = Math.min(yLo, lv.stop.level); yHi = Math.max(yHi, lv.stop.level);
-      }
-      if (lv.target) {
-        hline(lv.target.level, `Target ${fmt(lv.target.level, pxDp())} · MTM ${usd(lv.target.mtm_at)}`, "#3fb950", "solid", lv.target.status === "hit" ? 3 : 2);
-        yLo = Math.min(yLo, lv.target.level); yHi = Math.max(yHi, lv.target.level);
-      }
-      const pad = (yHi - yLo) * 0.08 || yHi * 0.02;
-      yLo -= pad; yHi += pad;
-      // Zones beyond each level: red past the stop, green past the target.
-      const band = (a, b, color) => shapes.push({ type: "rect", xref: "paper", x0: 0, x1: 1, yref: "y", y0: a, y1: b,
-        fillcolor: color, line: { width: 0 }, layer: "below" });
-      if (lv.stop) isShort ? band(lv.stop.level, yHi, "rgba(248,81,73,0.10)") : band(yLo, lv.stop.level, "rgba(248,81,73,0.10)");
-      if (lv.target) isShort ? band(yLo, lv.target.level, "rgba(63,185,80,0.10)") : band(lv.target.level, yHi, "rgba(63,185,80,0.10)");
-    }
-    const cc = typeof chartColors === "function" ? chartColors() : { text: "#c9d1d9", paper: "transparent", plot: "transparent", muted: "#8b949e", grid: "#30363d", legendBg: "transparent", legendBorder: "#30363d" };
-    Plotly.react("fm-price-chart", traces, {
-      title: { text: p ? `${label(p)} · ${p.kind === "synthetic" ? "synthetic (options)" : "forward"} · ${STATUS[p.levels.status][0]}` : `${asset()} spot`,
-        font: { color: cc.text, size: 14 } },
-      paper_bgcolor: cc.paper, plot_bgcolor: cc.plot, shapes,
-      xaxis: { color: cc.muted, gridcolor: cc.grid, range: [x0, x1] },
-      yaxis: { color: cc.muted, gridcolor: cc.grid, range: [yLo, yHi], tickformat: "." + pxDp() + "f", title: `${asset()} (USD)` },
-      margin: { t: 40, r: 20, b: 40, l: 70 }, showlegend: true,
-      legend: { orientation: "h", y: -0.12, font: { color: cc.muted, size: 10 }, bgcolor: cc.legendBg },
-      hovermode: "x unified",
-    }, { responsive: true });
-  }
-
-  // ── distance chart: every position's stop→target range vs spot ─────
-  function rangeChart() {
-    if (!window.Plotly) return;
-    const ps = mon.positions;
-    if (!ps.length) { Plotly.purge("fm-range-chart"); return; }
-    const S = mon.spot;
-    const rel = (v) => (v / S - 1) * 100;
-    const names = rangeNames = ps.map((p, i) => `${i + 1}. ${p.counterparty} ${p.side === "buy" ? "L" : "S"} ${fmt(p.qty / 1000)}k`);
-    const traces = [];
-    ps.forEach((p, i) => {
-      const lv = p.levels, n = names[i];
-      const pts = [lv.stop && rel(lv.stop.level), lv.target && rel(lv.target.level), rel(p.forward_price)].filter((v) => v != null);
-      traces.push({ x: [Math.min(...pts), Math.max(...pts)], y: [n, n], type: "scatter", mode: "lines", showlegend: false,
-        line: { color: p.key === selected ? "#c9d1d9" : "#484f58", width: p.key === selected ? 6 : 4 }, hoverinfo: "skip" });
-    });
-    const mk = (name, sym, color, get, size = 13) => {
-      const rows = ps.map((p, i) => [get(p), names[i], p]).filter((r) => r[0] != null);
-      if (!rows.length) return;
-      traces.push({ x: rows.map((r) => rel(r[0])), y: rows.map((r) => r[1]), type: "scatter", mode: "markers", name,
-        marker: { symbol: sym, size, color, line: { color: "#0d1117", width: 1 } },
-        customdata: rows.map((r) => [r[0], r[2].key]),
-        hovertemplate: `${name} $%{customdata[0]:.${pxDp()}f} · %{x:+.1f}% from spot<extra>%{y}</extra>` });
-    };
-    mk("Entry", "diamond", "#8b949e", (p) => p.forward_price, 11);
-    mk("Stop loss", "line-ns-open", "#f85149", (p) => p.levels.stop && p.levels.stop.level, 18);
-    mk("Take profit", "line-ns-open", "#3fb950", (p) => p.levels.target && p.levels.target.level, 18);
-    const cc = typeof chartColors === "function" ? chartColors() : { text: "#c9d1d9", paper: "transparent", plot: "transparent", muted: "#8b949e", grid: "#30363d", legendBg: "transparent" };
-    const band = mon.near_pct;
-    Plotly.react("fm-range-chart", traces, {
-      title: { text: `Distance from spot $${fmt(S, pxDp())} (0%) · shaded = within ${band}%`, font: { color: cc.text, size: 13 } },
-      paper_bgcolor: cc.paper, plot_bgcolor: cc.plot,
-      shapes: [
-        { type: "rect", xref: "x", yref: "paper", x0: -band, x1: band, y0: 0, y1: 1, fillcolor: "rgba(210,153,34,0.10)", line: { width: 0 }, layer: "below" },
-        { type: "line", xref: "x", yref: "paper", x0: 0, x1: 0, y0: 0, y1: 1, line: { color: "#58a6ff", width: 2 } },
-      ],
-      xaxis: { color: cc.muted, gridcolor: cc.grid, ticksuffix: "%", zeroline: false, title: "% from spot" },
-      yaxis: { color: cc.muted, autorange: "reversed", automargin: true },
-      margin: { t: 36, r: 20, b: 44, l: 10 }, height: Math.max(220, 70 + 34 * ps.length),
-      legend: { orientation: "h", y: -0.25, font: { color: cc.muted, size: 10 }, bgcolor: cc.legendBg },
-    }, { responsive: true });
-    const el = $("fm-range-chart");
-    if (!el.dataset.wired) {
-      el.dataset.wired = "1";
-      el.on("plotly_click", (ev) => {
-        const pt = ev.points && ev.points[0];
-        const idx = pt ? rangeNames.indexOf(pt.y) : -1;
-        const cur = mon && mon.positions[idx >= 0 ? idx : -1];
-        if (cur) { selected = cur.key; renderAll(); }
-      });
-    }
-  }
-
-  // ── table with inline level editing ───────────────────────────
-  function levelCells(x) {
-    if (!x) return `<td class="num optv3-muted">—</td><td class="num optv3-muted">—</td>`;
-    const col = x.status === "hit" ? "font-weight:700" : x.status === "near" ? "color:#d29922" : "";
-    return `<td class="num" style="${col}">${pct(x.dist_pct)}</td><td class="num" style="${sign(x.mtm_at)}">${usd(x.mtm_at)}</td>`;
-  }
-
-  function table() {
-    const rows = mon.positions.map((p, i) => {
-      const lv = p.levels;
-      const kind = p.kind === "synthetic"
-        ? `<span class="tm-fwd-badge" title="${esc(p.legs.join("\n"))}">Synthetic</span>${p.embedded ? ` <span class="fw-lv fw-lv-watch" title="This call/put pair is part of a larger deal">in deal</span>` : ""}`
-        : `<span class="tm-fwd-badge">Forward</span>`;
-      const eff = Math.abs(p.effective_price - p.forward_price) > 1e-12
-        ? `<div class="optv3-muted" style="font-size:.7rem" title="All-in, with the net premium ${usd(p.net_premium_usd)}">all-in ${fmt(p.effective_price, pxDp())}</div>` : "";
-      const isShort = p.side === "sell";
-      return `<tr class="${p.key === selected ? "fm-row-sel" : ""}" data-key="${esc(p.key)}">
-        <td>${i + 1}</td><td>${pill(lv.status)}</td><td>${kind}</td>
-        <td style="text-align:left">${esc(p.counterparty)}${p.legs.length ? `<div class="optv3-muted" style="font-size:.7rem">${esc(p.legs.join(" · "))}</div>` : ""}</td>
-        <td style="${isShort ? "color:var(--red)" : "color:var(--green)"}">${isShort ? "Sell" : "Buy"}</td>
-        <td class="num">${fmt(p.qty)}</td>
-        <td class="num">${fmt(p.forward_price, pxDp())}${eff}</td>
-        <td>${esc(p.maturity_date)}<div class="optv3-muted" style="font-size:.7rem">${fmt(p.days_to_maturity)}d</div></td>
-        <td class="num" style="${sign(p.mtm)}">${usd(p.mtm)}</td>
-        <td><input type="number" step="any" min="0" class="fm-in" data-f="sl" value="${p.stop_loss ?? ""}" placeholder="${isShort ? "above" : "below"} spot"></td>
-        ${levelCells(lv.stop)}
-        <td><input type="number" step="any" min="0" class="fm-in" data-f="tp" value="${p.take_profit ?? ""}" placeholder="${isShort ? "below" : "above"} spot"></td>
-        ${levelCells(lv.target)}
-        <td><input type="text" class="fm-in fm-note" data-f="note" value="${esc(p.note || "")}" placeholder="note"></td>
-        <td style="white-space:nowrap">
-          <button class="btn-secondary" data-act="save" style="width:auto">Save</button>
-          <button class="btn-secondary" data-act="clear" style="width:auto" title="Remove stop and target">Clear</button>
-          <button class="btn-secondary" data-act="chart" style="width:auto" title="Show on the price chart">Chart</button>
-        </td></tr>`;
-    }).join("") || `<tr><td colspan="17" style="text-align:center;color:var(--muted)">No open ${esc(asset())} forwards or synthetic forwards.</td></tr>`;
-    $("fm-table").innerHTML = `<table class="pf-table fw-table">
-      <thead><tr><th>#</th><th>Status</th><th>Kind</th><th>Counterparty</th><th>Side</th><th class="num">Qty</th>
-        <th class="num">Forward price</th><th>Maturity</th><th class="num">MTM</th>
-        <th title="Spot price: short = above spot, long = below">Stop loss</th><th class="num" title="Stop vs live spot">to stop</th><th class="num" title="This position's MTM if spot reaches the stop">MTM at stop</th>
-        <th title="Spot price: short = below spot, long = above">Take profit</th><th class="num">to target</th><th class="num">MTM at target</th>
-        <th>Note</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  }
-
-  function renderAll() {
-    $("fm-asset-label").textContent = asset();
-    cards(); priceChart(); rangeChart(); table();
-  }
+  function renderAll() { summary(); positionCards(); priceChart(); }
 
   // ── data ─────────────────────────────────────────────────────
+  const monitorUrl = (a, emb) => `/api/forwards/monitor?asset=${a}&include_embedded=${!!emb}`;
+
+  async function loadHistory(a) {
+    const c = hist[a];
+    if (c && Date.now() - c.at < HIST_MS) return;
+    try { hist[a] = { data: await api("GET", `/api/forwards/history?asset=${a}`), at: Date.now() }; }
+    catch (e) { console.warn("history", a, e); if (!c) hist[a] = { data: null, at: Date.now() }; }
+  }
+
   async function load(quiet) {
     if (quiet !== true) status("Loading…");
-    try {
-      const [m, h] = await Promise.all([
-        api("GET", `/api/forwards/monitor?asset=${asset()}&include_embedded=${!!$("fm-embedded")?.checked}`),
-        api("GET", `/api/forwards/history?asset=${asset()}`).catch((e) => { console.warn("history:", e); return null; }),
-      ]);
-      if (m.asset !== asset()) return;          // asset switched mid-flight
-      mon = m; if (h) hist = h;
-      if (!mon.positions.some((p) => p.key === selected)) selected = null;
-      renderAll();
-      alerts();
-      setBadge(mon);
-      const $eh = $("fm-embedded-count");
-      if ($eh) $eh.textContent = mon.embedded_synthetics ? `(${mon.embedded_synthetics})` : "(none)";
-      status(`Spot $${fmt(mon.spot, pxDp())} · ${hist ? hist.source + " hourly" : "no history"} · as of ${new Date().toLocaleTimeString()}`
-        + ($("fm-auto")?.checked ? " · re-checks every minute" : ""));
-    } catch (e) {
-      status("Failed to load: " + e.message, true);
+    const emb = $("fm-embedded")?.checked;
+    const res = await Promise.allSettled(ASSETS.map((a) => api("GET", monitorUrl(a, emb))));
+    books = {};
+    positions = [];
+    let embedded = 0;
+    res.forEach((r, i) => {
+      const a = ASSETS[i];
+      if (r.status === "rejected") { books[a] = { error: r.reason?.message || "unavailable" }; return; }
+      books[a] = r.value;
+      embedded += r.value.embedded_synthetics || 0;
+      for (const p of r.value.positions) positions.push({ ...p, asset: a, spot: r.value.spot });
+    });
+    positions.sort((x, y) => (RANK[x.levels.status] ?? 9) - (RANK[y.levels.status] ?? 9)
+      || x.maturity_date.localeCompare(y.maturity_date) || x.asset.localeCompare(y.asset)
+      || x.counterparty.localeCompare(y.counterparty));
+    if (!positions.some((p) => pk(p) === selected)) {
+      const first = positions.find((p) => p.levels.status !== "none") || positions[0];
+      selected = first ? pk(first) : null;
     }
+    if (!positions.some((p) => pk(p) === editing)) editing = null;
+    const selAsset = positions.find((p) => pk(p) === selected)?.asset;
+    if (selAsset) await loadHistory(selAsset);
+    renderAll();
+    alerts();
+    setBadge(positions);
+    const $eh = $("fm-embedded-count");
+    if ($eh) $eh.textContent = embedded ? `(${embedded})` : "(none)";
+    const errs = ASSETS.filter((a) => books[a]?.error);
+    status((errs.length ? `${errs.join(", ")} unavailable · ` : "") + `as of ${new Date().toLocaleTimeString()}`
+      + ($("fm-auto")?.checked ? " · re-checks every minute" : ""), errs.length > 0);
     schedule();
   }
 
@@ -274,22 +309,24 @@
     clearTimeout(timer);
     if (!$("fm-auto")?.checked) return;
     timer = setTimeout(() => {
-      const editing = document.activeElement && document.activeElement.classList.contains("fm-in");
       if (active() && !editing) load(true); else schedule();
     }, REFRESH_MS);
   }
 
-  async function save(key, clear) {
-    const tr = document.querySelector(`#fm-table tr[data-key="${CSS.escape(key)}"]`);
-    const num = (f) => { const v = parseFloat(tr.querySelector(`[data-f="${f}"]`).value); return v > 0 ? v : null; };
-    const body = { asset: asset(), key,
+  async function save(k, clear) {
+    const card = document.querySelector(`#fm-positions .fm-card[data-key="${CSS.escape(k)}"]`);
+    const p = positions.find((x) => pk(x) === k);
+    if (!card || !p) return;
+    if (clear && !confirm(`Remove the stop loss and take profit for ${label(p)}?`)) return;
+    const num = (f) => { const v = parseFloat(card.querySelector(`[data-f="${f}"]`)?.value); return v > 0 ? v : null; };
+    const body = { asset: p.asset, key: p.key,
       stop_loss: clear ? null : num("sl"), take_profit: clear ? null : num("tp"),
-      note: clear ? "" : tr.querySelector('[data-f="note"]').value };
-    if (clear && !confirm("Remove the stop loss and take profit for this position?")) return;
+      note: clear ? "" : (card.querySelector('[data-f="note"]')?.value || "") };
     try {
       await api("PUT", "/api/forwards/levels", body);
-      status(clear ? "Levels cleared." : "Levels saved.");
-      selected = key;
+      editing = null;
+      selected = k;
+      status(clear ? "Levels removed." : "Levels saved.");
       await load(true);
       if (typeof fwReload === "function") fwReload();
     } catch (e) {
@@ -297,40 +334,55 @@
     }
   }
 
-  // ── sidebar badge: hits + near levels, from any page ──────────
-  // A light poll so a level coming into reach shows even while you are on
-  // another screen. The page itself refreshes every minute when open.
+  // ── sidebar badge: hits + near levels across both assets ──────
   const BADGE_MS = 180_000;
-  function setBadge(m) {
+  function setBadge(ps) {
     const b = $("nav-badge-fwmonitor");
-    if (!b || !m) return;
-    const s = m.summary, hits = s.stop_hit + s.target_hit, near = s.near_stop + s.near_target;
+    if (!b) return;
+    const n = (k) => ps.filter((p) => p.levels.status === k).length;
+    const hits = n("stop_hit") + n("target_hit"), near = n("near_stop") + n("near_target");
     b.textContent = hits ? String(hits) : near ? String(near) : "";
-    b.style.background = hits ? "var(--red)" : near ? "#d29922" : "";
-    b.title = hits || near ? `${s.stop_hit} stop hit · ${s.target_hit} target hit · ${s.near_stop} near stop · ${s.near_target} near target` : "";
+    b.style.background = hits ? "var(--red)" : near ? "var(--orange)" : "";
+    b.title = hits || near ? `${n("stop_hit")} stop hit · ${n("target_hit")} target hit · ${n("near_stop")} near stop · ${n("near_target")} near target` : "";
   }
   async function badgeTick() {
-    try { if (!active()) setBadge(await api("GET", `/api/forwards/monitor?asset=${asset()}`)); } catch (_) { /* next tick */ }
+    if (!active()) {
+      const res = await Promise.allSettled(ASSETS.map((a) => api("GET", monitorUrl(a, false))));
+      setBadge(res.flatMap((r) => (r.status === "fulfilled" ? r.value.positions : [])));
+    }
     setTimeout(badgeTick, BADGE_MS);
   }
   setTimeout(badgeTick, 5000);
 
   // ── wiring ────────────────────────────────────────────────────
   document.querySelector('.nav-item[data-page="fwmonitor"]')?.addEventListener("click", () => { lastStatus = {}; load(); });
-  $("fm-refresh")?.addEventListener("click", load);
+  $("fm-refresh")?.addEventListener("click", () => load());
   $("fm-auto")?.addEventListener("change", schedule);
   $("fm-embedded")?.addEventListener("change", () => load());
-  $("fm-table")?.addEventListener("click", (ev) => {
-    const b = ev.target.closest("button[data-act]");
-    const tr = ev.target.closest("tr[data-key]");
-    if (!b || !tr) return;
-    const key = tr.dataset.key;
-    if (b.dataset.act === "save") save(key, false);
-    else if (b.dataset.act === "clear") save(key, true);
-    else if (b.dataset.act === "chart") { selected = key; renderAll(); $("fm-price-chart").scrollIntoView({ behavior: "smooth", block: "center" }); }
+  $("fm-positions")?.addEventListener("click", async (ev) => {
+    const card = ev.target.closest(".fm-card[data-key]");
+    if (!card) return;
+    const k = card.dataset.key;
+    const act = ev.target.closest("button[data-act]")?.dataset.act;
+    if (act === "save") return save(k, false);
+    if (act === "clear") return save(k, true);
+    if (act === "edit") { editing = k; positionCards(); document.querySelector(`#fm-positions .fm-card[data-key="${CSS.escape(k)}"] [data-f="sl"]`)?.focus(); return; }
+    if (act === "cancel") { editing = null; positionCards(); schedule(); return; }
+    if (ev.target.closest("input, label")) return;
+    // Anywhere else on the card (or "Show on chart"): chart this position.
+    if (selected !== k || act === "chart") {
+      selected = k;
+      const a = positions.find((p) => pk(p) === k)?.asset;
+      if (a) await loadHistory(a);
+      positionCards(); priceChart();
+      if (act === "chart") $("fm-price-chart").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
   });
-  $("fm-table")?.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" && ev.target.classList.contains("fm-in")) save(ev.target.closest("tr").dataset.key, false);
+  $("fm-positions")?.addEventListener("keydown", (ev) => {
+    if (!ev.target.closest(".fm-edit")) return;
+    const k = ev.target.closest(".fm-card")?.dataset.key;
+    if (ev.key === "Enter") save(k, false);
+    else if (ev.key === "Escape") { editing = null; positionCards(); }
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && document.title.startsWith("⚠")) document.title = baseTitle; });
 })();

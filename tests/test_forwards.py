@@ -154,20 +154,32 @@ def test_confirmed_forward_is_booked_once(monkeypatch):
         db = await aiosqlite.connect(":memory:")
         db.row_factory = aiosqlite.Row
         await repo.ensure_tables(db)
-        assert await repo.seed_confirmed(db) == 1
+        n_fwd, n_lv = len(repo.CONFIRMED_FORWARDS), len(repo.CONFIRMED_LEVELS)
+        assert await repo.seed_confirmed(db) == n_fwd + n_lv
         assert await repo.seed_confirmed(db) == 0          # idempotent
-        rows = await repo.list_forwards(db, "ETH")
-        assert len(rows) == 1
-        r = rows[0]
-        assert (r["counterparty"], r["side"], r["qty"], r["forward_price"], r["maturity_date"]) == \
-            ("Flowdesk", "sell", 2500.0, 2346.5, "2026-11-27")
+        eth = {r["external_ref"]: r for r in await repo.list_forwards(db, "ETH")}
+        r = eth["e45b44b1-1592-4201-86ec-bd5a7f71a0b7"]
+        assert (r["counterparty"], r["side"], r["qty"], r["forward_price"], r["maturity_date"]) ==             ("Flowdesk", "sell", 2500.0, 2346.5, "2026-11-27")
+        r2 = eth["ad76a4c0-0380-4ded-8305-84d8fd4ba3a1"]
+        assert (r2["side"], r2["qty"], r2["forward_price"], r2["trade_date"]) == ("sell", 1250.0, 2108.1, "2026-11-09")
+        fil = await repo.list_forwards(db, "FIL")
+        assert [(f["side"], f["qty"], f["forward_price"]) for f in fil] == [("sell", 5_000_000.0, 0.7544)]
+        # Desk orders become levels once: short, so stop above target.
+        lv = await repo.get_levels(db)
+        assert (lv[f"fwd:{r['id']}"]["stop_loss"], lv[f"fwd:{r['id']}"]["take_profit"]) == (2236.5, 1900.0)
+        assert (lv[f"fwd:{fil[0]['id']}"]["stop_loss"], lv[f"fwd:{fil[0]['id']}"]["take_profit"]) == (0.83, 0.67)
+        for l in repo.CONFIRMED_LEVELS:
+            assert fwd.check_levels_order("sell", l["stop_loss"], l["take_profit"]) is None
+        # Clearing levels on the Monitor sticks across restarts.
+        await repo.set_levels(db, f"fwd:{r['id']}", "ETH", None, None, "", "desk")
+        assert await repo.seed_confirmed(db) == 0
+        assert f"fwd:{r['id']}" not in await repo.get_levels(db)
         # A deliberate delete stays deleted.
         await repo.set_status(db, r["id"], "deleted", "desk")
         assert await repo.seed_confirmed(db) == 0
         await db.close()
 
     asyncio.run(go())
-
 
 
 # ── stop-loss / take-profit levels (Forwards Monitor) ─────────────────────
@@ -265,4 +277,20 @@ def test_monitor_lists_forwards_and_synthetics_and_manages_levels(monkeypatch):
     assert "syn:2-1" not in asyncio.run(repo.get_levels(db, "FIL"))
     mon = asyncio.run(route.get_monitor("FIL"))
     assert mon["positions"][0]["key"] == f"fwd:{f['id']}"       # near-stop sorts first
+    asyncio.run(db.close())
+
+
+def test_desk_levels_attach_to_the_matching_synthetic(monkeypatch):
+    # KeyRock 10 Nov: PL buys the 11DEC26 0.7564 put, sells the call, 4m each = short forward.
+    legs = [_leg(11, "Put", "Buy", q=4_000_000, exp="2026-12-11", prem=-40_000),
+            _leg(12, "Call", "Sell", q=4_000_000, exp="2026-12-11", prem=40_000)]
+    db = _with_trades(monkeypatch, legs, spot=0.75)
+    mon = asyncio.run(route.build_monitor("FIL", 0.75, today=date(2026, 11, 13)))
+    p = next(p for p in mon["positions"] if p["key"] == "syn:12-11")
+    assert (p["side"], p["qty"], p["effective_price"]) == ("sell", 4_000_000, pytest.approx(0.7564))
+    assert (p["stop_loss"], p["take_profit"]) == (0.83, 0.67) and p["levels"]["status"] == "watching"
+    # Once only: a cleared level is not re-applied.
+    asyncio.run(repo.set_levels(db, "syn:12-11", "FIL", None, None, "", "desk"))
+    mon = asyncio.run(route.build_monitor("FIL", 0.75, today=date(2026, 11, 13)))
+    assert next(p for p in mon["positions"] if p["key"] == "syn:12-11")["stop_loss"] is None
     asyncio.run(db.close())

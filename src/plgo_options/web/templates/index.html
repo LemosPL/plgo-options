@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=31">
+  <link rel="stylesheet" href="/static/style.css?v=32">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -4050,7 +4050,7 @@
     <section class="card collat-controls">
       <div class="collat-header">
         <div class="collat-header-left">
-          <h2 class="collat-title">Forwards Monitor — <span id="fm-asset-label">FIL</span></h2>
+          <h2 class="collat-title">Forwards Monitor <small style="font-weight:400;color:var(--muted);font-size:.8rem">ETH &amp; FIL</small></h2>
           <span id="fm-status" class="optv3-muted" style="font-size:.75rem"></span>
         </div>
         <div class="collat-header-right">
@@ -4063,25 +4063,20 @@
           <button id="fm-refresh" class="btn-secondary collat-refresh-btn" style="width:auto">&#8635; Refresh</button>
         </div>
       </div>
-      <p style="font-size:.74rem;color:var(--muted);margin:.35rem 0 .6rem;max-width:95ch">
-        Every forward position of this asset: forwards booked on the Trades screen, and <b>synthetic forwards</b> booked as options
-        (a long call + short put at one strike, same size and expiry, same counterparty and trade date, is a long forward at that strike;
-        the reverse is a short). Stop loss and take profit are <b>spot price</b> levels set here and kept off the trades:
-        a short's stop sits above spot and its target below, a long's the other way. <b>Near</b> = spot within 2% of a level.
-        Synthetic MTM is qty × (spot − strike), put-call parity at zero rate.
-      </p>
       <div id="fm-alert" class="fm-alert" style="display:none"></div>
-      <div id="fm-cards" class="fw-cards"></div>
+      <div id="fm-summary" class="fm-summary"></div>
+      <details class="fm-help">
+        <summary>How this works</summary>
+        <p>Every open forward of both assets: forwards booked on the Trades screen, and <b>synthetic forwards</b> booked as options
+        (long call + short put at one strike, same size, expiry, counterparty and trade date = long forward; the reverse = short).
+        Stop loss and take profit are <b>spot price</b> levels kept off the trades: a short's stop sits above spot and its target below,
+        a long's the other way. <b>Near</b> = spot within 2% of a level. MTM is at live spot (plus carry for booked forwards);
+        synthetic MTM is qty &times; (spot &minus; strike), put-call parity at zero rate.</p>
+      </details>
     </section>
+    <div id="fm-positions" class="fm-grid"></div>
     <section class="card">
-      <div id="fm-price-chart" class="chart-container" style="min-height:420px"></div>
-    </section>
-    <section class="card">
-      <div id="fm-range-chart" class="chart-container"></div>
-    </section>
-    <section class="card">
-      <h3 style="margin:0 0 .5rem">Positions &amp; levels <small style="font-weight:400;color:var(--muted);font-size:.72rem">type a level and Save (or Enter); Clear removes both</small></h3>
-      <div id="fm-table" class="chain-wrapper"></div>
+      <div id="fm-price-chart" class="chart-container" style="min-height:440px"></div>
     </section>
   </div>
 
@@ -4629,6 +4624,6 @@
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
 <script src="/static/execbot.js?v=11"></script>
-<script src="/static/fwmonitor.js?v=2"></script>
+<script src="/static/fwmonitor.js?v=3"></script>
 </body>
 </html>

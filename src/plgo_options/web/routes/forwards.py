@@ -333,6 +333,11 @@ async def build_monitor(asset: str, spot: float, today: date | None = None,
         log.warning("option legs unavailable for monitor %s: %s", a, e)
         legs = []
     synthetics = fwd.find_synthetic_forwards(legs)
+    try:
+        if await repo.seed_synthetic_levels(db, a, synthetics):
+            levels = await repo.get_levels(db, a)
+    except Exception as e:  # noqa: BLE001 - the monitor still shows without the seeded levels
+        log.warning("synthetic level seed failed for %s: %s", a, e)
     embedded_count = sum(1 for s in synthetics if not s["standalone"])
     for s in synthetics:
         if not s["standalone"] and not include_embedded:

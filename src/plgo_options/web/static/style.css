@@ -1880,3 +1880,52 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 #fm-table .fm-in { width:6.5rem; padding:.15rem .3rem; font-size:.8rem; }
 #fm-table .fm-note { width:9rem; }
 #fm-table tr.fm-row-sel td { background:rgba(88,166,255,.08); }
+
+/* Forwards Monitor v3: position cards with a level ladder */
+.fm-summary { display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:.75rem; margin-top:.5rem; }
+.fm-help { margin-top:.6rem; font-size:.74rem; color:var(--muted); }
+.fm-help summary { cursor:pointer; }
+.fm-help p { margin:.35rem 0 0; max-width:100ch; }
+.fm-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:1rem; margin-bottom:1rem; }
+.fm-card { margin:0; cursor:pointer; border-left:4px solid var(--border); display:flex; flex-direction:column; gap:.6rem; }
+.fm-card:hover { border-color:var(--accent); }
+.fm-card-sel { box-shadow:0 0 0 1px var(--accent) inset; }
+.fm-card-stop { border-left-color:var(--red); }
+.fm-card-target { border-left-color:var(--green); }
+.fm-card-near { border-left-color:var(--orange); }
+.fm-card-top { display:flex; justify-content:space-between; align-items:center; gap:.5rem; }
+.fm-asset { font-size:.7rem; font-weight:700; padding:.05rem .4rem; border-radius:4px; background:var(--hover-bg); border:1px solid var(--border); }
+.fm-card-mid { display:flex; justify-content:space-between; align-items:flex-start; gap:.75rem; }
+.fm-trade { font-family:'SF Mono','Fira Code',monospace; font-size:.92rem; font-variant-numeric:tabular-nums; }
+.fm-mtm { text-align:right; font-family:'SF Mono','Fira Code',monospace; font-size:1.35rem; font-weight:700; line-height:1.1; }
+.fm-ladder { position:relative; height:64px; margin:0 1.6rem; }
+.fm-axis { position:absolute; left:0; right:0; top:31px; height:2px; background:var(--border); }
+.fm-zone { position:absolute; top:24px; height:16px; }
+.fm-zone-loss { background:rgba(248,81,73,.22); }
+.fm-zone-win { background:rgba(63,185,80,.22); }
+.fm-mark { position:absolute; top:0; height:100%; width:0; }
+.fm-tick { position:absolute; left:-1px; top:22px; width:3px; height:20px; border-radius:2px; background:currentColor; }
+.fm-tag { position:absolute; transform:translateX(-50%); white-space:nowrap; font-size:.68rem;
+  font-family:'SF Mono','Fira Code',monospace; font-variant-numeric:tabular-nums; }
+.fm-tag-up { top:4px; }
+.fm-tag-dn { top:45px; }
+.fm-m-stop { color:var(--red); }
+.fm-m-target { color:var(--green); }
+.fm-m-entry { color:var(--muted); }
+.fm-m-entry .fm-tick { width:2px; background:repeating-linear-gradient(to bottom, currentColor 0 3px, transparent 3px 5px); }
+.fm-m-spot { color:var(--accent); z-index:2; }
+.fm-m-spot .fm-tick { width:4px; left:-2px; top:19px; height:26px; }
+.fm-m-spot .fm-tag { font-weight:700; }
+.fm-lvrow { display:grid; grid-template-columns:1fr 1fr; gap:.6rem; }
+.fm-lvbox { border:1px solid var(--border); border-radius:6px; padding:.4rem .6rem; background:var(--bg); }
+.fm-lvbox-hit { background:rgba(248,81,73,.08); }
+.fm-lvbox-h { font-size:.66rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); font-weight:600; }
+.fm-lvbox-v { font-family:'SF Mono','Fira Code',monospace; font-weight:700; font-variant-numeric:tabular-nums; }
+.fm-note { font-size:.74rem; font-style:italic; }
+.fm-card-btns { display:flex; gap:.5rem; }
+.fm-edit { display:flex; flex-wrap:wrap; gap:.5rem .75rem; align-items:flex-end; cursor:default;
+  border-top:1px solid var(--border); padding-top:.6rem; }
+.fm-edit label { display:flex; flex-direction:column; font-size:.7rem; color:var(--muted); gap:.15rem; }
+.fm-edit input { width:7.5rem; padding:.2rem .35rem; font-size:.85rem; }
+.fm-edit-note input { width:12rem; }
+.fm-edit-btns { display:flex; gap:.4rem; }
