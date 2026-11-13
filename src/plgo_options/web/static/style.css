@@ -1929,3 +1929,11 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .fm-edit input { width:7.5rem; padding:.2rem .35rem; font-size:.85rem; }
 .fm-edit-note input { width:12rem; }
 .fm-edit-btns { display:flex; gap:.4rem; }
+
+/* Trade Management: totals of the ticked rows (tmRenderSelectionTotals) */
+#tm-table tfoot td { position: sticky; bottom: 0; z-index: 1; background: var(--surface);
+  border-top: 2px solid var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+#tm-table tfoot td:first-child { text-align: left; width: auto; }
+.tm-sel-clear { margin-left: .5rem; padding: 0 .4rem; font-size: .7rem; font-weight: 400; background: none;
+  border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; }
+.tm-sel-clear:hover { color: var(--text); border-color: var(--accent); }

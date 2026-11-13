@@ -1616,6 +1616,7 @@ async function tmLoad() {
   const tmBody = document.getElementById("tm-body");
   tmBody.innerHTML = '<tr><td colspan="22" style="text-align:center;padding:2rem;color:var(--muted)">Loading trades...</td></tr>';
   tmSelected.clear();
+  tmSelectedFwd.clear();
   // 13 Oct 2026: the P&L call takes seconds; switching asset meanwhile used to
   // let the old asset's answer land here - ETH's spot became the global spot on
   // the FIL page and Pricing valued FIL legs at ~$2,500 (billions). Drop it.
@@ -1936,8 +1937,9 @@ function tmForwardRowHtml(t, f) {
   const sideColor = t.side === "Buy" ? "qty-long" : "qty-short";
   const rec = fw.recon && fw.recon.status;
   const recDot = rec === "matched" ? "status-active" : rec === "break" ? "status-deleted" : "status-expired";
-  return `<tr class="tm-row-forward" data-fwd="${fw.id}" title="${escAttr([fw.external_ref, fw.note].filter(Boolean).join(" · "))}">
-      <td></td>
+  const fsel = tmSelectedFwd.has(fw.id);
+  return `<tr class="tm-row-forward${fsel ? " tm-row-selected" : ""}" data-fwd="${fw.id}" title="${escAttr([fw.external_ref, fw.note].filter(Boolean).join(" · "))}">
+      <td><input type="checkbox" class="tm-fwd-check" data-fid="${fw.id}" ${fsel ? "checked" : ""} title="Include in the selection totals"></td>
       <td><span class="status-dot ${recDot}" title="Reconciliation: ${rec || "not reconciled"}"></span></td>
       <td style="text-align:left">${fw.counterparty}</td>
       <td>${fw.trade_date || ""}</td>
@@ -2090,7 +2092,69 @@ function tmRenderTable() {
       tmUpdateBulkUI();
     });
   });
+  tbody.querySelectorAll(".tm-fwd-check").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const fid = parseInt(cb.dataset.fid);
+      if (cb.checked) tmSelectedFwd.add(fid); else tmSelectedFwd.delete(fid);
+      cb.closest("tr").classList.toggle("tm-row-selected", cb.checked);
+      tmRenderSelectionTotals();
+    });
+  });
   tmUpdateBulkUI();
+}
+
+// Totals of the ticked rows (options + forwards), as a footer row under the
+// trades table aligned with its columns. Greeks are position totals: per-unit
+// greek x signed qty, like the summary cards (delta in tokens, theta $/day,
+// vega $ per vol point); forwards add delta / theta / MTM only.
+function tmRenderSelectionTotals() {
+  const table = document.getElementById("tm-table");
+  if (!table) return;
+  let foot = document.getElementById("tm-sel-foot");
+  const opts = tmEnriched.filter(t => tmSelected.has(t.db_id || t.id));
+  const fwds = ((tmForwards && tmForwards.trades) || []).filter(f => tmSelectedFwd.has(f.id));
+  if (!opts.length && !fwds.length) { if (foot) foot.remove(); return; }
+  if (!foot) { foot = document.createElement("tfoot"); foot.id = "tm-sel-foot"; table.appendChild(foot); }
+  const sum = (arr, f) => arr.reduce((s, x) => s + (f(x) || 0), 0);
+  const optQty = sum(opts, t => t.net_qty);
+  const grossQty = sum(opts, t => Math.abs(t.qty || 0)) + sum(fwds, f => Math.abs(f.qty || 0));
+  const netQty = optQty + sum(fwds, f => f.signed_qty);
+  const notional = grossQty * (ethSpot || 0) / 1e6;
+  const premium = sum(opts, t => t.premium_usd);
+  const delta = sum(opts, t => (t.delta || 0) * (t.net_qty || 0)) + sum(fwds, f => f.delta);
+  const gamma = sum(opts, t => (t.gamma || 0) * (t.net_qty || 0));
+  const theta = sum(opts, t => (t.theta || 0) * (t.net_qty || 0)) + sum(fwds, f => f.theta);
+  const vega = sum(opts, t => (t.vega || 0) * (t.net_qty || 0));
+  const mtm = sum(opts, t => t.current_mtm) + sum(fwds, f => f.mtm);
+  const isFil = currentAsset === "FIL";
+  const n = (v, d = 0) => Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+  const sgn = v => (v > 0 ? "+" : v < 0 ? "−" : "") ;
+  const num = (v, d = 0) => sgn(v) + n(Math.abs(v), d);
+  const money = v => (v < 0 ? "−$" : "$") + n(Math.abs(v));
+  const col = v => v > 0 ? "mtm-pos" : v < 0 ? "mtm-neg" : "";
+  const parts = [opts.length ? `${opts.length} option${opts.length > 1 ? "s" : ""}` : "", fwds.length ? `${fwds.length} forward${fwds.length > 1 ? "s" : ""}` : ""].filter(Boolean).join(" + ");
+  const gammaD = isFil ? 2 : 4;
+  foot.innerHTML = `<tr class="tm-sel-total">
+      <td colspan="11" style="text-align:left">&Sigma; Selected: ${parts}
+        <button type="button" class="tm-sel-clear" onclick="tmClearSelection()" title="Untick everything">clear</button></td>
+      <td class="${col(netQty)}" title="Net (signed) quantity · gross ${n(grossQty)}">${num(netQty)}</td>
+      <td title="Gross quantity x spot">${"$" + n(notional, 2)}mm</td>
+      <td class="${col(premium)}" title="Net premium (+ received, − paid)">${money(premium)}</td>
+      <td></td>
+      <td class="${col(delta)}" title="Position delta, ${currentAsset}">${num(delta, isFil ? 0 : 1)}</td>
+      <td title="Position gamma, ${currentAsset} per $1 move">${num(gamma, gammaD)}</td>
+      <td class="${col(theta)}" title="Position theta, $ per day">${money(theta)}</td>
+      <td title="Position vega, $ per vol point">${money(vega)}</td>
+      <td></td>
+      <td class="${col(mtm)}" title="Mark-to-market of the selection">${money(mtm)}</td>
+      <td></td>
+    </tr>`;
+}
+
+function tmClearSelection() {
+  tmSelected.clear();
+  tmSelectedFwd.clear();
+  tmRenderTable();
 }
 
 function tmRenderInsights() {
@@ -2748,6 +2812,7 @@ function tmInvalidatePortfolio() {
 
 // ─── Bulk select & actions ──────────────────────────────────
 let tmSelected = new Set();
+let tmSelectedFwd = new Set();   // forward ids ticked for the selection totals (no bulk actions)
 
 // Rows the bulk actions can touch: anything not soft-deleted. Expired rows
 // are included so they can be reactivated — they used to render a disabled
@@ -2819,6 +2884,7 @@ function tmUpdateBulkUI() {
   const n = tmSelected.size;
   const { active, expired } = tmSelectedByStatus();
   tmRenderSelectedDecay(active);
+  tmRenderSelectionTotals();
   if (typeof tmRedrawDecay === "function" && tmLoaded) tmRedrawDecay();
   const $expire = document.getElementById("btn-tm-bulk-expire");
   const $delete = document.getElementById("btn-tm-bulk-delete");
@@ -2844,8 +2910,10 @@ document.getElementById("tm-check-all").addEventListener("change", (e) => {
   const selectable = tmSelectableRows();
   if (e.target.checked) {
     selectable.forEach(t => tmSelected.add(t.db_id || t.id));
+    ((tmForwards && tmForwards.trades) || []).forEach(f => tmSelectedFwd.add(f.id));
   } else {
     tmSelected.clear();
+    tmSelectedFwd.clear();
   }
   tmRenderTable();
   tmUpdateBulkUI();
