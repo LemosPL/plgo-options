@@ -311,7 +311,8 @@ def test_a_minute_runs_a_pass_every_5_seconds_and_records_routine_passes_once(tm
     async def body():
         oid = await store.create_order(NAME, "buy", 500, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
         out = await bot.run_minute(books, off, clock=lambda: clock["t"], sleep=sleep)
-        assert out["passes"] == 12 and [t - NOW for t in seen] == [0, 5, 10, 15, 20]  # resting after the take
+        # resting after the take, the books read only for the fill's 5 s and 30 s markouts
+        assert out["passes"] == 12 and [t - NOW for t in seen] == [0, 5, 10, 15, 20, 25, 50]
         assert [r["qty"] for r in out["takes"]] == [25]
         d = await store.order_detail(oid)
         # the first pass's wait, the take; the waits and rests in between are not written
@@ -675,4 +676,53 @@ def test_testnet_orders_need_a_testnet_key_and_production_stays_refused(tmp_path
         assert (await routes.create(mk("testnet"), req))["order"]["mode"] == "testnet"
         with pytest.raises(HTTPException, match="testnet run"):
             await routes.create(mk("live"), req)
+    run(body)
+
+
+def _books_vol(dv: float, ask_shift: float = 0.0) -> list[dict]:
+    """_books with every vol dv vol points higher (marks and quotes alike)."""
+    T = (parse_exp(EXPIRY).timestamp() - NOW) / (365 * 86400)
+    out = _books(ask_shift)
+    for b in out:
+        _, _, K, cp = b["instrument_name"].split("-")
+        v = float(svi_iv(SVI, [float(K)], F, T)[0])
+        up = black(F, float(K), T, v + dv / 100, cp) - black(F, float(K), T, v, cp)
+        for k in ("best_bid_price", "best_ask_price", "mark_price"):
+            b[k] += up / S
+        b["bids"] = [[p + up / S, q] for p, q in b["bids"]]
+        b["asks"] = [[p + up / S, q] for p, q in b["asks"]]
+    return out
+
+
+def test_markouts_follow_each_fill_after_its_order_finished(tmp_path):
+    from plgo_options.execution import markouts
+    run = _db(tmp_path, "markouts.db")
+    state = {"books": _books(-3.0)}
+
+    async def books(expiries, instruments):
+        return {EXPIRY: state["books"]}
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 25, NOW + 12 * H, 0.5, 0.7, 0.9, 25, now=NOW)
+        t0 = NOW + 60
+        await bot.run_tick(t0, books, off)                                  # bought 25: the order is filled
+        assert (await store.get_order(oid))["status"] == "filled"
+        state["books"] = _books_vol(1.0)                                    # then vols rise 1 point
+        for h in (5, 30, 60, 120, 300):
+            out = await bot.run_tick(t0 + h + 2, books, off)                # the bot comes back with no order working
+            assert out.get("markouts") == 1
+        assert (await bot.run_tick(t0 + 900 + 100, books, off)).get("markouts") == 1   # 100 s late: recorded empty
+        assert await store.due_markouts(t0 + 1000, markouts.HORIZONS, markouts.LATE) == []
+        m = markouts.summary(await store.markout_rows(NOW))
+        (leg,) = m["legs"]
+        assert leg["id"] == oid and leg["fills"] == 1 and leg["qty"] == 25
+        c = m["all"]
+        # a buy, vols up 1 point: the fair value moved our way by about a vol point (the index did not move)
+        assert 0.6 < c["5"]["spline"] < 1.6 and c["300"]["spline"] == pytest.approx(c["5"]["spline"])
+        assert c["5"]["mid"] > c["5"]["spline"] - 1.0                      # we paid above the old mid, below the new
+        assert c["900"]["n"] == 0 and c["900"]["spline"] is None and c["3600"]["n"] == 0
+        assert not await bot._busy(t0 + 3700)                               # an hour on: nothing left to observe
     run(body)

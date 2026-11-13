@@ -18,6 +18,9 @@ Without the feed (it failed to start, or dropped), a pass reads the worked optio
 books over HTTP and the summary's prices for the rest, which have no sizes, so the
 spline falls back to spread-only weights.
 
+After a fill the bot keeps coming back, working orders or not, until its markouts are taken
+(markouts.py: the market 5 s to 1 h after each fill, recorded at the start of each pass).
+
 Takes, fills, errors and expiries are recorded on the pass they happen; the routine
 outcomes (wait, cooldown, halted, ...) once a minute, on its first pass, so the DB
 (on GCS FUSE on Cloud Run) is not written every 5 seconds.
@@ -48,7 +51,7 @@ from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile
 
-from . import store
+from . import markouts, store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
 from .deribit import testnet_connector
 from .paper import PaperConnector, deribit_option_fee
@@ -219,12 +222,26 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
                           fair_usd=fair["fair"],
                           mark_usd=mark * S if mark is not None else None,
                           mid_usd=mid * S if mid is not None else None,
-                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_usd))
+                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_usd,
+                          S=S, iv=fair["iv"], vega=fair["vega"]))   # the market at the fill: its markouts start here
     await store.add_fills(o.id, fills)
     await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail, **ctx)
     if o.remaining - st.filled_qty < QTY_STEP:
         await store.set_status(o.id, "filled")
     return {"id": o.id, "action": "take", "qty": st.filled_qty, "cost": d.est_cost}
+
+
+async def _busy(now: float) -> bool:
+    """Work to do: an order working, or a markout due within the next minute."""
+    if await store.working_orders():
+        return True
+    return bool(await store.due_markouts(now + SPAN + PERIOD, markouts.HORIZONS, markouts.LATE))
+
+
+async def _expiries(now: float) -> list[str]:
+    """The expiries the quote feed covers: the working orders' and those of fills awaiting markouts."""
+    due = await store.due_markouts(now + SPAN + PERIOD, markouts.HORIZONS, markouts.LATE)
+    return sorted({o.expiry for o in await store.working_orders()} | {d["instrument"].split("-")[1] for d in due})
 
 
 def _hms(ts: float) -> str:
@@ -235,6 +252,10 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
                 record: bool) -> dict[str, Any]:
     """One pass over the working orders; the caller holds the lease."""
     out: dict[str, Any] = {"ts": now, "orders": []}
+    try:
+        out["markouts"] = await markouts.observe(now, books_fn)
+    except Exception as ex:  # a markout is a measurement: never let it stop the trading
+        out["markout_error"] = f"{type(ex).__name__}: {ex}"
     live = []
     for o in await store.working_orders():
         if now >= o.deadline_ts:
@@ -300,7 +321,7 @@ async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
                    halted: Callable[[], Awaitable[bool]] = kill_switch_on) -> dict[str, Any]:
     """A single pass under the lease, everything recorded."""
     now = now or time.time()
-    if not await store.working_orders():  # idle: write nothing (on Cloud Run the DB sits on GCS FUSE)
+    if not await _busy(now):  # idle: write nothing (on Cloud Run the DB sits on GCS FUSE)
         return {"ts": now, "orders": []}
     if not await store.acquire_lock(LOCK, LOCK_TTL, now):
         return {"ts": now, "skipped": "another tick is running"}
@@ -323,7 +344,7 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
     ``books_fn`` is given, the passes read a quote feed held for the call over every
     option of the working orders' expiries."""
     start = clock()
-    if not await store.working_orders():
+    if not await _busy(start):
         return {"ts": start, "passes": 0, "orders": []}
     while not await store.acquire_lock(LOCK, LOCK_TTL, clock()):
         if clock() - start > 2 * period:  # the previous call should have finished by now
@@ -335,7 +356,7 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
         if books_fn is None:
             feed = feed_fn()
             try:
-                await feed.start(await names_fn(sorted({o.expiry for o in await store.working_orders()})))
+                await feed.start(await names_fn(await _expiries(start)))
             except Exception as e:  # no feed: the passes read over HTTP
                 feed.error = feed.error or f"{type(e).__name__}: {e}"
             books_fn = functools.partial(_books, feed=feed)
@@ -349,7 +370,7 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
             passes += 1
             takes += [r for r in last["orders"] if r["action"] == "take"]
             nxt = start + passes * period
-            if nxt > start + span or not await store.working_orders():
+            if nxt > start + span or not await _busy(clock()):
                 break
             await sleep(max(0.0, nxt - clock()))
         return {"ts": start, "passes": passes, "takes": takes, "orders": last["orders"],

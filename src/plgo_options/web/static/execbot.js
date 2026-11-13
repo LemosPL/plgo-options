@@ -129,6 +129,30 @@
       <td>${usd(sum("spline_usd"), 0)}</td><td>${usd(sum("mark_usd"), 0)}</td><td>${usd(sum("fee_usd"), 0)}</td></tr>`;
   }
 
+  // ── markouts ──────────────────────────────────────────────────
+  async function markoutsLoad() {
+    const q = new URLSearchParams({ days: $("xb-mo-days").value });
+    if ($("xb-mo-mode").value) q.set("mode", $("xb-mo-mode").value);
+    const d = await api("GET", "/api/execution-bot/markouts?" + q);
+    const lbl = (h) => h < 60 ? `${h} s` : h < 3600 ? `${h / 60} min` : `${h / 3600} h`;
+    $("xb-mo-head").innerHTML = `<tr><th style="text-align:left">Fills</th><th></th>${d.horizons.map((h) => `<th>${lbl(h)}</th>`).join("")}</tr>`;
+    const color = (v) => v == null ? "" : v < -0.05 ? "color:var(--red)" : v > 0.05 ? "color:var(--green)" : "";
+    const cell = (c, k) => c[k] == null ? `<td style="color:var(--muted)">—</td>`
+      : `<td style="${color(c[k])}" title="${c.n} fill(s)">${fmt(c[k], 2)}</td>`;
+    const rows2 = (name, cells, bold) => ["spline", "mid"].map((k, i) => `<tr${bold && i === 0 ? ' style="font-weight:600;border-top:2px solid var(--border)"' : ""}>
+      <td style="text-align:left">${i === 0 ? name : ""}</td><td style="text-align:left;color:var(--muted)">${k === "spline" ? "Spline" : "vs mid"}</td>
+      ${d.horizons.map((h) => cell(cells[h], k)).join("")}</tr>`).join("");
+    if (!d.legs.length) {
+      $("xb-mo").innerHTML = `<tr><td colspan="${d.horizons.length + 2}" style="text-align:center;color:var(--muted);padding:1rem">
+        No markouts yet: they start with the next fills.</td></tr>`;
+      return;
+    }
+    $("xb-mo").innerHTML = d.legs.map((g) => rows2(`#${g.id} ${g.side === "buy" ? "Buy" : "Sell"} ${esc(g.instrument)}`
+        + `${g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`} <span style="color:var(--muted)">· ${fmt(g.fills)} fill(s), ${fmt(g.qty)}</span>`, g.cells)).join("")
+      + rows2("All", d.all, true);
+  }
+  ["xb-mo-mode", "xb-mo-days"].forEach((id) => $(id)?.addEventListener("change", () => markoutsLoad().catch((e) => status(e.message, true))));
+
   // ── detail ────────────────────────────────────────────────────
   async function detail() {
     if (selected == null) { $("xb-detail").style.display = "none"; return; }
@@ -197,7 +221,7 @@
       header(st);
       rows(os.orders);
       costs(cs.legs);
-      await detail();
+      await Promise.all([detail(), markoutsLoad()]);
     } catch (e) {
       status("Load failed: " + e.message, true);
     }

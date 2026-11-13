@@ -4,6 +4,8 @@
     exec_ticks    the order's passes: fair value, threshold, best cost, action; takes as they
                   happen, the routine ones once a minute; what the Execution page charts
     exec_fills    every fill, with its cost against the spline at the time, Deribit's mark and the mid
+    exec_markouts the market after each fill: horizon 0 is the fill itself (index, spline fair,
+                  mid, vol, vega), then 5 s to 1 h after it, as the bot saw them (markouts.py)
     exec_lock     a lease so two scheduler calls never work the same orders at once
 """
 
@@ -64,6 +66,13 @@ SCHEMA = [
         mark_usd REAL,
         mid_usd REAL,
         UNIQUE (order_id, trade_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS exec_markouts (
+        fill_id INTEGER NOT NULL REFERENCES exec_fills(id),
+        horizon REAL NOT NULL,
+        ts REAL NOT NULL,
+        S REAL, fair_usd REAL, mid_usd REAL, iv REAL, vega REAL,
+        PRIMARY KEY (fill_id, horizon)
     )""",
     """CREATE TABLE IF NOT EXISTS exec_lock (
         name TEXT PRIMARY KEY,
@@ -153,7 +162,8 @@ async def add_tick(oid: int, ts: float, action: str, *, theta_vp=None, theta_usd
 
 
 async def add_fills(oid: int, fills: list[dict[str, Any]]) -> None:
-    """Record fills and roll them into the order's filled size, cost and fees."""
+    """Record fills and roll them into the order's filled size, cost and fees. A fill carrying the
+    market at the time (S, iv, vega) also gets its horizon-0 markout row, which its markouts need."""
     if not fills:
         return
     db = await get_db()
@@ -167,6 +177,10 @@ async def add_fills(oid: int, fills: list[dict[str, Any]]) -> None:
             await db.execute("UPDATE exec_orders SET filled = filled + ?, cost_usd = cost_usd + ?,"
                              " fees_usd = fees_usd + ? WHERE id = ?",
                              (f["qty"], f["qty"] * f["cost_usd"], f["fee_usd"], oid))
+            if f.get("S") is not None and f.get("vega"):
+                await db.execute("INSERT OR IGNORE INTO exec_markouts (fill_id, horizon, ts, S, fair_usd, mid_usd, iv, vega)"
+                                 " VALUES (?,0,?,?,?,?,?,?)", (cur.lastrowid, f["ts"], f["S"], f["fair_usd"],
+                                                                f.get("mid_usd"), f.get("iv"), f["vega"]))
     await db.commit()
 
 
@@ -208,6 +222,48 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
             g[f"{name}_vega"] = v
         out.append(g)
     return out
+
+
+async def due_markouts(now: float, horizons: tuple[float, ...], late: float = 60.0) -> list[dict[str, Any]]:
+    """The (fill, horizon) observations due now: the horizon has passed, none is recorded yet, and
+    the fill has its horizon-0 row. ``late``: how long past due one may still be taken (later,
+    markouts.missed records it empty so it stops being due)."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT f.id AS fill_id, f.ts, o.instrument FROM exec_fills f JOIN exec_orders o ON o.id = f.order_id"
+        " JOIN exec_markouts m0 ON m0.fill_id = f.id AND m0.horizon = 0 WHERE f.ts >= ?",
+        (now - max(horizons) - late,))
+    fills = [dict(r) for r in await cur.fetchall()]
+    if not fills:
+        return []
+    cur = await db.execute(f"SELECT fill_id, horizon FROM exec_markouts WHERE fill_id IN ({','.join('?' * len(fills))})",
+                           tuple(f["fill_id"] for f in fills))
+    done = {(r["fill_id"], r["horizon"]) for r in await cur.fetchall()}
+    return [f | {"horizon": h, "due": f["ts"] + h} for f in fills for h in horizons
+            if f["ts"] + h <= now and (f["fill_id"], float(h)) not in done]
+
+
+async def add_markouts(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    db = await get_db()
+    await db.executemany(
+        "INSERT OR IGNORE INTO exec_markouts (fill_id, horizon, ts, S, fair_usd, mid_usd, iv, vega) VALUES (?,?,?,?,?,?,?,?)",
+        [(r["fill_id"], r["horizon"], r["ts"], r.get("S"), r.get("fair_usd"), r.get("mid_usd"), r.get("iv"), r.get("vega"))
+         for r in rows])
+    await db.commit()
+
+
+async def markout_rows(since: float, mode: str | None = None) -> list[dict[str, Any]]:
+    """Every fill since ``since`` with a horizon-0 row, joined to its markouts, for markouts.summary."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT f.id AS fill_id, f.order_id, f.ts AS fill_ts, f.qty, f.price_usd, f.mode, o.instrument, o.side,"
+        " m.horizon, m.ts, m.S, m.fair_usd, m.mid_usd, m.iv, m.vega FROM exec_fills f"
+        " JOIN exec_orders o ON o.id = f.order_id JOIN exec_markouts m ON m.fill_id = f.id"
+        " WHERE f.ts >= ?" + (" AND f.mode = ?" if mode else "") + " ORDER BY f.id, m.horizon",
+        (since, mode) if mode else (since,))
+    return [dict(r) for r in await cur.fetchall()]
 
 
 async def last_fill_ts(instruments: list[str]) -> dict[str, float]:

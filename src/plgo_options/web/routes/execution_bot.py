@@ -14,6 +14,7 @@ People-facing:
     POST /api/execution-bot/rfq/{id}/{action}    accept (whole amount at our limit, fill-or-kill) | cancel
     POST /api/execution-bot/orders/batch         create several (the reviewed preview)
     GET  /api/execution-bot/orders/{id}          the order, its ticks and fills
+    GET  /api/execution-bot/markouts             how the market moved 5 s to 1 h after the fills (vol points)
     GET  /api/execution-bot/costs                each leg's fill cost vs the spline, the mark and the mid
     POST /api/execution-bot/orders/{id}/{action} pause | resume | cancel
 """
@@ -30,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer, rfq, rfq_desk
+from plgo_options.execution import bot, from_optimizer, markouts, rfq, rfq_desk
 from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
@@ -162,6 +163,12 @@ async def preview(req: PreviewReq):
 @router.get("/costs")
 async def costs(limit: int = 50):
     return {"legs": await store.leg_costs(limit)}
+
+
+@router.get("/markouts")
+async def markouts_view(mode: Literal["paper", "testnet", "live"] | None = None, days: float = 7.0):
+    rows = await store.markout_rows(time.time() - days * 86400, mode)
+    return markouts.summary(rows) | {"mode": mode, "days": days}
 
 
 class RfqPreviewReq(BaseModel):

@@ -4192,6 +4192,29 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2>Markouts after fills</h2>
+      <p style="font-size:.74rem;color:var(--muted);margin:.2rem 0 .6rem;max-width:80ch">
+        How the market moved after our fills, delta-hedged, in vol points per contract weighted by vega; positive is the
+        market moving our way. <b>Spline</b>: the fair value's move after the take. Negative means we traded just
+        before the market went against us. <b>vs mid</b>: what the fill is worth against the screen mid later. It
+        starts near minus the half-spread we crossed. Falling further after a take means makers requoted worse, which
+        only live fills can show (paper fills touched no real book; testnet fills' prices are testnet's).
+        The bot takes each reading as it passes, up to an hour after the fill.</p>
+      <div style="display:flex;gap:1rem;align-items:flex-end;font-size:.78rem;margin-bottom:.5rem">
+        <label>Mode<br><select id="xb-mo-mode"><option value="">All</option><option value="paper">Paper</option>
+          <option value="testnet">Testnet</option><option value="live">Live</option></select></label>
+        <label>Fills of the last<br><select id="xb-mo-days"><option value="1">day</option><option value="7" selected>week</option>
+          <option value="30">30 days</option></select></label>
+      </div>
+      <div class="chain-wrapper">
+        <table class="pf-table">
+          <thead id="xb-mo-head"></thead>
+          <tbody id="xb-mo"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="card" id="xb-detail" style="display:none">
       <h2 id="xb-detail-title"></h2>
       <div id="xb-detail-cards" class="collat-summary-grid"></div>
@@ -4623,7 +4646,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=11"></script>
+<script src="/static/execbot.js?v=12"></script>
 <script src="/static/fwmonitor.js?v=3"></script>
 </body>
 </html>
