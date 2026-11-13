@@ -1,6 +1,7 @@
 """The execution bot's state, in the app's SQLite DB next to the agents' tables.
 
-    exec_orders   one parent order: what to trade, by when, the threshold ramp, progress
+    exec_orders   one parent order: what to trade, by when, the threshold ramp, progress; via 'bot'
+                  (worked on screen) or 'rfq' (one leg of an accepted Block RFQ, created filled)
     exec_ticks    the order's passes: fair value, threshold, best cost, action; takes as they
                   happen, the routine ones once a minute; what the Execution page charts
     exec_fills    every fill, with its cost against the spline at the time, Deribit's mark and the mid
@@ -33,6 +34,7 @@ SCHEMA = [
         hard_vp REAL NOT NULL,
         cap REAL NOT NULL,
         mode TEXT NOT NULL DEFAULT 'paper',
+        via TEXT NOT NULL DEFAULT 'bot',
         status TEXT NOT NULL DEFAULT 'working',
         filled REAL NOT NULL DEFAULT 0,
         cost_usd REAL NOT NULL DEFAULT 0,
@@ -95,6 +97,10 @@ async def init_exec_tables() -> None:
     for col in ("mark_usd", "mid_usd"):
         if col not in have:
             await db.execute(f"ALTER TABLE exec_fills ADD COLUMN {col} REAL")
+    # Block RFQ legs next to the bot's orders (13 Nov 2026)
+    cur = await db.execute("PRAGMA table_info(exec_orders)")
+    if "via" not in {r[1] for r in await cur.fetchall()}:
+        await db.execute("ALTER TABLE exec_orders ADD COLUMN via TEXT NOT NULL DEFAULT 'bot'")
     await db.commit()
 
 
@@ -115,6 +121,21 @@ async def create_order(instrument: str, side: str, qty: float, deadline_ts: floa
         (now or time.time(), created_by, instrument, side, qty, deadline_ts, start_vp, end_vp, hard_vp,
          cap, mode, note))
     await db.commit()
+    return cur.lastrowid
+
+
+async def record_rfq_leg(instrument: str, side: str, mode: str, fills: list[dict[str, Any]], note: str,
+                         created_by: str = "", now: float | None = None) -> int:
+    """One leg of an accepted Block RFQ: an order created filled (via 'rfq'), with its trades as fills."""
+    now = now or time.time()
+    qty = sum(f["qty"] for f in fills)
+    db = await get_db()
+    cur = await db.execute(
+        "INSERT INTO exec_orders (created_ts, created_by, instrument, side, qty, deadline_ts, start_vp, end_vp,"
+        " hard_vp, cap, mode, via, status, note, finished_ts) VALUES (?,?,?,?,?,?,0,0,0,?,?,'rfq','filled',?,?)",
+        (now, created_by, instrument, side, qty, now, qty, mode, note, now))
+    await db.commit()
+    await add_fills(cur.lastrowid, fills)
     return cur.lastrowid
 
 
@@ -191,7 +212,7 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
     its column, with the contracts it covers in *_qty."""
     db = await get_db()
     cur = await db.execute(
-        "SELECT o.id, o.instrument, o.side, o.qty AS order_qty, o.filled, o.status, o.mode, f.ts, f.qty,"
+        "SELECT o.id, o.instrument, o.side, o.qty AS order_qty, o.filled, o.status, o.mode, o.via, f.ts, f.qty,"
         " f.price_usd, f.fair_usd, f.mark_usd, f.mid_usd, f.fee_usd, t.vega FROM exec_fills f"
         " JOIN exec_orders o ON o.id = f.order_id"
         " LEFT JOIN exec_ticks t ON t.order_id = f.order_id AND t.ts = f.ts"
@@ -200,7 +221,7 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
     legs: dict[int, dict[str, Any]] = {}
     for r in await cur.fetchall():
         g = legs.setdefault(r["id"], {k: r[k] for k in ("id", "instrument", "side", "order_qty", "filled",
-                                                         "status", "mode")} | {"last_ts": 0.0, "fee_usd": 0.0})
+                                                         "status", "mode", "via")} | {"last_ts": 0.0, "fee_usd": 0.0})
         g["last_ts"] = max(g["last_ts"], r["ts"])
         g["fee_usd"] += r["fee_usd"]
         g["fee_vega"] = g.get("fee_vega", 0.0) + (r["qty"] * r["vega"] if r["vega"] else 0.0)
@@ -258,7 +279,7 @@ async def markout_rows(since: float, mode: str | None = None) -> list[dict[str, 
     """Every fill since ``since`` with a horizon-0 row, joined to its markouts, for markouts.summary."""
     db = await get_db()
     cur = await db.execute(
-        "SELECT f.id AS fill_id, f.order_id, f.ts AS fill_ts, f.qty, f.price_usd, f.mode, o.instrument, o.side,"
+        "SELECT f.id AS fill_id, f.order_id, f.ts AS fill_ts, f.qty, f.price_usd, f.mode, o.via, o.instrument, o.side,"
         " m.horizon, m.ts, m.S, m.fair_usd, m.mid_usd, m.iv, m.vega FROM exec_fills f"
         " JOIN exec_orders o ON o.id = f.order_id JOIN exec_markouts m ON m.fill_id = f.id"
         " WHERE f.ts >= ?" + (" AND f.mode = ?" if mode else "") + " ORDER BY f.id, m.horizon",
@@ -267,13 +288,14 @@ async def markout_rows(since: float, mode: str | None = None) -> list[dict[str, 
 
 
 async def last_fill_ts(instruments: list[str]) -> dict[str, float]:
-    """{instrument: time of its last fill, any order}, for the instruments that have one."""
+    """{instrument: time of its last screen fill, any bot order}, for the instruments that have one. A Block
+    RFQ fill took nothing from the screen book, so it starts no rest."""
     if not instruments:
         return {}
     db = await get_db()
     cur = await db.execute(
         "SELECT o.instrument, MAX(f.ts) AS ts FROM exec_fills f JOIN exec_orders o ON o.id = f.order_id"
-        f" WHERE o.instrument IN ({','.join('?' * len(set(instruments)))}) GROUP BY o.instrument",
+        f" WHERE o.via = 'bot' AND o.instrument IN ({','.join('?' * len(set(instruments)))}) GROUP BY o.instrument",
         tuple(set(instruments)))
     return {r["instrument"]: r["ts"] for r in await cur.fetchall()}
 

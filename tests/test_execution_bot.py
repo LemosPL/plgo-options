@@ -726,3 +726,35 @@ def test_markouts_follow_each_fill_after_its_order_finished(tmp_path):
         assert c["900"]["n"] == 0 and c["900"]["spline"] is None and c["3600"]["n"] == 0
         assert not await bot._busy(t0 + 3700)                               # an hour on: nothing left to observe
     run(body)
+
+
+def test_an_accepted_rfq_goes_into_the_cost_table_as_rfq_legs_and_starts_no_rest(tmp_path):
+    from plgo_options.execution import markouts, rfq_desk
+    run = _db(tmp_path, "rfqcost.db")
+    put = f"ETH-{EXPIRY}-2000-P"
+
+    async def books(expiries, instruments):
+        return {EXPIRY: _books()}
+
+    by = {b["instrument_name"]: b for b in _books()}
+    trades = [{"instrument_name": NAME, "direction": "buy", "amount": 30, "price": by[NAME]["mark_price"] + 1 / S,
+               "fee": 0.0002, "trade_id": "B1", "timestamp": NOW * 1000},
+              {"instrument_name": put, "direction": "sell", "amount": 15, "price": by[put]["mark_price"] - 0.5 / S,
+               "fee": 0.0001, "trade_id": "B2", "timestamp": NOW * 1000},
+              {"instrument_name": f"ETH-{EXPIRY}", "direction": "sell", "amount": 50000, "price": F,
+               "fee": 0, "trade_id": "B3", "timestamp": NOW * 1000}]   # the hedge future: left out
+
+    async def body():
+        ids = await rfq_desk.record(77, trades, "desk@x", books_fn=books)
+        assert len(ids) == 2
+        legs = {g["instrument"]: g for g in await store.leg_costs()}
+        c, p = legs[NAME], legs[put]
+        assert c["via"] == p["via"] == "rfq" and c["status"] == "filled" and c["filled"] == 30 and p["side"] == "sell"
+        assert c["mode"] == "testnet" and c["fee_usd"] == pytest.approx(0.0002 * S)
+        # the call bought $1 over its mark, the put sold $0.50 under: both cost that against the mark
+        assert c["mark_usd"] == pytest.approx(30 * 1.0) and p["mark_usd"] == pytest.approx(15 * 0.5)
+        assert (await store.get_order(ids[0]))["note"] == "Block RFQ #77"
+        assert await store.last_fill_ts([NAME, put]) == {}                 # no rest for the bot after an RFQ
+        due = await store.due_markouts(NOW + 6, markouts.HORIZONS, markouts.LATE)
+        assert {d["instrument"] for d in due} == {NAME, put}                # and its markouts follow
+    run(body)

@@ -255,6 +255,13 @@ def desk(fake, monkeypatch):
     from plgo_options.execution import rfq_desk
     monkeypatch.setattr(rfq_desk, "_client", _client(fake))
     monkeypatch.setattr(rfq_desk, "_sent", {})
+    recorded = []
+
+    async def record(rid, trades, by=""):   # the cost table is test_execution_bot's
+        recorded.append((rid, len(trades)))
+        return [101, 102]
+    monkeypatch.setattr(rfq_desk, "record", record)
+    rfq_desk.recorded = recorded
     return rfq_desk
 
 
@@ -280,6 +287,7 @@ async def test_desk_accepts_only_inside_our_limit(fake, desk):
     v = await desk.accept(v["id"])
     assert v["state"] == "filled" and v["acceptance"]["filled"] and len(v["acceptance"]["trades"]) == 4
     assert _sent(fake, "accept_block_rfq")[0]["price"] == 0.0125
+    assert desk.recorded == [(v["id"], 4)] and v["acceptance"]["recorded"] == [101, 102]   # into the cost table
 
 
 async def test_desk_forgets_nothing_it_did_not_send(desk):

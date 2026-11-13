@@ -105,7 +105,8 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         dl = _delta(r0["instrument"], r0["S"], r0["iv"], r0["fill_ts"])
         w = r0["qty"] * r0["vega"]
         legs.setdefault(r0["order_id"], {"id": r0["order_id"], "instrument": r0["instrument"], "side": r0["side"],
-                                         "mode": r0["mode"], "fills": 0, "qty": 0.0, "last_ts": 0.0})
+                                         "mode": r0["mode"], "via": r0.get("via", "bot"), "fills": 0, "qty": 0.0,
+                                         "last_ts": 0.0})
         g = legs[r0["order_id"]]
         g["fills"] += 1
         g["qty"] += r0["qty"]

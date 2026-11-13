@@ -107,26 +107,35 @@
       return;
     }
     const vp = (v) => v == null ? "—" : fmt(v, 2);
+    const all = legs;
     // vega-weighted over the legs that have the reference
-    const pool = (name) => {
+    const poolOf = (legs) => (name) => {
       const w = legs.reduce((a, g) => a + (g[name + "_vp"] != null ? g[name + "_vega"] : 0), 0);
       return w ? legs.reduce((a, g) => a + (g[name + "_vp"] != null ? g[name + "_vp"] * g[name + "_vega"] : 0), 0) / w : null;
     };
-    const sum = (k) => legs.some((g) => g[k] != null) ? legs.reduce((a, g) => a + (g[k] || 0), 0) : null;
+    const sumOf = (legs) => (k) => legs.some((g) => g[k] != null) ? legs.reduce((a, g) => a + (g[k] || 0), 0) : null;
     const allIn = (m, f) => m != null && f != null ? m + f : null;
     const partial = (g, name) => g[name + "_qty"] != null && g[name + "_qty"] < g.filled
       ? ` <span style="color:var(--muted)" title="covers ${fmt(g[name + "_qty"])} of ${fmt(g.filled)} contracts">*</span>` : "";
+    const tag = (g) => (g.via === "rfq" ? ` <b style="color:var(--accent, #4f8cff)">RFQ</b>` : "") + (g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`);
     const row = (g) => `<tr data-id="${g.id}" style="cursor:pointer">
-      <td>${g.id}</td><td style="text-align:left">${g.side === "buy" ? "Buy" : "Sell"} ${esc(g.instrument)}${g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`}</td>
+      <td>${g.id}</td><td style="text-align:left">${g.side === "buy" ? "Buy" : "Sell"} ${esc(g.instrument)}${tag(g)}</td>
       <td>${fmt(g.filled)} / ${fmt(g.order_qty)}${g.status === "working" ? "" : ` <span style="color:var(--muted)">${esc(g.status)}</span>`}</td>
       <td>${vp(g.mid_vp)}${partial(g, "mid")}</td><td>${vp(g.spline_vp)}</td><td>${vp(g.mark_vp)}${partial(g, "mark")}</td>
       <td>${vp(g.fee_vp)}</td><td>${vp(allIn(g.mark_vp, g.fee_vp))}</td>
       <td>${usd(g.spline_usd, 0)}</td><td>${usd(g.mark_usd, 0)}</td><td>${usd(g.fee_usd, 0)}</td></tr>`;
-    $("xb-costs").innerHTML = legs.map(row).join("")
-      + `<tr style="font-weight:600;border-top:2px solid var(--border)"><td></td><td style="text-align:left">All</td>
+    // one total per route when both are there: on screen (the bot) and Block RFQ
+    const groups = [["All", all]];
+    const bot = all.filter((g) => g.via !== "rfq"), rfqs = all.filter((g) => g.via === "rfq");
+    if (bot.length && rfqs.length) groups.push(["All on screen (bot)", bot], ["All Block RFQ", rfqs]);
+    const total = ([name, legs], i) => {
+      const pool = poolOf(legs), sum = sumOf(legs);
+      return `<tr style="font-weight:600;${i === 0 ? "border-top:2px solid var(--border)" : ""}"><td></td><td style="text-align:left">${name}</td>
       <td>${fmt(legs.reduce((a, g) => a + g.filled, 0))}</td><td>${vp(pool("mid"))}</td><td>${vp(pool("spline"))}</td>
       <td>${vp(pool("mark"))}</td><td>${vp(pool("fee"))}</td><td>${vp(allIn(pool("mark"), pool("fee")))}</td>
       <td>${usd(sum("spline_usd"), 0)}</td><td>${usd(sum("mark_usd"), 0)}</td><td>${usd(sum("fee_usd"), 0)}</td></tr>`;
+    };
+    $("xb-costs").innerHTML = all.map(row).join("") + groups.map(total).join("");
   }
 
   // ── markouts ──────────────────────────────────────────────────
@@ -148,7 +157,7 @@
       return;
     }
     $("xb-mo").innerHTML = d.legs.map((g) => rows2(`#${g.id} ${g.side === "buy" ? "Buy" : "Sell"} ${esc(g.instrument)}`
-        + `${g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`} <span style="color:var(--muted)">· ${fmt(g.fills)} fill(s), ${fmt(g.qty)}</span>`, g.cells)).join("")
+        + `${g.via === "rfq" ? " <b>RFQ</b>" : ""}${g.mode === "paper" ? "" : ` <b>${esc(g.mode)}</b>`} <span style="color:var(--muted)">· ${fmt(g.fills)} fill(s), ${fmt(g.qty)}</span>`, g.cells)).join("")
       + rows2("All", d.all, true);
   }
   ["xb-mo-mode", "xb-mo-days"].forEach((id) => $(id)?.addEventListener("change", () => markoutsLoad().catch((e) => status(e.message, true))));
@@ -392,7 +401,10 @@
         : `<div style="color:var(--muted)">No quote yet.</div>`;
     const acc = v.acceptance ? `<div style="margin-top:.3rem;color:${v.acceptance.filled ? "var(--green)" : "var(--red)"}">`
         + (v.acceptance.filled ? `Filled: ${v.acceptance.trades.map((t) => `${t.direction} ${fmt(t.amount)} ${esc(t.instrument_name)} @ ${t.price}`).join(" · ")}`
-          : `Not filled: ${esc(v.acceptance.reason)}`) + `</div>` : "";
+          : `Not filled: ${esc(v.acceptance.reason)}`)
+        + (v.acceptance.recorded ? `<div style="color:var(--muted)">In the cost table as order(s) ${v.acceptance.recorded.map((x) => "#" + x).join(", ")}.</div>` : "")
+        + (v.acceptance.record_error ? `<div style="color:var(--red)">Not in the cost table: ${esc(v.acceptance.record_error)}</div>` : "")
+        + `</div>` : "";
     const canAccept = open && v.quotes_visible && v.best && v.best.inside;
     slot.innerHTML = `<div style="border-top:1px dashed var(--border);margin-top:.5rem;padding-top:.45rem;font-size:.78rem">
       <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
