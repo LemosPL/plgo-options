@@ -183,3 +183,96 @@ def find_synthetic_forwards(trades: list[dict]) -> list[dict]:
                 break
     out.sort(key=lambda s: (s["expiry"], s["counterparty"].lower(), s["key"]))
     return out
+
+
+# ── Round trips: closing forwards matched against opening ones ───────────
+# A buy on a short forward's counterparty and maturity closes (part of) it;
+# cash-settled, the gain is locked in and paid at the maturity fixing.
+# Manual pairs (picked on the Monitor) go first, the rest is matched FIFO by
+# trade date. A close is tagged take_profit / stop_loss when its price is at
+# or through the opening leg's level (within LEVEL_MATCH_PCT), else "closed".
+LEVEL_MATCH_PCT = 1.0
+CLOSE_REASONS = ("take_profit", "stop_loss", "roll", "closed")
+
+
+def group_key(f: dict) -> str:
+    return f"{str(f['asset']).upper()}|{str(f['counterparty']).strip().lower()}|{str(f['maturity_date'])[:10]}"
+
+
+def close_reason(open_side: str, close_price: float, stop: float | None, target: float | None,
+                 tol_pct: float = LEVEL_MATCH_PCT) -> str:
+    short = side_sign(open_side) < 0
+    tol = tol_pct / 100.0
+    if target:
+        if (close_price <= target * (1 + tol)) if short else (close_price >= target * (1 - tol)):
+            return "take_profit"
+    if stop:
+        if (close_price >= stop * (1 - tol)) if short else (close_price <= stop * (1 + tol)):
+            return "stop_loss"
+    return "closed"
+
+
+def match_round_trips(legs: list[dict], manual: list[dict], levels: dict[str, dict] | None = None):
+    """(open qty by leg id, round trips). `legs`: open forwards (id, asset,
+    counterparty, side, qty, forward_price, trade_date, maturity_date);
+    `manual`: forward_closes rows. Pairs that no longer fit (a leg gone,
+    same side, other group, nothing left) are returned with "invalid"."""
+    levels = levels or {}
+    by_id = {int(l["id"]): l for l in legs}
+    rem = {i: float(l["qty"]) for i, l in by_id.items()}
+    trips, invalid = [], []
+
+    def trip(o, c, q, reason, source, close_row=None):
+        so = side_sign(o["side"])
+        lv = levels.get(f"fwd:{o['id']}") or {}
+        if reason is None:
+            reason = close_reason(o["side"], float(c["forward_price"]), lv.get("stop_loss"), lv.get("take_profit"))
+        trips.append({
+            "group": group_key(o), "asset": str(o["asset"]).upper(), "counterparty": o["counterparty"],
+            "maturity_date": str(o["maturity_date"])[:10], "side": o["side"], "qty": q,
+            "open_id": int(o["id"]), "open_price": float(o["forward_price"]), "open_date": str(o["trade_date"])[:10],
+            "close_id": int(c["id"]), "close_price": float(c["forward_price"]), "close_date": str(c["trade_date"])[:10],
+            "realised_usd": so * q * (float(c["forward_price"]) - float(o["forward_price"])),
+            "reason": reason, "source": source, "close_row_id": close_row,
+            "stop_loss": lv.get("stop_loss"), "take_profit": lv.get("take_profit"),
+        })
+
+    def order(a, b):
+        ka = (str(a["trade_date"])[:10], int(a["id"]))
+        kb = (str(b["trade_date"])[:10], int(b["id"]))
+        return (a, b) if ka <= kb else (b, a)
+
+    for m in manual:
+        a, b = by_id.get(int(m["open_id"])), by_id.get(int(m["close_id"]))
+        if not a or not b or a is b or side_sign(a["side"]) == side_sign(b["side"]) or group_key(a) != group_key(b):
+            invalid.append({**m, "why": "legs no longer open or not offsetting"})
+            continue
+        o, c = order(a, b)
+        q = min(float(m["qty"]), rem[int(o["id"])], rem[int(c["id"])])
+        if q <= 1e-12:
+            invalid.append({**m, "why": "nothing left to close on these legs"})
+            continue
+        rem[int(o["id"])] -= q
+        rem[int(c["id"])] -= q
+        trip(o, c, q, m.get("reason") or "closed", "manual", m.get("id"))
+
+    groups: dict[str, list[dict]] = {}
+    for l in by_id.values():
+        groups.setdefault(group_key(l), []).append(l)
+    for g in groups.values():
+        g.sort(key=lambda l: (str(l["trade_date"])[:10], int(l["id"])))
+        lots: list[dict] = []          # open lots, all of one side
+        for l in g:
+            i = int(l["id"])
+            while rem[i] > 1e-12 and lots and side_sign(lots[0]["side"]) != side_sign(l["side"]):
+                o = lots[0]
+                q = min(rem[i], rem[int(o["id"])])
+                rem[i] -= q
+                rem[int(o["id"])] -= q
+                trip(o, l, q, None, "auto")
+                if rem[int(o["id"])] <= 1e-12:
+                    lots.pop(0)
+            if rem[i] > 1e-12:
+                lots.append(l)
+    trips.sort(key=lambda t: (t["close_date"], t["close_id"], t["open_id"]))
+    return {i: max(q, 0.0) for i, q in rem.items()}, trips, invalid

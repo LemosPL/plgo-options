@@ -315,17 +315,31 @@ async def build_monitor(asset: str, spot: float, today: date | None = None,
     await repo.ensure_tables(db)
     book = await build_forward_book(a, spot, today)
     levels = await repo.get_levels(db, a)
+    # Closed round trips (settlement buys / sells offsetting earlier legs):
+    # matched quantity leaves the open view; its gain is locked (realised).
+    manual = await repo.list_closes(db, a)
+    open_qty, trips, invalid = fwd.match_round_trips(book["trades"], manual, levels)
     out = []
     for t in book["trades"]:
+        q0 = float(t["qty"])
+        q = open_qty.get(int(t["id"]), q0)
+        if q <= 1e-9:
+            continue
+        k = q / q0 if q0 else 0.0
+        lv = dict(t["levels"])
+        for side in ("stop", "target"):
+            if lv.get(side):
+                lv[side] = {**lv[side], "mtm_at": lv[side]["mtm_at"] * k}
         out.append({
             "key": f"fwd:{t['id']}", "kind": "forward", "forward_id": t["id"],
-            "counterparty": t["counterparty"], "side": t["side"], "qty": float(t["qty"]),
+            "counterparty": t["counterparty"], "side": t["side"], "qty": q, "booked_qty": q0,
             "forward_price": float(t["forward_price"]), "effective_price": float(t["forward_price"]),
             "net_premium_usd": 0.0, "trade_date": t["trade_date"], "maturity_date": t["maturity_date"],
-            "days_to_maturity": t["days_to_maturity"], "mtm": t["mtm"], "delta": t["delta"],
+            "days_to_maturity": t["days_to_maturity"], "mtm": t["mtm"] * k, "delta": t["delta"] * k,
             "fair_forward": t["fair_forward"], "external_ref": t.get("external_ref") or "",
+            "group": fwd.group_key({**t, "asset": a}),
             "legs": [], "leg_ids": [], "stop_loss": t["stop_loss"], "take_profit": t["take_profit"],
-            "note": t["levels_note"], "levels": t["levels"],
+            "note": t["levels_note"], "levels": lv,
         })
     try:
         legs = await _active_option_legs(db, a, today)
@@ -366,7 +380,16 @@ async def build_monitor(asset: str, spot: float, today: date | None = None,
     summary = {k: st.count(k) for k in rank}
     summary.update(count=len(out), net_qty=sum(fwd.side_sign(p["side"]) * p["qty"] for p in out),
                    mtm=sum(p["mtm"] for p in out))
+    settled = await repo.list_forwards(db, a, ("settled",))
+    realised_closed = sum(t["realised_usd"] for t in trips)
+    realised_settled = sum(float(r["settled_pnl_usd"] or 0.0) for r in settled)
+    summary.update(open_mtm=summary["mtm"], realised_closed=realised_closed, realised_settled=realised_settled,
+                   pnl_total=summary["mtm"] + realised_closed + realised_settled)
+    open_legs = [{"id": t["id"], "counterparty": t["counterparty"], "side": t["side"], "qty": float(t["qty"]),
+                  "open_qty": open_qty.get(int(t["id"]), float(t["qty"])), "forward_price": float(t["forward_price"]),
+                  "trade_date": t["trade_date"], "maturity_date": t["maturity_date"]} for t in book["trades"]]
     return {"asset": a, "spot": spot, "near_pct": fwd.NEAR_PCT, "positions": out, "summary": summary,
+            "closed": trips, "invalid_closes": invalid, "settled": settled, "forward_legs": open_legs,
             "embedded_synthetics": embedded_count, "include_embedded": include_embedded,
             "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
@@ -413,6 +436,51 @@ async def put_levels(body: LevelsIn, request: Request):
     await repo.set_levels(db, body.key, a, body.stop_loss, body.take_profit, body.note, _user(request))
     mon = await build_monitor(a, spot, include_embedded=True)
     return next((p for p in mon["positions"] if p["key"] == body.key), pos)
+
+
+class CloseIn(BaseModel):
+    asset: str
+    open_id: int
+    close_id: int
+    qty: float | None = Field(default=None, gt=0)
+    reason: str = "closed"
+    note: str = ""
+
+
+@router.post("/closes")
+async def pair_close(body: CloseIn, request: Request):
+    """Pick by hand which forward closes which (the rest is matched FIFO)."""
+    a = body.asset.upper()
+    if a not in ASSETS:
+        raise HTTPException(status_code=400, detail=f"asset must be one of {ASSETS}")
+    if body.reason not in fwd.CLOSE_REASONS:
+        raise HTTPException(status_code=400, detail=f"reason must be one of {fwd.CLOSE_REASONS}")
+    db = await get_db()
+    await repo.ensure_tables(db)
+    x, y = await repo.get_forward(db, body.open_id), await repo.get_forward(db, body.close_id)
+    if not x or not y or x["status"] != "open" or y["status"] != "open" or x["id"] == y["id"]:
+        raise HTTPException(status_code=404, detail="both legs must be different open forwards")
+    if str(x["asset"]).upper() != a or str(y["asset"]).upper() != a:
+        raise HTTPException(status_code=400, detail=f"both legs must be {a} forwards")
+    if fwd.side_sign(x["side"]) == fwd.side_sign(y["side"]):
+        raise HTTPException(status_code=400, detail="a close needs one buy and one sell")
+    if fwd.group_key(x) != fwd.group_key(y):
+        raise HTTPException(status_code=400, detail="legs must share counterparty and maturity to offset")
+    # Replace an existing manual pair of the same two legs (e.g. retagging the reason).
+    for m in await repo.list_closes(db, a):
+        if {int(m["open_id"]), int(m["close_id"])} == {x["id"], y["id"]}:
+            await repo.delete_close(db, m["id"])
+    qty = body.qty or min(float(x["qty"]), float(y["qty"]))
+    cid = await repo.add_close(db, a, x["id"], y["id"], qty, body.reason, body.note, _user(request))
+    return {"id": cid}
+
+
+@router.delete("/closes/{cid}")
+async def unpair_close(cid: int):
+    db = await get_db()
+    if not await repo.delete_close(db, cid):
+        raise HTTPException(status_code=404, detail="no such pair")
+    return {"ok": True}
 
 
 @router.get("/history")

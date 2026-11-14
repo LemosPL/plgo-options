@@ -327,3 +327,49 @@ def test_confirmation_adopts_a_hand_booked_copy_and_heals_a_duplicate():
         await db.close()
 
     asyncio.run(go())
+
+
+def test_round_trips_fifo_manual_and_triggers():
+    L = lambda i, side, q, K, td: dict(id=i, asset="ETH", counterparty="Flowdesk", side=side, qty=q,
+                                       forward_price=K, trade_date=td, maturity_date="2026-11-27")
+    legs = [L(1, "sell", 2500, 2346.5, "2026-10-27"), L(2, "buy", 1250, 2100, "2026-11-09"),
+            L(3, "sell", 1250, 2108.1, "2026-11-09"), L(5, "buy", 55, 1910, "2026-11-13"),
+            L(7, "sell", 55, 1961, "2026-11-13")]
+    lv = {k: {"stop_loss": 2236.5, "take_profit": 1900.0} for k in ("fwd:1", "fwd:3", "fwd:7")}
+    rem, trips, inv = fwd.match_round_trips(legs, [], lv)
+    assert rem == {1: 1195.0, 2: 0.0, 3: 1250.0, 5: 0.0, 7: 55.0} and not inv
+    t12, t15 = trips
+    assert (t12["open_id"], t12["close_id"], t12["qty"], t12["realised_usd"], t12["reason"]) == (1, 2, 1250, 308_125, "closed")
+    assert t15["reason"] == "take_profit" and t15["realised_usd"] == pytest.approx(55 * 436.5)  # 1910 within 1% of TP
+    # A hand-picked pair goes first: the 55 buy and the 55 sell close each other.
+    rem, trips, inv = fwd.match_round_trips(legs, [dict(id=9, open_id=7, close_id=5, qty=55, reason="roll")], lv)
+    m = next(t for t in trips if t["source"] == "manual")
+    assert (m["open_id"], m["close_id"], m["realised_usd"], m["reason"]) == (5, 7, pytest.approx(55 * 51), "roll")
+    assert rem[1] == 1250.0
+    # Stale pairs are reported, not applied.
+    _, _, inv = fwd.match_round_trips(legs, [dict(id=10, open_id=1, close_id=3, qty=10, reason="closed")], lv)
+    assert inv and inv[0]["id"] == 10
+    assert fwd.close_reason("sell", 2240, 2236.5, 1900) == "stop_loss"
+    assert fwd.close_reason("buy", 0.95, 0.70, 0.90) == "take_profit"
+
+
+def test_monitor_shows_open_residual_closed_trips_and_pnl(monkeypatch):
+    db = _with_db(monkeypatch, spot=2000.0)
+    mk = lambda **kw: _book(asset="ETH", maturity_date="2099-12-31", **kw)
+    a = mk(side="sell", qty=2500, forward_price=2346.5, trade_date="2026-10-27")
+    b = mk(side="buy", qty=1250, forward_price=2100, trade_date="2026-11-09")
+    mon = asyncio.run(route.get_monitor("ETH"))
+    assert [(p["forward_id"], p["qty"]) for p in mon["positions"]] == [(a["id"], 1250.0)]
+    assert mon["positions"][0]["mtm"] == pytest.approx(-1250 * (2000 - 2346.5))
+    assert mon["closed"][0]["realised_usd"] == pytest.approx(308_125)
+    s = mon["summary"]
+    assert s["pnl_total"] == pytest.approx(s["open_mtm"] + 308_125)
+    # Pair by hand with a trigger; validation rejects same-side pairs.
+    asyncio.run(route.pair_close(route.CloseIn(asset="ETH", open_id=a["id"], close_id=b["id"], reason="take_profit"), REQ))
+    mon = asyncio.run(route.get_monitor("ETH"))
+    assert mon["closed"][0]["source"] == "manual" and mon["closed"][0]["reason"] == "take_profit"
+    c = mk(side="sell", qty=10, forward_price=2000, trade_date="2026-11-10")
+    with pytest.raises(HTTPException):
+        asyncio.run(route.pair_close(route.CloseIn(asset="ETH", open_id=a["id"], close_id=c["id"]), REQ))
+    asyncio.run(route.unpair_close(mon["closed"][0]["close_row_id"]))
+    asyncio.run(db.close())

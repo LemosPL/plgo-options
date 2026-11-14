@@ -1938,3 +1938,22 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
   border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; }
 .tm-sel-clear:hover { color: var(--text); border-color: var(--accent); }
 .fm-legs { font-size:.72rem; font-family:'SF Mono','Fira Code',monospace; margin-top:.2rem; line-height:1.45; }
+.fm-pnl { display:flex; flex-wrap:wrap; align-items:center; gap:.4rem .9rem; margin-top:.6rem; padding:.45rem .75rem;
+  border:1px solid var(--border); border-radius:6px; background:var(--bg); font-size:.8rem;
+  font-family:'SF Mono','Fira Code',monospace; font-variant-numeric:tabular-nums; }
+.fm-pnl-h { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700;
+  font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+.fm-pnl-sep { color:var(--border); }
+.fm-pnl-tot { margin-left:auto; }
+.fm-tabs { display:flex; gap:.25rem; margin:0 0 .75rem; border-bottom:1px solid var(--border); }
+.fm-tab { background:none; border:none; border-bottom:2px solid transparent; color:var(--muted); padding:.45rem .9rem;
+  font-size:.85rem; font-weight:600; cursor:pointer; width:auto; margin:0 0 -1px; }
+.fm-tab:hover { color:var(--text); }
+.fm-tab.active { color:var(--text); border-bottom-color:var(--accent); }
+.fm-leg { display:block; cursor:pointer; }
+.fm-leg input { vertical-align:middle; margin-right:.2rem; }
+.fm-realised { font-size:.72rem; font-weight:600; margin-top:.2rem; }
+.fm-pair { display:flex; flex-wrap:wrap; gap:.5rem .8rem; align-items:flex-end; }
+.fm-pair label { display:flex; flex-direction:column; gap:.15rem; font-size:.7rem; color:var(--muted); }
+.fm-pair select { max-width:32rem; font-size:.8rem; padding:.2rem .3rem; }
+.fm-reason { font-size:.72rem; padding:0 .2rem; margin-left:.25rem; }

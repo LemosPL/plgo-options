@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=34">
+  <link rel="stylesheet" href="/static/style.css?v=35">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -4065,6 +4065,7 @@
       </div>
       <div id="fm-alert" class="fm-alert" style="display:none"></div>
       <div id="fm-summary" class="fm-summary"></div>
+      <div id="fm-pnl" class="fm-pnl"></div>
       <details class="fm-help">
         <summary>How this works</summary>
         <p>Every open forward of both assets: forwards booked on the Trades screen, and <b>synthetic forwards</b> booked as options
@@ -4074,10 +4075,33 @@
         synthetic MTM is qty &times; (spot &minus; strike), put-call parity at zero rate.</p>
       </details>
     </section>
-    <div id="fm-positions" class="fm-grid"></div>
-    <section class="card">
-      <div id="fm-price-chart" class="chart-container" style="min-height:440px"></div>
-    </section>
+    <div class="fm-tabs" id="fm-tabs">
+      <button type="button" class="fm-tab active" data-tab="open">Open positions <span id="fm-open-count" class="optv3-muted"></span></button>
+      <button type="button" class="fm-tab" data-tab="closed">Closed &amp; executed <span id="fm-closed-count" class="optv3-muted"></span></button>
+    </div>
+    <div id="fm-tab-open">
+      <div id="fm-positions" class="fm-grid"></div>
+      <section class="card">
+        <div id="fm-price-chart" class="chart-container" style="min-height:440px"></div>
+      </section>
+    </div>
+    <div id="fm-tab-closed" style="display:none">
+      <section class="card">
+        <h3 style="margin:0 0 .35rem">Closed round trips</h3>
+        <p class="optv3-muted" style="font-size:.74rem;margin:0 0 .6rem;max-width:100ch">A buy on a short's counterparty and maturity closes part of it (a sell closes a long);
+          cash-settled, so the gain is locked now and paid at the maturity fixing. Matched oldest-first automatically; pick pairs yourself below to override.
+          <b>TP</b> / <b>SL</b> = closed at or through the opening leg's take profit / stop loss (within 1%).</p>
+        <div id="fm-closed" class="chain-wrapper"></div>
+      </section>
+      <section class="card" id="fm-pair-card">
+        <h3 style="margin:0 0 .5rem">Mark trades as closed</h3>
+        <div id="fm-pair" class="fm-pair"></div>
+      </section>
+      <section class="card">
+        <h3 style="margin:0 0 .5rem">Settled at maturity</h3>
+        <div id="fm-settled" class="chain-wrapper"></div>
+      </section>
+    </div>
   </div>
 
   <div id="page-execbot" class="page">
@@ -4649,6 +4673,6 @@
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
 <script src="/static/execbot.js?v=13"></script>
-<script src="/static/fwmonitor.js?v=4"></script>
+<script src="/static/fwmonitor.js?v=5"></script>
 </body>
 </html>

@@ -68,10 +68,49 @@ CREATE TABLE IF NOT EXISTS forward_levels (
 """
 
 
+# Round trips picked by hand on the Forwards Monitor: this closing forward
+# offsets that opening one for qty. Unpaired quantity is matched FIFO
+# (pricing/forwards.match_round_trips); a manual pair always goes first.
+FORWARD_CLOSES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS forward_closes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset TEXT NOT NULL COLLATE NOCASE,
+    open_id INTEGER NOT NULL,
+    close_id INTEGER NOT NULL,
+    qty REAL NOT NULL,
+    reason TEXT NOT NULL DEFAULT 'closed',
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
 async def ensure_tables(db) -> None:
     await db.execute(FORWARD_TRADES_SCHEMA)
     await db.execute(FORWARD_CARRY_SCHEMA)
     await db.execute(FORWARD_LEVELS_SCHEMA)
+    await db.execute(FORWARD_CLOSES_SCHEMA)
+
+
+async def list_closes(db, asset: str) -> list[dict]:
+    cur = await db.execute("SELECT * FROM forward_closes WHERE asset = ? ORDER BY id", (asset.upper(),))
+    return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_close(db, asset: str, open_id: int, close_id: int, qty: float, reason: str, note: str, user: str) -> int:
+    cur = await db.execute(
+        """INSERT INTO forward_closes (asset, open_id, close_id, qty, reason, note, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (asset.upper(), open_id, close_id, qty, reason, (note or "").strip(), user))
+    await db.commit()
+    return cur.lastrowid
+
+
+async def delete_close(db, cid: int) -> bool:
+    cur = await db.execute("DELETE FROM forward_closes WHERE id = ?", (cid,))
+    await db.commit()
+    return cur.rowcount > 0
 
 
 async def get_levels(db, asset: str | None = None) -> dict[str, dict]:
