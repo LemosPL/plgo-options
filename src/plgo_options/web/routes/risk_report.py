@@ -38,6 +38,7 @@ from plgo_options.data.collar_loans import drop_collar_loans
 from plgo_options.data.database import get_db
 from plgo_options.pricing.options import bs_price
 from plgo_options.web.routes.collateral import (
+    USD_ASSETS,
     _effective_prices,
     _gather_portfolio,
     _otc_perps,
@@ -378,7 +379,7 @@ async def risk_report(counterparty: str = "ALL", asset: str = "ALL", vol_mode: s
     prices, _, _ = await _effective_prices(sorted(set(posted) | {"ETH", "FIL"}))
     coll_rows, coll_usd, coll_usd_hc = [], 0.0, 0.0
     for a, q in sorted(posted.items()):
-        px = 1.0 if a in ("USD", "USDC") else float(prices.get(a, 0.0))
+        px = 1.0 if a in USD_ASSETS else float(prices.get(a, 0.0))
         rate = effective_haircut_rate(cp, a, q) if cp else 0.0
         usd = q * px
         coll_rows.append({"asset": a, "qty": q, "price": px, "usd": usd, "haircut": rate, "usd_haircut": usd * (1 - rate)})

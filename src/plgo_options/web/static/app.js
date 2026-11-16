@@ -4664,9 +4664,14 @@ function pfCollBeta() {
   const v = parseFloat(document.getElementById("pf-collateral-beta")?.value);
   return Number.isFinite(v) ? v : 1;
 }
+// USDC and the Collateral Map's PnL rows (USD amounts): $1, never move with spot.
+function collatIsUsd(asset, map) {
+  const m = map || pfCollateralMap || (typeof collatMap !== "undefined" ? collatMap : null);
+  return asset === "USDC" || asset === "USD" || !!(m && (m.usd_assets || []).includes(asset));
+}
 function pfTokenPriceAt(asset, spot) {
   if (asset === currentAsset) return spot;
-  if (asset === "USDC") return 1;
+  if (collatIsUsd(asset, pfCollateralMap)) return 1;
   const p0 = ((pfCollateralMap && pfCollateralMap.prices) || {})[asset] || 0;
   const s0 = pfData && pfData.eth_spot;
   if (!p0 || !s0 || !(spot > 0)) return p0;
@@ -4733,7 +4738,9 @@ function pfCollateralNoteText() {
 function pfBookTooltip() {
   const lines = [`${currentAsset} book collateral (from Collateral Map):`];
   const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
-  const fmtTok = (a, q) => a === "USDC" ? `$${q.toLocaleString()} USDC` : `${q.toLocaleString()} ${a}`;
+  const lab = (pfCollateralMap && pfCollateralMap.asset_labels) || {};
+  const fmtTok = (a, q) => a === "USDC" ? `$${q.toLocaleString()} USDC`
+    : collatIsUsd(a, pfCollateralMap) ? `$${q.toLocaleString()} ${lab[a] || a}` : `${q.toLocaleString()} ${a}`;
   const totals = {};
   for (const c of pfBookCptys()) {
     const q = pfBookQtysFor(c);
@@ -4748,7 +4755,7 @@ function pfBookTooltip() {
   if (!Object.keys(totals).length) { lines.push("  (nothing allocated to this book)"); return lines.join("\n"); }
   lines.push(`Total: ${Object.entries(totals).map(([a, q]) => fmtTok(a, q)).join(" + ")}`);
   const totalUsd = Object.entries(totals).reduce((s, [a, q]) =>
-    s + q * (a === "USDC" ? 1 : (prices[a] || 0)), 0);
+    s + q * (collatIsUsd(a, pfCollateralMap) ? 1 : (prices[a] || 0)), 0);
   if (totalUsd) lines.push(`≈ $${Math.round(totalUsd).toLocaleString()}`);
   lines.push(`${currentAsset} revalues with spot; USDC held at $1.`);
   return lines.join("\n");
@@ -4811,7 +4818,7 @@ function pfCollateralTraces(spots) {
         customdata: c.map((v, i) => [v, pfTokenPriceAt(a, spots[i])]),
         line: { color: PF_COLL_TOKEN_COLOR[a] || "#8b949e", width: 1.5, dash: "dot" },
         legendgroup: "collateral",
-        hovertemplate: a === "USDC"
+        hovertemplate: collatIsUsd(a, pfCollateralMap)
           ? tn + ": $%{customdata[0]:,.0f}<extra></extra>"
           : tn + ": $%{customdata[0]:,.0f} @ " + a + " $%{customdata[1]:,.4~f}<extra></extra>",
       });
@@ -4845,7 +4852,7 @@ function pfTokenPriceAxes(spots) {
   const prices = (pfCollateralMap && pfCollateralMap.prices) || {};
   if (!beta || !s0) return res;
   const tokens = pfCollateralTokens(pfCollateralActiveCptys())
-    .filter(a => a !== currentAsset && a !== "USDC" && prices[a] > 0);
+    .filter(a => a !== currentAsset && !collatIsUsd(a, pfCollateralMap) && prices[a] > 0);
   if (!tokens.length) return res;
 
   const sMin = Math.min(...spots), sMax = Math.max(...spots);
@@ -17233,10 +17240,11 @@ function collatRenderMap() {
     { book: "FIL", label: "FIL book", color: "#f0883e" },
   ];
   document.getElementById("collat-map-tbody").innerHTML = assets.map(a => {
-    const isUsdc = a === "USDC";
+    const isUsdc = collatIsUsd(a, m);   // USDC and the PnL rows: USD amounts at $1
+    const isPnl = (m.pnl_assets || []).includes(a);
     const overridden = (a in overrides);
     const priceCell = isUsdc
-      ? `<td class="num">1.00</td>`
+      ? `<td class="num" ${isPnl ? 'title="USD amount: enter the P&L in dollars (negative = a loss)"' : ""}>1.00</td>`
       : `<td class="num"><input type="number" step="any" min="0" class="collat-price-input" data-asset="${a}" value="${prices[a] ?? 0}" title="${overridden ? "manual override — clear to revert to live" : "live price — type to override"}" style="width:90px;${overridden ? "color:var(--accent);font-weight:600" : ""}"></td>`;
 
     // Asset header row: total (both books) per CP + asset grand total.
@@ -17245,7 +17253,9 @@ function collatRenderMap() {
       return `<td class="num" style="font-weight:600">${usd ? _collatFmtUsd(usd) : "—"}</td>`;
     }).join("");
     const assetTotal = m.asset_totals[a] || 0;
-    const headRow = `<tr style="border-top:2px solid var(--border)">
+    const firstPnl = isPnl && (m.pnl_assets || []).find(x => assets.includes(x)) === a;
+    const headRow = (firstPnl ? `<tr class="collat-pnl-sep"><td colspan="${cps.length + 3}" style="text-align:left">P&amp;L counted as collateral <span style="font-weight:400;color:var(--muted)">(USD, no haircut, may be negative)</span></td></tr>` : "")
+      + `<tr style="border-top:2px solid var(--border)">
       <td style="text-align:left"><strong>${labels[a] || a}</strong></td>
       ${priceCell}
       ${headCells}
@@ -17258,7 +17268,7 @@ function collatRenderMap() {
         const qty = (c.books && c.books[bm.book] && c.books[bm.book][a]) || 0;
         const usd = qty * (prices[a] || (isUsdc ? 1 : 0));
         return `<td class="num">
-          <input type="number" step="any" min="0" class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" data-book="${bm.book}" value="${qty || ""}" placeholder="0" style="width:110px">
+          <input type="number" step="any" ${isPnl ? "" : 'min="0"'} class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" data-book="${bm.book}" value="${qty || ""}" placeholder="${isPnl ? "$ P&L" : "0"}" style="width:110px">
           <div style="font-size:.7rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>
         </td>`;
       }).join("");
@@ -17327,7 +17337,7 @@ function collatRenderMap() {
       collatPending[`${cp} ${asset} ${book}`] = { counterparty: cp, asset, book, qty };
       inp.style.borderColor = "var(--accent)";  // mark dirty
       // Live USD hint for immediate feedback (price = current effective price).
-      const px = asset === "USDC" ? 1 : ((collatMap && collatMap.prices && collatMap.prices[asset]) || 0);
+      const px = collatIsUsd(asset, collatMap) ? 1 : ((collatMap && collatMap.prices && collatMap.prices[asset]) || 0);
       const hint = inp.nextElementSibling;
       if (hint) hint.textContent = qty ? _collatFmtUsd(qty * px) : "—";
       collatUpdateSaveBtn();

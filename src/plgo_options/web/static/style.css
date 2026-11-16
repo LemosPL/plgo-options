@@ -1957,3 +1957,7 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .fm-pair label { display:flex; flex-direction:column; gap:.15rem; font-size:.7rem; color:var(--muted); }
 .fm-pair select { max-width:32rem; font-size:.8rem; padding:.2rem .3rem; }
 .fm-reason { font-size:.72rem; padding:0 .2rem; margin-left:.25rem; }
+
+/* Collateral Map: P&L-as-collateral rows */
+.collat-pnl-sep td { padding-top:.9rem !important; font-size:.72rem; font-weight:700; text-transform:uppercase;
+  letter-spacing:.05em; color:var(--accent); border-top:2px solid var(--accent) !important; }

@@ -141,8 +141,9 @@ async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = 
 async def _collateral_prices(collateral_by_cp: dict, asset: str) -> dict[str, float] | None:
     """USD prices for collateral assets other than USD/USDC and the book's own
     asset (whose price is the run's spot). None when there are none."""
+    from plgo_options.web.routes.collateral import USD_ASSETS
     others = sorted({a for by in collateral_by_cp.values() for a in by}
-                    - {"USD", "USDC", asset.upper()})
+                    - {*USD_ASSETS, asset.upper()})
     if not others:
         return None
     from plgo_options.web.routes.collateral import _effective_prices

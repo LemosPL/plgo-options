@@ -25,7 +25,7 @@ from ..pricing.cpty_pricing import resolve_price as resolve_cpty_price
 import matplotlib.pyplot as plt
 
 from ..pricing import options
-from ..web.routes.collateral import effective_haircut_rate
+from ..web.routes.collateral import USD_ASSETS, effective_haircut_rate
 
 # Transaction cost is modelled in VOL POINTS. Per execution (one leg),
 #   cost = |qty| × |vega| × VOLpts
@@ -1717,7 +1717,7 @@ class OptimizerV3(BaseOptimizer):
         collateral_floor_by_cp: dict[str, np.ndarray] = {}
         if collateral_by_cp:
             for cp, by_asset in collateral_by_cp.items():
-                usd_qty = float(by_asset.get("USDC", 0.0) or 0.0) + float(by_asset.get("USD", 0.0) or 0.0)
+                usd_qty = sum(float(by_asset.get(u, 0.0) or 0.0) for u in USD_ASSETS)
                 native_qty = float(by_asset.get(self.asset, 0.0) or 0.0)
                 if usd_qty == 0.0 and native_qty == 0.0:
                     continue
@@ -3621,6 +3621,8 @@ class OptimizerV3(BaseOptimizer):
             row = posted.setdefault(name(cp), {})
             for a, q in (by_asset or {}).items():
                 a = "USDC" if str(a).upper() == "USD" else str(a).upper()
+                if a in USD_ASSETS and a != "USDC":
+                    continue    # P&L credit: counts as collateral, but cannot be moved
                 row[a] = row.get(a, 0.0) + float(q or 0.0)
         hub = name(raw.get("hub") or "Flowdesk")
         posted.setdefault(hub, {})
@@ -3689,7 +3691,7 @@ class OptimizerV3(BaseOptimizer):
                     continue
                 if a == self.asset:
                     px = spot_arr
-                elif a in ("USD", "USDC"):
+                elif a in USD_ASSETS:
                     px = 1.0
                 elif a in prices:
                     px = prices[a]
@@ -3783,7 +3785,7 @@ class OptimizerV3(BaseOptimizer):
                     continue
                 if a == self.asset:
                     px = spot_arr
-                elif a in ("USD", "USDC"):
+                elif a in USD_ASSETS:
                     px = 1.0
                 elif a in prices:
                     px = prices[a] * factor

@@ -51,6 +51,14 @@ _live_price_cache: dict = {"ts": 0.0, "prices": None}
 # the only haircut in force is the KeyRock FIL concentration tier.
 HAIRCUTS = {"ETH": 0.0, "FIL": 0.0, "BTC": 0.0, "WAVE": 0.0, "USDC": 0.0}
 
+# P&L counted as collateral, entered in USD on the Collateral Map (one row per
+# source). Valued at $1 like USDC, never haircut, never moved with spot, and
+# may be negative (a loss owed reduces the collateral).
+PNL_ASSETS = ("PNL_TRADES", "PNL_ETH_FWD", "PNL_FIL_FWD")
+PNL_LABELS = {"PNL_TRADES": "PnL – Trades", "PNL_ETH_FWD": "PnL – ETH Forwards", "PNL_FIL_FWD": "PnL – FIL Forwards"}
+# Everything worth exactly $1 a unit.
+USD_ASSETS = ("USD", "USDC", *PNL_ASSETS)
+
 # Counterparty-specific concentration haircuts. Quantity *up to* threshold_qty
 # counts at the flat rate above; only the excess above it is haircut at `rate`.
 # Thresholds are in native token units (not USD) — KeyRock's 5.5M is 5.5M FIL,
@@ -115,7 +123,7 @@ def _haircut_value(
     for asset, qty in qtys.items():
         if not qty:
             continue
-        px = 1.0 if asset == "USDC" else prices.get(asset, 0.0)
+        px = 1.0 if asset in USD_ASSETS else prices.get(asset, 0.0)
         usd = qty * px
         nh += usd
         hc += usd * (1 - effective_haircut_rate(counterparty, asset, qty))
@@ -685,8 +693,8 @@ async def delete_margin(counterparty: str, portfolio_asset: str):
 # Stored in counterparty_collateral. Prices default to live market, overridable
 # per asset via collateral_price.
 
-MAP_ASSETS = ["USDC", "ETH", "FIL", "BTC"]
-MAP_ASSET_LABELS = {"USDC": "USD / USDC", "ETH": "ETH", "FIL": "FIL", "BTC": "BTC"}
+MAP_ASSETS = ["USDC", "ETH", "FIL", "BTC", *PNL_ASSETS]
+MAP_ASSET_LABELS = {"USDC": "USD / USDC", "ETH": "ETH", "FIL": "FIL", "BTC": "BTC", **PNL_LABELS}
 
 # Each collateral holding is allocated to one of the two options books. The
 # Portfolio P&L page pulls the slice matching the page's asset directly.
@@ -739,9 +747,11 @@ async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
     overrides = {r["asset"].upper(): float(r["price"]) for r in await cur.fetchall()}
     prices: dict[str, float] = {}
     for a in assets:
-        if a in overrides:
+        if a in PNL_ASSETS:
+            prices[a] = 1.0              # USD amounts: no override
+        elif a in overrides:
             prices[a] = overrides[a]
-        elif a == "USDC":
+        elif a in USD_ASSETS:
             prices[a] = 1.0
         else:
             prices[a] = live.get(a, 0.0)
@@ -870,6 +880,8 @@ async def collateral_map():
     return {
         "assets": assets,
         "asset_labels": {a: MAP_ASSET_LABELS.get(a, a) for a in assets},
+        "usd_assets": [a for a in assets if a in USD_ASSETS],
+        "pnl_assets": list(PNL_ASSETS),
         "prices": prices,
         "price_overrides": overrides,
         "live_prices": live,
@@ -906,7 +918,7 @@ async def upsert_map_cell(payload: MapCell):
         raise HTTPException(status_code=400, detail="asset required")
     if book not in COLLATERAL_BOOKS:
         raise HTTPException(status_code=400, detail="book must be ETH or FIL")
-    if payload.qty < 0:
+    if payload.qty < 0 and a not in PNL_ASSETS:
         raise HTTPException(status_code=400, detail="qty must be >= 0")
     db = await get_db()
     now = datetime.utcnow().isoformat()
@@ -942,7 +954,7 @@ async def upsert_map_cells(payload: MapCells):
             raise HTTPException(status_code=400, detail="counterparty and asset required")
         if book not in COLLATERAL_BOOKS:
             raise HTTPException(status_code=400, detail="book must be ETH or FIL")
-        if c.qty < 0:
+        if c.qty < 0 and a not in PNL_ASSETS:
             raise HTTPException(status_code=400, detail="qty must be >= 0")
         rows.append((cp, a, book, float(c.qty), now))
 
