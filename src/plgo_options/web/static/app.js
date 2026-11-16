@@ -5077,6 +5077,8 @@ function pfRenderPayoffChart() {
       title: "Portfolio value / Collateral (USD" + (collInvert ? ", collateral negative)" : ")"),
       color: cc.muted, gridcolor: cc.grid, zerolinecolor: "#f85149", zerolinewidth: 2,
       tickformat: "$,.2s", rangemode: "tozero",
+      // Hover in whole dollars like the collateral / residual lines (ticks stay short).
+      hoverformat: "$,.0f",
       ...(tokAxes.yDomain ? { domain: tokAxes.yDomain } : {}),
     },
     ...tokAxes.axes,
