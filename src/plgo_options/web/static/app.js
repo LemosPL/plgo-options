@@ -13900,8 +13900,26 @@ let optv4Loaded = false;
 
 // Base-book scoping shares the same global the Deals "Send to Optimizer" sets,
 // so a selection works whether you open v2 or v3.
+// Counterparties ticked in v4's picker (none / ALL = every counterparty).
+function optv4SelectedCptys() {
+  const sel = document.getElementById("optv4-counterparties");
+  return sel ? Array.from(sel.selectedOptions).map(o => o.value).filter(v => v && v !== "ALL") : [];
+}
+// "counterparties" = optimize only the selected counterparties' book (the
+// charts, matrix and KPIs show that book); "portfolio" = whole book, the
+// selection only limits who new trades are done with.
+function optv4BookScope() {
+  return document.getElementById("optv4-book-scope")?.value === "counterparties" && optv4SelectedCptys().length
+    ? "counterparties" : "portfolio";
+}
+
 function optv4ActivePositions() {
   const all = (optv4Data && optv4Data.positions) || [];
+  if (optv4BookScope() === "counterparties") {
+    const cps = new Set(optv4SelectedCptys().map(c => c.trim().toLowerCase()));
+    return all.concat((optv4Data && optv4Data.forward_positions) || [])
+      .filter(p => cps.has(String(p.counterparty || "").trim().toLowerCase()));
+  }
   const ids = optv2BaseIds();
   // Full book includes the open forwards (server-built position rows, opt
   // "F", is_forward); a Deals scope is options only.
@@ -16454,7 +16472,38 @@ document.getElementById("optv4-roll-dte-threshold")?.addEventListener("change", 
   else optv4RenderDteList();
   optv4RenderRollCandidates();
 });
-document.getElementById("optv4-counterparties")?.addEventListener("change", () => { if (optv4Data) optv4RenderRollCandidates(); });
+document.getElementById("optv4-counterparties")?.addEventListener("change", () => { if (optv4Data) optv4ScopeChanged(); });
+document.getElementById("optv4-book-scope")?.addEventListener("change", () => { if (optv4Data) optv4ScopeChanged(); });
+// The book the page shows changed (counterparty scope): redraw the previews and
+// drop a result computed for another book, so the chart never mixes the two.
+function optv4ScopeChanged() {
+  const scope = optv4BookScope() + "|" + optv4SelectedCptys().join(",");
+  if (optv4OptResult && optv4OptResult._scope !== undefined && optv4OptResult._scope !== scope) {
+    optv4OptResult = null;
+    const k = document.getElementById("optv4-result-kpi"); if (k) k.style.display = "none";
+    const u = document.getElementById("optv4-trades-under-chart"); if (u) u.style.display = "none";
+  }
+  optv4RenderPreview();
+  optv4RenderScopeNote();
+}
+function optv4RenderScopeNote(info) {
+  const el = document.getElementById("optv4-scope-note");
+  if (!el) return;
+  const cps = optv4SelectedCptys();
+  if (optv4BookScope() !== "counterparties") {
+    el.textContent = cps.length ? `Whole ${currentAsset} portfolio is optimized; new trades only with ${cps.join(", ")}.` : "";
+    return;
+  }
+  let t = `Only ${cps.join(", ")}'s book is optimized (${optv4ActivePositions().length} positions): charts, matrix and target are that book's.`;
+  if (info && info.target === "scaled") {
+    t += ` Target max loss scaled to $${Math.round(info.trough_payoff).toLocaleString()} (${info.basis}; portfolio target $${Math.round(info.portfolio_trough_payoff).toLocaleString()}).`;
+  } else if (info && info.target) {
+    t += ` Target: ${info.target}.`;
+  } else {
+    t += " The target's max loss is scaled to this book's value at spot when you run.";
+  }
+  el.textContent = t;
+}
 // Per-counterparty DTE inputs are dynamic — delegate their change to re-filter candidates.
 document.getElementById("optv4-dte-list")?.addEventListener("input", () => { if (optv4Data) optv4RenderRollCandidates(); });
 document.getElementById("btn-optv4-refresh-snapshots")?.addEventListener("click", () => optv4LoadSnapshots());
@@ -16676,8 +16725,11 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
       save_usecase_snapshot: saveRequested,
       is_replay: false,
       counterparties: cptiesParam,
+      // Whole book vs only the selected counterparties' book (server scopes the
+      // positions and scales the target's max loss to that book).
+      book_scope: optv4BookScope(),
       forced_roll_ids: forcedRollIds,
-      base_trade_ids: optv2BaseIds(),
+      base_trade_ids: optv4BookScope() === "counterparties" ? null : optv2BaseIds(),
       // User-edited target profile (Target Profile tab). null = auto parametric.
       manual_target: (optv4ManualTarget && optv4ManualTarget.length >= 2) ? optv4ManualTarget : null,
       // Per-counterparty transaction cost in vol points (cost = |vega| × VOLpts).
@@ -16702,7 +16754,9 @@ document.getElementById("btn-run-optv4")?.addEventListener("click", async () => 
     });
     console.log("Optimizer v4 result:", data);
     optv4HideError();
+    data._scope = optv4BookScope() + "|" + optv4SelectedCptys().join(",");
     optv4RenderResult(data);
+    optv4RenderScopeNote(data.book_scope);
     // Surface whether this run used a hypothetical spot instead of the live
     // mark — the "Before" column of the matrix is the CURRENT book repriced at
     // that hypothetical spot, not what the book is actually worth right now.

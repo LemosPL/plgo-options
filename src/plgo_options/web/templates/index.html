@@ -2809,6 +2809,13 @@
               <button type="button" id="optv4-cpty-clear" class="btn-secondary" style="width:auto;margin:0;padding:.2rem .5rem;font-size:.7rem">Clear</button>
             </div>
             <p class="optv3-hint">Click a counterparty to toggle it on/off — no Ctrl/Cmd needed. None selected = all counterparties.</p>
+            <label for="optv4-book-scope" style="margin-top:.5rem">Book</label>
+            <select id="optv4-book-scope">
+              <option value="portfolio" selected>Whole portfolio — trade only with the selected counterparties</option>
+              <option value="counterparties">Selected counterparties only — optimize their book on its own</option>
+            </select>
+            <p class="optv3-hint"><b>Whole portfolio</b>: the optimizer fits the whole book to the target; the selection only limits who new trades are done with. <b>Selected only</b>: just those counterparties' trades (options, forwards, perps) are the book — charts, matrix and KPIs show it, and the target's max loss is scaled to that book's value at spot (same shape and breakevens).</p>
+            <div id="optv4-scope-note" class="optv3-hint" style="color:var(--accent)"></div>
           </div>
         </div>
 
@@ -4669,7 +4676,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=224"></script>
+<script src="/static/app.js?v=225"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=7"></script>

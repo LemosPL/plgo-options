@@ -315,6 +315,13 @@ class OptimizationParams(BaseModel):
     # against becomes only this subset), instead of the whole asset book. Sourced
     # from a selection of deals on the Deals / Risk screen. None/empty = full book.
     base_trade_ids: list[int] | None = None
+    # What the optimizer starts from when counterparties are selected:
+    # "portfolio" (default) = the whole asset book, and the selection only says
+    # who new trades may be done with ("trade only with G20 to fix the whole
+    # book"); "counterparties" = only the selected counterparties' book (their
+    # options, forwards and perps) is optimized, and the parametric target's
+    # max loss is scaled to that book (see _scope_to_counterparties).
+    book_scope: str = "portfolio"
     # Optional user-drawn target payoff the LP fits to, replacing the parametric
     # target. List of {"x": spot, "y": payoff} control points (>=2), interpolated
     # onto the optimizer's spot ladder. None = use the built-in parametric target.
@@ -513,6 +520,19 @@ async def run_optimizer(params: OptimizationParams):
         pnl_data["positions"] = filtered
         print(f"base_trade_ids: scoped book to {len(filtered)}/{len(all_positions)} positions")
 
+    scope = _scope_counterparties(params)
+    if scope:
+        all_positions = pnl_data.get("positions", []) or []
+        scoped = [p for p in all_positions if str(p.get("counterparty") or "").strip().lower() in scope]
+        if not scoped:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"No open {params.asset.upper()} positions with "
+                        f"{', '.join(params.counterparties or [])}: nothing to optimize on its own."),
+            )
+        pnl_data["_all_option_positions"] = all_positions
+        pnl_data["positions"] = scoped
+
     # ── Inject the perp hedge leg ─────────────────────────────────────────
     # portfolio_pnl deliberately keeps the hedge out of `positions` (it would
     # show up in the Deals grouping and reconciliation). The optimizer is the
@@ -532,6 +552,14 @@ async def run_optimizer(params: OptimizationParams):
                   f"@ {leg['strike']:,.4f} avg entry on {leg['counterparty']}")
     except Exception as e:
         print(f"perp hedge: injection skipped ({e})")
+
+    scope_info = None
+    if scope:
+        # Perp / forward legs too: only the selected counterparties' own.
+        pnl_data["positions"] = [p for p in pnl_data.get("positions", []) or []
+                                 if str(p.get("counterparty") or "").strip().lower() in scope]
+        scope_info = _scope_target(params, pnl_data)
+    pnl_data.pop("_all_option_positions", None)
 
     # Tag each position with the multi-leg "deal"/composite it belongs to
     # (same grouping the Deals screen shows), so the LP can prefer unwinding
@@ -664,7 +692,47 @@ async def run_optimizer(params: OptimizationParams):
         except Exception as e:
             print(f"collateral ladder skipped ({e})")
 
+    if isinstance(result, dict) and scope_info:
+        result["book_scope"] = scope_info
     return result
+
+
+def _scope_counterparties(params: OptimizationParams) -> set[str] | None:
+    """Lower-cased counterparties whose book alone is optimized, or None."""
+    if (params.book_scope or "portfolio").lower() != "counterparties":
+        return None
+    cps = {str(c).strip().lower() for c in (params.counterparties or [])
+           if c and str(c).strip() and str(c).strip().upper() != "ALL"}
+    return cps or None
+
+
+def _scope_target(params: OptimizationParams, pnl_data: dict) -> dict:
+    """Scale the parametric target to the scoped book (same V shape and
+    breakevens, max loss = that book's own value at spot), unless a manual or
+    saved target is in use. A book worth more than zero at spot has no loss
+    to anchor on: the full target is then scaled by the book's share of the
+    gross option quantity. Updates params in place; returns what it did."""
+    positions = pnl_data.get("positions", []) or []
+    value = sum(float(p.get("current_mtm") or 0.0) for p in positions)
+    info = {"counterparties": list(params.counterparties or []), "positions": len(positions),
+            "book_value_usd": round(value, 2), "target": "as given"}
+    if params.manual_target or params.target_profile_file:
+        info["target"] = "manual / saved target, not scaled"
+        return info
+    full = params.parametric_trough_payoff
+    if full is None:
+        full = -15_750_000.0 if params.asset.upper() == "FIL" else -20_000_000.0
+    if value < 0:
+        trough, basis = value, "book value at spot"
+    else:
+        def gross(ps):
+            return sum(abs(float(p.get("net_qty") or p.get("qty") or 0.0)) for p in ps
+                       if str(p.get("opt") or "").upper() in ("C", "P"))
+        share = gross(positions) / max(gross(pnl_data.get("_all_option_positions") or positions), 1e-12)
+        trough, basis = full * share, f"{share:.1%} of the portfolio's gross option quantity"
+    params.parametric_trough_payoff = trough
+    info.update(target="scaled", trough_payoff=round(trough, 2), portfolio_trough_payoff=full, basis=basis)
+    return info
 
 
 @router.get("/target-profiles")
