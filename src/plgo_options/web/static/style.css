@@ -1973,3 +1973,7 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .tm-fwd-closed-tag { font-size:.66rem; font-weight:700; letter-spacing:.04em; padding:.05rem .4rem; border-radius:8px;
   background:var(--muted); color:var(--bg); }
 .tm-fwd-real { font-size:.64rem; color:var(--muted); font-weight:400; }
+
+/* Portfolio P&L: closed / settled forwards listed under the positions */
+#pf-positions-body tr.pf-row-fwd-closed td { opacity:.55; }
+#pf-positions-body tr.pf-row-fwd-closed:hover td { opacity:.85; }

@@ -4347,6 +4347,22 @@ function pfUpdateOldNewHeaders() {
   document.getElementById("pf-new-all").checked = visible.length > 0 && visible.every(p => pfNewSet.has(p.id));
 }
 
+// Closed / settled forwards for the positions table, honouring the
+// Include-forwards toggle and the counterparty / expiry / type / side filters.
+function pfClosedForwardRows() {
+  if (!pfForwardsOn() || !pfData || !pfData.forwards) return [];
+  const fCpty = document.getElementById("pf-filter-cpty").value;
+  const fExpiry = document.getElementById("pf-filter-expiry").value;
+  const fType = document.getElementById("pf-filter-type").value;
+  const fSide = document.getElementById("pf-filter-side").value;
+  return (pfData.forwards.closed || []).filter(f =>
+    (!fCpty || (f.counterparty || "") === fCpty)
+    && (!fExpiry || String(f.maturity_date).slice(0, 10) === fExpiry)
+    && (!fType || fType === "F")
+    && (!fSide || fSide === (f.side === "buy" ? "Long" : "Short")))
+    .sort((a, b) => String(b.settled_at || "").localeCompare(String(a.settled_at || "")) || b.id - a.id);
+}
+
 function pfGetFilteredPositions() {
   const fCpty = document.getElementById("pf-filter-cpty").value;
   const fExpiry = document.getElementById("pf-filter-expiry").value;
@@ -4464,6 +4480,42 @@ function pfRenderTable() {
       `<td style="font-family:monospace;white-space:nowrap">${rollNewMarkHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollIvHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollCostHtml}</td>`;
+    $tbody.appendChild(tr);
+  }
+
+  // Closed / settled forwards: listed under the positions, greyed and tagged,
+  // with the close price and realised P&L. Display only - not rows of pfRows(),
+  // so never in a curve, the matrix, the totals or the Old / New selection.
+  for (const f of pfClosedForwardRows()) {
+    const settled = f.status === "settled";
+    const pnl = f.settled_pnl_usd || 0;
+    const when = String(f.settled_at || "").slice(0, 10);
+    const dp = Math.max(currentAsset === "FIL" ? 4 : 2, assetSpotDp());
+    const px = v => v != null ? Number(v).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp }) : "—";
+    const tr = document.createElement("tr");
+    tr.className = "pf-row-fwd-closed";
+    tr.title = [`${settled ? "Settled at the fixing" : "Closed"} ${when} @ ${px(f.fixing_price)}`,
+                `realised ${pnl < 0 ? "-" : ""}$${Math.abs(Math.round(pnl)).toLocaleString()}`,
+                "not in the curves, matrix or totals", f.external_ref, f.note].filter(Boolean).join(" · ");
+    tr.innerHTML =
+      `<td></td><td></td>` +
+      `<td style="text-align:left">${f.counterparty}</td>` +
+      `<td>${f.external_ref ? String(f.external_ref).slice(0, 8) : ""}</td>` +
+      `<td>${f.trade_date ?? ""}</td>` +
+      `<td style="text-align:left">${f.side}</td>` +
+      `<td style="text-align:left;color:var(--accent)">Forward <span class="tm-fwd-closed-tag">${settled ? "SETTLED" : "CLOSED"}</span></td>` +
+      `<td style="text-align:left;font-size:.8rem">${currentAsset}-FWD-${String(f.maturity_date).slice(0, 10)}</td>` +
+      `<td>${String(f.maturity_date).slice(0, 10)}</td>` +
+      `<td title="${settled ? "Settled" : "Closed"} on">${when || "—"}</td>` +
+      `<td style="font-family:monospace" title="Forward price">${px(f.forward_price)}</td>` +
+      `<td>—</td>` +
+      `<td style="font-family:monospace">${Math.round(f.qty).toLocaleString()}</td>` +
+      `<td>—</td><td>—</td><td>—</td>` +
+      `<td class="${pnl >= 0 ? "mtm-pos" : "mtm-neg"}" style="font-family:monospace" title="Realised P&L">` +
+        `${pnl < 0 ? "-" : ""}$${Math.abs(Math.round(pnl)).toLocaleString()} <span class="tm-fwd-real">realised</span></td>` +
+      `<td>—</td><td></td><td></td>` +
+      `<td style="font-family:monospace" title="${settled ? "Fixing" : "Close"} price">${px(f.fixing_price)}</td>` +
+      `<td></td><td></td><td></td>`;
     $tbody.appendChild(tr);
   }
 
