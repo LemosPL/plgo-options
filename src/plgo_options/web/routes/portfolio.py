@@ -951,6 +951,18 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
             for t in fwd_book["trades"]
         ],
     }
+    # Closed / settled forwards: listed (greyed, tagged) on Trade Management,
+    # never in a curve or total - those read only the open book above.
+    try:
+        from plgo_options.data.forward_repository import list_forwards
+        done = await list_forwards(await get_db(), asset.upper(), ("closed", "settled"))
+    except Exception:
+        done = []
+    forwards_block["closed"] = [
+        {k: r.get(k) for k in ("id", "counterparty", "side", "qty", "forward_price", "trade_date", "maturity_date",
+                               "fixing_price", "settled_pnl_usd", "settled_at", "status", "external_ref", "note")}
+        for r in done
+    ]
     fwd_delta = float(fwd_book["totals"]["delta"] or 0.0)
     forward_positions = _forward_positions(
         fwd_book, [float(x) for x in spot_arr], sorted(set(all_horizons) | set(PNL_MATRIX_HORIZONS)),

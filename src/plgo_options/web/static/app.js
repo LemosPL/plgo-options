@@ -1931,8 +1931,49 @@ function fwdLevelsBadge(levels) {
   return txt ? `<span class="fw-lv ${cls}" title="${escAttr(tip)}">${txt}</span>` : "";
 }
 
+// A price on a forward row (forward, mark, close): FIL 4 dp, ETH 2.
+function tmFwdPx(v) {
+  if (v == null || v === "") return "--";
+  const d = currentAsset === "FIL" ? 4 : 2;
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function tmClosedForwardRowHtml(t, f) {
+  const fw = t.fwd;
+  const settled = fw.status === "settled";
+  const pnl = fw.settled_pnl_usd || 0;
+  const when = String(fw.settled_at || "").slice(0, 10);
+  const tip = [`${settled ? "Settled at the fixing" : "Closed"} ${when} @ ${fw.fixing_price}`, `realised ${pnl < 0 ? "-" : ""}$${Math.abs(Math.round(pnl)).toLocaleString()}`,
+               fw.external_ref, fw.note].filter(Boolean).join(" · ");
+  return `<tr class="tm-row-forward tm-row-fwd-closed" data-fwd="${fw.id}" title="${escAttr(tip)}">
+      <td></td>
+      <td><span class="status-dot status-expired" title="${settled ? "Settled" : "Closed"}"></span></td>
+      <td style="text-align:left">${fw.counterparty}</td>
+      <td>${fw.trade_date || ""}</td>
+      <td style="text-align:left">${t.side}</td>
+      <td style="text-align:left"><span class="tm-fwd-badge">Forward</span> <span class="tm-fwd-closed-tag">${settled ? "SETTLED" : "CLOSED"}</span></td>
+      <td style="text-align:left">${t.instrument}</td>
+      <td>${t.expiry}</td>
+      <td>${when ? `<span title="${settled ? "Settled" : "Closed"} on">${when}</span>` : "—"}</td>
+      <td>${tmFwdPx(t.strike)}</td>
+      <td>—</td>
+      <td>${f.fmtK(t.qty)}</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td>0</td>
+      <td title="${settled ? "Fixing" : "Close"} price">${tmFwdPx(fw.fixing_price)}</td>
+      <td class="${pnl >= 0 ? "mtm-pos" : "mtm-neg"}" title="Realised P&L (not in the open totals)">${f.fmtMoney(pnl)} <span class="tm-fwd-real">realised</span></td>
+      <td></td>
+    </tr>`;
+}
+
 function tmForwardRowHtml(t, f) {
   const fw = t.fwd;
+  if (t.closed) return tmClosedForwardRowHtml(t, f);
   const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
   const sideColor = t.side === "Buy" ? "qty-long" : "qty-short";
   const rec = fw.recon && fw.recon.status;
@@ -1948,7 +1989,7 @@ function tmForwardRowHtml(t, f) {
       <td style="text-align:left">${t.instrument}</td>
       <td>${t.expiry}</td>
       <td>${t.days_remaining}</td>
-      <td>${f.fmtK(t.strike)}</td>
+      <td>${tmFwdPx(t.strike)}</td>
       <td>${f.fmt(t.pct_otm_live, 1)}%</td>
       <td>${f.fmtK(t.qty)}</td>
       <td>${f.fmtMm((t.qty || 0) * (ethSpot || 0) / 1e6)}</td>
@@ -1958,7 +1999,7 @@ function tmForwardRowHtml(t, f) {
       <td>0</td>
       <td>${f.fmt(t.theta, 4)}</td>
       <td>0</td>
-      <td>${f.fmtMoney(t.mark_price_usd)}</td>
+      <td>$${tmFwdPx(t.mark_price_usd)}</td>
       <td class="${mtmColor}">${f.fmtMoney(t.current_mtm)}</td>
       <td>
         <div class="tm-actions">
@@ -1988,7 +2029,18 @@ function tmForwardRows() {
       gamma: 0, theta: f.qty ? f.theta / f.qty : 0, vega: 0, mark_price_usd: f.fair_forward,
       current_mtm: f.mtm, trade_id: f.external_ref || "", db_status: "active",
     };
-  });
+  }).concat(((tmForwards && tmForwards.closed) || []).map(f => {
+    let code = f.maturity_date;
+    try { code = new Date(f.maturity_date + "T00:00:00Z").toUTCString().slice(5, 16).replace(/ /g, "").toUpperCase(); } catch (_) {}
+    return {
+      kind: "forward", closed: true, fwd: f, id: `fwd-${f.id}`, counterparty: f.counterparty, trade_date: f.trade_date,
+      side: f.side === "buy" ? "Buy" : "Sell", option_type: "Forward",
+      instrument: `${currentAsset}-${code}-FWD`, expiry: f.maturity_date, days_remaining: 0,
+      strike: f.forward_price, pct_otm_live: null, qty: f.qty, premium_usd: 0, iv_pct: null,
+      delta: 0, gamma: 0, theta: 0, vega: 0, mark_price_usd: f.fixing_price,
+      current_mtm: f.settled_pnl_usd || 0, trade_id: f.external_ref || "", db_status: f.status,
+    };
+  }));
 }
 
 function tmRenderTable() {
