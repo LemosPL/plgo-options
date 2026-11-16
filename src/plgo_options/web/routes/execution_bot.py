@@ -6,7 +6,7 @@ Scheduler-facing (guarded by X-Signals-Token):
 People-facing:
     GET  /api/execution-bot/status               kill switch, last tick, order counts, modes available
     GET  /api/execution-bot/orders               parent orders, open ones first
-    POST /api/execution-bot/orders               create one (paper only for now)
+    POST /api/execution-bot/orders               create one (testnet and live: confirmed, within the rails)
     POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
     POST /api/execution-bot/rfq-preview          the same solution as Block RFQ structures (nothing sent)
     POST /api/execution-bot/rfq/send             open a previewed structure as a Block RFQ (testnet only)
@@ -17,6 +17,7 @@ People-facing:
     GET  /api/execution-bot/markouts             how the market moved 5 s to 1 h after the fills (vol points)
     GET  /api/execution-bot/costs                each leg's fill cost vs the spline, the mark and the mid
     POST /api/execution-bot/orders/{id}/{action} pause | resume | cancel
+    POST /api/execution-bot/halt/{mode}/clear    lift a halt left by a failed position check (rails.py)
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer, markouts, rfq, rfq_desk
+from plgo_options.execution import bot, from_optimizer, markouts, rails, rfq, rfq_desk
 from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
 from plgo_options.pricing.smile_fit import parse_exp
@@ -59,6 +60,7 @@ class OrderCreate(BaseModel):
     hard_vp: float = Field(0.9, ge=0, description="threshold in the final hour; never exceeded")
     cap: float = Field(500, ge=1, description="max contracts per take (the option then rests 2 minutes)")
     mode: Literal["paper", "testnet", "live"] = "paper"
+    confirmed: bool = Field(False, description="testnet and live orders: the person confirmed sending them")
     note: str = ""
 
 
@@ -83,9 +85,16 @@ async def status():
     counts: dict[str, int] = {}
     for o in orders:
         counts[o["status"]] = counts.get(o["status"], 0) + 1
+    now = time.time()
+    day = {}
+    for m in rails.VENUE_MODES:
+        q, p = await store.day_totals(m, rails.day_start(now))
+        day[m] = {"contracts": q, "premium_usd": p}
+    live_off = rails.live_blocker()
     return {"kill_switch": await kill_switch_on(), "last_tick": await store.last_run(bot.LOCK),
-            "counts": counts, "modes": {"paper": True, "testnet": testnet_configured(), "live": False},
-            "live_note": "production execution waits for the bot's testnet run"}
+            "counts": counts, "modes": {"paper": True, "testnet": testnet_configured(), "live": live_off is None},
+            "live_note": live_off or "production on", "caps": rails.caps(), "today": day,
+            "halts": await store.halts()}
 
 
 @router.get("/orders")
@@ -95,10 +104,10 @@ async def orders(limit: int = 100):
 
 async def _check(req: OrderCreate, now: float) -> str | None:
     """Why the order cannot be created, or None."""
-    if req.mode == "live":
-        return "production execution waits for the bot's testnet run"
     if req.mode == "testnet" and not testnet_configured():
         return "no testnet key on this server: set DERIBIT_TESTNET_CLIENT_ID and DERIBIT_TESTNET_CLIENT_SECRET"
+    if err := rails.check_create(req.mode, req.qty, req.confirmed):
+        return err
     if not INSTRUMENT.fullmatch(req.instrument):
         return "instrument must look like ETH-25DEC26-2500-C"
     if not req.start_vp <= req.end_vp <= req.hard_vp:
@@ -158,6 +167,13 @@ async def preview(req: PreviewReq):
         return await from_optimizer.preview(req.trades, req.asset, req.start_vp, req.hours)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
+
+
+@router.post("/halt/{mode}/clear")
+async def clear_halt(mode: Literal["testnet", "live"]):
+    """After someone has checked the account against the page: the mode sends orders again."""
+    await store.clear_halt(mode)
+    return {"halts": await store.halts()}
 
 
 @router.get("/costs")

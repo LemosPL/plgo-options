@@ -4127,6 +4127,7 @@
         the real book, but do not take liquidity out of it.
       </p>
       <div id="xb-cards" class="collat-summary-grid"></div>
+      <div id="xb-halts"></div>
       <div id="xb-status" style="font-size:.78rem;margin-top:.5rem"></div>
     </section>
 
@@ -4140,7 +4141,7 @@
         <label>End (vp)<br><input id="xb-r-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label title="the final hour; never exceeded">Hard limit (vp)<br><input id="xb-r-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-r-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
-        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet">Mode<br><select id="xb-r-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option></select></label>
+        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet; live: Deribit production, once Lucas switches it on (asks to confirm, daily caps, position check)">Mode<br><select id="xb-r-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option><option value="live" disabled>Live (production)</option></select></label>
         <button id="xb-r-reprice" class="btn-secondary" style="width:auto">Re-price</button>
       </div>
       <div class="chain-wrapper">
@@ -4184,7 +4185,7 @@
         <label>End (vp)<br><input id="xb-n-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label>Hard limit (vp)<br><input id="xb-n-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-n-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
-        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet">Mode<br><select id="xb-n-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option></select></label>
+        <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet; live: Deribit production, once Lucas switches it on (asks to confirm, daily caps, position check)">Mode<br><select id="xb-n-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option><option value="live" disabled>Live (production)</option></select></label>
         <label>Note<br><input id="xb-n-note" style="width:12rem"></label>
         <button id="xb-n-submit" class="btn-primary" style="width:auto">Create</button>
       </div>
@@ -4672,7 +4673,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=6"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=13"></script>
+<script src="/static/execbot.js?v=14"></script>
 <script src="/static/fwmonitor.js?v=5"></script>
 </body>
 </html>

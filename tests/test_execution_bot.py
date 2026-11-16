@@ -199,7 +199,7 @@ def test_routes_create_act_and_refuse_live(tmp_path, monkeypatch):
     async def body():
         with pytest.raises(HTTPException) as e:
             await routes.create(routes.OrderCreate(instrument=NAME, side="buy", qty=10, hours=12, mode="live"), req)
-        assert e.value.status_code == 400 and "testnet" in e.value.detail
+        assert e.value.status_code == 400 and "EXEC_BOT_LIVE" in e.value.detail
         with pytest.raises(HTTPException):
             await routes.create(routes.OrderCreate(instrument=NAME, side="buy", qty=10, hours=12, start_vp=0.8), req)
         oid = (await routes.create(routes.OrderCreate(instrument=NAME, side="buy", qty=10, hours=12), req))["id"]
@@ -614,15 +614,23 @@ class _FakeVenue:
 
     def __init__(self):
         self.ok, self.sent, self.fill = True, [], None
+        self.pos, self.hide = 0.0, False       # the account's position; hide: a fill the account never shows
 
     async def healthy(self):
         return self.ok
 
+    async def positions(self):
+        from plgo_options.execution.models import Position
+        return [Position(NAME, self.pos, 0.0)] if self.pos else []
+
     async def submit(self, intent):
         from plgo_options.execution.models import Fill, OrderState, OrderStatus
         self.sent.append(intent)
+        if self.fill is not None and not self.hide:
+            self.pos += self.fill if intent.side == "buy" else -self.fill
         fills = [] if self.fill is None else [Fill(intent.intent_id, "ord1", intent.instrument, intent.side,
-                                                   self.fill, intent.limit_price, 0.0003, False, "T77", NOW + 121)]
+                                                   self.fill, intent.limit_price, 0.0003, False, f"T{len(self.sent)}",
+                                                   int(intent.intent_id.split("-")[1]) / 1000 + 1)]  # a second after sending
         return OrderState("ord1", intent, OrderStatus.FILLED if fills else OrderStatus.CANCELLED, fills)
 
 
@@ -652,7 +660,7 @@ def test_testnet_orders_go_through_the_connector_with_the_venues_fill_and_fee(tm
         d = await store.order_detail(oid)
         (f,) = d["fills"]
         S = _books()[0]["estimated_delivery_price"]
-        assert f["mode"] == "testnet" and f["trade_id"] == "T77" and f["ts"] == NOW + 121
+        assert f["mode"] == "testnet" and f["trade_id"] == "T2" and f["ts"] == NOW + 121
         assert f["fee_usd"] == pytest.approx(0.0003 * S)               # the fee the venue charged
         assert f["cost_usd"] == pytest.approx(f["price_usd"] - f["fair_usd"] + 0.0003 * S)
         assert d["order"]["filled"] == 20 and d["order"]["status"] == "working"
@@ -668,13 +676,18 @@ def test_testnet_orders_need_a_testnet_key_and_production_stays_refused(tmp_path
     req = Request({"type": "http", "headers": [], "session": {}})
 
     async def body():
-        mk = lambda mode: routes.OrderCreate(instrument=NAME, side="buy", qty=10, hours=12, mode=mode)  # noqa: E731
+        mk = lambda mode, **kw: routes.OrderCreate(instrument=NAME, side="buy", hours=12, mode=mode,  # noqa: E731
+                                                   **({"confirmed": True, "qty": 10} | kw))
         monkeypatch.setattr(routes, "testnet_configured", lambda: False)
         with pytest.raises(HTTPException, match="no testnet key"):
             await routes.create(mk("testnet"), req)
         monkeypatch.setattr(routes, "testnet_configured", lambda: True)
+        with pytest.raises(HTTPException, match="confirm it first"):
+            await routes.create(mk("testnet", confirmed=False), req)
+        with pytest.raises(HTTPException, match="per-order cap"):
+            await routes.create(mk("testnet", qty=251), req)
         assert (await routes.create(mk("testnet"), req))["order"]["mode"] == "testnet"
-        with pytest.raises(HTTPException, match="testnet run"):
+        with pytest.raises(HTTPException, match="EXEC_BOT_LIVE"):
             await routes.create(mk("live"), req)
     run(body)
 
@@ -758,3 +771,71 @@ def test_an_accepted_rfq_goes_into_the_cost_table_as_rfq_legs_and_starts_no_rest
         due = await store.due_markouts(NOW + 6, markouts.HORIZONS, markouts.LATE)
         assert {d["instrument"] for d in due} == {NAME, put}                # and its markouts follow
     run(body)
+
+
+def test_rails_cut_a_take_to_the_daily_cap_and_halt_the_mode_on_a_position_mismatch(tmp_path, monkeypatch):
+    from plgo_options.execution import rails
+    run = _db(tmp_path, "rails.db")
+    venue = _FakeVenue()
+    monkeypatch.setitem(bot.CONNECTORS, "testnet", lambda: venue)
+    monkeypatch.setattr(rails, "SLEEP", lambda _s: asyncio.sleep(0))
+    monkeypatch.setenv("EXEC_MAX_DAY_CONTRACTS", "30")
+
+    async def books(expiries, instruments):
+        return {EXPIRY: _books(-3.0)}
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 100, NOW + 12 * H, 0.5, 0.7, 0.9, 25, mode="testnet", now=NOW)
+        venue.fill = 25.0
+        out = await bot.run_tick(NOW + 60, books, off)
+        assert out["orders"][0]["action"] == "take" and venue.pos == 25
+        venue.fill = 5.0                                                # 5 of the day's 30 left
+        out = await bot.run_tick(NOW + 300, books, off)                 # after the 2-minute rest
+        assert venue.sent[-1].qty == 5 and out["orders"][0]["qty"] == 5
+        n = len(venue.sent)
+        out = await bot.run_tick(NOW + 600, books, off)                 # cap reached: nothing sent
+        assert out["orders"][0]["action"] == "day_cap" and len(venue.sent) == n
+        assert (await bot.run_tick(NOW + 86400 - 15 * H + 60, books, off))["orders"][0]["action"] == "take"  # a new UTC day
+
+        await store.clear_halt("testnet")
+        monkeypatch.setenv("EXEC_MAX_DAY_CONTRACTS", "1000")
+        venue.hide = True                                               # the account does not show the next fill
+        t = NOW + 86400 - 15 * H + 300
+        await bot.run_tick(t, books, off)
+        assert "expected" in (await store.halts())["testnet"]["reason"]
+        d = await store.order_detail(oid)
+        assert d["ticks"][-1]["action"] == "mismatch"
+        n = len(venue.sent)
+        out = await bot.run_tick(t + 300, books, off)                   # halted: nothing more sent
+        assert out["orders"][0]["action"] == "halted" and len(venue.sent) == n
+        await routes.clear_halt("testnet")
+        venue.hide, venue.fill = False, None
+        venue.pos += 5                                                  # someone squared the account by hand
+        out = await bot.run_tick(t + 600, books, off)
+        assert out["orders"][0]["action"] == "no_fill" and not await store.halts()
+    run(body)
+
+
+def test_live_needs_the_flag_production_settings_and_a_production_connector(monkeypatch):
+    from plgo_options import config
+    from plgo_options.execution import rails
+    from plgo_options.execution.deribit import ConnectorError
+    monkeypatch.delenv("EXEC_BOT_LIVE", raising=False)
+    assert "EXEC_BOT_LIVE" in rails.live_blocker()
+    with pytest.raises(ConnectorError):
+        rails.live_connector()
+    monkeypatch.setenv("EXEC_BOT_LIVE", "1")
+    monkeypatch.setattr(config, "DERIBIT_TESTNET", True)
+    assert "DERIBIT_TESTNET=0" in rails.live_blocker()
+    monkeypatch.setattr(config, "DERIBIT_TESTNET", False)
+    monkeypatch.setattr(config, "DERIBIT_CONNECTOR_PRODUCTION", True)
+    monkeypatch.setattr(rails, "deribit_keys", lambda testnet: ("id", "secret"))
+    assert rails.live_blocker() is None
+    monkeypatch.setattr(rails, "get_connector", lambda: type("C", (), {"testnet": True})())
+    with pytest.raises(ConnectorError, match="on testnet"):
+        rails.live_connector()
+    assert rails.check_create("live", 10, False) and rails.check_create("live", 10, True) is None
+    assert rails.check_create("paper", 10_000, False) is None

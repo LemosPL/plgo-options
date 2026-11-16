@@ -23,6 +23,7 @@
   let selected = null;     // order id shown in the detail card
   let review = null;       // { trades, meta, data, rfq } from Optimizer v2
   const live = {};         // RFQ structure index -> { id, timer } while it is watched
+  let lastStatus = null;   // the last /status: caps, today's use, halts (for the confirm dialog)
 
   async function api(method, url, body) {
     const r = await fetch(url, {
@@ -49,17 +50,26 @@
 
   // ── header ────────────────────────────────────────────────────
   function header(st) {
-    document.querySelectorAll(".xb-mode option[value=testnet]").forEach((o) => {   // offered only with a testnet key
-      o.disabled = !(st.modes && st.modes.testnet);
+    lastStatus = st;
+    ["testnet", "live"].forEach((m) => document.querySelectorAll(`.xb-mode option[value=${m}]`).forEach((o) => {   // offered only when the server allows it
+      o.disabled = !(st.modes && st.modes[m]);
       if (o.disabled && o.selected) o.parentElement.value = "paper";
-    });
+    }));
+    const halts = st.halts || {};
+    $("xb-halts").innerHTML = Object.entries(halts).map(([m, h]) => `<div style="border:1px solid var(--red);border-left-width:4px;border-radius:6px;
+      padding:.45rem .65rem;margin:.5rem 0;font-size:.8rem"><b style="color:var(--red)">${esc(m)} halted</b> since ${when(h.ts)}: ${esc(h.reason)}.
+      Nothing is sent in ${esc(m)} until the account has been checked against the page.
+      <button class="btn-secondary xb-clear-halt" data-mode="${esc(m)}" style="margin-left:.4rem">Checked: clear the halt</button></div>`).join("");
+    const cp = st.caps || {}, td = st.today || {};
+    const used = (m) => td[m] ? `${esc(m)} today: ${fmt(td[m].contracts)} of ${fmt(cp.day_contracts)} contracts, $${fmt(td[m].premium_usd)} of $${fmt(cp.day_premium_usd)}` : "";
     const card = (label, value, sub, style = "") => `<div class="collat-metric"><div class="collat-metric-label">${label}</div>
       <div class="collat-metric-value" style="${style}">${value}</div><div class="collat-metric-sub">${sub}</div></div>`;
     const c = st.counts || {};
     const lt = st.last_tick || {};
     $("xb-cards").innerHTML =
-      card("Modes", st.modes && st.modes.testnet ? "Paper · Testnet" : "Paper",
-        (st.modes && st.modes.testnet ? "" : "no testnet key on this server · ") + esc(st.live_note || ""))
+      card("Modes", ["Paper", st.modes && st.modes.testnet && "Testnet", st.modes && st.modes.live && "Live"].filter(Boolean).join(" · "),
+        [st.modes && st.modes.testnet ? used("testnet") : "no testnet key on this server", st.modes && st.modes.live ? used("live") : esc(st.live_note || ""),
+          `max ${fmt(cp.order_contracts)} contracts an order`].join(" · "), Object.keys(halts).length ? "color:var(--red)" : "")
       + card("Kill switch", st.kill_switch ? "ON" : "off", st.kill_switch ? "nothing is sent while it is on" : "Agents page controls it",
         st.kill_switch ? "color:var(--red)" : "")
       + card("Last run", lt.ts ? when(lt.ts) : "—", lt.ts ? `${fmt(lt.n)} order(s) · ${fmt(lt.passes || 1)} pass(es) · ${fmt(lt.takes || 0)} take(s)${lt.quotes ? ` · quotes ${esc(lt.quotes)}` : ""}${lt.halted ? " · halted" : ""}${lt.failed ? ` · ${fmt(lt.failed)} failed (${esc(lt.error || "")})` : ""}` : "no run yet: is the scheduler job deployed?")
@@ -245,6 +255,19 @@
     const n = (id) => parseFloat($(id).value);
     return { hours: n("xb-r-hours"), start_vp: n("xb-r-start"), end_vp: n("xb-r-end"), hard_vp: n("xb-r-hard"), cap: n("xb-r-cap"),
       mode: $("xb-r-mode").value };
+  }
+
+  // testnet and live orders are sent to Deribit: the server creates them only once confirmed
+  function confirmVenue(orders, mode) {
+    if (mode === "paper") return true;
+    const st = lastStatus || {}, cp = st.caps || {}, td = (st.today || {})[mode] || {};
+    const over = orders.filter((o) => o.qty > cp.order_contracts);
+    const lines = orders.slice(0, 12).map((o) => `  ${o.side} ${o.qty} ${o.instrument}`).join("\n") + (orders.length > 12 ? `\n  ... and ${orders.length - 12} more` : "");
+    const ok = confirm(`Send ${orders.length} order(s) to Deribit ${mode === "live" ? "PRODUCTION (real money)" : "testnet"}?\n\n${lines}\n\n`
+      + `Today in ${mode}: ${fmt(td.contracts || 0)} of ${fmt(cp.day_contracts)} contracts, $${fmt(td.premium_usd || 0)} of $${fmt(cp.day_premium_usd)} premium.`
+      + (over.length ? `\n${over.length} order(s) over the ${fmt(cp.order_contracts)}-contract cap will be refused.` : ""));
+    if (ok) orders.forEach((o) => { o.confirmed = true; });
+    return ok;
   }
 
   async function reprice() {
@@ -437,6 +460,7 @@
     const p = params();
     const orders = review.rfq.leftovers.map((x) => ({ instrument: x.instrument, side: x.side, qty: x.qty, ...p,
       note: `${review.meta.source || "Optimizer"}: RFQ leftover (${x.why})`.slice(0, 500) }));
+    if (!confirmVenue(orders, p.mode)) return;
     $("xb-rfq-left").disabled = true;
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
@@ -460,6 +484,7 @@
       return { instrument: l.instrument, side: l.side, qty: qtys[i], ...p,
         note: `${review.meta.source || "Optimizer"}: ${l.sources.join(" + ")}`.slice(0, 500) };
     });
+    if (!confirmVenue(orders, p.mode)) return;
     $("xb-r-create").disabled = true;
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
@@ -488,12 +513,14 @@
   async function createManual() {
     const v = (id) => $(id).value.trim();
     const n = (id) => parseFloat($(id).value);
+    const body = {
+      instrument: v("xb-n-inst").toUpperCase(), side: v("xb-n-side"), qty: n("xb-n-qty"), hours: n("xb-n-hours"),
+      start_vp: n("xb-n-start"), end_vp: n("xb-n-end"), hard_vp: n("xb-n-hard"), cap: n("xb-n-cap"),
+      mode: $("xb-n-mode").value, note: v("xb-n-note") };
+    if (!confirmVenue([body], body.mode)) return;
     try {
-      const r = await api("POST", "/api/execution-bot/orders", {
-        instrument: v("xb-n-inst").toUpperCase(), side: v("xb-n-side"), qty: n("xb-n-qty"), hours: n("xb-n-hours"),
-        start_vp: n("xb-n-start"), end_vp: n("xb-n-end"), hard_vp: n("xb-n-hard"), cap: n("xb-n-cap"),
-        mode: $("xb-n-mode").value, note: v("xb-n-note") });
-      status(`Paper order #${r.id} created.`);
+      const r = await api("POST", "/api/execution-bot/orders", body);
+      status(`${body.mode[0].toUpperCase() + body.mode.slice(1)} order #${r.id} created.`);
       $("xb-new").style.display = "none";
       selected = r.id;
       await load();
@@ -505,6 +532,11 @@
   // ── wiring ────────────────────────────────────────────────────
   document.querySelector('.nav-item[data-page="execbot"]')?.addEventListener("click", load);
   $("xb-refresh")?.addEventListener("click", load);
+  $("xb-halts")?.addEventListener("click", async (ev) => {
+    const b = ev.target.closest(".xb-clear-halt");
+    if (!b || !confirm(`Clear the ${b.dataset.mode} halt? Do it only once the Deribit account matches the fills on this page.`)) return;
+    try { await api("POST", `/api/execution-bot/halt/${b.dataset.mode}/clear`); await load(); } catch (e) { status(e.message, true); }
+  });
   $("xb-new-btn")?.addEventListener("click", () => { $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
   $("xb-n-submit")?.addEventListener("click", createManual);
   $("xb-r-reprice")?.addEventListener("click", reprice);

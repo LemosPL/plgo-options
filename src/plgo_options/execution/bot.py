@@ -30,8 +30,9 @@ Modes. "paper": the PaperConnector fills against the same book the decision saw.
 Deribit testnet through the connector, checked healthy first; it fills only if
 testnet's own book has something at our limit, so it proves the order path (labels,
 fills, fees, recording), not our costs. An IOC that meets nothing is recorded as
-no_fill and starts no rest. "live" (production) is refused at creation until testnet
-has run.
+no_fill and starts no rest. "live": the same on Deribit production, off unless Lucas
+switches it on. Both venue modes go through the rails (rails.py): daily caps on contracts
+and premium, and a position check around each IOC that halts the mode on a mismatch.
 """
 
 from __future__ import annotations
@@ -51,9 +52,9 @@ from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile
 
-from . import markouts, store
+from . import markouts, rails, store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
-from .deribit import testnet_connector
+from .deribit import ConnectorError, testnet_connector
 from .paper import PaperConnector, deribit_option_fee
 from .threshold import MAX_FIT_ERROR, QTY_STEP, ThresholdOrder, decide
 
@@ -64,10 +65,10 @@ PERIOD, SPAN = 5.0, 55.0   # a pass every 5 s, for 55 s of each scheduler minute
 # ~0.01 vol points cheaper; shorter rests gain little more, and live makers may requote
 # worse after being hit, which no replay shows.
 COOLDOWN = 120.0
-ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted", "no_fill", "connector_down"}  # recorded once a minute
+ROUTINE = {"wait", "outside", "no_book", "cooldown", "halted", "no_fill", "connector_down", "day_cap"}  # recorded once a minute
 API = "https://www.deribit.com/api/v2/public"
-# The venue for each non-paper mode. Production ("live") is not here until testnet has run.
-CONNECTORS: dict[str, Callable[[], Any]] = {"testnet": testnet_connector}
+# The venue for each non-paper mode; the live one refuses unless production is switched on (rails.py).
+CONNECTORS: dict[str, Callable[[], Any]] = {"testnet": testnet_connector, "live": rails.live_connector}
 # books_fn(expiries, instruments) -> {expiry: books}: every option of the expiries, and
 # the instruments' own books with their levels
 BooksFn = Callable[[list[str], list[str]], Awaitable[dict[str, list[dict]]]]
@@ -190,20 +191,40 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
             return depth
 
         conn = PaperConnector(top, fee_fn=deribit_option_fee, clock=lambda: now, depth=levels)
-    else:
-        conn = CONNECTORS[o.mode]()
-        if not await conn.healthy():  # auth, rate limit, ETH locked, or an earlier send still in doubt
-            await _tick(o, now, "connector_down", record, detail=f"{o.mode} connector unhealthy: nothing sent", **ctx)
+        qty = d.qty
+    else:  # a venue: the rails first (rails.py)
+        if halt := (await store.halts()).get(o.mode):
+            detail = f"{o.mode} halted by a failed position check: {halt['reason']}; clear it on the page"
+            await _tick(o, now, "halted", record, detail=detail, **ctx)
+            return {"id": o.id, "action": "halted", "detail": detail}
+        qty, why = await rails.room(o.mode, d.qty, d.limit_price * S, now)
+        if qty < QTY_STEP:
+            await _tick(o, now, "day_cap", record, detail=why + ": nothing sent", **ctx)
+            return {"id": o.id, "action": "day_cap", "detail": why}
+        try:
+            conn = CONNECTORS[o.mode]()
+            ok = await conn.healthy()  # auth, rate limit, ETH locked, or an earlier send still in doubt
+            before = await rails.position(conn, o.instrument) if ok else 0.0
+        except ConnectorError as ex:
+            ok, why = False, str(ex)
+        else:
+            why = "unhealthy"
+        if not ok:
+            await _tick(o, now, "connector_down", record, detail=f"{o.mode} connector {why}: nothing sent", **ctx)
             return {"id": o.id, "action": "connector_down"}
     intent = OrderIntent(intent_id=f"thr{o.id}-{int(now * 1000)}", proposal_id=f"exec-{o.id}",
-                         instrument=o.instrument, side=o.side, qty=d.qty, limit_price=d.limit_price,
+                         instrument=o.instrument, side=o.side, qty=qty, limit_price=d.limit_price,
                          time_in_force="IOC")
     st = await conn.submit(intent)
     if st.status is OrderStatus.REJECTED:
         await _tick(o, now, "rejected", record, detail=st.reject_reason or "", **ctx)
         return {"id": o.id, "action": "rejected", "detail": st.reject_reason}
     if not st.fills:  # an IOC that met nothing at our limit on that venue's book: no rest, the next pass decides again
-        detail = f"IOC {o.side} {d.qty:g} at {d.limit_price} on {o.mode}: nothing there at that price"
+        detail = f"IOC {o.side} {qty:g} at {d.limit_price} on {o.mode}: nothing there at that price"
+        if o.mode != "paper" and (bad := await rails.reconcile(conn, o.instrument, before, 0.0)):  # a fill we were not told of
+            await store.set_halt(o.mode, bad, now)
+            await store.add_tick(o.id, now, "mismatch", detail=f"{bad}: {o.mode} halted")
+            return {"id": o.id, "action": "mismatch", "detail": bad}
         await _tick(o, now, "no_fill", record, detail=detail, **ctx)
         return {"id": o.id, "action": "no_fill", "detail": detail}
     fills = []
@@ -225,7 +246,11 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
                           cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_usd,
                           S=S, iv=fair["iv"], vega=fair["vega"]))   # the market at the fill: its markouts start here
     await store.add_fills(o.id, fills)
-    await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail, **ctx)
+    await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail if qty == d.qty else f"{d.detail}; cut to {qty:g} by the {o.mode} daily cap", **ctx)
+    if o.mode != "paper":  # the account must show what we just recorded, or nothing more is sent in this mode
+        if bad := await rails.reconcile(conn, o.instrument, before, st.filled_qty if o.side == "buy" else -st.filled_qty):
+            await store.set_halt(o.mode, bad, now)
+            await store.add_tick(o.id, now + 0.001, "mismatch", detail=f"{bad}: {o.mode} halted")
     if o.remaining - st.filled_qty < QTY_STEP:
         await store.set_status(o.id, "filled")
     return {"id": o.id, "action": "take", "qty": st.filled_qty, "cost": d.est_cost}

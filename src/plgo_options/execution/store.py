@@ -333,3 +333,32 @@ async def last_run(name: str) -> dict[str, Any]:
     cur = await db.execute("SELECT last_json FROM exec_lock WHERE name = ?", (name,))
     r = await cur.fetchone()
     return json.loads(r["last_json"]) if r and r["last_json"] else {}
+
+
+async def day_totals(mode: str, since: float) -> tuple[float, float]:
+    """(contracts, premium USD) filled in ``mode`` since ``since``: every fill, bot and Block RFQ."""
+    db = await get_db()
+    cur = await db.execute("SELECT COALESCE(SUM(qty), 0) AS q, COALESCE(SUM(qty * price_usd), 0) AS p"
+                           " FROM exec_fills WHERE mode = ? AND ts >= ?", (mode, since))
+    r = await cur.fetchone()
+    return float(r["q"]), float(r["p"])
+
+
+# A mode halted by a failed position check (rails.py): kept in exec_lock as "halt:<mode>", until cleared.
+async def set_halt(mode: str, reason: str, now: float | None = None) -> None:
+    db = await get_db()
+    await db.execute("INSERT OR REPLACE INTO exec_lock (name, until, last_json) VALUES (?, 0, ?)",
+                     (f"halt:{mode}", json.dumps({"reason": reason, "ts": now or time.time()})))
+    await db.commit()
+
+
+async def halts() -> dict[str, dict[str, Any]]:
+    db = await get_db()
+    cur = await db.execute("SELECT name, last_json FROM exec_lock WHERE name LIKE 'halt:%'")
+    return {r["name"][5:]: json.loads(r["last_json"]) for r in await cur.fetchall()}
+
+
+async def clear_halt(mode: str) -> None:
+    db = await get_db()
+    await db.execute("DELETE FROM exec_lock WHERE name = ?", (f"halt:{mode}",))
+    await db.commit()
