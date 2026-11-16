@@ -373,3 +373,30 @@ def test_monitor_shows_open_residual_closed_trips_and_pnl(monkeypatch):
         asyncio.run(route.pair_close(route.CloseIn(asset="ETH", open_id=a["id"], close_id=c["id"]), REQ))
     asyncio.run(route.unpair_close(mon["closed"][0]["close_row_id"]))
     asyncio.run(db.close())
+
+
+def test_close_forwards_in_full_in_part_and_as_a_pair(monkeypatch):
+    db = _with_db(monkeypatch, spot=2000.0)
+    mk = lambda **kw: _book(asset="ETH", maturity_date="2099-12-31", **kw)
+    a = mk(side="sell", qty=2500, forward_price=2346.5, trade_date="2026-10-27")
+    b = mk(side="buy", qty=1250, forward_price=2100, trade_date="2026-11-09")
+    # Part of a: 1,250 against b, at any price -> realised = their difference.
+    res = asyncio.run(route.close_forwards(route.ForwardCloseIn(
+        items=[route.CloseItem(id=a["id"], qty=1250), route.CloseItem(id=b["id"])], close_price=1999.0), REQ))
+    assert res["realised_usd"] == pytest.approx(1250 * (2346.5 - 2100))
+    book = asyncio.run(route.build_forward_book("ETH", 2000.0))
+    assert [(t["id"], t["qty"]) for t in book["trades"]] == [(a["id"], 1250.0)]      # only the rest is open
+    rows = {r["id"]: r for r in asyncio.run(repo.list_forwards(db, "ETH", ("closed",)))}
+    split = rows[res["closed"][0]["closed_id"]]
+    assert split["id"] != a["id"] and split["qty"] == 1250 and f"#{a['id']}" in split["note"]
+    assert rows[b["id"]]["status"] == "closed"
+    # The rest in full; can't close more than is open, or a closed one again.
+    with pytest.raises(HTTPException):
+        asyncio.run(route.close_forwards(route.ForwardCloseIn(items=[route.CloseItem(id=a["id"], qty=5000)], close_price=2000.0), REQ))
+    asyncio.run(route.close_forwards(route.ForwardCloseIn(items=[route.CloseItem(id=a["id"])], close_price=2000.0), REQ))
+    assert asyncio.run(route.build_forward_book("ETH", 2000.0))["trades"] == []
+    with pytest.raises(HTTPException):
+        asyncio.run(route.close_forwards(route.ForwardCloseIn(items=[route.CloseItem(id=b["id"])], close_price=2000.0), REQ))
+    full = asyncio.run(route.get_book("ETH"))
+    assert full["realised_pnl_usd"] == pytest.approx(1250 * 246.5 + 1250 * 346.5)
+    asyncio.run(db.close())

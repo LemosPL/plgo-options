@@ -350,6 +350,36 @@ async def set_status(db, fid: int, status: str, user: str, **extra) -> None:
     await db.commit()
 
 
+async def close_forward(db, fid: int, qty: float, close_price: float, pnl: float, note: str, user: str,
+                        when: str) -> int:
+    """Close `qty` of an open forward at `close_price` (status 'closed', the
+    price in fixing_price, realised P&L in settled_pnl_usd). Closing part of
+    it splits the row: the original keeps the rest open and a new closed row
+    carries the closed quantity. Returns the id of the closed row."""
+    row = await get_forward(db, fid)
+    if qty >= float(row["qty"]) - 1e-9:
+        await db.execute(
+            """UPDATE forward_trades SET status = 'closed', fixing_price = ?, settled_pnl_usd = ?, settled_at = ?,
+                   note = CASE WHEN ? = '' THEN note ELSE trim(note || ' · ' || ?, ' ·') END,
+                   updated_by = ?, updated_at = datetime('now') WHERE id = ?""",
+            (close_price, pnl, when, note, note, user, fid))
+        await db.commit()
+        return fid
+    await db.execute(
+        "UPDATE forward_trades SET qty = qty - ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?",
+        (qty, user, fid))
+    cur = await db.execute(
+        """INSERT INTO forward_trades (asset, counterparty, side, qty, forward_price, trade_date, maturity_date,
+               settlement, external_ref, note, status, fixing_price, settled_pnl_usd, settled_at, created_by, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, 'closed', ?, ?, ?, ?, ?)""",
+        (row["asset"], row["counterparty"], row["side"], qty, row["forward_price"], row["trade_date"],
+         row["maturity_date"], row["settlement"],
+         f"closed {qty:g} of #{fid}" + (f" ({row['external_ref']})" if row["external_ref"] else "") + (f" · {note}" if note else ""),
+         close_price, pnl, when, user, user))
+    await db.commit()
+    return cur.lastrowid
+
+
 async def set_recon(db, fid: int, cpty_qty, cpty_price, cpty_mtm, note: str, user: str) -> None:
     await db.execute(
         """UPDATE forward_trades SET cpty_qty = ?, cpty_price = ?, cpty_mtm = ?, recon_note = ?,

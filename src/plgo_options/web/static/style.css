@@ -1961,3 +1961,8 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 /* Collateral Map: P&L-as-collateral rows */
 .collat-pnl-sep td { padding-top:.9rem !important; font-size:.72rem; font-weight:700; text-transform:uppercase;
   letter-spacing:.05em; color:var(--accent); border-top:2px solid var(--accent) !important; }
+
+/* Portfolio P&L: close button on a forward row */
+.pf-fwd-close { margin-left:.35rem; padding:0 .4rem; font-size:.68rem; border-radius:4px; cursor:pointer;
+  background:none; border:1px solid var(--accent); color:var(--accent); width:auto; }
+.pf-fwd-close:hover { background:var(--accent); color:#fff; }

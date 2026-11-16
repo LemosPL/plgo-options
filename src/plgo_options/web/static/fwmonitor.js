@@ -369,12 +369,12 @@
     const rows = settledAll.slice().sort((x, y) => String(y.settled_at || "").localeCompare(String(x.settled_at || "")));
     const tot = rows.reduce((s2, r) => s2 + (r.settled_pnl_usd || 0), 0);
     $("fm-settled").innerHTML = rows.length ? `<table class="pf-table fw-table"><thead><tr><th>Maturity</th><th>Asset</th><th style="text-align:left">Counterparty</th>
-      <th>Side</th><th class="num">Qty</th><th class="num">Forward</th><th class="num">Fixing</th><th class="num">P&amp;L</th></tr></thead><tbody>
-      ${rows.map((r) => `<tr><td>${maturityText(r.maturity_date)}</td><td><span class="fm-asset">${r.asset}</span></td><td style="text-align:left">${esc(r.counterparty)}</td>
+      <th>Side</th><th class="num">Qty</th><th class="num">Forward</th><th class="num" title="Fixing price, or the close price for a forward closed early">Fixing / close</th><th class="num">P&amp;L</th></tr></thead><tbody>
+      ${rows.map((r) => `<tr><td>${maturityText(r.maturity_date)}${r.status === "closed" ? ` <span class="tm-fwd-badge" title="Closed ${esc(String(r.settled_at || "").slice(0, 10))} before maturity">closed</span>` : ""}</td><td><span class="fm-asset">${r.asset}</span></td><td style="text-align:left">${esc(r.counterparty)}</td>
         <td>${r.side === "buy" ? "Buy" : "Sell"}</td><td class="num">${fmt(r.qty)}</td><td class="num">${px(r.asset, r.forward_price)}</td>
         <td class="num">${px(r.asset, r.fixing_price)}</td><td class="num" style="${sign(r.settled_pnl_usd)}">${usd(r.settled_pnl_usd)}</td></tr>`).join("")}
       </tbody><tfoot><tr><td colspan="7" style="text-align:left">${rows.length} settled</td><td class="num" style="${sign(tot)};font-weight:700">${usd(tot)}</td></tr></tfoot></table>`
-      : `<div class="optv3-muted" style="padding:.5rem">Nothing settled yet. Forwards are settled at their maturity fixing from the Trades screen.</div>`;
+      : `<div class="optv3-muted" style="padding:.5rem">Nothing settled or closed yet. Close a forward (Trades, Portfolio P&L) or settle it at its maturity fixing.</div>`;
   }
 
   function showTab(t) {

@@ -171,6 +171,17 @@ class SettleIn(BaseModel):
     fixing_price: float = Field(gt=0)
 
 
+class CloseItem(BaseModel):
+    id: int
+    qty: float | None = Field(default=None, gt=0)   # none = the whole forward
+
+
+class ForwardCloseIn(BaseModel):
+    items: list[CloseItem]
+    close_price: float = Field(gt=0)
+    note: str = ""
+
+
 class ReconIn(BaseModel):
     cpty_qty: float | None = None
     cpty_price: float | None = None
@@ -215,7 +226,7 @@ async def get_book(asset: str = "ETH"):
     book = await build_forward_book(asset, spot)
     db = await get_db()
     book["carry_info"] = await repo.get_carry(db, asset)
-    settled = await repo.list_forwards(db, asset, ("settled",))
+    settled = await repo.list_forwards(db, asset, ("settled", "closed"))
     book["settled"] = settled
     book["realised_pnl_usd"] = sum(float(s["settled_pnl_usd"] or 0.0) for s in settled)
     return book
@@ -265,6 +276,37 @@ async def settle_forward(fid: int, body: SettleIn, request: Request):
     await repo.set_status(db, fid, "settled", _user(request), fixing_price=body.fixing_price,
                           settled_pnl_usd=pnl, settled_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"))
     return await repo.get_forward(db, fid)
+
+
+@router.post("/close")
+async def close_forwards(body: ForwardCloseIn, request: Request):
+    """Close forwards (in full or in part) at one price, e.g. a buy and the
+    sell it offsets. Each closed piece books qty x (price - forward price),
+    signed by side; a matched buy/sell pair nets to their price difference
+    whatever price is used. Closed forwards leave the open book, so every
+    curve (Portfolio P&L, collateral, optimizer, risk) drops them."""
+    if not body.items:
+        raise HTTPException(status_code=400, detail="nothing to close")
+    db = await get_db()
+    rows = []
+    for it in body.items:
+        r = await repo.get_forward(db, it.id)
+        if not r or r["status"] != "open":
+            raise HTTPException(status_code=404, detail=f"forward #{it.id} is not open")
+        q = float(it.qty or r["qty"])
+        if q > float(r["qty"]) + 1e-9:
+            raise HTTPException(status_code=400, detail=f"forward #{it.id}: can't close {q:g}, only {float(r['qty']):g} open")
+        rows.append((r, q))
+    if len({str(r["asset"]).upper() for r, _ in rows}) > 1:
+        raise HTTPException(status_code=400, detail="close one asset at a time (one price)")
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    out, total = [], 0.0
+    for r, q in rows:
+        pnl = fwd.settlement_pnl(r["side"], q, float(r["forward_price"]), body.close_price)
+        cid = await repo.close_forward(db, r["id"], q, body.close_price, pnl, body.note.strip(), _user(request), when)
+        out.append({"id": r["id"], "closed_id": cid, "qty": q, "realised_usd": pnl})
+        total += pnl
+    return {"closed": out, "realised_usd": total, "close_price": body.close_price}
 
 
 @router.put("/trades/{fid}/recon")
@@ -380,7 +422,7 @@ async def build_monitor(asset: str, spot: float, today: date | None = None,
     summary = {k: st.count(k) for k in rank}
     summary.update(count=len(out), net_qty=sum(fwd.side_sign(p["side"]) * p["qty"] for p in out),
                    mtm=sum(p["mtm"] for p in out))
-    settled = await repo.list_forwards(db, a, ("settled",))
+    settled = await repo.list_forwards(db, a, ("settled", "closed"))
     realised_closed = sum(t["realised_usd"] for t in trips)
     realised_settled = sum(float(r["settled_pnl_usd"] or 0.0) for r in settled)
     summary.update(open_mtm=summary["mtm"], realised_closed=realised_closed, realised_settled=realised_settled,

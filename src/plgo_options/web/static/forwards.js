@@ -132,6 +132,7 @@
         <td class="fw-actions">
           <button class="btn-secondary" data-act="edit" data-id="${t.id}">Edit</button>
           <button class="btn-secondary" data-act="recon" data-id="${t.id}">Reconcile</button>
+          <button class="btn-secondary" data-act="close" data-id="${t.id}" title="Close (all or part) at a price: realised now, leaves the curves">Close</button>
           <button class="btn-secondary" data-act="settle" data-id="${t.id}">Settle</button>
           <button class="btn-secondary" data-act="delete" data-id="${t.id}" style="color:var(--red)">Delete</button>
         </td>
@@ -167,7 +168,7 @@
   }
 
   function settled() {
-    const rows = book.settled.map((s) => `<tr><td>${s.id}</td><td>${esc(s.counterparty)}</td><td>${s.side === "buy" ? "Buy" : "Sell"}</td>
+    const rows = book.settled.map((s) => `<tr><td>${s.id}${s.status === "closed" ? ' <span class="tm-fwd-badge" title="Closed before maturity">closed</span>' : ""}</td><td>${esc(s.counterparty)}</td><td>${s.side === "buy" ? "Buy" : "Sell"}</td>
       <td class="num">${fmt(s.qty, qtyDp())}</td><td class="num">${fmt(s.forward_price, pxDp())}</td><td>${esc(s.maturity_date)}</td>
       <td class="num">${fmt(s.fixing_price, pxDp())}</td><td class="num" style="${signStyle(s.settled_pnl_usd)}">${fmt(s.settled_pnl_usd)}</td>
       <td>${esc((s.settled_at || "").replace("T", " "))}</td><td>${esc(s.updated_by || "")}</td></tr>`).join("")
@@ -292,6 +293,7 @@
     if (!t) return;
     try {
       if (act === "edit") { if (typeof tmEditForward === "function") tmEditForward(id); return; }
+      if (act === "close") { await window.fwClose([id]); return; }
       if (act === "recon") { reconOpen = reconOpen === id ? null : id; positions(); return; }
       if (act === "delete") {
         if (!confirm(`Delete forward #${id} (${t.side} ${fmt(t.qty, qtyDp())} with ${t.counterparty})? It is kept in the database as deleted.`)) return;
@@ -314,6 +316,54 @@
       status(`${act} failed: ${e.message}`, true);
     }
   }
+
+  // Close forwards (Trades table, Portfolio P&L, this panel): all or part of
+  // one, or several at once at ONE price (e.g. a buy and the sell it offsets:
+  // the total then doesn't depend on the price). Closed forwards leave the
+  // open book, so every curve drops them; the realised P&L stays on record.
+  window.fwClose = async (ids) => {
+    const a = asset();
+    let bk;
+    try { bk = await api("GET", `/api/forwards/book?asset=${a}`); }
+    catch (e) { alert("Could not load the forwards: " + e.message); return false; }
+    const legs = ids.map((id) => bk.trades.find((t) => t.id === id)).filter(Boolean);
+    if (!legs.length) { alert("Those forwards are no longer open."); return false; }
+    const items = legs.map((t) => ({ id: t.id, qty: t.qty }));
+    if (legs.length === 1) {
+      const t = legs[0];
+      const raw = prompt(`Close forward #${t.id}: ${t.side} ${fmt(t.qty, qtyDp())} ${a} @ ${fmt(t.forward_price, pxDp())} with ${t.counterparty}.\n\nQuantity to close (all = ${t.qty}):`, String(t.qty));
+      if (raw == null) return false;
+      const q = parseFloat(raw);
+      if (!(q > 0) || q > t.qty + 1e-9) { alert(`Quantity must be between 0 and ${t.qty}.`); return false; }
+      items[0].qty = q;
+    }
+    const sgn = (t) => (t.side === "buy" ? 1 : -1);
+    const net = legs.reduce((s, t, i) => s + sgn(t) * items[i].qty, 0);
+    const offset = legs.length > 1 && Math.abs(net) < 1e-9;
+    const rawP = prompt(`Close price for ${a} (spot ${fmt(bk.spot, pxDp())})`
+      + (offset ? "\n\nThese legs offset each other: the price does not change the realised total." : "")
+      + (Math.abs(net) > 1e-9 && legs.length > 1 ? `\n\nNet ${net > 0 ? "long" : "short"} ${fmt(Math.abs(net), qtyDp())} ${a} is closed at this price.` : ""),
+      String(+bk.spot.toFixed(pxDp())));
+    if (rawP == null) return false;
+    const price = parseFloat(rawP);
+    if (!(price > 0)) { alert("Price must be a positive number."); return false; }
+    const pnl = legs.reduce((s, t, i) => s + sgn(t) * items[i].qty * (price - t.forward_price), 0);
+    const lines = legs.map((t, i) => `  #${t.id} ${t.side} ${fmt(items[i].qty, qtyDp())}${items[i].qty < t.qty - 1e-9 ? ` of ${fmt(t.qty, qtyDp())}` : ""} @ ${fmt(t.forward_price, pxDp())}`);
+    if (!confirm(`Close at ${fmt(price, pxDp())}:\n${lines.join("\n")}\n\nRealised ${usd(pnl)}. They leave the open book and every curve. Go ahead?`)) return false;
+    try {
+      const res = await api("POST", "/api/forwards/close", { items, close_price: price });
+      const msg = `Closed ${res.closed.length} forward${res.closed.length > 1 ? "s" : ""}: realised ${usd(res.realised_usd)}.`;
+      status(msg);
+      if (typeof tmInvalidatePortfolio === "function") tmInvalidatePortfolio();
+      await load();
+      refreshTradeTotals();
+      if (document.getElementById("page-portfolio")?.classList.contains("active") && typeof loadPortfolio === "function") loadPortfolio();
+      return true;
+    } catch (e) {
+      alert("Close failed: " + e.message);
+      return false;
+    }
+  };
 
   // Used by the trades table's forward rows (Settle / Delete buttons).
   window.fwReload = load;

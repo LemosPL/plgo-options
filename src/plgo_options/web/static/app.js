@@ -1963,6 +1963,7 @@ function tmForwardRowHtml(t, f) {
       <td>
         <div class="tm-actions">
           <button class="tm-action-btn" onclick="tmEditForward(${fw.id})" title="Edit forward">&#9998;</button>
+          <button class="tm-action-btn" onclick="fwClose && fwClose([${fw.id}])" title="Close (all or part) at a price: realised now, leaves the curves">&#10003;</button>
           <button class="tm-action-btn btn-expire" onclick="fwSettle && fwSettle(${fw.id})" title="Settle (cash) at a fixing price">&#9201;</button>
           <button class="tm-action-btn btn-delete" onclick="fwDelete && fwDelete(${fw.id})" title="Delete">&#10005;</button>
         </div>
@@ -2110,6 +2111,11 @@ function tmRenderTable() {
 function tmRenderSelectionTotals() {
   const table = document.getElementById("tm-table");
   if (!table) return;
+  const $fc = document.getElementById("btn-tm-close-fwd");
+  if ($fc) {
+    $fc.style.display = tmSelectedFwd.size ? "" : "none";
+    $fc.textContent = `Close Forwards (${tmSelectedFwd.size})`;
+  }
   let foot = document.getElementById("tm-sel-foot");
   const opts = tmEnriched.filter(t => tmSelected.has(t.db_id || t.id));
   const fwds = ((tmForwards && tmForwards.trades) || []).filter(f => tmSelectedFwd.has(f.id));
@@ -2917,6 +2923,11 @@ document.getElementById("tm-check-all").addEventListener("change", (e) => {
   }
   tmRenderTable();
   tmUpdateBulkUI();
+});
+
+document.getElementById("btn-tm-close-fwd")?.addEventListener("click", async () => {
+  if (!tmSelectedFwd.size || typeof fwClose !== "function") return;
+  if (await fwClose([...tmSelectedFwd])) { tmSelectedFwd.clear(); }
 });
 
 document.getElementById("btn-tm-bulk-expire").addEventListener("click", async () => {
@@ -4379,7 +4390,7 @@ function pfRenderTable() {
       `<td>${pos.trade_id ?? ""}</td>` +
       `<td>${pos.trade_date ?? ""}</td>` +
       `<td style="text-align:left" class="${sideClass}">${pos.side_raw}</td>` +
-      `<td style="text-align:left;color:${typeColor}">${pos.option_type}</td>` +
+      `<td style="text-align:left;color:${typeColor}">${pos.option_type}${isFwd && pos.forward_id ? ` <button class="pf-fwd-close" data-fid="${pos.forward_id}" title="Close this forward (all or part): realised now, leaves the curves">close</button>` : ""}</td>` +
       `<td style="text-align:left;font-size:.8rem">${pos.instrument}</td>` +
       `<td>${pos.expiry}</td>` +
       `<td>${Math.round(pos.days_remaining)}</td>` +
@@ -4403,6 +4414,13 @@ function pfRenderTable() {
       `<td style="font-family:monospace;white-space:nowrap">${rollCostHtml}</td>`;
     $tbody.appendChild(tr);
   }
+
+  $tbody.querySelectorAll(".pf-fwd-close").forEach(b => {
+    b.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (typeof fwClose === "function") await fwClose([parseInt(b.dataset.fid)]);  // reloads this page itself
+    });
+  });
 
   // Wire Old checkboxes (independent — a trade can be in both Old and New)
   $tbody.querySelectorAll(".pf-old-check").forEach(cb => {

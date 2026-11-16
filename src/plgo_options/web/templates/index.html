@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=36">
+  <link rel="stylesheet" href="/static/style.css?v=37">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -334,6 +334,7 @@
         <button id="btn-tm-bulk-reactivate" class="btn-secondary tm-bulk-btn" style="width:auto;display:none"
           title="Put the selected expired trades back to active. The expiry date is left unchanged, so any trade already past its expiry will be auto-expired again on the next app restart — edit its expiry to keep it active.">Reactivate Selected</button>
         <button id="btn-tm-bulk-delete" class="btn-secondary tm-bulk-btn btn-delete" style="width:auto;display:none">Delete Selected</button>
+        <button id="btn-tm-close-fwd" class="btn-secondary tm-bulk-btn" style="width:auto;display:none" title="Close the ticked forwards at one price (e.g. a buy and the sell it offsets): realised now, they leave the curves">Close Forwards</button>
         <span id="tm-sel-decay" style="display:none;font-size:.8rem;padding:.25rem .55rem;border-radius:6px;background:var(--hover-bg);white-space:nowrap"
               title="Time decay of the ticked active trades at today's spot and vol: day = theta; month / year = value now minus value in 30 / 360 days (trades that expire sooner count to expiry)"></span>
         <label class="toggle-label" style="margin:0">
@@ -4098,7 +4099,7 @@
         <div id="fm-pair" class="fm-pair"></div>
       </section>
       <section class="card">
-        <h3 style="margin:0 0 .5rem">Settled at maturity</h3>
+        <h3 style="margin:0 0 .5rem">Settled &amp; closed</h3>
         <div id="fm-settled" class="chain-wrapper"></div>
       </section>
     </div>
@@ -4668,12 +4669,12 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=220"></script>
+<script src="/static/app.js?v=221"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
-<script src="/static/forwards.js?v=6"></script>
+<script src="/static/forwards.js?v=7"></script>
 <script src="/static/sandbox.js?v=2"></script>
 <script src="/static/execbot.js?v=14"></script>
-<script src="/static/fwmonitor.js?v=5"></script>
+<script src="/static/fwmonitor.js?v=6"></script>
 </body>
 </html>
