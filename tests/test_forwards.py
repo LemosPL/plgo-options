@@ -435,3 +435,28 @@ def test_call_put_pairs_booked_as_options_convert_to_forwards_and_back(monkeypat
     with pytest.raises(HTTPException):                                     # not a pair
         asyncio.run(route.convert_from_options(route.FromOptionsIn(call_id=27, put_id=23), REQ))
     asyncio.run(db.close())
+
+
+def test_book_a_forward_as_a_call_put_pair(monkeypatch):
+    from plgo_options.data.database import AUDIT_SCHEMA
+    from plgo_options.data.trade_repository import list_trades
+    db = _with_trades(monkeypatch, [], spot=0.60)
+    asyncio.run(db.execute(AUDIT_SCHEMA))
+    body = dict(asset="FIL", counterparty="KeyRock", side="sell", qty=2_000_000, strike=0.62,
+                trade_date="2026-11-17", maturity_date="2026-12-26", call_premium_usd=30_000,
+                put_premium_usd=10_000, external_ref="KR-123", note="booked as options")
+    f = asyncio.run(route.book_as_options(route.AsOptionsIn(**body), REQ))
+    # Short forward = sold call (+30k received) + bought put (-10k paid): net +20k
+    # received on a short lifts the all-in price by 0.01.
+    assert (f["side"], f["qty"], f["maturity_date"]) == ("sell", 2e6, "2026-12-26")
+    assert f["forward_price"] == pytest.approx(0.63) and f["note"].startswith("booked as options")
+    cur = asyncio.run(db.execute("SELECT * FROM trades ORDER BY id"))
+    legs = [dict(r) for r in asyncio.run(cur.fetchall())]
+    assert [(l["option_type"], l["side"], l["premium_usd"], l["instrument"], l["status"]) for l in legs] == [
+        ("Call", "Sell", 30_000.0, "FIL-26DEC26-0.62-C", "converted"),
+        ("Put", "Buy", -10_000.0, "FIL-26DEC26-0.62-P", "converted")]
+    assert f["source_legs"] == f"{legs[0]['id']},{legs[1]['id']}"
+    assert asyncio.run(list_trades(db, asset="FIL")) == []                   # out of the options book
+    with pytest.raises(HTTPException):                                       # maturity before trade date
+        asyncio.run(route.book_as_options(route.AsOptionsIn(**{**body, "maturity_date": "2026-11-01"}), REQ))
+    asyncio.run(db.close())

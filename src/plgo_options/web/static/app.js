@@ -2693,7 +2693,18 @@ function tmEditForward(fid) {
   document.getElementById("tf-fwd-price").value = f.forward_price;
   document.getElementById("tf-fwd-ref").value = f.external_ref || "";
   document.getElementById("tf-fwd-note").value = f.note || "";
+  // Amending edits the forward itself; the call/put option is for new bookings.
+  document.getElementById("tf-fwd-asopt").checked = false;
+  tfSyncAsOptions();
+  document.getElementById("tf-fwd-asopt-wrap").style.display = "none";
 }
+
+// "Booked as a call/put pair": premiums only matter then.
+function tfSyncAsOptions() {
+  const on = document.getElementById("tf-fwd-asopt")?.checked;
+  document.querySelectorAll(".tf-fwd-asopt-field").forEach(el => { el.style.display = on ? "" : "none"; });
+}
+document.getElementById("tf-fwd-asopt")?.addEventListener("change", tfSyncAsOptions);
 
 async function tfSaveForward() {
   const fid = document.getElementById("tf-fwd-id").value;
@@ -2713,6 +2724,36 @@ async function tfSaveForward() {
     return;
   }
   const verb = fid ? "Amend" : "Book";
+  const asOptions = !fid && document.getElementById("tf-fwd-asopt")?.checked;
+  if (asOptions) {
+    const callPrem = parseFloat(document.getElementById("tf-fwd-call-prem").value) || 0;
+    const putPrem = parseFloat(document.getElementById("tf-fwd-put-prem").value) || 0;
+    const sell = body.side !== "buy";
+    const q = body.qty.toLocaleString();
+    const legs = sell ? `SELL ${q} call + BUY ${q} put` : `BUY ${q} call + SELL ${q} put`;
+    if (!confirm(`Book as options: ${legs} ${body.asset} @ ${body.forward_price}, expiring ${body.maturity_date}, with ${body.counterparty}`
+      + (callPrem || putPrem ? ` (call premium $${callPrem.toLocaleString()} ${sell ? "received" : "paid"}, put $${putPrem.toLocaleString()} ${sell ? "paid" : "received"})` : "")
+      + `.\n\nCarried as a ${sell ? "SELL" : "BUY"} forward and shown as its two legs (one colour), out of the options book.`)) return;
+    try {
+      const r = await fetch("/api/forwards/as-options", {
+        method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asset: body.asset, counterparty: body.counterparty, side: body.side, qty: body.qty,
+          strike: body.forward_price, trade_date: body.trade_date, maturity_date: body.maturity_date,
+          call_premium_usd: callPrem, put_premium_usd: putPrem, external_ref: body.external_ref, note: body.note }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(typeof j.detail === "string" ? j.detail : (j.detail || []).map(d => d.msg).join("; ") || r.statusText);
+      }
+      document.getElementById("modal-trade").style.display = "none";
+      if (typeof tmInvalidatePortfolio === "function") tmInvalidatePortfolio();
+      await tmLoad();
+      if (typeof fwReload === "function") fwReload();
+    } catch (err) {
+      alert(`Book failed: ${err.message}`);
+    }
+    return;
+  }
   if (!confirm(`${verb}: ${body.side === "buy" ? "BUY" : "SELL"} ${body.qty.toLocaleString()} ${body.asset} forward @ ${body.forward_price} with ${body.counterparty}, maturity ${body.maturity_date}?`)) return;
   try {
     const r = await fetch(fid ? `/api/forwards/trades/${fid}` : "/api/forwards/trades", {
@@ -2744,6 +2785,13 @@ function tmOpenModal(trade = null) {
   if (qtyUnit) qtyUnit.textContent = currentAsset;
 
   document.getElementById("tf-fwd-id").value = "";
+  const $asopt = document.getElementById("tf-fwd-asopt");
+  if ($asopt) {
+    $asopt.checked = false;
+    document.getElementById("tf-fwd-asopt-wrap").style.display = "";
+    ["tf-fwd-call-prem", "tf-fwd-put-prem"].forEach(id => { document.getElementById(id).value = ""; });
+    tfSyncAsOptions();
+  }
   document.getElementById("tf-forward-section").style.display = "none";
   document.getElementById("tf-ref-spot-field").style.display = "";
   document.getElementById("tf-expiry-label").textContent = "Expiry";

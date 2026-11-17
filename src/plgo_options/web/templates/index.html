@@ -4457,6 +4457,16 @@
           <label class="modal-field" style="grid-column:1 / -1">Note
             <input type="text" id="tf-fwd-note" placeholder="e.g. cash-settled vs Deribit 0800 UTC fixing">
           </label>
+          <label class="modal-field" id="tf-fwd-asopt-wrap" style="grid-column:1 / -1;flex-direction:row;align-items:center;gap:.5rem">
+            <input type="checkbox" id="tf-fwd-asopt" style="width:auto">
+            Booked as a call/put pair (like the KeyRock forwards): sell = sell call + buy put, buy = buy call + sell put, at the forward price as strike, expiring at maturity
+          </label>
+          <label class="modal-field tf-fwd-asopt-field" style="display:none">Call premium ($)
+            <input type="number" id="tf-fwd-call-prem" step="any" min="0" placeholder="0">
+          </label>
+          <label class="modal-field tf-fwd-asopt-field" style="display:none">Put premium ($)
+            <input type="number" id="tf-fwd-put-prem" step="any" min="0" placeholder="0">
+          </label>
         </div>
         <p style="font-size:.72rem;color:var(--muted);margin:.4rem 0 0">Cash-settled: at maturity only qty × (fixing − forward price) is paid, in USD/USDC. Asset = the one selected in the sidebar.</p>
       </div>
@@ -4678,7 +4688,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=226"></script>
+<script src="/static/app.js?v=227"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=8"></script>

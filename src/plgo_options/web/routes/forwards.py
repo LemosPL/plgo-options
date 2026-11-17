@@ -338,6 +338,68 @@ async def convert_from_options(body: FromOptionsIn, request: Request):
     return await repo.get_forward(db, fid)
 
 
+class AsOptionsIn(BaseModel):
+    asset: str
+    counterparty: str
+    side: str                      # the forward's side: sell = short C + long P
+    qty: float = Field(gt=0)
+    strike: float = Field(gt=0)    # both legs; the forward price before premiums
+    trade_date: str
+    maturity_date: str             # the options' expiry
+    call_premium_usd: float = 0.0  # amounts, signed by the leg: + received (sold), - paid (bought)
+    put_premium_usd: float = 0.0
+    external_ref: str = ""
+    note: str = ""
+
+
+_MONTHS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _option_name(asset: str, expiry: date, strike: float, typ: str) -> str:
+    """Deribit-style name, e.g. FIL-11DEC26-0.7564-C."""
+    return f"{asset}-{expiry.day}{_MONTHS[expiry.month - 1]}{expiry.year % 100:02d}-{strike:g}-{typ}"
+
+
+@router.post("/as-options")
+async def book_as_options(body: AsOptionsIn, request: Request):
+    """Book a forward the way it was traded, as a call/put pair at one strike
+    (like the KeyRock structures): both option legs go into the trades table,
+    then straight into a forward (convert_synthetic), shown as its two legs
+    bound by colour. A short forward = sell call + buy put; long = the
+    reverse. Premiums fold into the forward price."""
+    f = _check({"asset": body.asset, "counterparty": body.counterparty, "side": body.side,
+                "trade_date": body.trade_date, "maturity_date": body.maturity_date})
+    a = f["asset"].upper()
+    exp = _date(f["maturity_date"], "maturity_date")
+    short = f["side"] == "sell"
+    legs_in = [("Call", "Sell" if short else "Buy", body.call_premium_usd),
+               ("Put", "Buy" if short else "Sell", body.put_premium_usd)]
+    user = _user(request)
+    from plgo_options.data.trade_repository import create_trade
+    db = await get_db()
+    await repo.ensure_tables(db)
+    created = []
+    for typ, side, prem in legs_in:
+        signed = abs(float(prem or 0.0)) * (1.0 if side == "Sell" else -1.0)
+        created.append(await create_trade(db, {
+            "asset": a, "counterparty": f["counterparty"], "trade_id": body.external_ref.strip(),
+            "trade_date": f["trade_date"], "side": side, "option_type": typ,
+            "instrument": _option_name(a, exp, body.strike, typ[0]), "expiry": exp.isoformat(),
+            "strike": body.strike, "qty": body.qty, "notional_mm": body.qty * body.strike / 1e6,
+            "premium_per": signed / body.qty, "premium_usd": signed, "status": "active",
+        }, changed_by=user or "user"))
+    syn = fwd.find_synthetic_forwards(created)
+    if not syn:   # cannot happen with the legs above; never leave them half-booked
+        for t in created:
+            await db.execute("UPDATE trades SET status = 'deleted' WHERE id = ?", (t["id"],))
+        await db.commit()
+        raise HTTPException(status_code=500, detail="the two legs did not pair up as a forward")
+    fid = await repo.convert_synthetic(db, syn[0], a, user)
+    if body.note.strip():
+        await repo.update_forward(db, fid, {"note": f"{body.note.strip()} · " + (await repo.get_forward(db, fid))["note"]}, user)
+    return await repo.get_forward(db, fid)
+
+
 @router.post("/trades/{fid}/to-options")
 async def back_to_options(fid: int, request: Request):
     """Undo a conversion: the option legs come back, the forward goes."""
