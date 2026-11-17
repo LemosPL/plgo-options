@@ -585,6 +585,8 @@ def _check_scope(scope: str) -> None:
     forbidden = granted & {"wallet:read_write", "custody:read_write"}
     if forbidden:
         raise ConnectorError(f"refusing an API key that can move funds: {sorted(forbidden)}")
+    if not granted & {"account:read", "account:read_write"}:  # the health check reads the account summary
+        raise ConnectorError(f"API key lacks account:read (scope: {scope!r})")
 
 
 def _locked(status: dict[str, Any], currency: str) -> bool:
@@ -592,7 +594,9 @@ def _locked(status: dict[str, Any], currency: str) -> bool:
     if str(status.get("locked", False)).lower() == "false":
         return False
     indices = status.get("locked_indices") or []
-    prefix = f"{currency.lower()}_"
+    # Our options and futures settle on the <cur>_usd index; <cur>_eurr (a euro pair, locked on testnet
+    # 17 Nov 2026) is not ours. <cur>_usdc is kept, to err on the safe side.
+    prefix = f"{currency.lower()}_usd"
     return not indices or any(i.startswith(prefix) for i in indices)
 
 

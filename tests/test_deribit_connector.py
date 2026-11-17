@@ -539,6 +539,15 @@ async def test_key_that_can_withdraw_is_refused(fake):
 
 
 @pytest.mark.asyncio
+async def test_key_that_cannot_read_the_account_is_refused_by_name(fake):
+    fake.scope = "connection trade:read_write wallet:none"
+    c = _connector(fake)
+    assert not await c.healthy()
+    with pytest.raises(ConnectorError, match="account:read"):
+        await c.submit(_intent())
+
+
+@pytest.mark.asyncio
 async def test_key_that_cannot_trade_is_refused(fake):
     fake.scope = "connection trade:read wallet:none"
     assert not await _connector(fake).healthy()
@@ -613,6 +622,10 @@ async def test_locked_eth_is_unhealthy_but_other_locks_are_not(fake):
     assert not await c.healthy()
     fake.locked = {"locked": "partial", "locked_indices": ["btc_usd"]}
     assert await c.healthy()
+    fake.locked = {"locked": "partial", "locked_indices": ["eth_eurr", "fil_usdc"]}   # testnet, 17 Nov 2026
+    assert await c.healthy()
+    fake.locked = {"locked": "partial", "locked_indices": ["eth_usdc"]}
+    assert not await c.healthy()
     fake.locked = {"locked": "true", "locked_indices": []}
     assert not await c.healthy()
 

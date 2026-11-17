@@ -27,7 +27,7 @@ from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, s
 
 from . import store
 from .block_rfq import GRACE_SECONDS, BlockRfqClient, Rfq
-from .deribit import ConnectorError, testnet_connector
+from .deribit import ConnectorError, DeribitError, testnet_connector
 from .threshold import MAX_FIT_ERROR
 
 OPTION = re.compile(r"ETH-\d{1,2}[A-Z]{3}\d{2}-\d+-[CP]")
@@ -61,7 +61,15 @@ async def send(legs: list[dict[str, Any]], kind: str, limit_eth: float, amount: 
                by: str = "", hedge: dict[str, Any] | None = None) -> dict[str, Any]:
     """Open an RFQ for a previewed structure. ``limit_eth`` is the preview's, per unit of ``amount``."""
     c = client()
-    rfq = await c.create(legs, f"plgo-{kind}-{uuid.uuid4().hex[:10]}", hedge=hedge)
+    label = f"plgo-{kind}-{uuid.uuid4().hex[:10]}"
+    try:
+        rfq = await c.create(legs, label, hedge=hedge)
+    except DeribitError as ex:
+        # A disclosed RFQ needs a name on the account; a personal testnet account has none: go anonymous,
+        # to every maker (an anonymous RFQ must name at least 5).
+        if "no identity to disclose" not in str(ex):
+            raise
+        rfq = await c.create(legs, label, hedge=hedge, disclosed=False, makers=await c.makers())
     # Deribit's amount is the legs' common factor; the preview's should equal it, but scale to be sure.
     per_unit = limit_eth * amount / rfq.amount
     _sent[rfq.block_rfq_id] = Sent(rfq, kind, per_unit, spot, by, time.time())

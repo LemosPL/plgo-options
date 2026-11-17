@@ -163,7 +163,7 @@ async def test_a_structure_that_is_not_ours_is_cancelled_and_raised(fake):
 
 
 async def test_no_block_rfq_scope_sends_nothing(fake):
-    fake.scope = "connection trade:read_write"
+    fake.scope = "connection account:read trade:read_write"
     with pytest.raises(ConnectorError, match="block_rfq:read_write"):
         await _client(fake).create(LEGS, "plgo-1")
     assert not _sent(fake, "create_block_rfq")

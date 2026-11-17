@@ -130,6 +130,10 @@ class BlockRfqClient:
             raise ConnectorError(f"API key lacks block_rfq:read_write (scope: {self.conn._scope!r})")
         return out
 
+    async def makers(self) -> list[str]:
+        """The makers an RFQ can be sent to (an anonymous one must name at least 5 of them)."""
+        return list(await self.conn._rpc("private/get_block_rfq_makers", {}))
+
     # -- create -----------------------------------------------------------------
 
     async def create(self, legs: list[dict[str, Any]], label: str, *, makers: list[str] | None = None,

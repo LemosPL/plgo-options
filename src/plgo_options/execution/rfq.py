@@ -29,7 +29,8 @@ is the smoothing spline's (smile_fit.spline_fair, as the bot prices). For each s
              options block rate is to confirm with Deribit)
 
 Box legs are kept apart from the other legs even on the same instrument, so a box goes out
-as a box. Leftovers come back in the shape of execution-bot orders.
+as a box. A structure whose legs add up to fewer than MIN_RFQ_CONTRACTS contracts (Deribit's
+minimum) goes to the bot whole. Leftovers come back in the shape of execution-bot orders.
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair, s
 from .from_optimizer import _listed, deribit_legs, fit_warnings
 
 BOX = "BOX_NEUTRALIZER"
+# Deribit refuses an ETH option RFQ whose option legs add up to fewer contracts ("insufficient minimum
+# amount", minimums {eth_usd_option: 250}; testnet 17 Nov 2026: 249 + 1 passes, 249 alone does not).
+MIN_RFQ_CONTRACTS = 250
 
 
 def split(trades: list[dict], asset: str = "ETH") -> tuple[list[list[dict]], list[dict], list[dict]]:
@@ -192,6 +196,19 @@ async def preview_rfq(trades: list[dict], asset: str = "ETH", unit: int = 100, a
         leftovers += [dict(instrument=x["instrument"], side=x["side"], qty=lo,
                            why=f"under one {unit}-contract unit" if lo == x["qty"] else f"rounding to {amount}-contract units")
                       for x, lo in zip(ls, left) if lo]
+    small = [st for st in structs if sum(r * st[3] for r in st[2]) < MIN_RFQ_CONTRACTS]
+    for kind, ls, r, amount in small:  # too small for Deribit: the whole structure goes to the bot
+        n = sum(x * amount for x in r)
+        structs.remove((kind, ls, r, amount))
+        for x, ri in zip(ls, r):
+            if ri:
+                prev = next((lo for lo in leftovers if lo["instrument"] == x["instrument"] and lo["side"] == x["side"]), None)
+                if prev:
+                    prev["qty"] += ri * amount
+                    prev["why"] = f"{kind} under Deribit's {MIN_RFQ_CONTRACTS}-contract RFQ minimum ({n:g})"
+                else:
+                    leftovers.append(dict(instrument=x["instrument"], side=x["side"], qty=ri * amount,
+                                          why=f"{kind} under Deribit's {MIN_RFQ_CONTRACTS}-contract RFQ minimum ({n:g})"))
     out = []
     if structs:
         books, _, _ = await books_fn(sorted({s[1][0]["instrument"].split("-")[1] for s in structs}))

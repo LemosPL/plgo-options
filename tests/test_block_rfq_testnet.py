@@ -7,11 +7,11 @@ and Block RFQ enabled on the testnet account:
         python -m pytest tests/test_block_rfq_testnet.py -v -s
 
 Skipped without them. Opens RFQs and cancels them; trades nothing unless
-``BLOCK_RFQ_TESTNET_ACCEPT=1``, and then only a 1-unit box if a maker quotes it
+``BLOCK_RFQ_TESTNET_ACCEPT=1``, and then only the 250-unit box if a maker quotes it
 within 30 s inside 5% of its mark. ``-s`` prints what each check found, which is
 what to send back:
 
-    * the sizes we send come back as the ratios and amount we expect (50:25:50:34 x 1);
+    * the sizes we send come back as the ratios and amount we expect (50:25:50:34 x 5);
     * the sign of a structure's price: Deribit's combo mark against the legs' marks,
       buys added and sells subtracted, in Deribit's direction of the structure;
     * whether Deribit writes our structure as we sent it or flipped, and the RFQ's
@@ -34,6 +34,12 @@ from plgo_options.execution.deribit import DeribitConnector
 CLIENT_ID = os.environ.get("DERIBIT_TESTNET_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("DERIBIT_TESTNET_CLIENT_SECRET", "")
 ACCEPT = os.environ.get("BLOCK_RFQ_TESTNET_ACCEPT") == "1"
+# Deribit refuses smaller ETH option RFQs: "insufficient minimum amount", minimums {eth_usd_option: 250}
+# (testnet, 17 Nov 2026). Both structures here have a 250-contract leg.
+MIN_RFQ = 250
+# A disclosed RFQ needs a name on the account ("no identity to disclose" otherwise): a new testnet
+# account has none, so the checks go out anonymous unless BLOCK_RFQ_TESTNET_DISCLOSED=1.
+DISCLOSED = os.environ.get("BLOCK_RFQ_TESTNET_DISCLOSED") == "1"
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.skipif(
     not (CLIENT_ID and CLIENT_SECRET),
@@ -94,13 +100,13 @@ async def test_four_legs_come_back_as_our_ratios(client):
     expiry, strikes, marks = await _chain(client)
     mid = len(strikes) // 2
     kp1, kp2, kc1, kc2 = strikes[mid - 3], strikes[mid - 2], strikes[mid + 1], strikes[mid + 2]
-    legs = [dict(instrument=_name(expiry, kp1, "P"), side="buy", qty=50),
-            dict(instrument=_name(expiry, kp2, "P"), side="sell", qty=25),
-            dict(instrument=_name(expiry, kc1, "C"), side="buy", qty=50),
-            dict(instrument=_name(expiry, kc2, "C"), side="buy", qty=34)]
-    rfq = await client.create(legs, _label())
+    legs = [dict(instrument=_name(expiry, kp1, "P"), side="buy", qty=250),
+            dict(instrument=_name(expiry, kp2, "P"), side="sell", qty=125),
+            dict(instrument=_name(expiry, kc1, "C"), side="buy", qty=250),
+            dict(instrument=_name(expiry, kc2, "C"), side="buy", qty=170)]
+    rfq = await client.create(legs, _label(), disclosed=DISCLOSED, makers=None if DISCLOSED else await client.makers())
     client.opened.append(rfq)
-    assert rfq.amount == 1 and sorted(x["ratio"] for x in rfq.legs) == [25, 34, 50, 50]
+    assert rfq.amount == 5 and sorted(x["ratio"] for x in rfq.legs) == [25, 34, 50, 50]
     implied = _report("four legs", rfq, marks)
     if rfq.mark_price is not None:
         assert rfq.mark_price == pytest.approx(implied, rel=0.05, abs=2e-4), \
@@ -112,11 +118,11 @@ async def test_four_legs_come_back_as_our_ratios(client):
 async def test_a_sold_box_and_its_price_sign(client):
     expiry, strikes, marks = await _chain(client)
     lo, hi = strikes[len(strikes) // 4], strikes[3 * len(strikes) // 4]
-    legs = [dict(instrument=_name(expiry, lo, "C"), side="sell", qty=1),
-            dict(instrument=_name(expiry, lo, "P"), side="buy", qty=1),
-            dict(instrument=_name(expiry, hi, "C"), side="buy", qty=1),
-            dict(instrument=_name(expiry, hi, "P"), side="sell", qty=1)]
-    rfq = await client.create(legs, _label())
+    legs = [dict(instrument=_name(expiry, lo, "C"), side="sell", qty=MIN_RFQ),
+            dict(instrument=_name(expiry, lo, "P"), side="buy", qty=MIN_RFQ),
+            dict(instrument=_name(expiry, hi, "C"), side="buy", qty=MIN_RFQ),
+            dict(instrument=_name(expiry, hi, "P"), side="sell", qty=MIN_RFQ)]
+    rfq = await client.create(legs, _label(), disclosed=DISCLOSED, makers=None if DISCLOSED else await client.makers())
     client.opened.append(rfq)
     implied = _report(f"box {lo:g}/{hi:g} sold", rfq, marks)
     # In our direction a sold box pays about -(width)/spot per unit: negative, whatever Deribit's.

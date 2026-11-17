@@ -561,6 +561,15 @@ def test_rfq_structures_a_box_apart_the_rest_in_units_with_a_delta_hedge(monkeyp
     plain = asyncio.run(rfq.preview_rfq(rest, listed_fn=listed, books_fn=books))["structures"][0]
     assert plain["hedge"] is None and plain["delta_total_eth"] == pytest.approx(s["delta_eth"] * 100, abs=0.1)
     assert sorted((x["instrument"][12:], x["qty"]) for x in out["leftovers"]) == [("2200-P", 73), ("2500-C", 6), ("2800-C", 40)]
+    # under Deribit's 250-contract minimum: a 60-unit box (240 contracts) and a 200-contract spread go to the bot whole
+    small = [x | {"qty": 60} for x in box] + [{"counterparty": "Deribit", "opt": "P", "strike": 2000, "expiry": d, "qty": 150, "side": "Buy"},
+                                              {"counterparty": "Deribit", "opt": "P", "strike": 2200, "expiry": d, "qty": 50, "side": "Sell"}]
+    out = asyncio.run(rfq.preview_rfq(small, unit=50, listed_fn=listed, books_fn=books))
+    assert out["structures"] == []
+    left = sorted((x["instrument"][12:], x["side"], x["qty"]) for x in out["leftovers"])
+    assert left == [("1800-C", "sell", 60), ("1800-P", "buy", 60), ("2000-P", "buy", 150), ("2200-P", "sell", 50),
+                    ("2800-C", "buy", 60), ("2800-P", "sell", 60)]
+    assert all("250-contract RFQ minimum" in x["why"] for x in out["leftovers"])
 
 
 def test_fit_error_is_small_on_a_clean_smile_and_measures_a_curve_off_its_quotes():
