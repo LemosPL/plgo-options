@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS forward_closes (
 
 async def ensure_tables(db) -> None:
     await db.execute(FORWARD_TRADES_SCHEMA)
+    cur = await db.execute("PRAGMA table_info(forward_trades)")
+    if "source_legs" not in {r[1] for r in await cur.fetchall()}:
+        # Option legs a forward was converted from ("2835,2836"): booked as a
+        # call/put pair, now carried as this forward (see convert_synthetic).
+        await db.execute("ALTER TABLE forward_trades ADD COLUMN source_legs TEXT NOT NULL DEFAULT ''")
     await db.execute(FORWARD_CARRY_SCHEMA)
     await db.execute(FORWARD_LEVELS_SCHEMA)
     await db.execute(FORWARD_CLOSES_SCHEMA)
@@ -200,6 +205,18 @@ CONFIRMED_SYNTHETIC_LEVELS = [
     },
 ]
 
+# Forwards the desk booked as call/put pairs, converted once at startup into
+# forwards (convert_synthetic): matched by asset, counterparty, expiry, strike,
+# size and side, since the leg ids only exist on the live book.
+CONFIRMED_SYNTHETIC_CONVERSIONS = [
+    {"tag": "keyrock-fil-11dec26-0.7564-sell-4m", "asset": "FIL", "counterparty": "keyrock",
+     "expiry": "2026-12-11", "strike": 0.7564, "qty": 4_000_000.0, "side": "sell"},   # 10 Nov: short C + long P
+    {"tag": "keyrock-fil-11dec26-0.68-buy-4m", "asset": "FIL", "counterparty": "keyrock",
+     "expiry": "2026-12-11", "strike": 0.68, "qty": 4_000_000.0, "side": "buy"},      # 14 Nov: long C + short P
+    {"tag": "keyrock-fil-11dec26-0.6524-sell-1.5m", "asset": "FIL", "counterparty": "keyrock",
+     "expiry": "2026-12-11", "strike": 0.6524, "qty": 1_500_000.0, "side": "sell"},   # 14 Nov: long P + short C
+]
+
 FORWARD_SEED_LOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS forward_seed_log (
     tag TEXT PRIMARY KEY,
@@ -281,6 +298,31 @@ async def seed_confirmed(db) -> int:
     return added
 
 
+async def seed_conversions(db) -> int:
+    """Apply CONFIRMED_SYNTHETIC_CONVERSIONS once each (forward_seed_log)."""
+    from plgo_options.pricing.forwards import find_synthetic_forwards
+    await db.execute(FORWARD_SEED_LOG_SCHEMA)
+    done = 0
+    for conv in CONFIRMED_SYNTHETIC_CONVERSIONS:
+        tag = f"convert:{conv['tag']}"
+        cur = await db.execute("SELECT 1 FROM forward_seed_log WHERE tag = ?", (tag,))
+        if await cur.fetchone():
+            continue
+        cur = await db.execute("SELECT * FROM trades WHERE asset = ? AND status = 'active'", (conv["asset"],))
+        legs = [dict(r) for r in await cur.fetchall()]
+        syn = next((s for s in find_synthetic_forwards(legs)
+                    if s["counterparty"].strip().lower() == conv["counterparty"] and s["side"] == conv["side"]
+                    and str(s["expiry"])[:10] == conv["expiry"] and abs(s["strike"] - conv["strike"]) < 1e-9
+                    and abs(s["qty"] - conv["qty"]) < 1e-6), None)
+        if not syn:
+            continue
+        await convert_synthetic(db, syn, conv["asset"], "desk: booked as options")
+        await db.execute("INSERT INTO forward_seed_log (tag) VALUES (?)", (tag,))
+        await db.commit()
+        done += 1
+    return done
+
+
 async def seed_synthetic_levels(db, asset: str, synthetics: list[dict]) -> int:
     """Apply CONFIRMED_SYNTHETIC_LEVELS once to the matching synthetic forward."""
     added = 0
@@ -348,6 +390,53 @@ async def set_status(db, fid: int, status: str, user: str, **extra) -> None:
         f"UPDATE forward_trades SET {', '.join(cols)}, updated_by = ?, updated_at = datetime('now') WHERE id = ?",
         (status, *extra.values(), user, fid))
     await db.commit()
+
+
+async def _set_leg_status(db, tid: int, old: str, new: str, user: str, action: str) -> None:
+    await db.execute("UPDATE trades SET status = ?, updated_at = datetime('now') WHERE id = ?", (new, tid))
+    await db.execute(
+        """INSERT INTO trade_audit_log (trade_id, action, field_changed, old_value, new_value, changed_by)
+           VALUES (?, ?, 'status', ?, ?, ?)""", (tid, action, old, new, user or "forwards"))
+
+
+async def convert_synthetic(db, syn: dict, asset: str, user: str) -> int:
+    """Book a synthetic forward (a call/put pair from
+    pricing.forwards.find_synthetic_forwards) as a forward and take its two
+    option legs out of the options book (status 'converted', audit-logged,
+    reversible with restore_options). Forward price = the all-in price (strike
+    less the net premium per unit); levels set on the pair move across.
+    Returns the forward id."""
+    c, p = syn["call"], syn["put"]
+    prem = float(syn.get("net_premium_usd") or 0.0)
+    note = (f"from options #{c['id']} {c['side']} call + #{p['id']} {p['side']} put @ {float(syn['strike']):g}"
+            + (f", net premium ${prem:,.0f} folded into the price" if abs(prem) > 0.005 else ", zero net premium"))
+    fid = await insert_forward(db, {
+        "asset": asset, "counterparty": syn["counterparty"], "side": syn["side"], "qty": float(syn["qty"]),
+        "forward_price": float(syn["effective_price"]), "trade_date": syn["trade_date"],
+        "maturity_date": str(syn["expiry"])[:10], "external_ref": c.get("trade_id") or p.get("trade_id") or "",
+        "note": note}, user)
+    await db.execute("UPDATE forward_trades SET source_legs = ? WHERE id = ?", (f"{c['id']},{p['id']}", fid))
+    for leg in (c, p):
+        await _set_leg_status(db, int(leg["id"]), "active", "converted", user, "convert_to_forward")
+    cur = await db.execute("SELECT 1 FROM forward_levels WHERE key = ?", (f"fwd:{fid}",))
+    if not await cur.fetchone():
+        await db.execute("UPDATE forward_levels SET key = ? WHERE key = ?", (f"fwd:{fid}", syn["key"]))
+    await db.commit()
+    return fid
+
+
+async def restore_options(db, fid: int, user: str) -> list[int]:
+    """Undo convert_synthetic: the option legs go back to active, the forward
+    is soft-deleted. Returns the restored leg ids."""
+    row = await get_forward(db, fid)
+    ids = [int(x) for x in str(row.get("source_legs") or "").split(",") if x.strip()]
+    for tid in ids:
+        await _set_leg_status(db, tid, "converted", "active", user, "restore_from_forward")
+    await db.execute(
+        """UPDATE forward_trades SET status = 'deleted', note = trim(note || ' · back to options', ' ·'),
+               updated_by = ?, updated_at = datetime('now') WHERE id = ?""", (user, fid))
+    await db.commit()
+    return ids
 
 
 async def close_forward(db, fid: int, qty: float, close_price: float, pnl: float, note: str, user: str,

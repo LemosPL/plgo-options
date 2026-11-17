@@ -28,7 +28,9 @@ async def list_trades(
     conditions = []
     params = []
     if not include_deleted:
-        conditions.append("status != 'deleted'")
+        # 'converted' = an option leg of a synthetic forward now booked as a
+        # forward (forward_trades.source_legs): out of the options book.
+        conditions.append("status NOT IN ('deleted', 'converted')")
     if not include_expired:
         conditions.append("status != 'expired'")
     if asset:

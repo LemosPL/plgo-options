@@ -309,6 +309,45 @@ async def close_forwards(body: ForwardCloseIn, request: Request):
     return {"closed": out, "realised_usd": total, "close_price": body.close_price}
 
 
+class FromOptionsIn(BaseModel):
+    call_id: int
+    put_id: int
+
+
+@router.post("/from-options")
+async def convert_from_options(body: FromOptionsIn, request: Request):
+    """Book a call/put pair (same counterparty, trade date, expiry, strike and
+    size, opposite sides) as the forward it is, and take the two legs out of
+    the options book (status 'converted'; undo with /trades/{id}/to-options)."""
+    db = await get_db()
+    await repo.ensure_tables(db)
+    legs = []
+    for tid in (body.call_id, body.put_id):
+        cur = await db.execute("SELECT * FROM trades WHERE id = ?", (tid,))
+        r = await cur.fetchone()
+        if not r or r["status"] != "active":
+            raise HTTPException(status_code=404, detail=f"option #{tid} is not an active trade")
+        legs.append(dict(r))
+    syn = fwd.find_synthetic_forwards(legs)
+    if not syn:
+        raise HTTPException(status_code=400, detail=(
+            "not a forward pair: needs one call and one put, opposite sides, same counterparty, "
+            "trade date, expiry, strike and size"))
+    asset = str(legs[0]["asset"]).upper()
+    fid = await repo.convert_synthetic(db, syn[0], asset, _user(request))
+    return await repo.get_forward(db, fid)
+
+
+@router.post("/trades/{fid}/to-options")
+async def back_to_options(fid: int, request: Request):
+    """Undo a conversion: the option legs come back, the forward goes."""
+    db = await get_db()
+    row = await repo.get_forward(db, fid)
+    if not row or row["status"] != "open" or not str(row.get("source_legs") or "").strip():
+        raise HTTPException(status_code=404, detail="no open forward converted from options with that id")
+    return {"restored": await repo.restore_options(db, fid, _user(request))}
+
+
 @router.put("/trades/{fid}/recon")
 async def reconcile_forward(fid: int, body: ReconIn, request: Request):
     """Store the counterparty's own figures for this forward."""

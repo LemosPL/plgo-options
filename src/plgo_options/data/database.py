@@ -338,6 +338,9 @@ async def init_db():
     await ensure_forward_tables(db)
     if await seed_confirmed(db):
         logger.info("Booked confirmed forwards from counterparty confirmations")
+    from plgo_options.data.forward_repository import seed_conversions
+    if await seed_conversions(db):
+        logger.info("Converted call/put pairs booked as options into forwards")
     from plgo_options.data import sandbox_repository
     await sandbox_repository.ensure_tables(db)
     if await sandbox_repository.seed(db):

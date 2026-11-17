@@ -226,6 +226,7 @@
         ${k === editing ? editor(p) : `<div class="fm-card-btns">
           <button class="btn-secondary" data-act="edit" style="width:auto">${p.stop_loss || p.take_profit ? "Edit levels" : "Set levels"}</button>
           <button class="btn-secondary" data-act="chart" style="width:auto">${k === selected ? "On chart ↓" : "Show on chart"}</button>
+          ${p.kind === "synthetic" && p.leg_ids && p.leg_ids.length === 2 ? `<button class="btn-secondary" data-act="convert" style="width:auto" title="Book this call/put pair as the forward it is: the two option legs leave the options book (reversible)">Convert to forward</button>` : ""}
           ${p.kind === "net" || p.kind === "forward" ? `<button class="btn-secondary" data-act="markclosed" style="width:auto" title="${p.kind === "net" ? "Tick a buy and a sell leg above, then mark them as a closed round trip" : "Pair this forward with the trade that closed it"}">Mark closed…</button>` : ""}</div>`}
       </section>`;
     }).join("");
@@ -564,6 +565,20 @@
     if (act === "clear") return save(k, true);
     if (act === "edit") { editing = k; positionCards(); document.querySelector(`#fm-positions .fm-card[data-key="${CSS.escape(k)}"] [data-f="sl"]`)?.focus(); return; }
     if (act === "cancel") { editing = null; positionCards(); schedule(); return; }
+    if (act === "convert") {
+      const p = positions.find((x) => pk(x) === k);
+      if (!confirm(`Convert ${label(p)} (${p.legs.join(" + ")}) into a forward?
+
+The two option legs leave the options book (Trades, Deals, greeks, optimizer) and the position is carried as a ${p.side} forward of ${fmt(p.qty)} ${p.asset} @ ${px(p.asset, p.effective_price)}, maturing ${p.maturity_date}. You can undo it from the forward ("Back to options").`)) return;
+      try {
+        await api("POST", "/api/forwards/from-options", { call_id: p.leg_ids[0], put_id: p.leg_ids[1] });
+        status("Converted to a forward.");
+        if (typeof tmInvalidatePortfolio === "function") tmInvalidatePortfolio();
+        await load(true);
+        if (typeof fwReload === "function") fwReload();
+      } catch (e) { status("Convert failed: " + e.message, true); }
+      return;
+    }
     if (act === "markclosed") {
       const p = positions.find((x) => pk(x) === k);
       const ticked = [...card.querySelectorAll(".fm-leg-check:checked")].map((c) => +c.dataset.fid);

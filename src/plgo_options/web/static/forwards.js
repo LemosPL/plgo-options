@@ -132,6 +132,7 @@
         <td class="fw-actions">
           <button class="btn-secondary" data-act="edit" data-id="${t.id}">Edit</button>
           <button class="btn-secondary" data-act="recon" data-id="${t.id}">Reconcile</button>
+          ${t.source_legs ? `<button class="btn-secondary" data-act="tooptions" data-id="${t.id}" title="Undo the conversion: option legs #${esc(t.source_legs)} come back to the options book">Back to options</button>` : ""}
           <button class="btn-secondary" data-act="close" data-id="${t.id}" title="Close (all or part) at a price: realised now, leaves the curves">Close</button>
           <button class="btn-secondary" data-act="settle" data-id="${t.id}">Settle</button>
           <button class="btn-secondary" data-act="delete" data-id="${t.id}" style="color:var(--red)">Delete</button>
@@ -294,6 +295,12 @@
     try {
       if (act === "edit") { if (typeof tmEditForward === "function") tmEditForward(id); return; }
       if (act === "close") { await window.fwClose([id]); return; }
+      if (act === "tooptions") {
+        if (!confirm(`Put forward #${id} back as its option legs (#${t.source_legs})? The forward is removed and the call/put pair returns to the options book.`)) return;
+        await api("POST", `/api/forwards/trades/${id}/to-options`);
+        status(`Forward #${id} is back as options #${t.source_legs}.`);
+        if (typeof tmInvalidatePortfolio === "function") tmInvalidatePortfolio();
+      }
       if (act === "recon") { reconOpen = reconOpen === id ? null : id; positions(); return; }
       if (act === "delete") {
         if (!confirm(`Delete forward #${id} (${t.side} ${fmt(t.qty, qtyDp())} with ${t.counterparty})? It is kept in the database as deleted.`)) return;

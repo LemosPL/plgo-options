@@ -400,3 +400,38 @@ def test_close_forwards_in_full_in_part_and_as_a_pair(monkeypatch):
     full = asyncio.run(route.get_book("ETH"))
     assert full["realised_pnl_usd"] == pytest.approx(1250 * 246.5 + 1250 * 346.5)
     asyncio.run(db.close())
+
+
+def test_call_put_pairs_booked_as_options_convert_to_forwards_and_back(monkeypatch):
+    from plgo_options.data.database import AUDIT_SCHEMA
+    from plgo_options.data.trade_repository import list_trades
+    exp = "2026-12-11"
+    legs = [_leg(21, "Call", "Sell", k=0.7564, q=4_000_000, td="2026-11-10", exp=exp, prem=40_000),
+            _leg(22, "Put", "Buy", k=0.7564, q=4_000_000, td="2026-11-10", exp=exp, prem=-40_000),
+            _leg(23, "Call", "Buy", k=0.68, q=4_000_000, td="2026-11-14", exp=exp, prem=-2_800),
+            _leg(24, "Put", "Sell", k=0.68, q=4_000_000, td="2026-11-14", exp=exp, prem=2_800),
+            _leg(25, "Put", "Buy", k=0.6524, q=1_500_000, td="2026-11-14", exp=exp),
+            _leg(26, "Call", "Sell", k=0.6524, q=1_500_000, td="2026-11-14", exp=exp),
+            _leg(27, "Put", "Buy", k=0.5, q=1_000_000, td="2026-11-14", exp=exp)]       # a real option, stays
+    db = _with_trades(monkeypatch, legs, spot=0.60)
+    asyncio.run(db.execute(AUDIT_SCHEMA))
+    asyncio.run(repo.set_levels(db, "syn:21-22", "FIL", 0.83, 0.67, "desk", "x"))
+    assert asyncio.run(repo.seed_conversions(db)) == 3
+    assert asyncio.run(repo.seed_conversions(db)) == 0                     # once only
+    fw = {(r["side"], r["qty"], r["forward_price"]): r for r in asyncio.run(repo.list_forwards(db, "FIL"))}
+    assert set(fw) == {("sell", 4e6, 0.7564), ("buy", 4e6, 0.68), ("sell", 1.5e6, 0.6524)}
+    a = fw[("sell", 4e6, 0.7564)]
+    assert a["maturity_date"] == exp and a["counterparty"] == "KeyRock" and a["source_legs"] == "21,22"
+    assert asyncio.run(repo.get_levels(db, "FIL"))[f"fwd:{a['id']}"]["stop_loss"] == 0.83   # levels moved
+    # The legs left the options book; the real option stays.
+    assert [t["id"] for t in asyncio.run(list_trades(db, asset="FIL"))] == [27]
+    mon = asyncio.run(route.build_monitor("FIL", 0.60, include_embedded=True))
+    assert not [p for p in mon["positions"] if p["kind"] == "synthetic"]
+    # Undo one; then convert it again through the endpoint.
+    assert asyncio.run(route.back_to_options(a["id"], REQ))["restored"] == [21, 22]
+    assert {t["id"] for t in asyncio.run(list_trades(db, asset="FIL"))} == {21, 22, 27}
+    f = asyncio.run(route.convert_from_options(route.FromOptionsIn(call_id=21, put_id=22), REQ))
+    assert (f["side"], f["qty"], f["forward_price"]) == ("sell", 4e6, 0.7564)
+    with pytest.raises(HTTPException):                                     # not a pair
+        asyncio.run(route.convert_from_options(route.FromOptionsIn(call_id=27, put_id=23), REQ))
+    asyncio.run(db.close())
