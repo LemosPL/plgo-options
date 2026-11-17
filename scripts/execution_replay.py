@@ -38,6 +38,16 @@ WebSocket connections, so the same second can differ slightly.
     .venv/bin/python -u scripts/execution_replay.py --precompute
     .venv/bin/python -u scripts/execution_replay.py --validate
     .venv/bin/python -u scripts/execution_replay.py --starts 0.3,0.35,0.4,0.45,0.5
+    .venv/bin/python -u scripts/execution_replay.py --ramps 0.3/0.5/0.9,0.5/0.7/0.9,0.5/0.7/1.2 --hours-list 6,12,24
+
+--ramps scores each start/end/hard ramp and deadline all-in: the fills against the spline, the fees,
+and what was left at the deadline crossed at the touch then (a lower bound for a large remainder).
+Steps where the spline is off its quotes are skipped, as the bot's guard does.
+
+6-17 Nov 2026, the 9 Nov order (15,979 contracts, 25DEC26), paired against 0.5/0.7/0.9 per window:
+0.5/0.7/1.2 is $100-190 cheaper (about 1 s.e.), 0.3/0.5/0.9 and 0.7/0.9/1.2 cost $1.4-2k more;
+24 h deadlines cost ~0.9 vol points all-in against ~1.0 at 12 h and ~1.14 at 6 h; fees are about
+60% of the fills' cost; Saturday windows fill under 10% (the remainder dominates).
 """
 
 from __future__ import annotations
@@ -61,9 +71,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from plgo_options.execution.models import BookDepth  # noqa: E402
-from plgo_options.execution.threshold import ThresholdOrder, decide  # noqa: E402
+from plgo_options.execution.threshold import MAX_FIT_ERROR, ThresholdOrder, decide  # noqa: E402
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd  # noqa: E402
-from plgo_options.pricing.smile_fit import otm_quotes, spline_fair, spline_smile  # noqa: E402
+from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile  # noqa: E402
 
 QUOTES = ROOT / "data" / "cache" / "quote_recorder"
 SMILES = ROOT / "data" / "cache" / "smile_recorder"
@@ -106,15 +116,16 @@ def _hour(args: tuple[str, float, list[str]]) -> str:
     """Cache one hour of steps: index, and per leg FIELDS (NaN where there is no fit)."""
     expiry, h0, legs = args
     out = CACHE / expiry / f"{dt.datetime.fromtimestamp(h0, dt.timezone.utc):%Y%m%d%H}.npz"
-    if out.exists():
+    if out.exists() and "fit" in np.load(out).files:   # older hours lack the fit error: redone
         return f"{out.name} cached"
     files = [(t, p) for t, p in _quote_files() if h0 - 120 <= t < h0 + H]
     snaps = [(t, p) for t, p in _smile_snaps(expiry) if h0 - 900 <= t < h0 + H + 900]
     steps = np.arange(h0, h0 + H, STEP)
     S = np.full(len(steps), np.nan)
+    fit = np.full(len(steps), np.nan)   # the spline's RMS distance from its quotes, in half-spreads (the bot's guard)
     data = {f: np.full((len(steps), len(legs)), np.nan) for f in FIELDS}
     if not files or len(snaps) < 2:
-        np.savez_compressed(out, steps=steps, S=S, **data)
+        np.savez_compressed(out, steps=steps, S=S, fit=fit, **data)
         return f"{out.name} no data"
     loaded = [_load_snap(p, expiry) for _, p in snaps]
     snap_t = np.array([t for t, _ in loaded])
@@ -161,9 +172,10 @@ def _hour(args: tuple[str, float, list[str]]) -> str:
             smile = spline_smile(q) if q is not None else None
         except Exception:
             q = None
-        if q is None:
+        if q is None or smile is None:
             continue
         S[j] = S_t
+        fit[j] = fit_error(q, smile)[0]
         by = {b["instrument_name"]: b for b in books}
         for i, name in enumerate(legs):
             b = by.get(name)
@@ -179,7 +191,7 @@ def _hour(args: tuple[str, float, list[str]]) -> str:
             for fld, key in (("bid", "best_bid_price"), ("bsize", "best_bid_amount"),
                              ("ask", "best_ask_price"), ("asize", "best_ask_amount")):
                 data[fld][j, i] = b[key] if b[key] is not None else np.nan
-    np.savez_compressed(out, steps=steps, S=S, **data)
+    np.savez_compressed(out, steps=steps, S=S, fit=fit, **data)
     return f"{out.name} {int(np.isfinite(S).sum())}/{len(steps)} steps"
 
 
@@ -196,9 +208,13 @@ def precompute(expiry: str, legs: list[str], workers: int) -> None:
 
 
 def load(expiry: str) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    """The cached steps. A step whose spline is off its quotes (fit > MAX_FIT_ERROR) has no fit, as the
+    bot then waits: its S is NaN (mostly around Deribit's 08:00 UTC expiry)."""
     parts = [np.load(p) for p in sorted((CACHE / expiry).glob("*.npz"))]
     steps = np.concatenate([p["steps"] for p in parts])
     S = np.concatenate([p["S"] for p in parts])
+    fit = np.concatenate([p["fit"] if "fit" in p.files else np.full(len(p["steps"]), np.nan) for p in parts])
+    S = np.where(fit > MAX_FIT_ERROR, np.nan, S)
     data = {f: np.concatenate([p[f] for p in parts]) for f in FIELDS}
     return steps, S, data
 
@@ -264,7 +280,21 @@ def work(steps, S, data, legs, t0: float, hours: float, start_vp: float, end_vp:
             taken[i] = (px, sz, prev + d.qty)
             if o.remaining <= 0:
                 done_ts[i] = t
-    return dict(t0=t0, cover=cover, fills=fills, orders=orders, done_ts=done_ts)
+    # What is left at the deadline, crossed at the touch on the last step with a fit (top-of-book price for
+    # all of it, so a lower bound): puts a slow, cheap ramp on the same footing as one that finishes.
+    finish = 0.0
+    jl = next((j for j in range(j1 - 1, j0 - 1, -1) if np.isfinite(S[j])), None)
+    for i, o in enumerate(orders):
+        if o.remaining <= 0 or jl is None or not np.isfinite(data["fair"][jl, i]):
+            continue
+        px = data["ask"][jl, i] if o.side == "buy" else data["bid"][jl, i]
+        if not np.isfinite(px):
+            continue
+        usd = px * S[jl]
+        sign = 1.0 if o.side == "buy" else -1.0
+        finish += o.remaining * (sign * (usd - data["fair"][jl, i]) + deribit_option_fee_usd(float(S[jl]), usd))
+    return dict(t0=t0, cover=cover, fills=fills, orders=orders, done_ts=done_ts, finish=finish,
+                qty_vega=sum(o.qty * arrival[i][1] for i, o in enumerate(orders)))
 
 
 def vp(fills: list[dict], key: str, w: str = "vega") -> float:
@@ -282,7 +312,8 @@ def summarize(run: dict, legs) -> dict:
                 spline=vp(f, "spline"), mark=vp(f, "mark"), fee=vp(f, "fee"),
                 arrival=vp(f, "arrival", "vega0"), usd_spline=sum(x["qty"] * x["spline"] for x in f),
                 usd_mark=sum(x["qty"] * x["mark"] for x in f), usd_fee=sum(x["qty"] * x["fee"] for x in f),
-                usd_arrival=sum(x["qty"] * x["arrival"] for x in f), max_theta=max((x["theta"] for x in f), default=0))
+                usd_arrival=sum(x["qty"] * x["arrival"] for x in f), max_theta=max((x["theta"] for x in f), default=0),
+                usd_finish=run.get("finish", 0.0), qty_vega=run.get("qty_vega", float("nan")))
 
 
 def grid(steps, S, data, legs, a, start: float, cooldowns: list[float], caps: list[float]) -> None:
@@ -308,6 +339,44 @@ def grid(steps, S, data, legs, a, start: float, cooldowns: list[float], caps: li
                   f"{(d.usd_spline + d.usd_fee).mean():>12,.0f}", flush=True)
 
 
+def ramps(steps, S, data, legs, a) -> None:
+    """Threshold ramps (start/end/hard) x deadlines: completion, and the cost of the whole order, what was
+    left at the deadline crossed at the touch then."""
+    rs = [tuple(float(x) for x in r.split("/")) for r in a.ramps.split(",")]
+    hs = [float(x) for x in (a.hours_list or str(a.hours)).split(",")]
+    qty = sum(q for _, _, q in legs)
+    t_first = math.ceil(steps[0] / H) * H
+    print(f"\nlegs: {', '.join(f'{s} {q} {n[12:]}' for n, s, q in legs)} ({qty:,} contracts); cap {a.cap:g}, rest {a.cooldown:g} s; "
+          f"windows every {a.every:g} h; steps with the spline off its quotes skipped, as the bot does")
+    print("USD per window, mean (vol points per contract in brackets); all-in = fills vs spline + fees + the rest at the touch\n")
+    print(f"{'hours':>5} {'start/end/hard':>15} {'windows':>7} {'filled':>7} {'all done':>8} {'took (h)':>8} "
+          f"{'fills+fee $':>12} {'rest at touch $':>15} {'all-in $':>10} {'all-in vp':>9} {'worst $':>9}")
+    out = []
+    for h in hs:
+        windows = np.arange(t_first, steps[-1] - h * H, a.every * H)
+        for r in rs:
+            rows = []
+            for t0 in windows:
+                run = work(steps, S, data, legs, float(t0), h, r[0], r[1], r[2], a.cap, a.cooldown)
+                if run is None or run["cover"] < a.min_cover:
+                    continue
+                d = summarize(run, legs)
+                rows.append(d | {"t0": t0, "hours_window": h, "ramp": "/".join(f"{x:g}" for x in r)})
+            d = pd.DataFrame(rows)
+            if d.empty:
+                continue
+            allin = d.usd_spline + d.usd_fee + d.usd_finish
+            # vol points: all-in USD over the order's contracts x their arrival vega (as the page's cost table)
+            vp_allin = (allin / d.qty_vega).mean()
+            print(f"{h:>5g} {'/'.join(f'{x:g}' for x in r):>15} {len(d):>7} {d.filled.mean():>7.1%} {d.all_done.mean():>8.0%} "
+                  f"{d.hours.mean():>8.1f} {(d.usd_spline + d.usd_fee).mean():>12,.0f} {d.usd_finish.mean():>15,.0f} "
+                  f"{allin.mean():>10,.0f} {vp_allin:>9.3f} {allin.max():>9,.0f}", flush=True)
+            out.append(d.assign(all_in=allin))
+    f = CACHE / a.expiry / "ramp_results.csv"
+    pd.concat(out).to_csv(f, index=False)
+    print(f"\nper window: {f}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--expiry", default="25DEC26")
@@ -323,6 +392,8 @@ def main() -> None:
     p.add_argument("--hours", type=float, default=12)
     p.add_argument("--every", type=float, default=2, help="hours between window starts")
     p.add_argument("--min-cover", type=float, default=0.95, help="share of steps with data a window needs")
+    p.add_argument("--ramps", help="start/end/hard ramps, e.g. 0.3/0.5/0.9,0.5/0.7/0.9 (all-in cost, deadlines from --hours-list)")
+    p.add_argument("--hours-list", help="deadlines for --ramps, e.g. 6,12,24")
     a = p.parse_args()
     legs = LEGS
     names = [n for n, _, _ in legs]
@@ -359,6 +430,9 @@ def main() -> None:
                   f"{vp(rf, 'spline'):>9.3f}   {len(bf):>4} {sum(r[2] for r in bf):>5.0f} {bdone:>8.1f} {bsp:>9.3f}")
         return
 
+    if a.ramps:
+        ramps(steps, S, data, legs, a)
+        return
     starts = [float(x) for x in a.starts.split(",")]
     if a.grid:
         cds, caps = ([float(x) for x in part.split(",")] for part in a.grid.split(":"))
