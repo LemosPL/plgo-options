@@ -112,8 +112,8 @@ class FakeDeribit:
         return self._place("sell", p)
 
     def _place(self, side: str, p: dict):
-        if p["valid_until"] < self.now * 1000:
-            return self._error(13888, "timed_out")
+        if p["valid_until"] < self.now * 1000:  # as Deribit answers a stale request (testnet, 17 Nov 2026)
+            return self._error(-32602, "Invalid params", {"reason": "timestamp in past", "param": "valid_until"})
         if p["amount"] > 1e7:
             return self._error(10009, "not_enough_funds")
         bid, ask, bid_size, ask_size = self.books[p["instrument_name"]]
@@ -170,6 +170,8 @@ class FakeDeribit:
                 and self._recent(o)]
 
     def _get_order_history_by_instrument(self, p):
+        if p.get("include_unfilled") and p.get("historical"):  # as Deribit refuses it (testnet, 17 Nov 2026)
+            return self._error(-32602, "Invalid params")
         return [self._public(o) for o in self.orders
                 if o["instrument_name"] == p["instrument_name"] and o["closed_at"] is not None
                 and (o["filled_amount"] > 0 or p.get("include_unfilled"))]

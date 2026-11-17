@@ -117,6 +117,7 @@ class DeribitError(ConnectorError):
 
     def __init__(self, code: int, message: str, data: Any = None) -> None:
         self.code = code
+        self.data = data
         self.reason = f"{message}: {data}" if data else message
         super().__init__(f"Deribit error {code}: {self.reason}")
 
@@ -346,7 +347,7 @@ class DeribitConnector:
         except DeribitError as exc:
             if exc.code in _OUTCOME_UNKNOWN:
                 return await self._resolve_unknown(intent, meta, lands_by, str(exc))
-            if exc.code in _NOT_PLACED:
+            if exc.code in _NOT_PLACED or _stale(exc):
                 raise
             return self._reject(intent, exc.reason)
         return await self._adopt(intent, result["order"], result.get("trades"))
@@ -397,17 +398,23 @@ class DeribitConnector:
 
     async def _search_history(self, instrument: str,
                               match: Callable[[dict[str, Any]], bool]) -> list[dict[str, Any]]:
-        for page in range(_HISTORY_MAX_PAGES):
-            rows = await self._rpc("private/get_order_history_by_instrument", {
-                "instrument_name": instrument, "count": _HISTORY_PAGE,
-                "offset": page * _HISTORY_PAGE, "include_old": True,
-                "include_unfilled": True, "historical": True,
-            })
-            hits = [r for r in rows if match(r)]
-            if hits or len(rows) < _HISTORY_PAGE:
-                return hits
-        # Saying "not found" here could double an order, so refuse to conclude.
-        raise ConnectorError(f"{instrument}: order history too long to prove an order is absent")
+        # Deribit refuses include_unfilled together with historical (testnet, 17 Nov 2026): the recent
+        # history with its unfilled orders first, then the historical store.
+        for extra in ({"include_unfilled": True}, {"historical": True}):
+            for page in range(_HISTORY_MAX_PAGES):
+                rows = await self._rpc("private/get_order_history_by_instrument", {
+                    "instrument_name": instrument, "count": _HISTORY_PAGE,
+                    "offset": page * _HISTORY_PAGE, "include_old": True, **extra,
+                })
+                hits = [r for r in rows if match(r)]
+                if hits:
+                    return hits
+                if len(rows) < _HISTORY_PAGE:
+                    break
+            else:
+                # Saying "not found" here could double an order, so refuse to conclude.
+                raise ConnectorError(f"{instrument}: order history too long to prove an order is absent")
+        return []
 
     # -- order state ----------------------------------------------------------
 
@@ -598,6 +605,12 @@ def _locked(status: dict[str, Any], currency: str) -> bool:
     # 17 Nov 2026) is not ours. <cur>_usdc is kept, to err on the safe side.
     prefix = f"{currency.lower()}_usd"
     return not indices or any(i.startswith(prefix) for i in indices)
+
+
+def _stale(exc: DeribitError) -> bool:
+    """Deribit refused valid_until as already past ("timestamp in past", -32602; testnet 17 Nov 2026):
+    our window or clock, not the order, so nothing was placed and it is the connector's fault."""
+    return exc.code == -32602 and isinstance(exc.data, dict) and exc.data.get("param") == "valid_until"
 
 
 def _positive(value: float | None) -> float | None:
