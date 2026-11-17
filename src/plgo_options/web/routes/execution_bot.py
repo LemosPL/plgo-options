@@ -156,7 +156,7 @@ class PreviewReq(BaseModel):
     trades: list[dict]
     asset: str = "ETH"
     start_vp: float = 0.5
-    hours: float = 12.0
+    hours: float = 24.0
 
 
 @router.post("/preview")

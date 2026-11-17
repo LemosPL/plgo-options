@@ -4144,7 +4144,7 @@
       <div id="xb-review-sub" style="font-size:.75rem;color:var(--muted);margin-bottom:.6rem"></div>
       <div id="xb-review-warn"></div>
       <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;font-size:.78rem;margin-bottom:.75rem">
-        <label>Deadline (h)<br><input id="xb-r-hours" type="number" value="12" min="1.5" step="0.5" style="width:5rem"></label>
+        <label>Deadline (h)<br><input id="xb-r-hours" type="number" value="24" min="1.5" step="0.5" style="width:5rem"></label>
         <label title="vol points x the option's vega = USD per contract">Start (vp)<br><input id="xb-r-start" type="number" value="0.5" step="0.05" style="width:5rem"></label>
         <label>End (vp)<br><input id="xb-r-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label title="the final hour; never exceeded">Hard limit (vp)<br><input id="xb-r-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
@@ -4152,6 +4152,7 @@
         <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet; live: Deribit production, once Lucas switches it on (asks to confirm, daily caps, position check)">Mode<br><select id="xb-r-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option><option value="live" disabled>Live (production)</option></select></label>
         <button id="xb-r-reprice" class="btn-secondary" style="width:auto">Re-price</button>
       </div>
+      <div id="xb-r-hours-hint" class="xb-dl-hint" style="font-size:.74rem;margin:-.35rem 0 .75rem"></div>
       <div class="chain-wrapper">
         <table class="pf-table">
           <thead><tr><th></th><th style="text-align:left">Instrument</th><th style="text-align:left">Side</th><th>Qty</th><th>Fair (spline)</th><th>Vol</th><th>Best cost now</th><th>Takeable now</th><th style="text-align:left">Note</th></tr></thead>
@@ -4188,7 +4189,7 @@
         <label>Instrument<br><input id="xb-n-inst" placeholder="ETH-25DEC26-2500-C" style="width:12rem"></label>
         <label>Side<br><select id="xb-n-side"><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
         <label>Qty<br><input id="xb-n-qty" type="number" value="1000" min="1" step="1" style="width:6rem"></label>
-        <label>Deadline (h)<br><input id="xb-n-hours" type="number" value="12" min="1.5" step="0.5" style="width:5rem"></label>
+        <label>Deadline (h)<br><input id="xb-n-hours" type="number" value="24" min="1.5" step="0.5" style="width:5rem"></label>
         <label>Start (vp)<br><input id="xb-n-start" type="number" value="0.5" step="0.05" style="width:5rem"></label>
         <label>End (vp)<br><input id="xb-n-end" type="number" value="0.7" step="0.05" style="width:5rem"></label>
         <label>Hard limit (vp)<br><input id="xb-n-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
@@ -4197,6 +4198,7 @@
         <label>Note<br><input id="xb-n-note" style="width:12rem"></label>
         <button id="xb-n-submit" class="btn-primary" style="width:auto">Create</button>
       </div>
+      <div id="xb-n-hours-hint" class="xb-dl-hint" style="font-size:.74rem;margin-top:.4rem"></div>
     </section>
 
     <section class="card">
@@ -4681,7 +4683,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=7"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=14"></script>
+<script src="/static/execbot.js?v=15"></script>
 <script src="/static/fwmonitor.js?v=6"></script>
 </body>
 </html>

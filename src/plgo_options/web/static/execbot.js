@@ -234,6 +234,7 @@
   }
 
   async function load() {
+    ["xb-r-hours", "xb-n-hours"].forEach((id) => deadlineHint(id));
     try {
       const [st, os, cs] = await Promise.all([api("GET", "/api/execution-bot/status"), api("GET", "/api/execution-bot/orders"),
         api("GET", "/api/execution-bot/costs")]);
@@ -509,6 +510,25 @@
     $("xb-review").scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
+  // ── deadline hint: what the replay of 6-17 Nov 2026 found (scripts/execution_replay.py) ──
+  // all-in cost ~0.9 vp at 24 h, ~1.0 at 12 h, ~1.14 at 6 h; Saturday (UTC) windows filled under 10%
+  function saturdayHours(from, hours) {
+    let h = 0;
+    for (let t = from; t < from + hours * 3600; t += 900) if (new Date(t * 1000).getUTCDay() === 6) h += 0.25;
+    return h;
+  }
+  function deadlineHint(id) {
+    const el = $(id + "-hint"), hours = parseFloat($(id)?.value);
+    if (!el) return;
+    if (!(hours > 0)) { el.innerHTML = ""; return; }
+    const sat = saturdayHours(Date.now() / 1000, hours), parts = [];
+    if (hours < 24) parts.push(`<span style="color:var(--muted)">24 h is cheaper all-in in the replay (~0.9 vp against ~1.0 at 12 h, ~1.14 at 6 h).</span>`);
+    if (sat >= hours / 4) parts.push(`<span style="color:var(--red)">${fmt(sat, sat % 1 ? 1 : 0)} of these ${fmt(hours, hours % 1 ? 1 : 0)} h fall on Saturday (UTC):`
+      + ` in the replay Saturday windows filled under 10%, the rest left for the deadline. Start after the weekend, or give it longer.</span>`);
+    el.innerHTML = parts.join(" ");
+  }
+  ["xb-r-hours", "xb-n-hours"].forEach((id) => { $(id)?.addEventListener("input", () => deadlineHint(id)); deadlineHint(id); });
+
   // ── manual order ──────────────────────────────────────────────
   async function createManual() {
     const v = (id) => $(id).value.trim();
@@ -537,7 +557,7 @@
     if (!b || !confirm(`Clear the ${b.dataset.mode} halt? Do it only once the Deribit account matches the fills on this page.`)) return;
     try { await api("POST", `/api/execution-bot/halt/${b.dataset.mode}/clear`); await load(); } catch (e) { status(e.message, true); }
   });
-  $("xb-new-btn")?.addEventListener("click", () => { $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
+  $("xb-new-btn")?.addEventListener("click", () => { deadlineHint("xb-n-hours"); $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
   $("xb-n-submit")?.addEventListener("click", createManual);
   $("xb-r-reprice")?.addEventListener("click", reprice);
   $("xb-r-create")?.addEventListener("click", createFromReview);
