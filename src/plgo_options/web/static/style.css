@@ -1977,3 +1977,9 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 /* Portfolio P&L: closed / settled forwards listed under the positions */
 #pf-positions-body tr.pf-row-fwd-closed td { opacity:.55; }
 #pf-positions-body tr.pf-row-fwd-closed:hover td { opacity:.85; }
+
+/* Forward converted from a call/put pair: its two option legs, bound by one colour */
+tr.tm-row-fwd-leg, tr.pf-row-fwd-leg { background: color-mix(in srgb, var(--fwd-col) 9%, transparent); }
+tr.tm-row-fwd-leg td.fwd-leg-band, tr.pf-row-fwd-leg td.fwd-leg-band { box-shadow: inset 4px 0 0 var(--fwd-col); }
+.fwd-leg-tag { display:inline-block; font-size:.64rem; font-weight:700; letter-spacing:.03em; padding:.02rem .38rem;
+  border-radius:8px; color:#0d1117; vertical-align:middle; }

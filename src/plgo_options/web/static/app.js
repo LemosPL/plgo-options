@@ -1938,8 +1938,65 @@ function tmFwdPx(v) {
   return Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
+// A forward converted from a call/put pair (source_legs) is shown as its two
+// original option legs, bound by one colour per forward and tagged FWD #id.
+// The forward is still the position (risk, curves, close): the first leg row
+// carries its tick box, MTM and actions, the second is display only.
+const FWD_LEG_COLORS = ["#a371f7", "#f0883e", "#3fb950", "#58a6ff", "#db61a2", "#d29922", "#2dd4bf"];
+function fwdLegColor(id) { return FWD_LEG_COLORS[Math.abs(Number(id) || 0) % FWD_LEG_COLORS.length]; }
+
+function tmForwardLegsHtml(t, f, closed) {
+  const fw = t.fwd;
+  const col = fwdLegColor(fw.id);
+  const spot = ethSpot || 0;
+  const pnl = closed ? (fw.settled_pnl_usd || 0) : (t.current_mtm || 0);
+  const tag = `<span class="fwd-leg-tag" style="background:${col}" title="Option leg of forward #${fw.id}: ${fw.side} ${Number(fw.qty).toLocaleString()} @ ${tmFwdPx(fw.forward_price)}, ${fw.maturity_date}">FWD #${fw.id}</span>`;
+  const settled = fw.status === "settled";
+  return fw.legs.map((leg, i) => {
+    const first = i === 0;
+    const sideCls = /buy|long/i.test(leg.side) ? "qty-long" : "qty-short";
+    const otm = spot ? (Number(leg.strike) / spot - 1) * 100 : null;
+    const sel = !closed && tmSelectedFwd.has(fw.id);
+    const check = first && !closed ? `<input type="checkbox" class="tm-fwd-check" data-fid="${fw.id}" ${sel ? "checked" : ""} title="Tick to close / total this forward (both legs)">` : "";
+    const statusTag = closed ? ` <span class="tm-fwd-closed-tag">${settled ? "SETTLED" : "CLOSED"}</span>` : (first ? " " + fwdLevelsBadge(fw.levels) : "");
+    const mtmCell = first
+      ? `<td class="${pnl >= 0 ? "mtm-pos" : "mtm-neg"}" title="${closed ? "Realised P&L of the forward (both legs)" : "MTM of the forward (both legs)"}">${f.fmtMoney(pnl)}${closed ? ' <span class="tm-fwd-real">realised</span>' : ""}</td>`
+      : `<td style="color:var(--muted)" title="in the forward's MTM above">↑</td>`;
+    const actions = first && !closed
+      ? `<div class="tm-actions">
+          <button class="tm-action-btn" onclick="fwClose && fwClose([${fw.id}])" title="Close this forward (both legs): realised now, leaves the curves">&#10003;</button>
+          <button class="tm-action-btn btn-expire" onclick="fwSettle && fwSettle(${fw.id})" title="Settle (cash) at a fixing price">&#9201;</button>
+        </div>` : "";
+    const tip = [`Leg of forward #${fw.id} (${fw.side} ${Number(fw.qty).toLocaleString()} @ ${tmFwdPx(fw.forward_price)})`,
+                 `option #${leg.id}${leg.trade_id ? " · " + leg.trade_id : ""}`, closed ? `${settled ? "settled" : "closed"} ${String(fw.settled_at || "").slice(0, 10)} @ ${fw.fixing_price}` : ""].filter(Boolean).join(" · ");
+    return `<tr class="tm-row-forward tm-row-fwd-leg${closed ? " tm-row-fwd-closed" : ""}${sel ? " tm-row-selected" : ""}" data-fwd="${fw.id}" style="--fwd-col:${col}" title="${escAttr(tip)}">
+      <td class="fwd-leg-band">${check}</td>
+      <td>${first ? `<span class="status-dot ${closed ? "status-expired" : "status-active"}"></span>` : ""}</td>
+      <td style="text-align:left">${fw.counterparty}</td>
+      <td>${leg.trade_date || ""}</td>
+      <td style="text-align:left" class="${sideCls}">${leg.side}</td>
+      <td style="text-align:left">${leg.option_type} ${tag}${statusTag}</td>
+      <td style="text-align:left">${leg.instrument || ""}</td>
+      <td>${String(leg.expiry || "").slice(0, 10)}</td>
+      <td>${closed ? (String(fw.settled_at || "").slice(0, 10) || "—") : t.days_remaining}</td>
+      <td>${tmFwdPx(leg.strike)}</td>
+      <td>${otm == null || closed ? "—" : f.fmt(otm, 1) + "%"}</td>
+      <td>${f.fmtK(leg.qty)}</td>
+      <td>${closed ? "—" : f.fmtMm((leg.qty || 0) * spot / 1e6)}</td>
+      <td>${f.fmtMoney(leg.premium_usd)}</td>
+      <td>—</td>
+      <td>${first && !closed ? f.fmt(t.delta, 4) : "—"}</td>
+      <td>—</td><td>—</td><td>—</td>
+      <td>${first ? (closed ? tmFwdPx(fw.fixing_price) : "$" + tmFwdPx(t.mark_price_usd)) : ""}</td>
+      ${mtmCell}
+      <td>${actions}</td>
+    </tr>`;
+  }).join("");
+}
+
 function tmClosedForwardRowHtml(t, f) {
   const fw = t.fwd;
+  if (Array.isArray(fw.legs) && fw.legs.length === 2) return tmForwardLegsHtml(t, f, true);
   const settled = fw.status === "settled";
   const pnl = fw.settled_pnl_usd || 0;
   const when = String(fw.settled_at || "").slice(0, 10);
@@ -1974,6 +2031,7 @@ function tmClosedForwardRowHtml(t, f) {
 function tmForwardRowHtml(t, f) {
   const fw = t.fwd;
   if (t.closed) return tmClosedForwardRowHtml(t, f);
+  if (Array.isArray(fw.legs) && fw.legs.length === 2) return tmForwardLegsHtml(t, f, false);
   const mtmColor = (t.current_mtm || 0) >= 0 ? "mtm-pos" : "mtm-neg";
   const sideColor = t.side === "Buy" ? "qty-long" : "qty-short";
   const rec = fw.recon && fw.recon.status;
@@ -4347,6 +4405,53 @@ function pfUpdateOldNewHeaders() {
   document.getElementById("pf-new-all").checked = visible.length > 0 && visible.every(p => pfNewSet.has(p.id));
 }
 
+// Option legs of a forward converted from a call/put pair, from /pnl's forwards
+// block (open or closed); null when it was booked as a forward.
+function pfForwardLegs(fid) {
+  const f = ((pfData && pfData.forwards && pfData.forwards.trades) || []).find(x => x.id === fid);
+  return f && Array.isArray(f.legs) && f.legs.length === 2 ? f.legs : null;
+}
+
+// Turn a forward's row into its two option legs, colour-bound and tagged
+// FWD #id: the first keeps the row's checkboxes / MTM / close button, the
+// second is display only. Cell order = the positions table header.
+function pfDressLegRows(tr, legs, fid, closed) {
+  const col = fwdLegColor(fid);
+  const dp = Math.max(currentAsset === "FIL" ? 4 : 2, assetSpotDp());
+  const px = v => Number(v).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  const spot = (pfData && pfData.eth_spot) || 0;
+  const tag = `<span class="fwd-leg-tag" style="background:${col}">FWD #${fid}</span>`;
+  return legs.map((leg, i) => {
+    const r = i === 0 ? tr : tr.cloneNode(true);
+    const c = r.children;
+    r.classList.add("pf-row-fwd-leg");
+    r.style.setProperty("--fwd-col", col);
+    r.title = `Option leg #${leg.id} of forward #${fid}` + (r.title ? " · " + r.title : "");
+    if (i > 0) {
+      c[0].innerHTML = ""; c[1].innerHTML = "";
+      c[16].innerHTML = '<span style="color:var(--muted)" title="in the forward\'s MTM above">↑</span>';
+      c[17].innerHTML = ""; c[20].innerHTML = "";
+    }
+    c[0].classList.add("fwd-leg-band");
+    c[3].textContent = leg.trade_id ? String(leg.trade_id).slice(0, 8) : "";
+    c[4].textContent = leg.trade_date || "";
+    c[5].textContent = leg.side;
+    c[5].className = /buy|long/i.test(leg.side) ? "qty-long" : "qty-short";
+    const closeBtn = i === 0 ? c[6].querySelector(".pf-fwd-close") : null;
+    const closedTag = c[6].querySelector(".tm-fwd-closed-tag");
+    c[6].innerHTML = `${leg.option_type} ${tag}`;
+    if (closedTag) c[6].appendChild(closedTag.cloneNode(true));
+    if (closeBtn) { c[6].append(" "); c[6].appendChild(closeBtn); }
+    c[6].style.color = "";
+    c[7].textContent = leg.instrument || "";
+    c[10].textContent = px(leg.strike);
+    c[11].textContent = closed || !spot ? "—" : `${((leg.strike / spot - 1) * 100).toFixed(1)}%`;
+    c[12].textContent = Math.round(leg.qty).toLocaleString();
+    c[14].textContent = leg.premium_usd ? `${leg.premium_usd < 0 ? "-" : ""}$${Math.abs(Math.round(leg.premium_usd)).toLocaleString()}` : "$0";
+    return r;
+  });
+}
+
 // Closed / settled forwards for the positions table, honouring the
 // Include-forwards toggle and the counterparty / expiry / type / side filters.
 function pfClosedForwardRows() {
@@ -4480,6 +4585,11 @@ function pfRenderTable() {
       `<td style="font-family:monospace;white-space:nowrap">${rollNewMarkHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollIvHtml}</td>` +
       `<td style="font-family:monospace;white-space:nowrap">${rollCostHtml}</td>`;
+    const fwLegs = isFwd ? pfForwardLegs(pos.forward_id) : null;
+    if (fwLegs) {
+      pfDressLegRows(tr, fwLegs, pos.forward_id, false).forEach(r => $tbody.appendChild(r));
+      continue;
+    }
     $tbody.appendChild(tr);
   }
 
@@ -4516,6 +4626,10 @@ function pfRenderTable() {
       `<td>—</td><td></td><td></td>` +
       `<td style="font-family:monospace" title="${settled ? "Fixing" : "Close"} price">${px(f.fixing_price)}</td>` +
       `<td></td><td></td><td></td>`;
+    if (Array.isArray(f.legs) && f.legs.length === 2) {
+      pfDressLegRows(tr, f.legs, f.id, true).forEach(r => $tbody.appendChild(r));
+      continue;
+    }
     $tbody.appendChild(tr);
   }
 

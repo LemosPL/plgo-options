@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from datetime import datetime, date
@@ -960,9 +961,27 @@ async def portfolio_pnl(asset: str = "ETH", include_expired: bool = False,
         done = []
     forwards_block["closed"] = [
         {k: r.get(k) for k in ("id", "counterparty", "side", "qty", "forward_price", "trade_date", "maturity_date",
-                               "fixing_price", "settled_pnl_usd", "settled_at", "status", "external_ref", "note")}
+                               "fixing_price", "settled_pnl_usd", "settled_at", "status", "external_ref", "note",
+                               "source_legs")}
         for r in done
     ]
+    # A forward converted from a call/put pair (forward_trades.source_legs)
+    # carries its original option legs, shown under it tagged FORWARD on
+    # Trade Management / Portfolio P&L - display only, never in the options book.
+    try:
+        wanted = sorted({int(x) for f in forwards_block["trades"] + forwards_block["closed"]
+                         for x in str(f.get("source_legs") or "").split(",") if x.strip()})
+        legs_by_id = {}
+        if wanted:
+            cur = await (await get_db()).execute(
+                "SELECT id, trade_id, trade_date, side, option_type, instrument, expiry, strike, qty, premium_usd, status "
+                f"FROM trades WHERE id IN ({','.join('?' * len(wanted))})", wanted)
+            legs_by_id = {int(r["id"]): dict(r) for r in await cur.fetchall()}
+        for f in forwards_block["trades"] + forwards_block["closed"]:
+            f["legs"] = [legs_by_id[int(x)] for x in str(f.get("source_legs") or "").split(",")
+                         if x.strip() and int(x) in legs_by_id]
+    except Exception as e:
+        logging.getLogger(__name__).warning("forward source legs unavailable: %s", e)
     fwd_delta = float(fwd_book["totals"]["delta"] or 0.0)
     forward_positions = _forward_positions(
         fwd_book, [float(x) for x in spot_arr], sorted(set(all_horizons) | set(PNL_MATRIX_HORIZONS)),
