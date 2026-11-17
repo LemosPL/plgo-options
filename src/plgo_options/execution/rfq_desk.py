@@ -149,7 +149,8 @@ async def record(rid: int, trades: list[dict[str, Any]], by: str = "", books_fn=
             fee = float(t.get("fee") or 0.0) * S
             fills.append(dict(ts=(t.get("timestamp") or now * 1000) / 1000, intent_id=f"rfq{rid}",
                               trade_id=str(t["trade_id"]), price_eth=float(t["price"]), price_usd=usd,
-                              qty=float(t["amount"]), fee_usd=fee, cost_usd=sign * (usd - fair) + fee,
+                              qty=float(t["amount"]), fee_usd=fee,   # the trade's fee; the cost is per contract
+                              cost_usd=sign * (usd - fair) + fee / float(t["amount"]),
                               fair_usd=fair, mode=NETWORK, mark_usd=mark * S if mark else None,
                               mid_usd=(bid + ask) / 2 * S if bid and ask else None,
                               S=S if f else None, iv=f["iv"] if f else None, vega=f["vega"] if f else None))

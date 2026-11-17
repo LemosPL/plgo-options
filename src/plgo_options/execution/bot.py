@@ -233,17 +233,18 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
     mid = (bid + ask) / 2 if bid and ask else None
     for f in st.fills:
         usd = f.price * S
-        # paper: the fee as Deribit would charge it; on a venue, the fee it charged (ETH)
-        fee_usd = deribit_option_fee_usd(S, usd) if o.mode == "paper" else f.fee * S
+        # The fee per contract, which the cost per contract carries: paper, Deribit's rate; on a venue,
+        # what it charged for the whole fill (ETH) over the fill's contracts. fee_usd stays the fill's total.
+        fee_per = deribit_option_fee_usd(S, usd) if o.mode == "paper" else f.fee * S / f.qty
         # a fresh paper connector each pass restarts its ids: key paper fills by the intent too
         fills.append(dict(ts=now if o.mode == "paper" else (f.ts or now), intent_id=f.intent_id,
                           trade_id=f"{f.intent_id}/{f.trade_id}" if o.mode == "paper" else f.trade_id,
                           price_eth=f.price, price_usd=usd,
-                          qty=f.qty, fee_usd=f.fee * S if o.mode == "paper" else fee_usd, mode=o.mode,
+                          qty=f.qty, fee_usd=f.fee * S, mode=o.mode,
                           fair_usd=fair["fair"],
                           mark_usd=mark * S if mark is not None else None,
                           mid_usd=mid * S if mid is not None else None,
-                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_usd,
+                          cost_usd=(usd - fair["fair"] if o.side == "buy" else fair["fair"] - usd) + fee_per,
                           S=S, iv=fair["iv"], vega=fair["vega"]))   # the market at the fill: its markouts start here
     await store.add_fills(o.id, fills)
     await _tick(o, now, "take", record, qty=st.filled_qty, detail=d.detail if qty == d.qty else f"{d.detail}; cut to {qty:g} by the {o.mode} daily cap", **ctx)

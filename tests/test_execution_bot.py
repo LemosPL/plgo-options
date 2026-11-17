@@ -670,8 +670,9 @@ def test_testnet_orders_go_through_the_connector_with_the_venues_fill_and_fee(tm
         (f,) = d["fills"]
         S = _books()[0]["estimated_delivery_price"]
         assert f["mode"] == "testnet" and f["trade_id"] == "T2" and f["ts"] == NOW + 121
-        assert f["fee_usd"] == pytest.approx(0.0003 * S)               # the fee the venue charged
-        assert f["cost_usd"] == pytest.approx(f["price_usd"] - f["fair_usd"] + 0.0003 * S)
+        assert f["fee_usd"] == pytest.approx(0.0003 * S)               # the fee the venue charged for the fill
+        assert f["cost_usd"] == pytest.approx(f["price_usd"] - f["fair_usd"] + 0.0003 * S / 20)   # per contract
+        assert d["order"]["cost_usd"] == pytest.approx(20 * (f["price_usd"] - f["fair_usd"]) + 0.0003 * S)
         assert d["order"]["filled"] == 20 and d["order"]["status"] == "working"
     run(body)
 
@@ -776,6 +777,8 @@ def test_an_accepted_rfq_goes_into_the_cost_table_as_rfq_legs_and_starts_no_rest
         # the call bought $1 over its mark, the put sold $0.50 under: both cost that against the mark
         assert c["mark_usd"] == pytest.approx(30 * 1.0) and p["mark_usd"] == pytest.approx(15 * 0.5)
         assert (await store.get_order(ids[0]))["note"] == "Block RFQ #77"
+        (f,) = (await store.order_detail(ids[0]))["fills"]                 # the trade's fee, spread over its 30 contracts
+        assert f["cost_usd"] == pytest.approx(f["price_usd"] - f["fair_usd"] + 0.0002 * S / 30)
         assert await store.last_fill_ts([NAME, put]) == {}                 # no rest for the bot after an RFQ
         due = await store.due_markouts(NOW + 6, markouts.HORIZONS, markouts.LATE)
         assert {d["instrument"] for d in due} == {NAME, put}                # and its markouts follow
