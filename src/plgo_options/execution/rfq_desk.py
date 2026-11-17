@@ -98,7 +98,8 @@ async def accept(rid: int) -> dict[str, Any]:
     best = s.rfq.best()
     if best is None or s.rfq.ours(best.price) > s.limit_eth + 1e-12:
         raise ConnectorError("no quote for the whole amount at our limit or better")
-    res = await c.accept(s.rfq, s.limit_eth)
+    # at the best quote's own price: on Deribit's tick, and no worse than our limit (checked above)
+    res = await c.accept(s.rfq, s.rfq.ours(best.price))
     s.acceptance = {"filled": res.filled, "reason": res.reason, "at": time.time(),
                     "trades": [{k: t.get(k) for k in ("instrument_name", "direction", "amount", "price",
                                                       "fee", "fee_currency", "trade_id", "block_trade_id")}

@@ -52,6 +52,7 @@ from .deribit import (
 logger = logging.getLogger(__name__)
 
 SCOPES = BLOCK_RFQ_SCOPES
+PRICE_TICK = 0.0001  # an RFQ's price grid (testnet, 17 Nov 2026: 0.05816 refused, quotes at 0.0582, 0.058)
 GRACE_SECONDS = 5.0  # quotes are hidden from the taker this long after creation
 _RECENT = 100  # how many of our latest RFQs a label lookup covers
 
@@ -217,7 +218,10 @@ class BlockRfqClient:
         the structure's currency (negative to receive). Fill-or-kill, so all of it or none."""
         if limit is None or not math.isfinite(limit):
             raise ConnectorError("accept needs a finite limit")
-        price = rfq.ours(limit)  # back into Deribit's direction: worst price to buy, or to sell
+        # back into Deribit's direction (worst price to buy, or to sell), on Deribit's tick: rounded
+        # down to buy and up to sell, so never worse than ``limit``
+        steps = round(rfq.ours(limit) / PRICE_TICK, 6)
+        price = round((math.floor(steps) if rfq.side == "buy" else math.ceil(steps)) * PRICE_TICK, 10)
         params: dict[str, Any] = {
             "block_rfq_id": rfq.block_rfq_id, "amount": rfq.amount, "direction": rfq.side,
             "price": price, "time_in_force": "fill_or_kill",

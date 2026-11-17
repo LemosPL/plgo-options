@@ -100,6 +100,8 @@ class FakeRfq:
         assert [(x["instrument_name"], x["direction"], x["ratio"]) for x in p["legs"]] == \
                [(x["instrument_name"], x["direction"], x["ratio"]) for x in r["legs"]]
         assert p["time_in_force"] == "fill_or_kill"
+        if abs(p["price"] / 1e-4 - round(p["price"] / 1e-4)) > 1e-6:  # testnet, 17 Nov 2026
+            return self._error(-32602, "Invalid params")
         book = r["asks"] if p["direction"] == "buy" else r["bids"]
         ok = [q for q in book if (q["price"] <= p["price"] if p["direction"] == "buy" else q["price"] >= p["price"])
               and q["amount"] >= p["amount"]]
@@ -204,6 +206,21 @@ async def test_accept_is_fill_or_kill_at_our_limit_and_reports_the_trades(fake):
     assert {t["instrument_name"]: t["amount"] for t in res.trades}[C2500] == 3400
 
 
+async def test_accept_rounds_our_limit_onto_the_tick_never_worse(fake):
+    c = _client(fake)
+    rfq = await c.create(LEGS, "plgo-1")
+    fake.quote("asks", 0.0124, 100)
+    await c.read(rfq)
+    assert (await c.accept(rfq, 0.012468)).filled   # pays at most 0.0124, not 0.0125
+    assert _sent(fake, "accept_block_rfq")[0]["price"] == 0.0124
+    fake.flip = True
+    rfq = await c.create(LEGS, "plgo-2")
+    fake.quote("bids", -0.0125, 100)
+    await c.read(rfq)
+    await c.accept(rfq, 0.012468)   # sells at -0.0124 or more: we pay at most 0.0124
+    assert _sent(fake, "accept_block_rfq")[-1]["price"] == -0.0124
+
+
 async def test_accept_on_a_flipped_structure_sells_it_no_worse_than_our_limit(fake):
     fake.flip = True
     c = _client(fake)
@@ -286,7 +303,7 @@ async def test_desk_accepts_only_inside_our_limit(fake, desk):
     fake.quote("asks", 0.012, 100)
     v = await desk.accept(v["id"])
     assert v["state"] == "filled" and v["acceptance"]["filled"] and len(v["acceptance"]["trades"]) == 4
-    assert _sent(fake, "accept_block_rfq")[0]["price"] == 0.0125
+    assert _sent(fake, "accept_block_rfq")[0]["price"] == 0.012   # the quote's own price, on the tick
     assert desk.recorded == [(v["id"], 4)] and v["acceptance"]["recorded"] == [101, 102]   # into the cost table
 
 
