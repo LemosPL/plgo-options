@@ -56,3 +56,37 @@ def test_pnl_rows_are_usd_collateral(monkeypatch):
     with pytest.raises(HTTPException):
         asyncio.run(col.upsert_map_cell(col.MapCell(counterparty="Flowdesk", asset="ETH", qty=-1)))
     asyncio.run(db.close())
+
+
+def test_closed_forwards_realised_pnl_counts_automatically_under_pnl_trades(monkeypatch):
+    from plgo_options.data import forward_repository as frepo
+    db = _db(monkeypatch)
+
+    async def book():
+        await frepo.ensure_tables(db)
+        for asset, cp, side, q, k, status, pnl in [
+            ("ETH", "flowdesk", "sell", 2500, 2346.5, "closed", 1_348_000.0),   # cpty spelled differently
+            ("ETH", "Flowdesk", "buy", 1250, 2100.0, "closed", -363_812.0),
+            ("FIL", "KeyRock", "sell", 4e6, 0.7564, "closed", 305_600.0),
+            ("FIL", "Flowdesk", "sell", 5e6, 0.7544, "settled", 737_500.0),     # cash moved: not counted
+            ("FIL", "Flowdesk", "sell", 5e6, 0.61, "open", None)]:
+            fid = await frepo.insert_forward(db, dict(asset=asset, counterparty=cp, side=side, qty=q, forward_price=k,
+                                                      trade_date="2026-11-01", maturity_date="2026-11-27"), "t")
+            if status != "open":
+                await frepo.set_status(db, fid, status, "t", fixing_price=1.0, settled_pnl_usd=pnl)
+    asyncio.run(book())
+    asyncio.run(col.upsert_map_cells(col.MapCells(cells=[
+        col.MapCell(counterparty="Flowdesk", asset="PNL_TRADES", book="ETH", qty=-100_000),
+        col.MapCell(counterparty="Flowdesk", asset="USDC", book="ETH", qty=1_000_000)])))
+    m = asyncio.run(col.collateral_map())
+    by = {c["counterparty"].lower(): c for c in m["counterparties"]}
+    fd, kr = by["flowdesk"], by["keyrock"]
+    assert fd["auto_pnl"] == {"ETH": pytest.approx(984_188.0)}
+    assert fd["manual_books"]["ETH"]["PNL_TRADES"] == -100_000            # input keeps what was typed
+    assert fd["books"]["ETH"]["PNL_TRADES"] == pytest.approx(884_188.0)   # typed + auto
+    assert fd["total_usd"] == pytest.approx(1_884_188.0)
+    assert kr["auto_pnl"] == {"FIL": pytest.approx(305_600.0)} and kr["usd"]["PNL_TRADES"] == pytest.approx(305_600.0)
+    assert "FIL" not in fd["auto_pnl"]                                     # settled + open left out
+    rows = asyncio.run(col.realised_forward_pnl_rows("FIL"))
+    assert [(r["counterparty"], r["qty"]) for r in rows] == [("KeyRock", 305_600.0)]
+    asyncio.run(db.close())

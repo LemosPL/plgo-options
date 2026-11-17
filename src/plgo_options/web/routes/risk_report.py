@@ -39,6 +39,8 @@ from plgo_options.data.database import get_db
 from plgo_options.pricing.options import bs_price
 from plgo_options.web.routes.collateral import (
     USD_ASSETS,
+    merge_auto_pnl,
+    realised_forward_pnl_rows,
     _effective_prices,
     _gather_portfolio,
     _otc_perps,
@@ -239,7 +241,8 @@ async def _posted_collateral(counterparty: str | None) -> dict[str, float]:
     db = await get_db()
     cur = await db.execute(
         "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset")
-    rows = drop_collar_loans([dict(r) for r in await cur.fetchall()])
+    rows = [dict(r) for r in await cur.fetchall()]
+    rows = drop_collar_loans(merge_auto_pnl(rows, await realised_forward_pnl_rows()))
     out: dict[str, float] = {}
     for r in rows:
         if counterparty and str(r["counterparty"]).strip().lower() != counterparty.lower():

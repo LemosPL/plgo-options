@@ -1983,3 +1983,6 @@ tr.tm-row-fwd-leg, tr.pf-row-fwd-leg { background: color-mix(in srgb, var(--fwd-
 tr.tm-row-fwd-leg td.fwd-leg-band, tr.pf-row-fwd-leg td.fwd-leg-band { box-shadow: inset 4px 0 0 var(--fwd-col); }
 .fwd-leg-tag { display:inline-block; font-size:.64rem; font-weight:700; letter-spacing:.03em; padding:.02rem .38rem;
   border-radius:8px; color:#0d1117; vertical-align:middle; }
+
+/* Collateral Map: closed forwards realised P&L counted automatically (P&L - Trades) */
+.collat-auto-pnl { font-size:.68rem; color:var(--accent); white-space:nowrap; }

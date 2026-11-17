@@ -59,6 +59,43 @@ PNL_LABELS = {"PNL_TRADES": "PnL – Trades", "PNL_ETH_FWD": "PnL – ETH Forwar
 # Everything worth exactly $1 a unit.
 USD_ASSETS = ("USD", "USDC", *PNL_ASSETS)
 
+# Realised P&L of CLOSED forwards (closed before maturity: locked, paid at the
+# fixing) counts automatically in this row, per counterparty, in the book of
+# the forward's asset - on top of whatever is typed in the cell. SETTLED
+# forwards are left out: their cash has moved and belongs in USDC.
+AUTO_PNL_ASSET = "PNL_TRADES"
+
+
+async def realised_forward_pnl_rows(book: str | None = None) -> list[dict]:
+    """Closed forwards' realised P&L as collateral-map rows
+    {counterparty, asset: PNL_TRADES, book, qty, auto: True}. Never raises."""
+    try:
+        from plgo_options.data.forward_repository import ensure_tables, list_forwards
+        db = await get_db()
+        await ensure_tables(db)
+        closed = await list_forwards(db, None, ("closed",))
+    except Exception:
+        return []
+    agg: dict[tuple[str, str], list] = {}
+    for f in closed:
+        b = str(f["asset"]).upper()
+        b = b if b in COLLATERAL_BOOKS else "FIL"
+        if book and b != book.upper():
+            continue
+        k = (str(f["counterparty"]).strip().lower(), b)
+        e = agg.setdefault(k, [str(f["counterparty"]).strip(), 0.0])
+        e[1] += float(f["settled_pnl_usd"] or 0.0)
+    return [{"counterparty": cp, "asset": AUTO_PNL_ASSET, "book": b, "qty": round(v, 2), "auto": True}
+            for (_, b), (cp, v) in agg.items() if abs(v) > 0.005]
+
+
+def merge_auto_pnl(rows: list[dict], auto: list[dict]) -> list[dict]:
+    """rows + the auto P&L rows, spelled like the counterparty's existing
+    collateral rows (case-insensitive) so they land on the same counterparty."""
+    spelling = {str(r["counterparty"]).strip().lower(): r["counterparty"] for r in rows}
+    return list(rows) + [{**a, "counterparty": spelling.get(a["counterparty"].lower(), a["counterparty"])}
+                         for a in auto]
+
 # Counterparty-specific concentration haircuts. Quantity *up to* threshold_qty
 # counts at the flat rate above; only the excess above it is haircut at `rate`.
 # Thresholds are in native token units (not USD) — KeyRock's 5.5M is 5.5M FIL,
@@ -806,6 +843,7 @@ async def collateral_map():
     # managed as loans, not as desk risk — but it does mean the collateral map
     # is now the managed book's map, not everything the firm has posted.
     rows = drop_collar_loans(rows)
+    auto_rows = drop_collar_loans(await realised_forward_pnl_rows())
 
     assets = list(MAP_ASSETS)
     for r in rows:
@@ -825,6 +863,15 @@ async def collateral_map():
         entry = cps.setdefault(k, {"display": r["counterparty"],
                                    "books": {b: {} for b in COLLATERAL_BOOKS}})
         entry["books"][book][(r["asset"] or "").upper()] = float(r["qty"] or 0)
+    # Manual cells as typed (what the inputs show and save), before the auto P&L.
+    manual = {k: {b: dict(v["books"][b]) for b in COLLATERAL_BOOKS} for k, v in cps.items()}
+    auto_by_cp: dict[str, dict[str, float]] = {}
+    for a in auto_rows:
+        k = a["counterparty"].lower()
+        entry = cps.setdefault(k, {"display": a["counterparty"], "books": {b: {} for b in COLLATERAL_BOOKS}})
+        cell = entry["books"][a["book"]]
+        cell[AUTO_PNL_ASSET] = float(cell.get(AUTO_PNL_ASSET, 0.0)) + a["qty"]
+        auto_by_cp.setdefault(k, {})[a["book"]] = auto_by_cp.get(k, {}).get(a["book"], 0.0) + a["qty"]
 
     liab, liab_disp, pos_counts, liab_netted = await _liability_by_cp()
     for k, n in liab_disp.items():
@@ -857,6 +904,9 @@ async def collateral_map():
         out_cps.append({
             "counterparty": info["display"],
             "books": books,
+            "manual_books": {b: {a: float((manual.get(k) or {}).get(b, {}).get(a, 0) or 0) for a in assets}
+                             for b in COLLATERAL_BOOKS},
+            "auto_pnl": {b: round(v, 2) for b, v in (auto_by_cp.get(k) or {}).items()},
             "qtys": qtys,
             "usd": usd,
             "total_usd": total,
@@ -881,6 +931,7 @@ async def collateral_map():
         "assets": assets,
         "asset_labels": {a: MAP_ASSET_LABELS.get(a, a) for a in assets},
         "usd_assets": [a for a in assets if a in USD_ASSETS],
+        "auto_pnl_asset": AUTO_PNL_ASSET,
         "pnl_assets": list(PNL_ASSETS),
         "prices": prices,
         "price_overrides": overrides,

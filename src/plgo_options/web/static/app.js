@@ -17605,11 +17605,16 @@ function collatRenderMap() {
     // One editable row per book.
     const bookRows = bookMeta.map(bm => {
       const cells = cps.map(c => {
-        const qty = (c.books && c.books[bm.book] && c.books[bm.book][a]) || 0;
-        const usd = qty * (prices[a] || (isUsdc ? 1 : 0));
+        // The input shows / saves what was typed; closed forwards' realised P&L
+        // is added automatically on the P&L - Trades row and shown under it.
+        const typed = c.manual_books ? ((c.manual_books[bm.book] || {})[a] || 0)
+          : ((c.books && c.books[bm.book] && c.books[bm.book][a]) || 0);
+        const auto = a === m.auto_pnl_asset ? ((c.auto_pnl || {})[bm.book] || 0) : 0;
+        const usd = (typed + auto) * (prices[a] || (isUsdc ? 1 : 0));
+        const autoNote = auto ? `<div class="collat-auto-pnl" title="Realised P&L of this counterparty's closed ${bm.book} forwards, counted automatically (on top of what is typed above)">${auto >= 0 ? "+" : ""}${_collatFmtUsd(auto)} closed fwds</div>` : "";
         return `<td class="num">
-          <input type="number" step="any" ${isPnl ? "" : 'min="0"'} class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" data-book="${bm.book}" value="${qty || ""}" placeholder="${isPnl ? "$ P&L" : "0"}" style="width:110px">
-          <div style="font-size:.7rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>
+          <input type="number" step="any" ${isPnl ? "" : 'min="0"'} class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" data-book="${bm.book}" data-auto="${auto}" value="${typed || ""}" placeholder="${isPnl ? "$ P&L" : "0"}" style="width:110px">
+          <div style="font-size:.7rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>${autoNote}
         </td>`;
       }).join("");
       const bookTotalUsd = cps.reduce((s, c) => s + ((c.books && c.books[bm.book] && c.books[bm.book][a]) || 0), 0) * (prices[a] || (isUsdc ? 1 : 0));
@@ -17679,7 +17684,8 @@ function collatRenderMap() {
       // Live USD hint for immediate feedback (price = current effective price).
       const px = collatIsUsd(asset, collatMap) ? 1 : ((collatMap && collatMap.prices && collatMap.prices[asset]) || 0);
       const hint = inp.nextElementSibling;
-      if (hint) hint.textContent = qty ? _collatFmtUsd(qty * px) : "—";
+      const tot = qty + (parseFloat(inp.dataset.auto) || 0);
+      if (hint) hint.textContent = tot ? _collatFmtUsd(tot * px) : "—";
       collatUpdateSaveBtn();
     });
   });
