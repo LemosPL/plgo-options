@@ -240,6 +240,7 @@
         api("GET", "/api/execution-bot/costs")]);
       header(st);
       rows(os.orders);
+      restButton(os.orders);
       costs(cs.legs);
       await Promise.all([detail(), markoutsLoad()]);
     } catch (e) {
@@ -500,6 +501,30 @@
     }
   }
 
+  // ── the rest at the deadline → Block RFQ ─────────────────────
+  // What the bot left unfilled when its orders expired (the last 24 h) goes to the review card as one
+  // solution: the RFQ preview groups it by expiry, and what is under Deribit's 250-contract minimum
+  // stays a leftover (back to the bot, or left). Nothing is sent until someone clicks Send, then Accept.
+  let rests = [];
+  function restButton(orders) {
+    const since = Date.now() / 1000 - 24 * 3600;
+    rests = orders.filter((o) => o.status === "expired" && o.via !== "rfq" && o.qty - o.filled >= 1 && (o.finished_ts || 0) >= since);
+    const b = $("xb-rest-rfq");
+    if (!b) return;
+    b.style.display = rests.length ? "" : "none";
+    b.textContent = `Rest → Block RFQ (${rests.length})`;
+  }
+  function restToRfq() {
+    if (!rests.length) return;
+    const trades = rests.map((o) => {
+      const [, , strike, opt] = o.instrument.split("-");
+      return { counterparty: "Deribit", instrument: o.instrument, opt, strike: +strike, qty: Math.floor(o.qty - o.filled),
+        side: o.side === "buy" ? "Buy" : "Sell" };
+    });
+    window.execbotReceive(trades, { source: `Bot rest at the deadline (#${rests.map((o) => o.id).join(", #")})`, asset: "ETH" });
+    rfqPreview();
+  }
+
   window.execbotReceive = function (trades, meta) {
     review = { trades, meta: meta || {}, data: null };
     Object.values(live).forEach((x) => clearTimeout(x.timer));
@@ -559,6 +584,7 @@
     if (!b || !confirm(`Clear the ${b.dataset.mode} halt? Do it only once the Deribit account matches the fills on this page.`)) return;
     try { await api("POST", `/api/execution-bot/halt/${b.dataset.mode}/clear`); await load(); } catch (e) { status(e.message, true); }
   });
+  $("xb-rest-rfq")?.addEventListener("click", restToRfq);
   $("xb-new-btn")?.addEventListener("click", () => { deadlineHint("xb-n-hours"); $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
   $("xb-n-submit")?.addEventListener("click", createManual);
   $("xb-r-reprice")?.addEventListener("click", reprice);
