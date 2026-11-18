@@ -511,7 +511,8 @@
   };
 
   // ── deadline hint: what the replay of 6-17 Nov 2026 found (scripts/execution_replay.py) ──
-  // all-in cost ~1.20 vp at 1.5 h, ~1.17 at 2 h, ~1.14 at 6 h, ~1.0 at 12 h, ~0.91 at 24 h; Saturday (UTC) windows filled under 10%
+  // all-in cost (the 9 Nov order without its deep ITM 2200 put): ~0.95 vp at 2 h, ~0.91 at 6 h, ~0.71 at 24 h,
+  // of which the fills ~0.6 vp and the rest left at the deadline ~1.1 vp; Saturday (UTC) windows filled under 10%
   function saturdayHours(from, hours) {
     let h = 0;
     for (let t = from; t < from + hours * 3600; t += 900) if (new Date(t * 1000).getUTCDay() === 6) h += 0.25;
@@ -522,8 +523,8 @@
     if (!el) return;
     if (!(hours > 0)) { el.innerHTML = ""; return; }
     const sat = saturdayHours(Date.now() / 1000, hours), parts = [];
-    if (hours < 24) parts.push(`<span style="color:var(--muted)">All-in cost in the replay (6-17 Nov): ~1.17 vp at 2 h, ~1.14 at 6 h,`
-      + ` ~0.91 at 24 h: a longer deadline is cheaper, at the price of waiting.</span>`);
+    if (hours < 24) parts.push(`<span style="color:var(--muted)">All-in cost in the replay (6-17 Nov, liquid options): ~0.95 vp at 2 h,`
+      + ` ~0.91 at 6 h, ~0.71 at 24 h. The fills cost ~0.6 vp, fee included; what is left at the deadline, crossed then, ~1.1 vp.</span>`);
     if (sat >= hours / 4) parts.push(`<span style="color:var(--red)">${fmt(sat, sat % 1 ? 1 : 0)} of these ${fmt(hours, hours % 1 ? 1 : 0)} h fall on Saturday (UTC):`
       + ` in the replay Saturday windows filled under 10%, the rest left for the deadline. Start after the weekend, or give it longer.</span>`);
     el.innerHTML = parts.join(" ");

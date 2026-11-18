@@ -48,6 +48,8 @@ Steps where the spline is off its quotes are skipped, as the bot's guard does.
 0.5/0.7/1.2 is $100-190 cheaper (about 1 s.e.), 0.3/0.5/0.9 and 0.7/0.9/1.2 cost $1.4-2k more;
 24 h deadlines cost ~0.9 vol points all-in against ~1.0 at 12 h, ~1.14 at 6 h, ~1.17 at 2 h and ~1.20 at 1.5 h; fees are about
 60% of the fills' cost; Saturday windows fill under 10% (the remainder dominates).
+Without the deep ITM 2200 put (--drop 2200-P; its book is wide, it is what is left over): ~0.95 vp all-in at
+2 h, ~0.91 at 6 h, ~0.71 at 24 h; the fills ~0.6 vp with the fee, the rest crossed at the deadline ~1.1 vp.
 """
 
 from __future__ import annotations
@@ -372,7 +374,7 @@ def ramps(steps, S, data, legs, a) -> None:
                   f"{d.hours.mean():>8.1f} {(d.usd_spline + d.usd_fee).mean():>12,.0f} {d.usd_finish.mean():>15,.0f} "
                   f"{allin.mean():>10,.0f} {vp_allin:>9.3f} {allin.max():>9,.0f}", flush=True)
             out.append(d.assign(all_in=allin))
-    f = CACHE / a.expiry / "ramp_results.csv"
+    f = CACHE / a.expiry / (f"ramp_results_no_{a.drop.replace(',', '_')}.csv" if a.drop else "ramp_results.csv")
     pd.concat(out).to_csv(f, index=False)
     print(f"\nper window: {f}")
 
@@ -394,6 +396,7 @@ def main() -> None:
     p.add_argument("--min-cover", type=float, default=0.95, help="share of steps with data a window needs")
     p.add_argument("--ramps", help="start/end/hard ramps, e.g. 0.3/0.5/0.9,0.5/0.7/0.9 (all-in cost, deadlines from --hours-list)")
     p.add_argument("--hours-list", help="deadlines for --ramps, e.g. 6,12,24")
+    p.add_argument("--drop", help="legs to leave out of the order, e.g. 2200-P (with their data)")
     a = p.parse_args()
     legs = LEGS
     names = [n for n, _, _ in legs]
@@ -401,6 +404,11 @@ def main() -> None:
         precompute(a.expiry, names, a.workers)
         return
     steps, S, data = load(a.expiry)
+    if a.drop:
+        drop = set(a.drop.split(","))
+        keep = [i for i, (n, _, _) in enumerate(legs) if n.split("-", 2)[2] not in drop]
+        legs = [legs[i] for i in keep]
+        data = {k: v[:, keep] for k, v in data.items()}
     print(f"cache: {dt.datetime.fromtimestamp(steps[0], dt.timezone.utc):%d %b %H:%M} to "
           f"{dt.datetime.fromtimestamp(steps[-1], dt.timezone.utc):%d %b %H:%M} UTC, "
           f"{np.isfinite(S).mean():.0%} of steps with a fit", flush=True)
