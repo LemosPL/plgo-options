@@ -1995,3 +1995,7 @@ tr.tm-row-fwd-leg td.fwd-leg-band, tr.pf-row-fwd-leg td.fwd-leg-band { box-shado
 .fm-pnl3-v { font-family:"SF Mono","Fira Code",monospace; font-size:1.3rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.25; white-space:nowrap; }
 .fm-pnl3-tot .fm-pnl3-v { font-size:1.45rem; }
 .fm-pnl3-s { font-size:.68rem; color:var(--muted); margin-top:.1rem; }
+
+/* Pricing: a leg left out of the pricing (include box unticked) */
+#legs-body tr.leg-off td { opacity:.45; }
+#legs-body tr.leg-off td:first-child { opacity:1; }

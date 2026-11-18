@@ -609,7 +609,12 @@ function chartLayout() {
   };
 }
 
+// Legs ticked "include" in the Pricing leg table (unticked = kept on screen,
+// left out of the payoff, the replication, the totals and anything sent on).
+function pricingActiveLegs() { return legs.filter(l => !l.off); }
+
 async function computePayoff() {
+  const legs = pricingActiveLegs();
   if (legs.length === 0) return;
   $btnCompute.classList.add("loading");
 
@@ -694,6 +699,18 @@ function addLeg(side = "buy", type = "C", strike = "", premium = "0", quantity =
   if (typeof optv4SyncPricingBackButton === "function") optv4SyncPricingBackButton();
 }
 
+// Header "include all" box: ticked when every leg is in.
+function pricingSyncLegsAll() {
+  const all = document.getElementById("legs-on-all");
+  if (all) { all.checked = legs.length > 0 && legs.every(l => !l.off); all.indeterminate = legs.some(l => l.off) && legs.some(l => !l.off); }
+}
+document.getElementById("legs-on-all")?.addEventListener("change", (e) => {
+  legs.forEach(l => { l.off = !e.target.checked; });
+  renderLegs();
+  const shown = document.getElementById("repl-results-section");
+  if (shown && shown.style.display !== "none" && pricingActiveLegs().length) replicateStrategy();
+});
+
 function removeLeg(idx) {
   legs.splice(idx, 1);
   renderLegs();
@@ -715,7 +732,9 @@ function renderLegs() {
     ).join("");
 
     const tr = document.createElement("tr");
+    if (leg.off) tr.className = "leg-off";
     tr.innerHTML = `
+      <td style="text-align:center"><input type="checkbox" class="leg-on" data-i="${i}" ${leg.off ? "" : "checked"} title="Include this leg in the pricing (untick to leave it out without deleting it)"></td>
       <td>
         <select data-i="${i}" data-field="expiry" style="font-size:.72rem">${expOpts}</select>
       </td>
@@ -745,12 +764,24 @@ function renderLegs() {
     $legsBody.appendChild(tr);
   });
 
-  $legsBody.querySelectorAll("select, input").forEach(el => {
+  $legsBody.querySelectorAll("select[data-field], input[data-field]").forEach(el => {
     el.addEventListener("change", () => {
       const idx = parseInt(el.dataset.i);
       legs[idx][el.dataset.field] = el.value;
     });
   });
+  $legsBody.querySelectorAll(".leg-on").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.i);
+      legs[idx].off = !cb.checked;
+      cb.closest("tr").classList.toggle("leg-off", !cb.checked);
+      pricingSyncLegsAll();
+      // Re-price what is shown, so the results always match the ticked legs.
+      const shown = document.getElementById("repl-results-section");
+      if (shown && shown.style.display !== "none" && pricingActiveLegs().length) replicateStrategy();
+    });
+  });
+  pricingSyncLegsAll();
 
   $legsBody.querySelectorAll(".btn-remove").forEach(btn => {
     btn.addEventListener("click", () => removeLeg(parseInt(btn.dataset.i)));
@@ -893,6 +924,7 @@ let lastReplPremiums = [];
 // The global spot must belong to the asset on screen. If it is off from the
 // legs' strikes by more than 20x (ETH ~2,500 vs FIL strikes ~1), refetch it.
 async function pricingEnsureSpot() {
+  const legs = pricingActiveLegs();
   const ks = legs.map(l => parseFloat(l.strike)).filter(k => k > 0).sort((a, b) => a - b);
   const mid = ks.length ? ks[Math.floor(ks.length / 2)] : null;
   const wrong = !(ethSpot > 0) || (mid && (ethSpot / mid > 20 || mid / ethSpot > 20));
@@ -913,12 +945,14 @@ async function pricingEnsureSpot() {
 }
 
 async function replicateStrategy() {
+  const legs = pricingActiveLegs();
   if (legs.length && !(await pricingEnsureSpot())) return;
   replicateStrategySync();
 }
 
 function replicateStrategySync() {
-  if (legs.length === 0) { alert("Add at least one leg."); return; }
+  const legs = pricingActiveLegs();
+  if (legs.length === 0) { alert(legsAllOff() ? "Every leg is unticked: tick at least one to price." : "Add at least one leg."); return; }
   for (const l of legs) {
     const s = parseFloat(l.strike);
     if (isNaN(s) || s <= 0) { alert("Each leg must have a valid strike price."); return; }
@@ -927,7 +961,10 @@ function replicateStrategySync() {
   if (!volSurface) { alert("Vol surface not loaded yet — wait for page init."); return; }
 
   // Validate all expiries have smile data (exact or interpolated)
-  const uniqueExpiries = [...new Set(legs.map(l => l.expiry))];
+  // A perp has no expiry: only the option legs set the expiry structure.
+  const isPerp = l => String(l.type || "").toUpperCase() === "PERP";
+  let uniqueExpiries = [...new Set(legs.filter(l => !isPerp(l)).map(l => l.expiry))];
+  if (!uniqueExpiries.length) uniqueExpiries = [legs[0].expiry || getDefaultExpiry()];
   for (const exp of uniqueExpiries) {
     const smile = getSmileForExpiry(exp);
     if (!smile) {
@@ -971,6 +1008,20 @@ function replicateStrategySync() {
     const K = parseFloat(l.strike);
     const qty = parseFloat(l.quantity);
     const dir = l.side === "buy" ? 1 : -1;
+    if (isPerp(l)) {
+      // Linear: worth qty x (spot - entry) at every horizon, delta 1 a unit,
+      // no premium and no vol (it was priced as a put before).
+      for (let i = 0; i < nPts; i++) {
+        const v = dir * qty * (spots[i] - K);
+        pnlAllExpired[i] += v; pnlNow[i] += v; pnlFirstExpiry[i] += v;
+      }
+      legDetails.push({
+        expiry: "perp", dte: null, strike: K, type: "PERP", side: l.side, quantity: qty,
+        iv_pct: null, iv_display: null, sigma: 0, bs_premium_usd: 0, bs_premium_eth: 0,
+        delta_per: 1, position_delta: dir * qty, _synthetic: false, cp_mode: null, cp_name: null, is_perp: true,
+      });
+      continue;
+    }
     const smile = getSmileForExpiry(l.expiry);
     const dte = smile.dte;
     const T = Math.max(dte, 0) / 365.25;
@@ -1127,9 +1178,11 @@ function replicateStrategySync() {
   for (const d of legDetails) {
     const tr = document.createElement("tr");
     const sideColor = d.side === "buy" ? "var(--accent)" : "var(--orange)";
-    const typeColor = d.type === "C" ? "var(--green)" : "var(--red)";
+    const typeColor = d.is_perp ? "var(--accent)" : d.type === "C" ? "var(--green)" : "var(--red)";
     let srcLabel;
-    if (d.cp_mode) {
+    if (d.is_perp) {
+      srcLabel = `<span style="color:var(--muted)" title="Linear: qty x (spot - entry); no premium, no vol">Linear</span>`;
+    } else if (d.cp_mode) {
       const cpName = d.cp_name || cptyMethod.name;
       const CP_MODE_LABEL = {
         otm: ["flat vol", `${cpName} marks OTM legs at a flat wing vol`],
@@ -1144,15 +1197,15 @@ function replicateStrategySync() {
     } else {
       srcLabel = `<span style="color:var(--muted)" title="Vol from Deribit vol surface — theoretical BS fair value">Vol Surface</span>`;
     }
-    const ivCell = d.cp_mode === "itm"
+    const ivCell = d.is_perp ? "—" : d.cp_mode === "itm"
       ? `<span title="Intrinsic value only — no time premium">intr</span>`
       : `${(d.iv_display).toFixed(1)}%`;
     tr.innerHTML = `
       <td style="font-size:.75rem">${d.expiry}</td>
       <td style="color:${sideColor}">${d.side.toUpperCase()}</td>
-      <td style="color:${typeColor}">${d.type === "C" ? "Call" : "Put"}</td>
-      <td>${fmtStrike(d.strike)}</td>
-      <td>${d.dte}d</td>
+      <td style="color:${typeColor}">${d.is_perp ? "Perp" : d.type === "C" ? "Call" : "Put"}</td>
+      <td${d.is_perp ? ' title="Entry price"' : ""}>${fmtStrike(d.strike)}</td>
+      <td>${d.is_perp ? "—" : d.dte + "d"}</td>
       <td>${ivCell}</td>
       <td style="font-family:monospace">${d.quantity.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
       <td style="font-family:monospace">$${fmtPrem(d.bs_premium_usd)}</td>
@@ -1210,7 +1263,7 @@ function replicateStrategySync() {
 
   // Vol smile chart — show the first expiry's smile with all legs marked
   const primarySmile = getSmileForExpiry(sortedExpiries[0].code);
-  drawSmileChart(primarySmile, legDetails);
+  drawSmileChart(primarySmile, legDetails.filter(d => !d.is_perp));
 }
 
 function drawSmileChart(smile, pricedLegs) {
@@ -1292,7 +1345,10 @@ function drawSmileChart(smile, pricedLegs) {
   Plotly.react("smile-chart", traces, layout, { responsive: true });
 }
 
+function legsAllOff() { return legs.length > 0 && legs.every(l => l.off); }
+
 function applyReplPremiums() {
+  const legs = pricingActiveLegs();   // the priced ones, same order as lastReplPremiums
   if (lastReplPremiums.length !== legs.length) return;
   for (let i = 0; i < legs.length; i++) {
     legs[i].premium = fmtPrem(lastReplPremiums[i]);
@@ -1317,7 +1373,8 @@ document.getElementById("btn-apply-repl").addEventListener("click", applyReplPre
 
 // Send Pricing legs → Strategy Builder
 document.getElementById("btn-send-to-sb").addEventListener("click", () => {
-  if (legs.length === 0) { alert("No legs to send — add legs first."); return; }
+  const legs = pricingActiveLegs();
+  if (legs.length === 0) { alert(legsAllOff() ? "Every leg is unticked: tick the ones to send." : "No legs to send — add legs first."); return; }
   for (const l of legs) {
     sbAddLeg(l.side, l.type, parseFloat(l.strike) || 0, parseFloat(l.quantity) || 1000, l.expiry || "");
   }
@@ -15444,10 +15501,20 @@ function optv4ApplyPricingLegs() {
   const newManual = [];
   const cptyDiverged = [];
 
-  (legs || []).forEach(l => {
+  pricingActiveLegs().forEach(l => {
     const K = parseFloat(l.strike);
     const absQ = Math.abs(parseFloat(l.quantity));
     const opt = String(l.type || "").toUpperCase();
+    if (opt === "PERP" && l._srcOptv4 != null && Number.isFinite(absQ) && absQ > 0) {
+      const tp = (optv4Replacements || []).find(x => x._idx === l._srcOptv4);
+      if (tp) {
+        tp._qty = (String(l.side || "").toLowerCase().startsWith("s") ? -1 : 1) * absQ;
+        optv4ReplDeselected.delete(tp._idx);
+        seen.add(tp._idx);
+        applied++;
+        return;
+      }
+    }
     if (!Number.isFinite(K) || K <= 0 || !Number.isFinite(absQ) || (opt !== "C" && opt !== "P")) { bad++; return; }
     const sell = String(l.side || "").toLowerCase().startsWith("s");
     const t = (l._srcOptv4 != null)
@@ -16558,12 +16625,27 @@ document.getElementById("btn-optv4-send-to-pricing")?.addEventListener("click", 
   for (const t of source) {
     const opt = String(t.opt || "").toUpperCase();
     t._sentToPricing = false;
-    if (opt !== "C" && opt !== "P") { skipped++; continue; }  // skip perps/futures
     // Respect the table's own state: an unticked row isn't part of the proposed
     // book, so sending it would misrepresent what's actually being done.
     if (typeof optv4ReplDeselected !== "undefined" && optv4ReplDeselected.has(t._idx)) {
       unticked++; continue;
     }
+    // A perp / future the optimizer proposes goes over as a Perp leg (strike =
+    // entry, today's spot), so Pricing shows every trade of the solution.
+    if (opt === "F") {
+      const pq = Math.abs((t._qty != null ? t._qty : Number(t.qty)) || 0);
+      if (!pq) { skipped++; continue; }
+      const pside = String(t.side || "").toLowerCase().startsWith("s") ? "sell" : "buy";
+      const entry = Number(t.strike) || _S0;
+      addLeg(pside, "PERP", String(Math.round(entry * 1e4) / 1e4), "0", String(pq), null, t.counterparty ? String(t.counterparty).toLowerCase() : "");
+      const jl = legs[legs.length - 1];
+      if (jl) jl._srcOptv4 = t._idx;
+      t._sentToPricing = true;
+      if (t.counterparty) usedCpties.add(t.counterparty);
+      sent++;
+      continue;
+    }
+    if (opt !== "C" && opt !== "P") { skipped++; continue; }  // anything else (no premium to price)
     // Send what the table currently SHOWS, not what the run first proposed — the
     // strike and qty columns are editable (see optv4WireReplCheckboxes).
     const K = (t._strike != null ? t._strike : Number(t.strike)) || 0;

@@ -6,7 +6,7 @@
   <title>PLGO Options</title>
   <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=42">
+  <link rel="stylesheet" href="/static/style.css?v=43">
 
   <!-- ══════════════════════════════════════════════════════════════════
        Startup error overlay. MUST stay inline and MUST stay above app.js.
@@ -924,6 +924,7 @@
           <!-- Legs table -->
           <table id="legs-table">
             <colgroup>
+              <col style="width:30px">
               <col class="col-expiry">
               <col class="col-side-type">
               <col class="col-strike">
@@ -933,6 +934,7 @@
             </colgroup>
             <thead>
               <tr>
+                <th title="Include in the pricing"><input type="checkbox" id="legs-on-all" checked title="Include / leave out every leg"></th>
                 <th>Expiry</th>
                 <th>Side / Type</th>
                 <th>Strike</th>
@@ -4710,7 +4712,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=228"></script>
+<script src="/static/app.js?v=229"></script>
 <script src="/static/agents.js?v=33"></script>
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=8"></script>
