@@ -569,8 +569,11 @@
     const cur = $("xb-n-exp").value;
     $("xb-n-exp").innerHTML = chain.expiries.map((e) =>
       `<option value="${esc(e.code)}">${esc(e.code)} (${e.days < 1 ? fmt(e.days * 24) + " h" : fmt(e.days) + " d"})</option>`).join("");
-    // keep the expiry already picked; otherwise the first one a week or more away
-    const first = chain.expiries.find((e) => e.days >= 7) || chain.expiries[0];
+    // keep the expiry already picked; otherwise the next quarterly (Deribit's last Friday of Mar, Jun, Sep,
+    // Dec) a week or more away, else the first expiry a week or more away
+    const quarterly = (e) => /^(2[2-9]|3[01])(MAR|JUN|SEP|DEC)\d{2}$/.test(e.code);
+    const first = chain.expiries.find((e) => quarterly(e) && e.days >= 7) || chain.expiries.find((e) => e.days >= 7)
+      || chain.expiries[0];
     $("xb-n-exp").value = chain.expiries.some((e) => e.code === cur) ? cur : (first ? first.code : "");
     strikesFill();
   }
