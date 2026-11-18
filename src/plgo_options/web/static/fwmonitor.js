@@ -105,7 +105,18 @@
   }
 
   const gkey = (asset, cp, mat) => `${asset}|${String(cp).trim().toLowerCase()}|${String(mat).slice(0, 10)}`;
-  const realisedOf = (group) => closedAll.filter((t) => t.group === group).reduce((s, t) => s + t.realised_usd, 0);
+  // Realised P&L of a position (asset | counterparty | maturity): round trips
+  // the monitor matched among its open legs, plus the forwards closed (Close
+  // button) or settled at the fixing, which have left the open book.
+  const realisedParts = (group) => {
+    const trips = closedAll.filter((t) => t.group === group);
+    const done = settledAll.filter((f) => gkey(f.asset, f.counterparty, f.maturity_date) === group);
+    return {
+      matched: trips.reduce((s, t) => s + t.realised_usd, 0), nMatched: trips.length,
+      closed: done.reduce((s, f) => s + (f.settled_pnl_usd || 0), 0), nClosed: done.length,
+    };
+  };
+  const realisedOf = (group) => { const r = realisedParts(group); return r.matched + r.closed; };
   const REASON = { take_profit: ["TP", "fw-lv-hit-target"], stop_loss: ["SL", "fw-lv-hit-stop"], roll: ["roll", "fw-lv-watch"], closed: ["closed", "fw-lv-watch"] };
   const reasonPill = (r) => { const [t, c] = REASON[r] || REASON.closed; return `<span class="fw-lv ${c}">${t}</span>`; };
 
@@ -182,9 +193,23 @@
 
   const lockedOf = (p) => p.group ? realisedOf(p.group)
     : p.kind === "forward" ? realisedOf(gkey(p.asset, p.counterparty, p.maturity_date)) : 0;
-  function lockedHtml(p) {
-    const r = lockedOf(p);
-    return r ? `<div class="fm-realised" title="Locked by closed legs of this position (Closed tab), paid at maturity">+ closed <span style="${sign(r)}">${usdK(r)}</span></div>` : "";
+  // P&L panel: open MTM + realised = total, in whole dollars.
+  function pnlPanel(p) {
+    const g = p.group || (p.kind === "forward" ? gkey(p.asset, p.counterparty, p.maturity_date) : null);
+    const r = g ? realisedParts(g) : { matched: 0, nMatched: 0, closed: 0, nClosed: 0 };
+    const real = r.matched + r.closed, tot = p.mtm + real;
+    const bits = [r.nClosed ? `${r.nClosed} closed / settled` : "", r.nMatched ? `${r.nMatched} matched round trip${r.nMatched > 1 ? "s" : ""}` : ""].filter(Boolean);
+    return `<div class="fm-pnl3">
+      <div title="Mark-to-market of what is still open, at live spot"><div class="fm-pnl3-h">Open MTM</div>
+        <div class="fm-pnl3-v" style="${sign(p.mtm)}">${usd(p.mtm)}</div>
+        <div class="fm-pnl3-s">${fmt(p.qty)} ${p.asset} ${short(p) ? "short" : "long"} open</div></div>
+      <div title="Locked by closed legs: closed / settled forwards and buys matched against sells; paid at the fixing"><div class="fm-pnl3-h">Realised</div>
+        <div class="fm-pnl3-v" style="${sign(real)}">${real ? usd(real) : "$0"}</div>
+        <div class="fm-pnl3-s">${bits.join(" · ") || "nothing closed yet"}</div></div>
+      <div class="fm-pnl3-tot" title="Open MTM + realised"><div class="fm-pnl3-h">P&amp;L</div>
+        <div class="fm-pnl3-v" style="${sign(tot)}">${usd(tot)}</div>
+        <div class="fm-pnl3-s">open + realised</div></div>
+    </div>`;
   }
 
   function positionCards() {
@@ -216,10 +241,8 @@
             ${p.kind === "net" ? `<div class="optv3-muted fm-legs">${p.legs.map((t, i) => `<label class="fm-leg"><input type="checkbox" class="fm-leg-check" data-fid="${p.legData[i].forward_id}"> ${esc(t)}</label>`).join("")}</div>`
               : p.legs.length ? `<div class="optv3-muted" style="font-size:.7rem">${esc(p.legs.join(" · "))}</div>` : ""}
           </div>
-          <div class="fm-mtm"><div class="optv3-muted" style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em">MTM open</div>
-            <div style="${sign(p.mtm)}">${usdK(p.mtm)}</div>
-            ${lockedHtml(p)}</div>
         </div>
+        ${pnlPanel(p)}
         ${ladder(p)}
         <div class="fm-lvrow">${levelBox(p, p.levels.stop, "stop")}${levelBox(p, p.levels.target, "target")}</div>
         ${p.note && k !== editing ? `<div class="optv3-muted fm-note">“${esc(p.note)}”</div>` : ""}

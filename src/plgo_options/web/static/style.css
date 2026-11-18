@@ -1886,7 +1886,7 @@ tr.tm-row-forward td { background: rgba(163, 113, 247, .05); }
 .fm-help { margin-top:.6rem; font-size:.74rem; color:var(--muted); }
 .fm-help summary { cursor:pointer; }
 .fm-help p { margin:.35rem 0 0; max-width:100ch; }
-.fm-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(420px, 1fr)); gap:1rem; margin-bottom:1rem; }
+.fm-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(560px, 1fr)); gap:1.1rem; margin-bottom:1rem; }
 .fm-card { margin:0; cursor:pointer; border-left:4px solid var(--border); display:flex; flex-direction:column; gap:.6rem; }
 .fm-card:hover { border-color:var(--accent); }
 .fm-card-sel { box-shadow:0 0 0 1px var(--accent) inset; }
@@ -1986,3 +1986,12 @@ tr.tm-row-fwd-leg td.fwd-leg-band, tr.pf-row-fwd-leg td.fwd-leg-band { box-shado
 
 /* Collateral Map: closed forwards realised P&L counted automatically (P&L - Trades) */
 .collat-auto-pnl { font-size:.68rem; color:var(--accent); white-space:nowrap; }
+
+/* Forwards Monitor: P&L panel on each card (open MTM + realised = P&L) */
+.fm-pnl3 { display:grid; grid-template-columns:1fr 1fr 1.15fr; gap:.6rem; }
+.fm-pnl3 > div { border:1px solid var(--border); border-radius:6px; padding:.5rem .7rem; background:var(--bg); }
+.fm-pnl3 .fm-pnl3-tot { border-color:var(--accent); }
+.fm-pnl3-h { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:700; }
+.fm-pnl3-v { font-family:"SF Mono","Fira Code",monospace; font-size:1.3rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.25; white-space:nowrap; }
+.fm-pnl3-tot .fm-pnl3-v { font-size:1.45rem; }
+.fm-pnl3-s { font-size:.68rem; color:var(--muted); margin-top:.1rem; }
