@@ -46,7 +46,7 @@ Steps where the spline is off its quotes are skipped, as the bot's guard does.
 
 6-17 Nov 2026, the 9 Nov order (15,979 contracts, 25DEC26), paired against 0.5/0.7/0.9 per window:
 0.5/0.7/1.2 is $100-190 cheaper (about 1 s.e.), 0.3/0.5/0.9 and 0.7/0.9/1.2 cost $1.4-2k more;
-24 h deadlines cost ~0.9 vol points all-in against ~1.0 at 12 h and ~1.14 at 6 h; fees are about
+24 h deadlines cost ~0.9 vol points all-in against ~1.0 at 12 h, ~1.14 at 6 h, ~1.17 at 2 h and ~1.20 at 1.5 h; fees are about
 60% of the fills' cost; Saturday windows fill under 10% (the remainder dominates).
 """
 
