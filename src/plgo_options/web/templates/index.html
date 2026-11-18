@@ -4123,6 +4123,7 @@
         <div class="collat-header-right">
           <button id="xb-rest-rfq" class="btn-secondary" style="width:auto;display:none" title="What the bot left unfilled at the deadline (orders expired in the last 24 h), previewed as Block RFQ: a person sends and accepts">Rest &rarr; Block RFQ</button>
           <button id="xb-new-btn" class="btn-primary" style="width:auto">+ New order</button>
+          <button id="xb-rfq-new-btn" class="btn-secondary" style="width:auto" title="Pick the legs of a structure and preview it as Block RFQ">+ New RFQ</button>
           <button id="xb-refresh" class="btn-secondary collat-refresh-btn" title="Reload orders and the selected order">&#8635; Refresh</button>
         </div>
       </div>
@@ -4182,6 +4183,22 @@
         <button id="xb-q-go" class="btn-secondary" style="width:auto">Preview as Block RFQ</button>
       </div>
       <div id="xb-rfq"></div>
+    </section>
+
+    <section class="card" id="xb-rfq-new" style="display:none">
+      <h2>New Block RFQ</h2>
+      <p style="font-size:.72rem;color:var(--muted);margin:0 0 .6rem;max-width:85ch">Pick the legs; “Preview” prices them like a solution
+        from the optimizer (one structure per expiry, Deribit's 250-contract minimum, the limit at fair plus the allowance) in the
+        Review card, where you send it, then accept a quote. Testnet only.</p>
+      <table class="pf-table" style="width:auto">
+        <thead><tr><th style="text-align:left">Expiry</th><th style="text-align:left">Type</th><th style="text-align:left">Strike</th>
+          <th style="text-align:left">Side</th><th>Qty</th><th></th></tr></thead>
+        <tbody id="xb-rl-body"></tbody>
+      </table>
+      <div style="margin-top:.6rem;display:flex;gap:.5rem">
+        <button id="xb-rl-add" class="btn-secondary" style="width:auto">+ Leg</button>
+        <button id="xb-rl-go" class="btn-primary" style="width:auto">Preview as Block RFQ</button>
+      </div>
     </section>
 
     <section class="card" id="xb-new" style="display:none">
@@ -4698,7 +4715,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=8"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=20"></script>
+<script src="/static/execbot.js?v=21"></script>
 <script src="/static/fwmonitor.js?v=8"></script>
 </body>
 </html>

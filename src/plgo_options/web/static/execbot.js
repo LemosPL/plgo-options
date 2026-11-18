@@ -558,30 +558,40 @@
 
   // ── New order pickers: underlying, expiry, type, strike → the instrument name ──
   let chain = null;   // /instruments: { asset, index, expiries: [{ code, days, C: [strikes], P: [strikes] }] }
+  const expOptions = () => chain.expiries.map((e) =>
+    `<option value="${esc(e.code)}">${esc(e.code)} (${e.days < 1 ? fmt(e.days * 24) + " h" : fmt(e.days) + " d"})</option>`).join("");
+  // the next quarterly (Deribit's last Friday of Mar, Jun, Sep, Dec) a week or more away, else the first expiry a week or more away
+  function defaultExp() {
+    const quarterly = (e) => /^(2[2-9]|3[01])(MAR|JUN|SEP|DEC)\d{2}$/.test(e.code);
+    const e = chain.expiries.find((x) => quarterly(x) && x.days >= 7) || chain.expiries.find((x) => x.days >= 7) || chain.expiries[0];
+    return e ? e.code : "";
+  }
+  const strikesOf = (code, cp) => (chain && chain.expiries.find((x) => x.code === code) || {})[cp] || [];
+  const atmOf = (ks) => ks.length && chain.index ? ks.reduce((a, b) => Math.abs(b - chain.index) < Math.abs(a - chain.index) ? b : a) : null;
+  const strikeOptions = (ks) => { const atm = atmOf(ks); return ks.map((k) => `<option value="${k}">${k}${k === atm ? " (ATM)" : ""}</option>`).join(""); };
+  async function chainLoad() {
+    if (chain) return chain;
+    chain = await api("GET", "/api/execution-bot/instruments");
+    return chain;
+  }
+
   async function pickersLoad() {
     try {
-      chain = await api("GET", "/api/execution-bot/instruments");
+      await chainLoad();
     } catch (e) {
       $("xb-n-exp").innerHTML = `<option value="">unavailable</option>`;
       status("Could not list Deribit's options: " + e.message + " (type the instrument instead)", true);
       return;
     }
     const cur = $("xb-n-exp").value;
-    $("xb-n-exp").innerHTML = chain.expiries.map((e) =>
-      `<option value="${esc(e.code)}">${esc(e.code)} (${e.days < 1 ? fmt(e.days * 24) + " h" : fmt(e.days) + " d"})</option>`).join("");
-    // keep the expiry already picked; otherwise the next quarterly (Deribit's last Friday of Mar, Jun, Sep,
-    // Dec) a week or more away, else the first expiry a week or more away
-    const quarterly = (e) => /^(2[2-9]|3[01])(MAR|JUN|SEP|DEC)\d{2}$/.test(e.code);
-    const first = chain.expiries.find((e) => quarterly(e) && e.days >= 7) || chain.expiries.find((e) => e.days >= 7)
-      || chain.expiries[0];
-    $("xb-n-exp").value = chain.expiries.some((e) => e.code === cur) ? cur : (first ? first.code : "");
+    $("xb-n-exp").innerHTML = expOptions();
+    // keep the expiry already picked; otherwise the default
+    $("xb-n-exp").value = chain.expiries.some((e) => e.code === cur) ? cur : defaultExp();
     strikesFill();
   }
   function strikesFill(keep) {
-    const e = chain && chain.expiries.find((x) => x.code === $("xb-n-exp").value);
-    const ks = e ? e[$("xb-n-type").value] : [];
-    const atm = ks.length && chain.index ? ks.reduce((a, b) => Math.abs(b - chain.index) < Math.abs(a - chain.index) ? b : a) : null;
-    $("xb-n-strike").innerHTML = ks.map((k) => `<option value="${k}">${k}${k === atm ? " (ATM)" : ""}</option>`).join("");
+    const ks = strikesOf($("xb-n-exp").value, $("xb-n-type").value), atm = atmOf(ks);
+    $("xb-n-strike").innerHTML = strikeOptions(ks);
     const want = keep ?? parseInt($("xb-n-strike").dataset.last || "", 10);
     $("xb-n-strike").value = ks.includes(want) ? want : (atm ?? "");
     instFromPickers();
@@ -604,6 +614,58 @@
   $("xb-n-type")?.addEventListener("change", () => strikesFill());
   $("xb-n-strike")?.addEventListener("change", instFromPickers);
   $("xb-n-inst")?.addEventListener("change", pickersFromInst);
+
+  // ── New RFQ: legs picked by hand, previewed through the same Block RFQ preview as a solution ──
+  function rfqLegRow(prev) {
+    const tr = document.createElement("tr");
+    tr.className = "xb-rl";
+    const code = prev ? prev.querySelector(".xb-rl-exp").value : defaultExp();
+    tr.innerHTML = `<td><select class="xb-rl-exp" style="width:8.5rem">${expOptions()}</select></td>
+      <td><select class="xb-rl-type"><option value="C">Call</option><option value="P">Put</option></select></td>
+      <td><select class="xb-rl-strike" style="width:7.5rem"></select></td>
+      <td><select class="xb-rl-side"><option value="Buy">Buy</option><option value="Sell">Sell</option></select></td>
+      <td><input class="xb-rl-qty" type="number" value="${prev ? prev.querySelector(".xb-rl-qty").value : 300}" min="1" step="1" style="width:6rem"></td>
+      <td><button class="btn-secondary xb-rl-del" title="Remove the leg" style="width:auto;margin:0;padding:.15rem .55rem;font-size:.72rem">&times;</button></td>`;
+    tr.querySelector(".xb-rl-exp").value = code;
+    if (prev) tr.querySelector(".xb-rl-type").value = prev.querySelector(".xb-rl-type").value;
+    const fill = () => {
+      const ks = strikesOf(tr.querySelector(".xb-rl-exp").value, tr.querySelector(".xb-rl-type").value);
+      const sel = tr.querySelector(".xb-rl-strike"), was = parseInt(sel.value, 10);
+      sel.innerHTML = strikeOptions(ks);
+      sel.value = ks.includes(was) ? was : (atmOf(ks) ?? "");
+    };
+    tr.querySelector(".xb-rl-exp").addEventListener("change", fill);
+    tr.querySelector(".xb-rl-type").addEventListener("change", fill);
+    tr.querySelector(".xb-rl-del").addEventListener("click", () => tr.remove());
+    fill();
+    if (prev) {   // a new leg starts one listed strike above the last one: the usual spread
+      const sel = tr.querySelector(".xb-rl-strike"), ks = [...sel.options].map((o) => +o.value);
+      const i = ks.indexOf(+prev.querySelector(".xb-rl-strike").value);
+      if (i >= 0 && i + 1 < ks.length) sel.value = ks[i + 1];
+      tr.querySelector(".xb-rl-side").value = prev.querySelector(".xb-rl-side").value === "Buy" ? "Sell" : "Buy";
+    }
+    $("xb-rl-body").appendChild(tr);
+  }
+  async function rfqNewOpen() {
+    const box = $("xb-rfq-new");
+    if (box.style.display !== "none") { box.style.display = "none"; return; }
+    try { await chainLoad(); } catch (e) { status("Could not list Deribit's options: " + e.message, true); return; }
+    box.style.display = "";
+    if (!$("xb-rl-body").children.length) rfqLegRow();
+  }
+  function rfqNewPreview() {
+    const trades = [...document.querySelectorAll("#xb-rl-body .xb-rl")].map((tr) => {
+      const code = tr.querySelector(".xb-rl-exp").value, cp = tr.querySelector(".xb-rl-type").value, k = +tr.querySelector(".xb-rl-strike").value;
+      return { counterparty: "Deribit", instrument: `ETH-${code}-${k}-${cp}`, opt: cp, strike: k,
+        qty: parseFloat(tr.querySelector(".xb-rl-qty").value), side: tr.querySelector(".xb-rl-side").value };
+    }).filter((t) => t.strike && t.qty > 0);
+    if (!trades.length) { status("Add at least one leg with a quantity.", true); return; }
+    window.execbotReceive(trades, { source: "New RFQ", asset: "ETH" });
+    rfqPreview();
+  }
+  $("xb-rfq-new-btn")?.addEventListener("click", rfqNewOpen);
+  $("xb-rl-add")?.addEventListener("click", () => { const rs = document.querySelectorAll("#xb-rl-body .xb-rl"); rfqLegRow(rs[rs.length - 1]); });
+  $("xb-rl-go")?.addEventListener("click", rfqNewPreview);
 
   // ── manual order ──────────────────────────────────────────────
   async function createManual() {
