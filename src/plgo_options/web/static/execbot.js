@@ -556,6 +556,52 @@
   }
   ["xb-r-hours", "xb-n-hours"].forEach((id) => { $(id)?.addEventListener("input", () => deadlineHint(id)); deadlineHint(id); });
 
+  // ── New order pickers: underlying, expiry, type, strike → the instrument name ──
+  let chain = null;   // /instruments: { asset, index, expiries: [{ code, days, C: [strikes], P: [strikes] }] }
+  async function pickersLoad() {
+    try {
+      chain = await api("GET", "/api/execution-bot/instruments");
+    } catch (e) {
+      $("xb-n-exp").innerHTML = `<option value="">unavailable</option>`;
+      status("Could not list Deribit's options: " + e.message + " (type the instrument instead)", true);
+      return;
+    }
+    const cur = $("xb-n-exp").value;
+    $("xb-n-exp").innerHTML = chain.expiries.map((e) =>
+      `<option value="${esc(e.code)}">${esc(e.code)} (${e.days < 1 ? fmt(e.days * 24) + " h" : fmt(e.days) + " d"})</option>`).join("");
+    // keep the expiry already picked; otherwise the first one a week or more away
+    const first = chain.expiries.find((e) => e.days >= 7) || chain.expiries[0];
+    $("xb-n-exp").value = chain.expiries.some((e) => e.code === cur) ? cur : (first ? first.code : "");
+    strikesFill();
+  }
+  function strikesFill(keep) {
+    const e = chain && chain.expiries.find((x) => x.code === $("xb-n-exp").value);
+    const ks = e ? e[$("xb-n-type").value] : [];
+    const atm = ks.length && chain.index ? ks.reduce((a, b) => Math.abs(b - chain.index) < Math.abs(a - chain.index) ? b : a) : null;
+    $("xb-n-strike").innerHTML = ks.map((k) => `<option value="${k}">${k}${k === atm ? " (ATM)" : ""}</option>`).join("");
+    const want = keep ?? parseInt($("xb-n-strike").dataset.last || "", 10);
+    $("xb-n-strike").value = ks.includes(want) ? want : (atm ?? "");
+    instFromPickers();
+  }
+  function instFromPickers() {
+    const k = $("xb-n-strike").value, e = $("xb-n-exp").value;
+    if (k) $("xb-n-strike").dataset.last = k;
+    $("xb-n-inst").value = e && k ? `${$("xb-n-und").value}-${e}-${k}-${$("xb-n-type").value}` : "";
+  }
+  function pickersFromInst() {   // a pasted or typed name sets the pickers, when Deribit lists it
+    const m = /^([A-Z]+)-(\d{1,2}[A-Z]{3}\d{2})-(\d+)-([CP])$/.exec($("xb-n-inst").value.trim().toUpperCase());
+    if (!m || !chain) return;
+    const e = chain.expiries.find((x) => x.code === m[2]);
+    if (!e || !e[m[4]].includes(+m[3])) return;
+    $("xb-n-exp").value = m[2];
+    $("xb-n-type").value = m[4];
+    strikesFill(+m[3]);
+  }
+  $("xb-n-exp")?.addEventListener("change", () => strikesFill());
+  $("xb-n-type")?.addEventListener("change", () => strikesFill());
+  $("xb-n-strike")?.addEventListener("change", instFromPickers);
+  $("xb-n-inst")?.addEventListener("change", pickersFromInst);
+
   // ── manual order ──────────────────────────────────────────────
   async function createManual() {
     const v = (id) => $(id).value.trim();
@@ -585,7 +631,7 @@
     try { await api("POST", `/api/execution-bot/halt/${b.dataset.mode}/clear`); await load(); } catch (e) { status(e.message, true); }
   });
   $("xb-rest-rfq")?.addEventListener("click", restToRfq);
-  $("xb-new-btn")?.addEventListener("click", () => { deadlineHint("xb-n-hours"); $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
+  $("xb-new-btn")?.addEventListener("click", () => { deadlineHint("xb-n-hours"); if ($("xb-new").style.display === "none") pickersLoad(); $("xb-new").style.display = $("xb-new").style.display === "none" ? "" : "none"; });
   $("xb-n-submit")?.addEventListener("click", createManual);
   $("xb-r-reprice")?.addEventListener("click", reprice);
   $("xb-r-create")?.addEventListener("click", createFromReview);

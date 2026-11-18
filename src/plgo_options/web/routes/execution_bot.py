@@ -6,6 +6,7 @@ Scheduler-facing (guarded by X-Signals-Token):
 People-facing:
     GET  /api/execution-bot/status               kill switch, last tick, order counts, modes available
     GET  /api/execution-bot/orders               parent orders, open ones first
+    GET  /api/execution-bot/instruments          Deribit's listed ETH options: expiries, strikes per type, the index (New order pickers)
     POST /api/execution-bot/orders               create one (testnet and live: confirmed, within the rails)
     POST /api/execution-bot/preview              an optimizer solution's Deribit legs, priced now
     POST /api/execution-bot/rfq-preview          the same solution as Block RFQ structures (nothing sent)
@@ -77,6 +78,35 @@ async def tick(x_signals_token: str | None = Header(default=None)):
         return await bot.run_minute()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"execution bot: {type(e).__name__}: {e}")
+
+
+_chain: tuple[float, dict] | None = None
+
+
+@router.get("/instruments")
+async def instruments():
+    """The New order pickers: each listed expiry (soonest first) with its call and put strikes, and the ETH
+    index to start the strike at the money. Read from Deribit at most once a minute."""
+    global _chain
+    if _chain and time.time() - _chain[0] < 60:
+        return _chain[1]
+    async with httpx.AsyncClient(timeout=15) as c:
+        r, ix = await c.get(f"{API}/get_instruments", params={"currency": "ETH", "kind": "option", "expired": "false"}), \
+            await c.get(f"{API}/get_index_price", params={"index_name": "eth_usd"})
+    if r.status_code != 200:
+        raise HTTPException(502, f"Deribit instruments: HTTP {r.status_code}")
+    by: dict[str, dict[str, set[int]]] = {}
+    for i in r.json()["result"]:
+        if INSTRUMENT.fullmatch(i["instrument_name"]):
+            _, code, k, cp = i["instrument_name"].split("-")
+            by.setdefault(code, {"C": set(), "P": set()})[cp].add(int(k))
+    now = time.time()
+    exps = sorted(((parse_exp(code).timestamp(), code) for code in by), key=lambda x: x[0])
+    out = {"asset": "ETH", "index": (ix.json().get("result") or {}).get("index_price") if ix.status_code == 200 else None,
+           "expiries": [{"code": code, "expires_ts": ts, "days": round((ts - now) / 86400, 2),
+                         "C": sorted(by[code]["C"]), "P": sorted(by[code]["P"])} for ts, code in exps if ts > now]}
+    _chain = (now, out)
+    return out
 
 
 @router.get("/status")
