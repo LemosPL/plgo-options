@@ -354,6 +354,9 @@
           <div><span style="color:var(--muted)">RFQ fees (est.)</span><br>${usd(t.rfq_fee_usd, 0)}</div>
           <div><span style="color:var(--muted)">Total at fair</span><br>${pay(t.fair_usd)}</div>
         </div>
+        ${s.screen_cost_usd != null && s.kind !== "box" ? `<div style="font-size:.78rem;margin-top:.45rem;padding:.35rem .55rem;border:1px solid var(--border);border-radius:4px">
+          <b>Rule:</b> accept a quote at or better than <b>${pay(s.limit_usd)}</b> per unit (our limit) ·
+          worse than <b>${pay(s.fair_usd + s.screen_cost_usd - s.rfq_fee_usd)}</b> the screen is cheaper: cancel</div>` : ""}
         <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
           <button class="btn-secondary xb-rfq-send" data-i="${i}" ${s.fit_warning ? "disabled title=\"the limit comes from a spline off its quotes: price again in a few minutes\""
             : s.hedge ? "disabled title=\"the hedge leg is not sent yet: untick Hedge\"" : ""}>Send as RFQ (testnet)</button>
@@ -438,6 +441,7 @@
           Deribit writes it ${v.side === "buy" ? "as sent" : "reversed (we sell it)"} · amount ${fmt(v.amount)}</span></div>
       ${quotes}
       ${v.best ? `<div style="margin-top:.3rem">Best: ${pay(v.best.ours_usd)} per unit, ${pay(v.best.total_usd)} in all</div>` : ""}
+      ${open ? rfqVerdict(review?.rfq?.structures[i], v) : ""}
       ${acc}
       <div class="xb-rfq-err" style="color:var(--red)"></div>
       ${open ? `<div style="margin-top:.4rem;display:flex;gap:.5rem">
@@ -445,6 +449,24 @@
         <button class="btn-secondary xb-rfq-cancel">Cancel RFQ</button></div>` : ""}</div>`;
     slot.querySelector(".xb-rfq-accept")?.addEventListener("click", () => rfqAct(i, "accept", v));
     slot.querySelector(".xb-rfq-cancel")?.addEventListener("click", () => rfqAct(i, "cancel", v));
+  }
+
+  // One line that says what to do with the best quote: accept / beats the screen but above our limit / cancel.
+  // All in $ for the whole structure, against the spline's fair value, fees included (the preview's figures).
+  function rfqVerdict(s, v) {
+    const line = (color, text) => `<div style="margin-top:.4rem;padding:.35rem .55rem;border-radius:4px;font-weight:600;`
+      + `border:1px solid ${color};color:${color}">${text}</div>`;
+    if (!v.quotes_visible || !v.best) return line("var(--muted)", "Waiting for quotes…");
+    if (!s || s.screen_cost_usd == null) return v.best.inside ? line("var(--green)", "✅ Accept: the best quote is inside our limit")
+      : line("var(--red)", "❌ Above our limit: cancel");
+    const rfqCost = v.best.total_usd - s.fair_usd * s.amount + s.rfq_fee_usd * s.amount;   // over fair, fees in
+    const screen = s.screen_cost_usd * s.amount;
+    const save = screen - rfqCost;
+    const vp = s.kind !== "box" && s.vega_usd > 0 ? ` (${fmt(rfqCost / s.amount / s.vega_usd, 2)} vp over fair, fees in)` : "";
+    if (v.best.inside) return line("var(--green)", `✅ Accept: saves ${usd(save, 0)} vs the screen${vp}`);
+    if (save > 0) return line("var(--orange, #d29922)", `🟡 Beats the screen by ${usd(save, 0)} but is above our limit${vp}: `
+      + `raise the allowance and send again, or cancel`);
+    return line("var(--red)", `❌ Cancel: the screen is ${usd(-save, 0)} cheaper${vp}`);
   }
 
   async function rfqAct(i, action, v) {
