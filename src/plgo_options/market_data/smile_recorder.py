@@ -77,19 +77,25 @@ def quarterlies(instruments: list[dict], n: int, now: float) -> list[str]:
     return sorted(out, key=out.get)[:n]
 
 
+class RateLimited(RuntimeError):
+    """Deribit kept answering 429 (too many requests from this IP)."""
+
+
 async def expiry_books(expiries: list[str] | None = None, n_expiries: int = 3,
                        depth: int = 10) -> tuple[dict[str, list[dict]], float, float]:
     """Every ETH option order book of the given expiries (default: the next n
     quarterlies), depth levels deep: ({expiry: books}, t0, t1)."""
     async with httpx.AsyncClient(timeout=20) as c:
         async def get(method: str, **params) -> dict | list:
-            for attempt in range(5):
+            # rate limited (429): back off and retry, ~25 s in all (the recorders running on the same
+            # machine share Deribit's per-IP budget with the app)
+            for attempt in range(8):
                 r = await c.get(f"{API}/{method}", params=params)
-                if r.status_code != 429:  # rate limited: back off and retry
+                if r.status_code != 429:
                     r.raise_for_status()
                     return r.json()["result"]
-                await asyncio.sleep(1 + attempt)
-            raise RuntimeError(f"{method} {params}: rate limited")
+                await asyncio.sleep(min(1 + attempt, 4))
+            raise RateLimited(f"{method} {params}: rate limited")
 
         inst = await get("get_instruments", currency="ETH", kind="option", expired="false")
         if expiries is None:

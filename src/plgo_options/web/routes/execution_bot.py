@@ -36,10 +36,13 @@ from plgo_options.config import SIGNALS_TOKEN
 from plgo_options.execution import bot, from_optimizer, markouts, rails, rfq, rfq_desk
 from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
+from plgo_options.market_data.smile_recorder import RateLimited
 from plgo_options.pricing.smile_fit import parse_exp
 from plgo_options.web.auth import current_user
 
 router = APIRouter()
+RATE_LIMITED = ("Deribit is rate-limiting this server (too many requests from its IP, e.g. recorders running "
+                "on the same machine): try again in a few seconds")
 INSTRUMENT = re.compile(r"ETH-\d{1,2}[A-Z]{3}\d{2}-\d+-[CP]")
 API = "https://www.deribit.com/api/v2/public"
 
@@ -195,6 +198,8 @@ async def preview(req: PreviewReq):
         raise HTTPException(400, f"the execution bot trades Deribit ETH options only, not {req.asset}")
     try:
         return await from_optimizer.preview(req.trades, req.asset, req.start_vp, req.hours)
+    except RateLimited:
+        raise HTTPException(503, RATE_LIMITED)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
 
@@ -232,6 +237,8 @@ async def rfq_preview(req: RfqPreviewReq):
         raise HTTPException(400, f"Block RFQ is for Deribit ETH options only, not {req.asset}")
     try:
         return await rfq.preview_rfq(req.trades, req.asset, req.unit, req.allowance_vp, req.box_bps, req.hedge)
+    except RateLimited:
+        raise HTTPException(503, RATE_LIMITED)
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Deribit: {type(e).__name__}: {e}")
 

@@ -694,6 +694,7 @@ def test_testnet_orders_need_a_testnet_key_and_production_stays_refused(tmp_path
         monkeypatch.setattr(routes, "testnet_configured", lambda: True)
         with pytest.raises(HTTPException, match="confirm it first"):
             await routes.create(mk("testnet", confirmed=False), req)
+        monkeypatch.setenv("EXEC_MAX_ORDER_CONTRACTS", "250")   # not whatever the local .env says
         with pytest.raises(HTTPException, match="per-order cap"):
             await routes.create(mk("testnet", qty=251), req)
         assert (await routes.create(mk("testnet"), req))["order"]["mode"] == "testnet"
@@ -851,3 +852,22 @@ def test_live_needs_the_flag_production_settings_and_a_production_connector(monk
         rails.live_connector()
     assert rails.check_create("live", 10, False) and rails.check_create("live", 10, True) is None
     assert rails.check_create("paper", 10_000, False) is None
+
+
+
+def test_preview_says_so_when_deribit_rate_limits(monkeypatch):
+    from fastapi import HTTPException
+    from plgo_options.market_data.smile_recorder import RateLimited
+    from plgo_options.web.routes import execution_bot as routes
+
+    async def limited(*a, **k):
+        raise RateLimited("get_order_book: rate limited")
+    monkeypatch.setattr(routes.from_optimizer, "preview", limited)
+    monkeypatch.setattr(routes.rfq, "preview_rfq", limited)
+
+    async def body():
+        for call in (routes.preview(routes.PreviewReq(trades=[])), routes.rfq_preview(routes.RfqPreviewReq(trades=[]))):
+            with pytest.raises(HTTPException) as ex:
+                await call
+            assert ex.value.status_code == 503 and "rate-limiting" in ex.value.detail
+    asyncio.run(body())
