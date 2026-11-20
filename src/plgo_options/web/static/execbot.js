@@ -106,7 +106,7 @@
         <td>${usd(avg)}</td><td title="best cost at the touch vs the threshold, last tick">${now}</td>
         <td style="text-align:left" title="${esc(o.last_detail || "")}">${esc(ACTION[o.last_action] || o.last_action || "—")}</td>
         <td>${open ? left(o.deadline_ts) : when(o.finished_ts)}</td>
-        <td style="color:${stColor}">${esc(o.status)}</td><td style="white-space:nowrap">${acts}</td></tr>`;
+        <td style="color:${stColor}">${esc(o.status)}${leftoverTag(o)}</td><td style="white-space:nowrap">${acts}</td></tr>`;
     }).join("");
   }
 
@@ -256,7 +256,7 @@
   function params() {
     const n = (id) => parseFloat($(id).value);
     return { hours: n("xb-r-hours"), start_vp: n("xb-r-start"), end_vp: n("xb-r-end"), hard_vp: n("xb-r-hard"), cap: n("xb-r-cap"),
-      mode: $("xb-r-mode").value };
+      mode: $("xb-r-mode").value, leftover_rfq: $("xb-r-left").checked };
   }
 
   // testnet and live orders are sent to Deribit: the server creates them only once confirmed
@@ -528,9 +528,22 @@
   // solution: the RFQ preview groups it by expiry, and what is under Deribit's 250-contract minimum
   // stays a leftover (back to the bot, or left). Nothing is sent until someone clicks Send, then Accept.
   let rests = [];
+  // the remainder's way to a Block RFQ (execution/leftovers.py), under the order's status
+  function leftover(o) {
+    try { return o.leftover_json ? JSON.parse(o.leftover_json) : null; } catch (e) { return null; }
+  }
+  function leftoverTag(o) {
+    const l = leftover(o);
+    if (!l) return "";
+    const txt = { pending: "RFQ: pricing", sent: "RFQ: quotes", filled: "RFQ: filled", lapsed: "RFQ: lapsed", skipped: "RFQ: not sent" }[l.status] || l.status;
+    const color = { filled: "var(--green)", lapsed: "var(--red)", skipped: "var(--muted)" }[l.status] || "var(--orange)";
+    return `<div style="font-size:.7rem;color:${color}" title="${esc(l.detail || "")}">${esc(txt)}</div>`;
+  }
+
   function restButton(orders) {
     const since = Date.now() / 1000 - 24 * 3600;
-    rests = orders.filter((o) => o.status === "expired" && o.via !== "rfq" && o.qty - o.filled >= 1 && (o.finished_ts || 0) >= since);
+    const auto = (o) => ["pending", "sent", "filled"].includes(leftover(o)?.status);   // the bot has it, or did it
+    rests = orders.filter((o) => o.status === "expired" && o.via !== "rfq" && o.qty - o.filled >= 1 && (o.finished_ts || 0) >= since && !auto(o));
     const b = $("xb-rest-rfq");
     if (!b) return;
     b.style.display = rests.length ? "" : "none";
@@ -696,7 +709,7 @@
     const body = {
       instrument: v("xb-n-inst").toUpperCase(), side: v("xb-n-side"), qty: n("xb-n-qty"), hours: n("xb-n-hours"),
       start_vp: n("xb-n-start"), end_vp: n("xb-n-end"), hard_vp: n("xb-n-hard"), cap: n("xb-n-cap"),
-      mode: $("xb-n-mode").value, note: v("xb-n-note") };
+      mode: $("xb-n-mode").value, note: v("xb-n-note"), leftover_rfq: $("xb-n-left").checked };
     if (!confirmVenue([body], body.mode)) return;
     try {
       const r = await api("POST", "/api/execution-bot/orders", body);

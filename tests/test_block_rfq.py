@@ -64,6 +64,8 @@ class FakeRfq:
         return {"access_token": "tok", "expires_in": 900, "scope": self.scope}
 
     def _create_block_rfq(self, p):
+        if not any(x["direction"] == "buy" for x in p["legs"]):   # testnet, 20 Nov 2026
+            return self._error(-32602, "Invalid params")
         amounts = [leg["amount"] for leg in p["legs"]]
         amount = reduce(math.gcd, [int(a) for a in amounts])
         rev = {"buy": "sell", "sell": "buy"}
@@ -310,3 +312,13 @@ async def test_desk_accepts_only_inside_our_limit(fake, desk):
 async def test_desk_forgets_nothing_it_did_not_send(desk):
     with pytest.raises(KeyError):
         await desk.read(999)
+
+
+async def test_an_all_sell_structure_goes_out_as_its_long_version_and_is_sold(fake):
+    legs = [dict(instrument=C2400, side="sell", qty=300), dict(instrument=C2500, side="sell", qty=150)]
+    rfq = await _client(fake).create(legs, "plgo-sell", hedge={"instrument_name": "ETH-25DEC26", "direction": "buy", "amount": 100000})
+    (sent,) = _sent(fake, "create_block_rfq")
+    assert {x["direction"] for x in sent["legs"]} == {"buy"} and json.loads(sent["hedge"])["direction"] == "sell"
+    assert rfq.side == "sell" and rfq.amount == 150
+    fake.quote("bids", 0.02, 150)
+    assert rfq.ours(0.02) == -0.02                 # we receive Deribit's bid for its structure

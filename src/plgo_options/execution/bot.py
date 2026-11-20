@@ -2,7 +2,9 @@
 
 Each scheduler call holds the lease and runs a pass every 5 seconds for 55 seconds
 (run_minute). A pass, for every working parent order (execution/store.py):
-    1) past its deadline: expired, the unfilled remainder reported, nothing crossed
+    1) past its deadline: expired, the unfilled remainder reported, nothing crossed; with
+       leftover_rfq, the remainder then goes out as a Block RFQ the bot accepts within the
+       order's hard limit (leftovers.py, a step of every pass)
     2) the kill switch on: nothing sent, the pass recorded as halted
     3) a fill on the same option in the last 2 minutes: it rests (cooldown), so the
        book can refill and our taking does not chase it
@@ -52,7 +54,7 @@ from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile
 
-from . import markouts, rails, store
+from . import leftovers, markouts, rails, store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
 from .deribit import ConnectorError, testnet_connector
 from .paper import PaperConnector, deribit_option_fee
@@ -258,8 +260,8 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
 
 
 async def _busy(now: float) -> bool:
-    """Work to do: an order working, or a markout due within the next minute."""
-    if await store.working_orders():
+    """Work to do: an order working, a remainder on its way to an RFQ, or a markout due within the next minute."""
+    if await store.working_orders() or await store.open_leftovers():
         return True
     return bool(await store.due_markouts(now + SPAN + PERIOD, markouts.HORIZONS, markouts.LATE))
 
@@ -288,9 +290,16 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
             note = f"deadline passed with {o.remaining:g} of {o.qty:g} unfilled"
             await store.add_tick(o.id, now, "expired", detail=note)
             await store.set_status(o.id, "expired", note)
+            if o.leftover_rfq and o.remaining >= QTY_STEP:
+                await store.set_leftover(o.id, leftovers.initial(o, now))
             out["orders"].append({"id": o.id, "action": "expired", "detail": note})
         else:
             live.append(o)
+    try:
+        if done := await leftovers.step(now, books_fn, halted):
+            out["leftovers"] = done
+    except Exception as ex:  # the remainders' RFQs must never stop the working orders
+        out["leftover_error"] = f"{type(ex).__name__}: {ex}"
     if live and await halted():
         for o in live:
             await _tick(o, now, "halted", record, detail="kill switch on")

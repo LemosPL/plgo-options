@@ -57,19 +57,24 @@ def client() -> BlockRfqClient:
     return _client
 
 
-async def send(legs: list[dict[str, Any]], kind: str, limit_eth: float, amount: float, spot: float,
-               by: str = "", hedge: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Open an RFQ for a previewed structure. ``limit_eth`` is the preview's, per unit of ``amount``."""
-    c = client()
-    label = f"plgo-{kind}-{uuid.uuid4().hex[:10]}"
+async def create(c: BlockRfqClient, legs: list[dict[str, Any]], label: str,
+                 hedge: dict[str, Any] | None = None) -> Rfq:
+    """Open an RFQ, disclosed; anonymous to every maker if the account has no identity to disclose."""
     try:
-        rfq = await c.create(legs, label, hedge=hedge)
+        return await c.create(legs, label, hedge=hedge)
     except DeribitError as ex:
         # A disclosed RFQ needs a name on the account; a personal testnet account has none: go anonymous,
         # to every maker (an anonymous RFQ must name at least 5).
         if "no identity to disclose" not in str(ex):
             raise
-        rfq = await c.create(legs, label, hedge=hedge, disclosed=False, makers=await c.makers())
+        return await c.create(legs, label, hedge=hedge, disclosed=False, makers=await c.makers())
+
+
+async def send(legs: list[dict[str, Any]], kind: str, limit_eth: float, amount: float, spot: float,
+               by: str = "", hedge: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Open an RFQ for a previewed structure. ``limit_eth`` is the preview's, per unit of ``amount``."""
+    c = client()
+    rfq = await create(c, legs, f"plgo-{kind}-{uuid.uuid4().hex[:10]}", hedge)
     # Deribit's amount is the legs' common factor; the preview's should equal it, but scale to be sure.
     per_unit = limit_eth * amount / rfq.amount
     _sent[rfq.block_rfq_id] = Sent(rfq, kind, per_unit, spot, by, time.time())

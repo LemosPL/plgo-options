@@ -8,6 +8,9 @@
     exec_markouts the market after each fill: horizon 0 is the fill itself (index, spline fair,
                   mid, vol, vega), then 5 s to 1 h after it, as the bot saw them (markouts.py)
     exec_lock     a lease so two scheduler calls never work the same orders at once
+
+An order with ``leftover_rfq`` set sends what is unfilled at its deadline as a Block RFQ (leftovers.py);
+``leftover_json`` follows it: {status: pending | sent | filled | lapsed | skipped, detail, rfq, ...}.
 """
 
 from __future__ import annotations
@@ -99,8 +102,14 @@ async def init_exec_tables() -> None:
             await db.execute(f"ALTER TABLE exec_fills ADD COLUMN {col} REAL")
     # Block RFQ legs next to the bot's orders (13 Nov 2026)
     cur = await db.execute("PRAGMA table_info(exec_orders)")
-    if "via" not in {r[1] for r in await cur.fetchall()}:
+    have = {r[1] for r in await cur.fetchall()}
+    if "via" not in have:
         await db.execute("ALTER TABLE exec_orders ADD COLUMN via TEXT NOT NULL DEFAULT 'bot'")
+    # the remainder at the deadline as a Block RFQ (20 Nov 2026)
+    if "leftover_rfq" not in have:
+        await db.execute("ALTER TABLE exec_orders ADD COLUMN leftover_rfq INTEGER NOT NULL DEFAULT 0")
+    if "leftover_json" not in have:
+        await db.execute("ALTER TABLE exec_orders ADD COLUMN leftover_json TEXT")
     await db.commit()
 
 
@@ -108,18 +117,19 @@ def _order(r: Any) -> ThresholdOrder:
     return ThresholdOrder(id=r["id"], instrument=r["instrument"], side=r["side"], qty=r["qty"],
                           filled=r["filled"], created_ts=r["created_ts"], deadline_ts=r["deadline_ts"],
                           start_vp=r["start_vp"], end_vp=r["end_vp"], hard_vp=r["hard_vp"], cap=r["cap"],
-                          mode=r["mode"], status=r["status"])
+                          mode=r["mode"], status=r["status"], leftover_rfq=bool(r["leftover_rfq"]))
 
 
 async def create_order(instrument: str, side: str, qty: float, deadline_ts: float, start_vp: float,
                        end_vp: float, hard_vp: float, cap: float, mode: str = "paper",
-                       created_by: str = "", note: str = "", now: float | None = None) -> int:
+                       created_by: str = "", note: str = "", now: float | None = None,
+                       leftover_rfq: bool = False) -> int:
     db = await get_db()
     cur = await db.execute(
         "INSERT INTO exec_orders (created_ts, created_by, instrument, side, qty, deadline_ts, start_vp,"
-        " end_vp, hard_vp, cap, mode, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        " end_vp, hard_vp, cap, mode, note, leftover_rfq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (now or time.time(), created_by, instrument, side, qty, deadline_ts, start_vp, end_vp, hard_vp,
-         cap, mode, note))
+         cap, mode, note, int(leftover_rfq)))
     await db.commit()
     return cur.lastrowid
 
@@ -170,6 +180,20 @@ async def set_status(oid: int, status: str, note: str | None = None) -> None:
     await db.execute("UPDATE exec_orders SET status = ?, finished_ts = COALESCE(?, finished_ts),"
                      " note = COALESCE(?, note) WHERE id = ?", (status, finished, note, oid))
     await db.commit()
+
+
+async def set_leftover(oid: int, state: dict[str, Any]) -> None:
+    db = await get_db()
+    await db.execute("UPDATE exec_orders SET leftover_json = ? WHERE id = ?", (json.dumps(state), oid))
+    await db.commit()
+
+
+async def open_leftovers() -> list[dict[str, Any]]:
+    """Expired orders whose remainder is still on its way to a Block RFQ (pending or sent), state parsed."""
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM exec_orders WHERE status = 'expired' AND leftover_rfq = 1"
+                           " AND json_extract(leftover_json, '$.status') IN ('pending', 'sent') ORDER BY id")
+    return [dict(r) | {"leftover": json.loads(r["leftover_json"])} for r in await cur.fetchall()]
 
 
 async def add_tick(oid: int, ts: float, action: str, *, theta_vp=None, theta_usd=None, best_cost=None,

@@ -61,6 +61,7 @@ class ThresholdOrder:
     cap: float  # contracts per take
     mode: str = "paper"
     status: str = "working"
+    leftover_rfq: bool = False  # at the deadline, the remainder goes out as a Block RFQ (leftovers.py)
 
     @property
     def expiry(self) -> str:

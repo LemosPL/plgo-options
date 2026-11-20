@@ -66,6 +66,8 @@ class OrderCreate(BaseModel):
     mode: Literal["paper", "testnet", "live"] = "paper"
     confirmed: bool = Field(False, description="testnet and live orders: the person confirmed sending them")
     note: str = ""
+    leftover_rfq: bool = Field(True, description="at the deadline, send the remainder as a Block RFQ the bot "
+                                                 "accepts within the hard limit (testnet)")
 
 
 async def _listed(instrument: str) -> bool:
@@ -156,7 +158,8 @@ async def _check(req: OrderCreate, now: float) -> str | None:
 
 async def _create(req: OrderCreate, by: str, now: float) -> int:
     return await store.create_order(req.instrument, req.side, req.qty, now + req.hours * 3600, req.start_vp,
-                                    req.end_vp, req.hard_vp, req.cap, req.mode, by, req.note, now)
+                                    req.end_vp, req.hard_vp, req.cap, req.mode, by, req.note, now,
+                                    leftover_rfq=req.leftover_rfq)
 
 
 @router.post("/orders")

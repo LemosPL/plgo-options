@@ -23,6 +23,10 @@ What the Deribit API does that shapes this file (docs.deribit.com, Block RFQ):
     so it fills entirely or not at all. An RFQ that filled cannot fill twice,
     so a timeout is settled by reading the RFQ back, never by resending.
 
+    Deribit refuses a structure with no long leg ("at least one long leg required", testnet
+    20 Nov 2026), so an all-sell structure goes out as its long version, hedge reversed too,
+    and comes back flipped: side "sell", we sell Deribit's structure.
+
     Labels are not unique on Deribit either. ``create`` looks the label up
     among our recent RFQs first and adopts an RFQ it finds rather than opening
     a second (a stray RFQ costs nothing but taker rating; still, one per label).
@@ -148,13 +152,18 @@ class BlockRfqClient:
         found = await self._by_label(label)
         if found is not None:
             return await self._checked(found, legs, label)
+        # no long leg: Deribit refuses it; send the long version, sold (read back as all flipped)
+        flip = not any(x["side"] == "buy" for x in legs)
+        rev = {"buy": "sell", "sell": "buy"}
         params: dict[str, Any] = {
-            "legs": [{"instrument_name": x["instrument"], "amount": x["qty"], "direction": x["side"]}
-                     for x in legs],
+            "legs": [{"instrument_name": x["instrument"], "amount": x["qty"],
+                      "direction": rev[x["side"]] if flip else x["side"]} for x in legs],
             "label": label, "disclosed": disclosed}
         if makers:
             params["makers"] = list(makers)
         if hedge:
+            if flip:
+                hedge = hedge | {"direction": rev[hedge["direction"]]}
             params["hedge"] = json.dumps(hedge)  # Deribit takes the hedge leg as a JSON string
         try:
             raw = await self.conn._rpc("private/create_block_rfq", params)
