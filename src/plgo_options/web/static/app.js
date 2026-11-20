@@ -5270,6 +5270,43 @@ function pfTokenPriceAxes(spots) {
 // has six legal steps, so T+16d is not drawn here. It stays in the matrix
 // below, exactly as it does on v4.
 //
+// FIL: a price point every $0.10 on the Portfolio P&L chart. Every curve /
+// collateral line drawn on the spot ladder gets the round $0.10 prices added
+// (values interpolated between the two ladder spots around them, linear in
+// log-spot like the axis), so hovering at $0.60 reads the book there; the x
+// axis gets a gridline at each $0.10 (labels thinned where log spacing is
+// tight). Returns the axis overrides.
+const PF_PRICE_STEP = { FIL: 0.1 };
+function pfAddPricePoints(traces, spots) {
+  const step = PF_PRICE_STEP[currentAsset];
+  if (!step || !spots || spots.length < 2) return {};
+  const lo = Math.min(...spots), hi = Math.max(...spots);
+  const grid = [];
+  for (let k = Math.ceil(lo / step - 1e-9); k * step <= hi + 1e-12; k++) grid.push(Math.round(k * step * 1e6) / 1e6);
+  if (!grid.length) return {};
+  const xs = [...new Set([...spots, ...grid])].sort((a, b) => a - b);
+  const lx = spots.map(Math.log);
+  const at = (arr, x) => {
+    const l = Math.log(x);
+    let j = lx.findIndex(v => v >= l - 1e-12);
+    if (j < 0) return arr[arr.length - 1];
+    if (j === 0) return arr[0];
+    const w = (l - lx[j - 1]) / (lx[j] - lx[j - 1] || 1);
+    const a = arr[j - 1], b2 = arr[j];
+    if (Array.isArray(a)) return a.map((v, i) => (typeof v === "number" && typeof b2[i] === "number") ? v + w * (b2[i] - v) : v);
+    return (typeof a === "number" && typeof b2 === "number") ? a + w * (b2 - a) : a;
+  };
+  for (const t of traces) {
+    if (t.x !== spots || !Array.isArray(t.y) || t.y.length !== spots.length) continue;
+    const y = t.y, cd = t.customdata;
+    t.x = xs;
+    t.y = xs.map(x => at(y, x));
+    if (Array.isArray(cd) && cd.length === spots.length) t.customdata = xs.map(x => at(cd, x));
+  }
+  const label = v => v <= 1 + 1e-9 || Math.abs(v * 2 - Math.round(v * 2)) < 1e-9;   // every 0.10 to $1, then every 0.50
+  return { tickvals: grid, ticktext: grid.map(v => label(v) ? `$${v.toFixed(2)}` : ""), hoverformat: ".4f" };
+}
+
 function pfRenderPayoffChart() {
   const spots = pfData.spot_ladder;
   // Only horizons the book actually carries, in v4's chart order.
@@ -5415,6 +5452,7 @@ function pfRenderPayoffChart() {
     },
   };
 
+  Object.assign(layout.xaxis, pfAddPricePoints(traces, spots));
   Plotly.react("portfolio-payoff-chart", traces, layout, { responsive: true, scrollZoom: true });
 
   const noteEl = document.getElementById("pf-collateral-note");
