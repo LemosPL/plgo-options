@@ -34,7 +34,8 @@ from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 
 from .models import BookDepth, Side
 
-FINAL_HOUR = 3600.0
+FINAL_HOUR = 3600.0   # the hard limit's stretch at the end is at most this long...
+FINAL_SHARE = 1.0     # ...and at most this share of the order's life (1.0: the full hour, if the order is that long)
 QTY_STEP = 1.0  # Deribit's minimum ETH option amount
 # RMS half-spreads (smile_fit.fit_error): above it the expiry's spline is not trusted and its
 # orders wait. Replayed on 3-11 Nov 2026 (2,161 snapshots): median 0.14, 99th percentile 0.85;
@@ -78,9 +79,14 @@ class ThresholdOrder:
         return max(self.qty - self.filled, 0.0)
 
 
+def final_stretch(created_ts: float, deadline_ts: float) -> float:
+    """Seconds at hard_vp before the deadline: FINAL_SHARE of the order's life, at most FINAL_HOUR."""
+    return min(FINAL_HOUR, FINAL_SHARE * max(deadline_ts - created_ts, 0.0))
+
+
 def threshold_vp(o: ThresholdOrder, now: float) -> float:
-    """start_vp at creation, linear to end_vp one hour before the deadline, hard_vp after."""
-    ramp_end = o.deadline_ts - FINAL_HOUR
+    """start_vp at creation, linear to end_vp at the final stretch, hard_vp in it (final_stretch)."""
+    ramp_end = o.deadline_ts - final_stretch(o.created_ts, o.deadline_ts)
     if now >= ramp_end:
         return o.hard_vp
     span = max(ramp_end - o.created_ts, 1.0)

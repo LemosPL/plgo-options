@@ -43,6 +43,17 @@ def test_threshold_ramps_to_the_end_an_hour_early_then_holds_the_hard_limit():
     assert threshold_vp(o, NOW + 11 * H) == threshold_vp(o, NOW + 13 * H) == 0.9   # never above hard_vp
 
 
+def test_final_stretch_is_a_share_of_the_order_capped_at_the_hour(monkeypatch):
+    from plgo_options.execution import threshold
+    assert threshold.final_stretch(NOW, NOW + 2 * H) == H                 # the default: the final hour
+    monkeypatch.setattr(threshold, "FINAL_SHARE", 0.25)
+    assert threshold.final_stretch(NOW, NOW + 2 * H) == pytest.approx(0.5 * H)
+    assert threshold.final_stretch(NOW, NOW + 24 * H) == H                # never longer than FINAL_HOUR
+    o = _order(deadline_ts=NOW + 2 * H)
+    assert threshold_vp(o, NOW + 1.5 * H - 1) == pytest.approx(0.7, abs=1e-3)
+    assert threshold_vp(o, NOW + 1.5 * H) == 0.9
+
+
 def test_decide_takes_the_top_of_book_only_up_to_its_size_and_the_cap():
     fair = dict(fair=100.0, iv=0.5, vega=4.0, inside=True)        # threshold 0.5 vp = $2.00
     px = lambda usd: usd / S                                       # noqa: E731

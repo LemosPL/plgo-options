@@ -50,6 +50,9 @@ Steps where the spline is off its quotes are skipped, as the bot's guard does.
 60% of the fills' cost; Saturday windows fill under 10% (the remainder dominates).
 Without the deep ITM 2200 put (--drop 2200-P; its book is wide, it is what is left over): ~0.95 vp all-in at
 2 h, ~0.91 at 6 h, ~0.71 at 24 h; the fills ~0.6 vp with the fee, the rest crossed at the deadline ~1.1 vp.
+--finals (the hard limit's final stretch as a share of the order's life, 20 Nov 2026, same order): barely
+matters: at 2 h, 0.946 vp all-in with the final hour, 0.940 with 30 min, 0.937 with 12 min (fewer fills, more left
+over); at 24 h, 0.709 with the final hour, 0.695 with the last 6 h. Within the noise: the bot keeps the final hour.
 """
 
 from __future__ import annotations
@@ -73,6 +76,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from plgo_options.execution.models import BookDepth  # noqa: E402
+from plgo_options.execution import threshold  # noqa: E402
 from plgo_options.execution.threshold import MAX_FIT_ERROR, ThresholdOrder, decide  # noqa: E402
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd  # noqa: E402
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile  # noqa: E402
@@ -351,30 +355,34 @@ def ramps(steps, S, data, legs, a) -> None:
     print(f"\nlegs: {', '.join(f'{s} {q} {n[12:]}' for n, s, q in legs)} ({qty:,} contracts); cap {a.cap:g}, rest {a.cooldown:g} s; "
           f"windows every {a.every:g} h; steps with the spline off its quotes skipped, as the bot does")
     print("USD per window, mean (vol points per contract in brackets); all-in = fills vs spline + fees + the rest at the touch\n")
-    print(f"{'hours':>5} {'start/end/hard':>15} {'windows':>7} {'filled':>7} {'all done':>8} {'took (h)':>8} "
+    print(f"{'hours':>5} {'start/end/hard':>15} {'final':>6} {'windows':>7} {'filled':>7} {'all done':>8} {'took (h)':>8} "
           f"{'fills+fee $':>12} {'rest at touch $':>15} {'all-in $':>10} {'all-in vp':>9} {'worst $':>9}")
     out = []
-    for h in hs:
+    finals = [float(x) for x in a.finals.split(",")] if a.finals else [threshold.FINAL_SHARE]
+    threshold.FINAL_HOUR = a.final_cap * H
+    for h, r, fs in ((h, r, fs) for h in hs for r in rs for fs in finals):
+        threshold.FINAL_SHARE = fs
         windows = np.arange(t_first, steps[-1] - h * H, a.every * H)
-        for r in rs:
-            rows = []
-            for t0 in windows:
-                run = work(steps, S, data, legs, float(t0), h, r[0], r[1], r[2], a.cap, a.cooldown)
-                if run is None or run["cover"] < a.min_cover:
-                    continue
-                d = summarize(run, legs)
-                rows.append(d | {"t0": t0, "hours_window": h, "ramp": "/".join(f"{x:g}" for x in r)})
-            d = pd.DataFrame(rows)
-            if d.empty:
+        rows = []
+        for t0 in windows:
+            run = work(steps, S, data, legs, float(t0), h, r[0], r[1], r[2], a.cap, a.cooldown)
+            if run is None or run["cover"] < a.min_cover:
                 continue
-            allin = d.usd_spline + d.usd_fee + d.usd_finish
-            # vol points: all-in USD over the order's contracts x their arrival vega (as the page's cost table)
-            vp_allin = (allin / d.qty_vega).mean()
-            print(f"{h:>5g} {'/'.join(f'{x:g}' for x in r):>15} {len(d):>7} {d.filled.mean():>7.1%} {d.all_done.mean():>8.0%} "
-                  f"{d.hours.mean():>8.1f} {(d.usd_spline + d.usd_fee).mean():>12,.0f} {d.usd_finish.mean():>15,.0f} "
-                  f"{allin.mean():>10,.0f} {vp_allin:>9.3f} {allin.max():>9,.0f}", flush=True)
-            out.append(d.assign(all_in=allin))
-    f = CACHE / a.expiry / (f"ramp_results_no_{a.drop.replace(',', '_')}.csv" if a.drop else "ramp_results.csv")
+            d = summarize(run, legs)
+            rows.append(d | {"t0": t0, "hours_window": h, "ramp": "/".join(f"{x:g}" for x in r), "final_share": fs})
+        d = pd.DataFrame(rows)
+        if d.empty:
+            continue
+        allin = d.usd_spline + d.usd_fee + d.usd_finish
+        # vol points: all-in USD over the order's contracts x their arrival vega (as the page's cost table)
+        vp_allin = (allin / d.qty_vega).mean()
+        fin = threshold.final_stretch(0, h * H) / 60
+        print(f"{h:>5g} {'/'.join(f'{x:g}' for x in r):>15} {fin:>5.0f}m {len(d):>7} {d.filled.mean():>7.1%} {d.all_done.mean():>8.0%} "
+              f"{d.hours.mean():>8.1f} {(d.usd_spline + d.usd_fee).mean():>12,.0f} {d.usd_finish.mean():>15,.0f} "
+              f"{allin.mean():>10,.0f} {vp_allin:>9.3f} {allin.max():>9,.0f}", flush=True)
+        out.append(d.assign(all_in=allin))
+    f = CACHE / a.expiry / ((f"ramp_results_no_{a.drop.replace(',', '_')}" if a.drop else "ramp_results")
+                            + ("_finals" if a.finals else "") + ".csv")
     pd.concat(out).to_csv(f, index=False)
     print(f"\nper window: {f}")
 
@@ -396,6 +404,9 @@ def main() -> None:
     p.add_argument("--min-cover", type=float, default=0.95, help="share of steps with data a window needs")
     p.add_argument("--ramps", help="start/end/hard ramps, e.g. 0.3/0.5/0.9,0.5/0.7/0.9 (all-in cost, deadlines from --hours-list)")
     p.add_argument("--hours-list", help="deadlines for --ramps, e.g. 6,12,24")
+    p.add_argument("--finals", help="final stretches for --ramps: shares of the order's life at the hard limit, "
+                   "each capped at --final-cap hours, e.g. 1,0.25,0.1 (1 = the bot's final hour)")
+    p.add_argument("--final-cap", type=float, default=1.0, help="hours, the longest final stretch")
     p.add_argument("--drop", help="legs to leave out of the order, e.g. 2200-P (with their data)")
     a = p.parse_args()
     legs = LEGS
