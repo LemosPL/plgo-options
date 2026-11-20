@@ -952,11 +952,18 @@ async function replicateStrategy() {
 
 function replicateStrategySync() {
   const legs = pricingActiveLegs();
+  // No vol surface = no expiries, smiles or spot to price from (e.g. Deribit's
+  // API down for maintenance answers 503). Say so instead of the misleading
+  // "each leg must have an expiry".
+  if (legs.some(l => String(l.type || "").toUpperCase() !== "PERP") && !(volSurface && (volSurface.smiles || []).length)) {
+    alert("No vol surface loaded: Deribit market data is unavailable right now (Deribit's API answers 503, e.g. during maintenance), so the options can't be priced. Try again once Deribit is back.");
+    return;
+  }
   if (legs.length === 0) { alert(legsAllOff() ? "Every leg is unticked: tick at least one to price." : "Add at least one leg."); return; }
   for (const l of legs) {
     const s = parseFloat(l.strike);
     if (isNaN(s) || s <= 0) { alert("Each leg must have a valid strike price."); return; }
-    if (!l.expiry) { alert("Each leg must have an expiry selected."); return; }
+    if (!l.expiry && String(l.type || "").toUpperCase() !== "PERP") { alert("Each leg must have an expiry selected."); return; }
   }
   if (!volSurface) { alert("Vol surface not loaded yet — wait for page init."); return; }
 
@@ -988,7 +995,7 @@ function replicateStrategySync() {
   // P&L now (BS value with each leg's own T)
   const pnlNow = new Array(nPts).fill(0);
   // P&L at first expiry (near-term legs at intrinsic, far legs at BS with remaining T)
-  const sortedExpiries = uniqueExpiries.map(e => ({ code: e, dte: getSmileForExpiry(e).dte })).sort((a, b) => a.dte - b.dte);
+  const sortedExpiries = uniqueExpiries.map(e => ({ code: e, dte: (getSmileForExpiry(e) || { dte: 0 }).dte })).sort((a, b) => a.dte - b.dte);
   const firstDte = sortedExpiries[0].dte;
   const lastDte = sortedExpiries[sortedExpiries.length - 1].dte;
   const pnlFirstExpiry = new Array(nPts).fill(0);
@@ -1263,7 +1270,7 @@ function replicateStrategySync() {
 
   // Vol smile chart — show the first expiry's smile with all legs marked
   const primarySmile = getSmileForExpiry(sortedExpiries[0].code);
-  drawSmileChart(primarySmile, legDetails.filter(d => !d.is_perp));
+  if (primarySmile) drawSmileChart(primarySmile, legDetails.filter(d => !d.is_perp));
 }
 
 function drawSmileChart(smile, pricedLegs) {
