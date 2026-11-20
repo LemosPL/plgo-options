@@ -21,7 +21,6 @@ from typing import Any
 
 import httpx
 
-from plgo_options.market_data.smile_recorder import expiry_books
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, parse_exp, spline_fair, spline_smile
 
 from .models import BookDepth
@@ -93,8 +92,9 @@ async def _listed(asset: str) -> set[str]:
 
 
 async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5, hours: float = 12.0,
-                  listed_fn=_listed, books_fn=expiry_books) -> dict[str, Any]:
-    """deribit_legs plus, per leg, what the bot would see now."""
+                  listed_fn=_listed, books_fn=None) -> dict[str, Any]:
+    """deribit_legs plus, per leg, what the bot would see now. The books are read as the bot reads
+    them (``preview_books``): one book summary for the smile, the legs' own books for their sizes."""
     legs, skipped = deribit_legs(trades, asset)
     now = time.time()
     names = await listed_fn(asset) if legs else set()
@@ -113,7 +113,8 @@ async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5,
         ok.append(leg)
     fits: dict[str, tuple] = {}
     if ok:
-        books, _, _ = await books_fn(sorted({x["instrument"].split("-")[1] for x in ok}))
+        books = await (books_fn or preview_books)(sorted({x["instrument"].split("-")[1] for x in ok}),
+                                                  sorted({x["instrument"] for x in ok}))
         for leg in ok:
             leg.update(_price_now(leg, books.get(leg["instrument"].split("-")[1], []), now, start_vp, fits))
     warnings = fit_warnings(fits)
@@ -121,6 +122,24 @@ async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5,
         if leg["instrument"].split("-")[1] in {w["expiry"] for w in warnings}:
             leg["note"] = "spline off its quotes: the bot waits" + (f"; {leg['note']}" if leg.get("note") else "")
     return {"legs": ok, "skipped": skipped, "asof": now, "warnings": warnings}
+
+
+async def preview_books(expiries: list[str], instruments: list[str]) -> dict[str, list[dict]]:
+    """The expiries' books as the bot reads them without its quote feed (bot._books): every option's
+    prices, marks and the forward from one book summary call, the instruments' own books for their
+    sizes. ~1 s, where reading all ~90 books of an expiry took ~13 s and ran into Deribit's per-IP
+    rate limit (20 Nov 2026). The other strikes have no sizes, so the spline weighs them by spread only."""
+    import httpx
+
+    from plgo_options.market_data.smile_recorder import RateLimited
+
+    from .bot import _books  # the bot imports this module's neighbours: import here, not at the top
+    try:
+        return await _books(expiries, instruments)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:  # the page says so (routes: a 503 with a readable message)
+            raise RateLimited("Deribit rate limit") from e
+        raise
 
 
 def fit_warnings(fits: dict[str, tuple]) -> list[dict]:

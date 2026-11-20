@@ -44,11 +44,10 @@ from typing import Any
 
 from scipy.stats import norm
 
-from plgo_options.market_data.smile_recorder import expiry_books
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import otm_quotes, parse_exp, spline_fair, spline_smile
 
-from .from_optimizer import _listed, deribit_legs, fit_warnings
+from .from_optimizer import _listed, deribit_legs, fit_warnings, preview_books
 
 BOX = "BOX_NEUTRALIZER"
 # Deribit refuses an ETH option RFQ whose option legs add up to fewer contracts ("insufficient minimum
@@ -160,7 +159,7 @@ def price_structure(kind: str, legs: list[dict], ratio: list[int], amount: int, 
 
 async def preview_rfq(trades: list[dict], asset: str = "ETH", unit: int = 100, allowance_vp: float = 0.2,
                       box_bps: float = 40.0, hedge: bool = False, listed_fn=_listed,
-                      books_fn=expiry_books) -> dict[str, Any]:
+                      books_fn=None) -> dict[str, Any]:
     """The solution's Deribit trades as Block RFQ structures, priced now, and the leftovers."""
     boxes, legs, skipped = split(trades, asset)
     now = time.time()
@@ -211,7 +210,8 @@ async def preview_rfq(trades: list[dict], asset: str = "ETH", unit: int = 100, a
                                           why=f"{kind} under Deribit's {MIN_RFQ_CONTRACTS}-contract RFQ minimum ({n:g})"))
     out = []
     if structs:
-        books, _, _ = await books_fn(sorted({s[1][0]["instrument"].split("-")[1] for s in structs}))
+        books = await (books_fn or preview_books)(sorted({s[1][0]["instrument"].split("-")[1] for s in structs}),
+                                                  sorted({x["instrument"] for s in structs for x in s[1]}))
         fits = {}
         for e in books:
             qd = otm_quotes(e, books[e], dt.datetime.fromtimestamp(now, dt.timezone.utc))

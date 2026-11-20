@@ -261,9 +261,9 @@ def test_preview_prices_listed_legs_and_drops_the_rest(monkeypatch):
     async def listed(_):
         return {NAME}
 
-    async def books(expiries):
-        assert expiries == [EXPIRY]
-        return {EXPIRY: _books(-3.0)}, NOW, NOW + 1
+    async def books(expiries, instruments):
+        assert expiries == [EXPIRY] and instruments == [NAME]
+        return {EXPIRY: _books(-3.0)}
 
     out = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
     (leg,) = out["legs"]
@@ -543,9 +543,9 @@ def test_rfq_structures_a_box_apart_the_rest_in_units_with_a_delta_hedge(monkeyp
     async def listed(_):
         return {f"ETH-{EXPIRY}-{k}-{c}" for k in STRIKES for c in "CP"}
 
-    async def books(expiries):
+    async def books(expiries, instruments):
         assert expiries == [EXPIRY]
-        return {EXPIRY: _books()}, NOW, NOW + 1
+        return {EXPIRY: _books()}
 
     assert rfq.ratios([5000, 2573, 3406, 40], 100) == ([50, 25, 34, 0], 100, [0, 73, 6, 40])
     assert rfq.ratios([800, 400], 100) == ([2, 1], 400, [0, 0])
@@ -615,8 +615,8 @@ def test_both_previews_warn_when_the_spline_is_off_its_quotes(monkeypatch):
     async def listed(_):
         return {NAME}
 
-    async def books(expiries):
-        return {EXPIRY: _books(-3.0)}, NOW, NOW + 1
+    async def books(expiries, instruments):
+        return {EXPIRY: _books(-3.0)}
 
     clean = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, books_fn=books))
     assert clean["warnings"] == [] and "off its quotes" not in clean["legs"][0]["note"]
