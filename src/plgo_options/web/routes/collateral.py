@@ -59,34 +59,24 @@ PNL_LABELS = {"PNL_TRADES": "PnL – Trades", "PNL_ETH_FWD": "PnL – ETH Forwar
 # Everything worth exactly $1 a unit.
 USD_ASSETS = ("USD", "USDC", *PNL_ASSETS)
 
-# Realised P&L of CLOSED forwards (closed before maturity: locked, paid at the
-# fixing) counts automatically in this row, per counterparty, in the book of
-# the forward's asset - on top of whatever is typed in the cell. SETTLED
-# forwards are left out: their cash has moved and belongs in USDC.
+# Open forwards' UNREALISED P&L (MTM at live spot) counts automatically in this
+# row, per counterparty, in the book of the forward's asset, on top of what is
+# typed in the cell. Realised / closed P&L is entered by hand (USD). Because it
+# sits on the collateral side here, the Collateral Map's liabilities leave the
+# forwards out (include_forwards=False), so each forward is counted once.
 AUTO_PNL_ASSET = "PNL_TRADES"
 
 
-async def realised_forward_pnl_rows(book: str | None = None) -> list[dict]:
-    """Closed forwards' realised P&L as collateral-map rows
-    {counterparty, asset: PNL_TRADES, book, qty, auto: True}. Never raises."""
-    try:
-        from plgo_options.data.forward_repository import ensure_tables, list_forwards
-        db = await get_db()
-        await ensure_tables(db)
-        closed = await list_forwards(db, None, ("closed",))
-    except Exception:
-        return []
-    agg: dict[tuple[str, str], list] = {}
-    for f in closed:
-        b = str(f["asset"]).upper()
-        b = b if b in COLLATERAL_BOOKS else "FIL"
-        if book and b != book.upper():
-            continue
-        k = (str(f["counterparty"]).strip().lower(), b)
-        e = agg.setdefault(k, [str(f["counterparty"]).strip(), 0.0])
-        e[1] += float(f["settled_pnl_usd"] or 0.0)
-    return [{"counterparty": cp, "asset": AUTO_PNL_ASSET, "book": b, "qty": round(v, 2), "auto": True}
-            for (_, b), (cp, v) in agg.items() if abs(v) > 0.005]
+def forward_pnl_rows(fwd_mtm_by_book: dict[str, dict[str, dict]]) -> list[dict]:
+    """{book: {cp_lower: {"counterparty", "mtm"}}} -> collateral-map rows
+    {counterparty, asset: PNL_TRADES, book, qty, auto: True}."""
+    out = []
+    for book, by_cp in fwd_mtm_by_book.items():
+        for f in by_cp.values():
+            if abs(float(f.get("mtm") or 0.0)) > 0.005:
+                out.append({"counterparty": f["counterparty"], "asset": AUTO_PNL_ASSET, "book": book,
+                            "qty": round(float(f["mtm"]), 2), "auto": True})
+    return out
 
 
 def merge_auto_pnl(rows: list[dict], auto: list[dict]) -> list[dict]:
@@ -235,7 +225,7 @@ def _otc_forwards(data: dict | None) -> dict[str, dict]:
     return out
 
 
-def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str, str], dict[str, int]]:
+def _compute_liabilities(data: dict | None, include_forwards: bool = True) -> tuple[dict[str, float], dict[str, str], dict[str, int]]:
     """For a single-asset portfolio response, return:
        liabilities[cp_lower], display_names[cp_lower], position_count[cp_lower].
 
@@ -263,14 +253,15 @@ def _compute_liabilities(data: dict | None) -> tuple[dict[str, float], dict[str,
         liabilities[k] = max(0.0, liabilities.get(k, 0.0) - perp["mtm"])
         counts[k] = counts.get(k, 0) + 1
     # Forwards net the same way: a forward we are losing on adds to what we owe.
-    for k, f in _otc_forwards(data).items():
+    # (The Collateral Map counts them on the collateral side instead: off.)
+    for k, f in (_otc_forwards(data) if include_forwards else {}).items():
         display.setdefault(k, f["counterparty"])
         liabilities[k] = max(0.0, liabilities.get(k, 0.0) - f["mtm"])
         counts[k] = counts.get(k, 0) + 1
     return liabilities, display, counts
 
 
-def _net_mtm_by_cp(data: dict | None) -> dict[str, float]:
+def _net_mtm_by_cp(data: dict | None, include_forwards: bool = True) -> dict[str, float]:
     """Signed MtM per counterparty (lower-cased) for a single-asset portfolio
     response: every option position plus any OTC perp held with it. The
     netted liability is max(0, −Σ) of this — one netting set per
@@ -285,7 +276,7 @@ def _net_mtm_by_cp(data: dict | None) -> dict[str, float]:
             out[cp] = out.get(cp, 0.0) + float(p.get("current_mtm") or 0)
     for k, perp in _otc_perps(data).items():
         out[k] = out.get(k, 0.0) + perp["mtm"]
-    for k, f in _otc_forwards(data).items():
+    for k, f in (_otc_forwards(data) if include_forwards else {}).items():
         out[k] = out.get(k, 0.0) + f["mtm"]
     return out
 
@@ -795,7 +786,7 @@ async def _effective_prices(assets: list[str]) -> tuple[dict, dict, dict]:
     return prices, overrides, live
 
 
-async def _liability_by_cp() -> tuple[dict[str, dict[str, float]], dict[str, str], dict[str, int], dict[str, float]]:
+async def _liability_by_cp(fwd_mtm: dict | None = None) -> tuple[dict[str, dict[str, float]], dict[str, str], dict[str, int], dict[str, float]]:
     """Per-counterparty MtM liability, per option book: {cp: {"ETH": x, "FIL": y}}.
 
     Each book's liability is computed on its own (an OTC perp nets only within
@@ -807,11 +798,15 @@ async def _liability_by_cp() -> tuple[dict[str, dict[str, float]], dict[str, str
     disp: dict[str, str] = {}
     counts: dict[str, int] = {}
     net_mtm: dict[str, float] = {}
+    fwd_mtm = {} if fwd_mtm is None else fwd_mtm
+    fwd_mtm.clear()
     for book in COLLATERAL_BOOKS:
         port = await _gather_portfolio(book)
-        for k, v in _net_mtm_by_cp(port).items():
+        # Forwards: on the collateral side (PnL - Trades), not in the liability.
+        fwd_mtm[book] = _otc_forwards(port)
+        for k, v in _net_mtm_by_cp(port, include_forwards=False).items():
             net_mtm[k] = net_mtm.get(k, 0.0) + v
-        l, d, n = _compute_liabilities(port)
+        l, d, n = _compute_liabilities(port, include_forwards=False)
         for k, v in l.items():
             liab.setdefault(k, {b: 0.0 for b in COLLATERAL_BOOKS})[book] = v
         for k, name in d.items():
@@ -843,7 +838,6 @@ async def collateral_map():
     # managed as loans, not as desk risk — but it does mean the collateral map
     # is now the managed book's map, not everything the firm has posted.
     rows = drop_collar_loans(rows)
-    auto_rows = drop_collar_loans(await realised_forward_pnl_rows())
 
     assets = list(MAP_ASSETS)
     for r in rows:
@@ -865,6 +859,9 @@ async def collateral_map():
         entry["books"][book][(r["asset"] or "").upper()] = float(r["qty"] or 0)
     # Manual cells as typed (what the inputs show and save), before the auto P&L.
     manual = {k: {b: dict(v["books"][b]) for b in COLLATERAL_BOOKS} for k, v in cps.items()}
+    fwd_mtm: dict[str, dict] = {}
+    liab, liab_disp, pos_counts, liab_netted = await _liability_by_cp(fwd_mtm)
+    auto_rows = drop_collar_loans(forward_pnl_rows(fwd_mtm))
     auto_by_cp: dict[str, dict[str, float]] = {}
     for a in auto_rows:
         k = a["counterparty"].lower()
@@ -872,8 +869,6 @@ async def collateral_map():
         cell = entry["books"][a["book"]]
         cell[AUTO_PNL_ASSET] = float(cell.get(AUTO_PNL_ASSET, 0.0)) + a["qty"]
         auto_by_cp.setdefault(k, {})[a["book"]] = auto_by_cp.get(k, {}).get(a["book"], 0.0) + a["qty"]
-
-    liab, liab_disp, pos_counts, liab_netted = await _liability_by_cp()
     for k, n in liab_disp.items():
         cps.setdefault(k, {"display": n, "books": {b: {} for b in COLLATERAL_BOOKS}})
 

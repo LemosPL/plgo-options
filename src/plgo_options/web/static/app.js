@@ -4976,7 +4976,10 @@ function pfInitCompareSets() {
 // no manual scope selection, no hardcoded split. Edit the split on the
 // Collateral page and it flows straight through here.
 function pfBookQtysFor(cp) {
-  return (cp && cp.books && cp.books[currentAsset]) || {};
+  // Typed collateral only: the curves already carry the open forwards, so the
+  // auto forward MTM on the Collateral Map's P&L - Trades row would count twice.
+  const src = cp && (cp.manual_books || cp.books);
+  return (src && src[currentAsset]) || {};
 }
 
 // Blended haircut rate for holding `qty` of `asset` at `cp`, mirroring the
@@ -17725,13 +17728,13 @@ function collatRenderMap() {
     // One editable row per book.
     const bookRows = bookMeta.map(bm => {
       const cells = cps.map(c => {
-        // The input shows / saves what was typed; closed forwards' realised P&L
-        // is added automatically on the P&L - Trades row and shown under it.
+        // The input shows / saves what was typed; open forwards' unrealised P&L
+        // (MTM at spot) is added automatically on the P&L - Trades row.
         const typed = c.manual_books ? ((c.manual_books[bm.book] || {})[a] || 0)
           : ((c.books && c.books[bm.book] && c.books[bm.book][a]) || 0);
         const auto = a === m.auto_pnl_asset ? ((c.auto_pnl || {})[bm.book] || 0) : 0;
         const usd = (typed + auto) * (prices[a] || (isUsdc ? 1 : 0));
-        const autoNote = auto ? `<div class="collat-auto-pnl" title="Realised P&L of this counterparty's closed ${bm.book} forwards, counted automatically (on top of what is typed above)">${auto >= 0 ? "+" : ""}${_collatFmtUsd(auto)} closed fwds</div>` : "";
+        const autoNote = auto ? `<div class="collat-auto-pnl" title="Unrealised P&L (MTM at spot) of this counterparty's open ${bm.book} forwards, counted automatically on top of what is typed above. Closed / realised P&L goes in by hand.">${auto >= 0 ? "+" : ""}${_collatFmtUsd(auto)} open fwds MTM</div>` : "";
         return `<td class="num">
           <input type="number" step="any" ${isPnl ? "" : 'min="0"'} class="collat-qty-input" data-cp="${encodeURIComponent(c.counterparty)}" data-asset="${a}" data-book="${bm.book}" data-auto="${auto}" value="${typed || ""}" placeholder="${isPnl ? "$ P&L" : "0"}" style="width:110px">
           <div style="font-size:.7rem;color:var(--muted)">${usd ? _collatFmtUsd(usd) : "—"}</div>${autoNote}

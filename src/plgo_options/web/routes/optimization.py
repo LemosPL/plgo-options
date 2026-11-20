@@ -67,8 +67,6 @@ async def _fetch_collateral_by_cp(book: str, include_collar_loans: bool = False)
         rows = [dict(r) for r in await cur.fetchall()]
     except Exception:
         return {}
-    from plgo_options.web.routes.collateral import merge_auto_pnl, realised_forward_pnl_rows
-    rows = merge_auto_pnl(rows, await realised_forward_pnl_rows(book))   # closed forwards' P&L
     if not include_collar_loans:
         rows = drop_collar_loans(rows)
     out: dict[str, dict[str, float]] = {}
@@ -103,8 +101,6 @@ async def _aggregate_collateral_inputs(asset: str, include_collar_loans: bool = 
         cur = await db.execute(
             "SELECT counterparty, asset, SUM(qty) AS qty FROM counterparty_collateral GROUP BY counterparty, asset")
         rows = [dict(r) for r in await cur.fetchall()]
-        from plgo_options.web.routes.collateral import merge_auto_pnl, realised_forward_pnl_rows
-        rows = merge_auto_pnl(rows, await realised_forward_pnl_rows())   # closed forwards' P&L
         if not include_collar_loans:
             rows = drop_collar_loans(rows)
         coll: dict[str, dict[str, float]] = {}

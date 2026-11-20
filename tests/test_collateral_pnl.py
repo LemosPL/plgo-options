@@ -11,6 +11,9 @@ from plgo_options.data.database import COLLATERAL_PRICE_SCHEMA, COLLATERAL_SCHEM
 from plgo_options.web.routes import collateral as col
 
 
+FWD_MTM: dict = {}
+
+
 def _db(monkeypatch):
     async def make():
         db = await aiosqlite.connect(":memory:")
@@ -26,7 +29,10 @@ def _db(monkeypatch):
     async def fake_live(force=False):
         return {"USDC": 1.0, "ETH": 2000.0, "FIL": 0.75, "BTC": 90000.0}
 
-    async def fake_liab():
+    async def fake_liab(fwd_mtm=None):
+        if fwd_mtm is not None:          # open forwards' MTM per book, as _liability_by_cp fills it
+            fwd_mtm.clear()
+            fwd_mtm.update(FWD_MTM)
         return ({"flowdesk": {"ETH": 1_000_000.0, "FIL": 0.0}}, {"flowdesk": "Flowdesk"},
                 {"flowdesk": 3}, {"flowdesk": 1_000_000.0})
 
@@ -58,35 +64,33 @@ def test_pnl_rows_are_usd_collateral(monkeypatch):
     asyncio.run(db.close())
 
 
-def test_closed_forwards_realised_pnl_counts_automatically_under_pnl_trades(monkeypatch):
-    from plgo_options.data import forward_repository as frepo
+def test_open_forwards_unrealised_pnl_counts_automatically_under_pnl_trades(monkeypatch):
     db = _db(monkeypatch)
-
-    async def book():
-        await frepo.ensure_tables(db)
-        for asset, cp, side, q, k, status, pnl in [
-            ("ETH", "flowdesk", "sell", 2500, 2346.5, "closed", 1_348_000.0),   # cpty spelled differently
-            ("ETH", "Flowdesk", "buy", 1250, 2100.0, "closed", -363_812.0),
-            ("FIL", "KeyRock", "sell", 4e6, 0.7564, "closed", 305_600.0),
-            ("FIL", "Flowdesk", "sell", 5e6, 0.7544, "settled", 737_500.0),     # cash moved: not counted
-            ("FIL", "Flowdesk", "sell", 5e6, 0.61, "open", None)]:
-            fid = await frepo.insert_forward(db, dict(asset=asset, counterparty=cp, side=side, qty=q, forward_price=k,
-                                                      trade_date="2026-11-01", maturity_date="2026-11-27"), "t")
-            if status != "open":
-                await frepo.set_status(db, fid, status, "t", fixing_price=1.0, settled_pnl_usd=pnl)
-    asyncio.run(book())
+    FWD_MTM.clear()
+    FWD_MTM.update({
+        "ETH": {"flowdesk": {"counterparty": "flowdesk", "net_qty": -2500, "mtm": 1_256_250.0}},
+        "FIL": {"keyrock": {"counterparty": "KeyRock", "net_qty": -1.5e6, "mtm": 102_075.0}},
+    })
     asyncio.run(col.upsert_map_cells(col.MapCells(cells=[
-        col.MapCell(counterparty="Flowdesk", asset="PNL_TRADES", book="ETH", qty=-100_000),
+        col.MapCell(counterparty="Flowdesk", asset="PNL_TRADES", book="ETH", qty=-100_000),   # e.g. closed P&L, by hand
         col.MapCell(counterparty="Flowdesk", asset="USDC", book="ETH", qty=1_000_000)])))
     m = asyncio.run(col.collateral_map())
     by = {c["counterparty"].lower(): c for c in m["counterparties"]}
     fd, kr = by["flowdesk"], by["keyrock"]
-    assert fd["auto_pnl"] == {"ETH": pytest.approx(984_188.0)}
+    assert fd["auto_pnl"] == {"ETH": pytest.approx(1_256_250.0)}
     assert fd["manual_books"]["ETH"]["PNL_TRADES"] == -100_000            # input keeps what was typed
-    assert fd["books"]["ETH"]["PNL_TRADES"] == pytest.approx(884_188.0)   # typed + auto
-    assert fd["total_usd"] == pytest.approx(1_884_188.0)
-    assert kr["auto_pnl"] == {"FIL": pytest.approx(305_600.0)} and kr["usd"]["PNL_TRADES"] == pytest.approx(305_600.0)
-    assert "FIL" not in fd["auto_pnl"]                                     # settled + open left out
-    rows = asyncio.run(col.realised_forward_pnl_rows("FIL"))
-    assert [(r["counterparty"], r["qty"]) for r in rows] == [("KeyRock", 305_600.0)]
+    assert fd["books"]["ETH"]["PNL_TRADES"] == pytest.approx(1_156_250.0)  # typed + open forwards' MTM
+    assert fd["total_usd"] == pytest.approx(2_156_250.0)
+    assert kr["auto_pnl"] == {"FIL": pytest.approx(102_075.0)} and kr["usd"]["PNL_TRADES"] == pytest.approx(102_075.0)
+    assert col.forward_pnl_rows({"ETH": {"x": {"counterparty": "X", "mtm": 0.0}}}) == []
+    FWD_MTM.clear()
     asyncio.run(db.close())
+
+
+def test_collateral_map_liabilities_leave_forwards_out():
+    port = {"positions": [{"counterparty": "Flowdesk", "current_mtm": -3_000_000.0}],
+            "forwards": {"by_counterparty": [{"counterparty": "Flowdesk", "net_qty": -2500, "mtm": 1_000_000.0}]}}
+    with_f, _, _ = col._compute_liabilities(port)
+    without, _, _ = col._compute_liabilities(port, include_forwards=False)
+    assert with_f["flowdesk"] == pytest.approx(2_000_000.0) and without["flowdesk"] == pytest.approx(3_000_000.0)
+    assert col._net_mtm_by_cp(port, include_forwards=False)["flowdesk"] == pytest.approx(-3_000_000.0)
