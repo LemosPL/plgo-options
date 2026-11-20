@@ -21,6 +21,21 @@ _cache_lock = asyncio.Lock() if hasattr(asyncio, "Lock") else None
 
 CACHE_TTL_SECONDS = 10  # cache responses for 10 seconds
 
+# ETH / BTC spot (_spot_with_fallbacks): sanity bounds, last good quote, and
+# the external venues used when Deribit can't answer.
+_SPOT_BOUNDS = {"ETH": (50.0, 100_000.0), "BTC": (1_000.0, 2_000_000.0)}
+SPOT_STALE_OK_SECONDS = 600
+_last_good_spot: dict[str, tuple[float, float]] = {}
+
+
+def _external_spot_sources(asset: str):
+    a = asset.upper()
+    return [
+        ("coinbase", f"https://api.coinbase.com/v2/prices/{a}-USD/spot", lambda r: r.json()["data"]["amount"]),
+        ("kraken", f"https://api.kraken.com/0/public/Ticker?pair={'XETHZUSD' if a == 'ETH' else 'XXBTZUSD'}",
+         lambda r: next(iter(r.json()["result"].values()))["c"][0]),
+    ]
+
 # ---------------------------------------------------------------------------
 # FIL spot sources (see DeribitClient.get_fil_spot_price)
 # ---------------------------------------------------------------------------
@@ -111,14 +126,68 @@ class DeribitClient:
     # -- instruments ------------------------------------------------------
 
     async def get_eth_spot_price(self) -> float:
-        """Return ETH spot price from the perpetual last price."""
-        ticker = await self._get("ticker", {"instrument_name": "ETH-PERPETUAL"})
-        return float(ticker["last_price"])
+        """ETH spot: Deribit's eth_usd index (see _spot_with_fallbacks)."""
+        return await self._spot_with_fallbacks("ETH")
 
     async def get_btc_spot_price(self) -> float:
-        """Return BTC spot price from the perpetual last price."""
-        ticker = await self._get("ticker", {"instrument_name": "BTC-PERPETUAL"})
-        return float(ticker["last_price"])
+        """BTC spot: Deribit's btc_usd index (see _spot_with_fallbacks)."""
+        return await self._spot_with_fallbacks("BTC")
+
+    async def _spot_with_fallbacks(self, asset: str) -> float:
+        """Spot for ETH / BTC, in this order:
+
+        1. Deribit's index (eth_usd / btc_usd): the composite spot.
+        2. The perpetual's MARK price, only while the perp is trading.
+        3. Coinbase, then Kraken spot.
+        4. The last good price, if under SPOT_STALE_OK_SECONDS old.
+
+        It used to be the perpetual's LAST TRADED price, which went badly
+        wrong on 20 Nov 2026: after Deribit's maintenance the perp stayed
+        `locked` and its last trade was from before the outage (ETH read
+        1,963 against an index of 1,639), and Deribit's 429s right after
+        failed every ETH screen. Every quote is bounds-checked.
+        """
+        a = asset.upper()
+        key = f"spot:{a}"
+        now = time.monotonic()
+        cached = _cache.get(key)
+        if cached and now < cached[0]:
+            return cached[1]
+        lo, hi = _SPOT_BOUNDS[a]
+        errors: list[str] = []
+
+        def ok(price) -> float:
+            price = float(price)
+            if not (lo <= price <= hi):
+                raise ValueError(f"implausible {a} price {price}")
+            _cache[key] = (now + CACHE_TTL_SECONDS, price)
+            _last_good_spot[a] = (now, price)
+            return price
+
+        try:
+            idx = await self._get("get_index_price", {"index_name": f"{a.lower()}_usd"})
+            return ok(idx["index_price"])
+        except Exception as exc:  # noqa: BLE001 - try the next source
+            errors.append(f"deribit index: {type(exc).__name__}: {exc}")
+        try:
+            t = await self._get("ticker", {"instrument_name": f"{a}-PERPETUAL"})
+            if str(t.get("state") or "open") != "open":
+                raise RuntimeError(f"perp {t.get('state')}")
+            return ok(t.get("mark_price") or t["last_price"])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"deribit perp: {type(exc).__name__}: {exc}")
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as http_client:
+            for name, url, extract in _external_spot_sources(a):
+                try:
+                    resp = await http_client.get(url, headers={"Cache-Control": "no-cache"})
+                    resp.raise_for_status()
+                    return ok(extract(resp))
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+        last = _last_good_spot.get(a)
+        if last and now - last[0] <= SPOT_STALE_OK_SECONDS:
+            return last[1]
+        raise RuntimeError(f"{a} spot unavailable from all sources - " + "; ".join(errors))
 
     async def get_fil_spot_price(self) -> float:
         """Return FIL spot price, trying each venue in _FIL_SPOT_SOURCES order.
