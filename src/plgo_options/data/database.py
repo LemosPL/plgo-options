@@ -341,6 +341,20 @@ async def init_db():
     from plgo_options.data.forward_repository import seed_conversions
     if await seed_conversions(db):
         logger.info("Converted call/put pairs booked as options into forwards")
+    # One-off (2026-11-20, desk request): PnL - Trades counts ONLY open forwards'
+    # MTM automatically; a closed-P&L figure typed into KeyRock's FIL cell
+    # ($192,000) is zeroed once - only if it still holds exactly that amount.
+    from plgo_options.data.forward_repository import FORWARD_SEED_LOG_SCHEMA
+    await db.execute(FORWARD_SEED_LOG_SCHEMA)
+    _tag = "collateral:zero-keyrock-pnl-trades-fil-192000"
+    _cur = await db.execute("SELECT 1 FROM forward_seed_log WHERE tag = ?", (_tag,))
+    if not await _cur.fetchone():
+        await db.execute(
+            "UPDATE counterparty_collateral SET qty = 0, updated_at = datetime('now') "
+            "WHERE lower(counterparty) = 'keyrock' AND asset = 'PNL_TRADES' AND book = 'FIL' "
+            "AND abs(qty - 192000) < 0.01")
+        await db.execute("INSERT INTO forward_seed_log (tag) VALUES (?)", (_tag,))
+        await db.commit()
     from plgo_options.data import sandbox_repository
     await sandbox_repository.ensure_tables(db)
     if await sandbox_repository.seed(db):
