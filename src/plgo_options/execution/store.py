@@ -237,9 +237,11 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
     db = await get_db()
     cur = await db.execute(
         "SELECT o.id, o.instrument, o.side, o.qty AS order_qty, o.filled, o.status, o.mode, o.via, f.ts, f.qty,"
-        " f.price_usd, f.fair_usd, f.mark_usd, f.mid_usd, f.fee_usd, t.vega FROM exec_fills f"
+        " f.price_usd, f.fair_usd, f.mark_usd, f.mid_usd, f.fee_usd, COALESCE(t.vega, m.vega) AS vega FROM exec_fills f"
         " JOIN exec_orders o ON o.id = f.order_id"
         " LEFT JOIN exec_ticks t ON t.order_id = f.order_id AND t.ts = f.ts"
+        # a testnet fill lands after its tick (the exchange's time): its own markout row has the vega it was priced at
+        " LEFT JOIN exec_markouts m ON m.fill_id = f.id AND m.horizon = 0"
         " WHERE o.id IN (SELECT order_id FROM exec_fills GROUP BY order_id ORDER BY MAX(ts) DESC LIMIT ?)",
         (limit,))
     legs: dict[int, dict[str, Any]] = {}
@@ -259,6 +261,7 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
             if r["vega"]:
                 g[f"{name}_vp_usd"] = g.get(f"{name}_vp_usd", 0.0) + sign * (r["price_usd"] - ref) * r["qty"]
                 g[f"{name}_vega"] = g.get(f"{name}_vega", 0.0) + r["qty"] * r["vega"]
+    await _remainders(db, legs)
     out = []
     for g in sorted(legs.values(), key=lambda g: -g["last_ts"]):
         for name in ("spline", "mark", "mid", "fee"):
@@ -267,6 +270,38 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
             g[f"{name}_vega"] = v
         out.append(g)
     return out
+
+
+async def _remainders(db, legs: dict[int, dict[str, Any]]) -> None:
+    """What an order left at its deadline, as the replay counts it (scripts/execution_replay.py): crossed at
+    the touch on its last tick with a price, fee included, against the spline; the whole remainder at the
+    top-of-book price, so a lower bound. ``left_qty`` the contracts, ``left_usd`` / ``left_vega`` their
+    cost and vega, None when no tick priced it. Only expired orders: a cancelled order's rest was a choice,
+    not a trade. A remainder a Block RFQ filled is in the table as its RFQ legs, so only what it left out
+    (rounding, ``unsent``) counts."""
+    ids = [i for i, g in legs.items() if g["status"] == "expired" and g["order_qty"] > g["filled"]]
+    if not ids:
+        return
+    q = ",".join("?" * len(ids))
+    cur = await db.execute(f"SELECT id, leftover_json FROM exec_orders WHERE id IN ({q})", ids)
+    lo = {r["id"]: json.loads(r["leftover_json"]) if r["leftover_json"] else None for r in await cur.fetchall()}
+    cur = await db.execute(
+        f"SELECT t.order_id, t.best_cost, t.vega FROM exec_ticks t JOIN (SELECT order_id, MAX(ts) AS ts FROM exec_ticks"
+        f" WHERE order_id IN ({q}) AND best_cost IS NOT NULL AND vega IS NOT NULL GROUP BY order_id) l"
+        f" ON l.order_id = t.order_id AND l.ts = t.ts", ids)
+    last = {r["order_id"]: (r["best_cost"], r["vega"]) for r in await cur.fetchall()}
+    for i in ids:
+        g = legs[i]
+        left = g["order_qty"] - g["filled"]
+        st = lo.get(i)
+        if st and st.get("status") == "filled":
+            left = float(st.get("unsent", {}).get(f"{g['instrument']} {g['side']}", 0))
+        if left <= 0:
+            continue
+        g["left_qty"] = left
+        cost, vega = last.get(i, (None, None))
+        g["left_usd"] = left * cost if cost is not None else None
+        g["left_vega"] = left * vega if cost is not None else None
 
 
 async def due_markouts(now: float, horizons: tuple[float, ...], late: float = 60.0) -> list[dict[str, Any]]:

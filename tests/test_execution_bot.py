@@ -882,3 +882,31 @@ def test_preview_says_so_when_deribit_rate_limits(monkeypatch):
                 await call
             assert ex.value.status_code == 503 and "rate-limiting" in ex.value.detail
     asyncio.run(body())
+
+
+def test_the_cost_table_prices_what_an_expired_order_left_at_its_last_priced_tick(tmp_path):
+    run = _db(tmp_path, "left_cost.db")
+
+    async def body():
+        def fill(ts):
+            return dict(ts=ts, intent_id=f"i{ts}", trade_id=f"t{ts}", price_eth=0.05, price_usd=150.0, qty=100.0,
+                        fee_usd=0.9, cost_usd=3.0, fair_usd=147.0, mode="paper", mark_usd=147.5, mid_usd=148.0)
+        a = await store.create_order(NAME, "buy", 300, NOW + 60, 0.5, 0.7, 0.9, 500, "paper", now=NOW)
+        await store.add_tick(a, NOW, "take", best_cost=3.9, vega=5.0, qty=100)
+        await store.add_fills(a, [fill(NOW)])
+        await store.add_tick(a, NOW + 30, "wait", best_cost=6.0, vega=5.0)   # the last priced tick
+        await store.add_tick(a, NOW + 60, "expired", detail="deadline")      # no price on the expiry tick
+        await store.set_status(a, "expired")
+        b = await store.create_order(NAME, "buy", 300, NOW + 60, 0.5, 0.7, 0.9, 500, "paper", now=NOW)
+        await store.add_fills(b, [fill(NOW + 1)])
+        await store.set_status(b, "cancelled")                               # a choice: no remainder counted
+        c = await store.create_order(NAME, "buy", 300, NOW + 60, 0.5, 0.7, 0.9, 500, "testnet", now=NOW,
+                                     leftover_rfq=True)
+        await store.add_fills(c, [fill(NOW + 2)])
+        await store.set_status(c, "expired")
+        await store.set_leftover(c, {"status": "filled", "unsent": {f"{NAME} buy": 5}})  # the RFQ took all but 5
+        legs = {g["id"]: g for g in await store.leg_costs()}
+        assert legs[a]["left_qty"] == 200 and legs[a]["left_usd"] == 200 * 6.0 and legs[a]["left_vega"] == 200 * 5.0
+        assert "left_qty" not in legs[b]
+        assert legs[c]["left_qty"] == 5 and legs[c]["left_usd"] is None    # never priced: shown, not counted
+    run(body)

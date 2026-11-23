@@ -4245,7 +4245,9 @@
         contracts' vega; “All-in” adds the fee to the cost against the mark. “All” weights the legs shown by vega.
         <b>RFQ</b> legs are the trades of an accepted Block RFQ, priced against the same references when it was
         accepted; with both kinds shown, a total for each route compares them. Paper fills assume the whole top of
-        the book with no impact.</p>
+        the book with no impact. “All-in: fees and the remainder in” is the whole cost as the replay counts it, against
+        the spline: the fills, their fees, and what expired orders left at the deadline, crossed at the touch then (fee
+        included; the touch's price for all of it, so a lower bound).</p>
       <div class="chain-wrapper">
         <table class="pf-table">
           <thead><tr><th>#</th><th style="text-align:left">Leg</th><th>Filled</th><th>vs mid (vp)</th><th>vs spline (vp)</th>
@@ -4719,7 +4721,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=8"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=24"></script>
+<script src="/static/execbot.js?v=25"></script>
 <script src="/static/fwmonitor.js?v=8"></script>
 </body>
 </html>

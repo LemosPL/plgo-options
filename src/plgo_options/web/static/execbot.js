@@ -145,7 +145,29 @@
       <td>${vp(pool("mark"))}</td><td>${vp(pool("fee"))}</td><td>${vp(allIn(pool("mark"), pool("fee")))}</td>
       <td>${usd(sum("spline_usd"), 0)}</td><td>${usd(sum("mark_usd"), 0)}</td><td>${usd(sum("fee_usd"), 0)}</td></tr>`;
     };
-    $("xb-costs").innerHTML = all.map(row).join("") + groups.map(total).join("");
+    $("xb-costs").innerHTML = all.map(row).join("") + groups.map(total).join("") + allInRow(all);
+  }
+
+  // All-in, as the replay counts it: the fills against the spline, their fees, and what expired orders left
+  // at the deadline crossed at the touch then (fee included, a lower bound); vol points over all their vega
+  function allInRow(legs) {
+    const left = legs.filter((g) => g.left_qty > 0);
+    if (!left.length) return "";
+    const priced = left.filter((g) => g.left_usd != null);
+    const sum = (xs, f) => xs.reduce((a, g) => a + (f(g) || 0), 0);
+    const fillsUsd = sum(legs, (g) => (g.spline_vp ?? 0) * g.spline_vega + (g.fee_vp ?? 0) * g.fee_vega);
+    const leftUsd = sum(priced, (g) => g.left_usd), vega = sum(legs, (g) => g.spline_vega) + sum(priced, (g) => g.left_vega);
+    const qLeft = sum(left, (g) => g.left_qty), qUnpriced = sum(left.filter((g) => g.left_usd == null), (g) => g.left_qty);
+    const leftVp = sum(priced, (g) => g.left_vega) ? leftUsd / sum(priced, (g) => g.left_vega) : null;
+    const usdAll = sum(legs, (g) => g.spline_usd) + sum(legs, (g) => g.fee_usd) + leftUsd;
+    const tip = `fills vs the spline + fees + ${fmt(qLeft - qUnpriced)} contracts left at expired orders' deadlines, crossed at the touch`
+      + ` on their last priced tick (${leftVp == null ? "—" : fmt(leftVp, 2) + " vp"}, fee included; a lower bound)`
+      + (qUnpriced ? `; ${fmt(qUnpriced)} more left with no price on any tick, not counted` : "");
+    return `<tr style="font-weight:600;border-top:2px solid var(--border)" title="${esc(tip)}"><td></td>
+      <td style="text-align:left">All-in: fees and the remainder in</td>
+      <td>${fmt(sum(legs, (g) => g.filled))} + ${fmt(qLeft)} left${qUnpriced ? ` <span style="color:var(--muted)">(${fmt(qUnpriced)} unpriced)</span>` : ""}</td>
+      <td>—</td><td>${fmt((fillsUsd + leftUsd) / vega, 2)}</td><td>—</td><td>—</td><td>—</td>
+      <td>${usd(usdAll, 0)}</td><td>—</td><td>—</td></tr>`;
   }
 
   // ── markouts ──────────────────────────────────────────────────
