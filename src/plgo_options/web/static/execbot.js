@@ -584,7 +584,8 @@
     if (!(hours > 0)) { el.innerHTML = ""; return; }
     const sat = saturdayHours(Date.now() / 1000, hours), parts = [];
     if (hours < 24) parts.push(`<span style="color:var(--muted)">All-in cost in the replay (6-17 Nov, liquid options): ~0.95 vp at 2 h,`
-      + ` ~0.91 at 6 h, ~0.71 at 24 h. The fills cost ~0.6 vp, fee included; what is left at the deadline, crossed then, ~1.1 vp.</span>`);
+      + ` ~0.91 at 6 h, ~0.71 at 24 h; against crossing it all at the touch at once, 2 h saves nothing measurable, 6 h and`
+      + ` 24 h ~0.08-0.09 vp. The fills cost ~0.6 vp, fee included; what is left at the deadline, crossed then, ~1.1 vp.</span>`);
     if (sat >= hours / 4) parts.push(`<span style="color:var(--red)">${fmt(sat, sat % 1 ? 1 : 0)} of these ${fmt(hours, hours % 1 ? 1 : 0)} h fall on Saturday (UTC):`
       + ` in the replay Saturday windows filled under 10%, the rest left for the deadline. Start after the weekend, or give it longer.</span>`);
     el.innerHTML = parts.join(" ");
