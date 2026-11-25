@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer, markouts, rails, rfq, rfq_desk
+from plgo_options.execution import bot, from_optimizer, leftovers, markouts, rails, rfq, rfq_desk
 from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
 from plgo_options.market_data.smile_recorder import RateLimited
@@ -66,7 +66,7 @@ class OrderCreate(BaseModel):
     mode: Literal["paper", "testnet", "live"] = "paper"
     confirmed: bool = Field(False, description="testnet and live orders: the person confirmed sending them")
     note: str = ""
-    leftover_rfq: bool = Field(True, description="at the deadline, send the remainder as a Block RFQ the bot "
+    leftover_rfq: bool = Field(False, description="at the deadline, send the remainder as a Block RFQ the bot "
                                                  "accepts within the hard limit (testnet)")
 
 
@@ -129,7 +129,7 @@ async def status():
     return {"kill_switch": await kill_switch_on(), "last_tick": await store.last_run(bot.LOCK),
             "counts": counts, "modes": {"paper": True, "testnet": testnet_configured(), "live": live_off is None},
             "live_note": live_off or "production on", "caps": rails.caps(), "today": day,
-            "halts": await store.halts()}
+            "halts": await store.halts(), "leftover_rfq": list(leftovers.modes())}
 
 
 @router.get("/orders")

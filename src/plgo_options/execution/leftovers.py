@@ -22,8 +22,12 @@ An order created with ``leftover_rfq`` that expires with at least one contract l
            by EXPIRY_MARGIN before the RFQ ends: cancelled, ``lapsed``, with the best quote against
            our limit.
 
-Testnet only, like the desk (rfq_desk.py): a live order's remainder is ``skipped`` until the
-testnet run confirms Block RFQ end to end; a paper order's too (no RFQ to simulate against). The
+Off unless switched on, per mode: EXEC_LEFTOVER_RFQ lists the modes whose remainders go out (e.g.
+``testnet``); empty, the default since 25 Nov 2026 (testnet makers' quotes say nothing about production's,
+so the desk wants it back gradually, once in production). A remainder in a mode not listed is ``skipped``,
+and one still pending when the switch goes off is skipped at the next pass; an RFQ already out is still
+watched to its end. A paper order's remainder is always skipped (no RFQ to simulate against). The desk
+(rfq_desk.py) is testnet-only, so listing ``live`` does nothing until it has a production client. The
 kill switch stops sending and accepting; an RFQ already out then lapses on its own.
 
 The RFQ's essentials are kept on the orders (``leftover_json``), not in this process, so a restart or
@@ -33,6 +37,7 @@ another Cloud Run instance picks it up where it was.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -46,7 +51,7 @@ from .block_rfq import GRACE_SECONDS, Rfq
 from .rfq import MIN_RFQ_CONTRACTS, price_structure, ratios
 from .threshold import MAX_FIT_ERROR
 
-MODES = ("testnet",)       # where a remainder goes out as an RFQ (the desk is testnet-only)
+SWITCH = "EXEC_LEFTOVER_RFQ"  # the modes whose remainders go out as an RFQ, comma-separated; empty: off
 UNIT = 10                  # contracts: the structure's round unit; under it per leg stays unfilled
 QUOTE_WAIT = 15.0          # seconds of visible quotes before accepting, so several makers can quote
 EXPIRY_MARGIN = 10.0       # seconds before the RFQ ends: give up, cancel
@@ -56,12 +61,24 @@ BY = "bot (leftovers)"
 BooksFn = Callable[[list[str], list[str]], Awaitable[dict[str, list[dict]]]]
 
 
+def modes() -> tuple[str, ...]:
+    """Where a remainder goes out as an RFQ now: the switch's modes the desk can reach (testnet only, for now)."""
+    on = {m.strip() for m in os.environ.get(SWITCH, "").split(",") if m.strip()}
+    return tuple(m for m in ("testnet",) if m in on)
+
+
+def _off(mode: str) -> str:
+    if mode == "paper":
+        return "paper: no Block RFQ to simulate against"
+    if mode == "testnet":
+        return "Block RFQ for remainders is off (testnet quotes say little about production's); not sent"
+    return f"{mode}: Block RFQ for remainders is not available in {mode} yet; not sent"
+
+
 def initial(o, now: float) -> dict[str, Any]:
     """The leftover state of an order expiring now with ``o.remaining`` unfilled."""
-    if o.mode not in MODES:
-        why = ("paper: no Block RFQ to simulate against" if o.mode == "paper"
-               else f"{o.mode}: Block RFQ is testnet-only for now")
-        return {"status": "skipped", "since": now, "qty": o.remaining, "detail": why}
+    if o.mode not in modes():
+        return {"status": "skipped", "since": now, "qty": o.remaining, "detail": _off(o.mode)}
     return {"status": "pending", "since": now, "qty": o.remaining,
             "detail": f"{o.remaining:g} to send as a Block RFQ"}
 
@@ -97,6 +114,10 @@ async def step(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[boo
         except Exception as ex:  # read again next pass; the RFQ lapses on its own if it never recovers
             out.append({"ids": [r["id"] for r in group], "action": "error", "detail": f"{type(ex).__name__}: {ex}"})
     for (mode, expiry), group in pending.items():
+        if mode not in modes():  # switched off while it waited
+            await _set(group, {"status": "skipped", "at": now, "detail": _off(mode)})
+            out.append({"ids": [r["id"] for r in group], "action": "skipped", "detail": "switched off"})
+            continue
         try:
             out.append(await _send(mode, expiry, group, now, books_fn))
         except Exception as ex:

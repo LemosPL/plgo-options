@@ -48,6 +48,22 @@
     el.style.color = isErr ? "var(--red)" : "";
   }
 
+  // the remainder as a Block RFQ: offered only where the server has it switched on (EXEC_LEFTOVER_RFQ)
+  function leftoverBoxes(st) {
+    const onModes = st.leftover_rfq || [];
+    [["xb-r-left", "xb-r-mode"], ["xb-n-left", "xb-n-mode"]].forEach(([id, modeId]) => {
+      const box = $(id), mode = $(modeId)?.value;
+      if (!box) return;
+      const on = onModes.includes(mode);
+      box.disabled = !on;
+      if (!on) box.checked = false;
+      box.parentElement.title = on
+        ? "at the deadline, what is unfilled goes out as a Block RFQ; the bot accepts the best quote if it costs at most the hard limit, fee included"
+        : `off in ${mode || "this mode"} for now: what is unfilled at the deadline stays unfilled (switched on per mode with EXEC_LEFTOVER_RFQ)`;
+    });
+  }
+  ["xb-r-mode", "xb-n-mode"].forEach((id) => $(id)?.addEventListener("change", () => lastStatus && leftoverBoxes(lastStatus)));
+
   // ── header ────────────────────────────────────────────────────
   function header(st) {
     lastStatus = st;
@@ -55,6 +71,7 @@
       o.disabled = !(st.modes && st.modes[m]);
       if (o.disabled && o.selected) o.parentElement.value = "paper";
     }));
+    leftoverBoxes(st);
     const halts = st.halts || {};
     $("xb-halts").innerHTML = Object.entries(halts).map(([m, h]) => `<div style="border:1px solid var(--red);border-left-width:4px;border-radius:6px;
       padding:.45rem .65rem;margin:.5rem 0;font-size:.8rem"><b style="color:var(--red)">${esc(m)} halted</b> since ${when(h.ts)}: ${esc(h.reason)}.

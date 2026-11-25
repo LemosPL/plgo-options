@@ -24,6 +24,7 @@ async def _not_halted():
 
 @pytest.fixture
 def venue(monkeypatch):
+    monkeypatch.setenv(leftovers.SWITCH, "testnet")
     fake = FakeRfq()
     fake.now = NOW
     monkeypatch.setattr(rfq_desk, "_client", _client(fake))
@@ -126,7 +127,7 @@ def test_paper_live_unticked_and_small_remainders_send_nothing(tmp_path, venue):
         assert not [m for m, _ in venue.calls if m == "private/create_block_rfq"]
         live = await _expired(NAME, "buy", 1000, 0, mode="live")
         await bot._pass(NOW + 1, _books_fn, _not_halted, record=True)
-        assert "testnet-only" in (await _state(live))["detail"]
+        assert "not available in live" in (await _state(live))["detail"]
     run(body)
 
 
@@ -141,4 +142,25 @@ def test_the_kill_switch_stops_sending(tmp_path, venue):
         out = await bot._pass(NOW, _books_fn, halted, record=True)
         assert out["leftovers"][0]["action"] == "halted" and (await _state(a))["status"] == "pending"
         assert not venue.calls
+    run(body)
+
+
+def test_off_by_default_a_remainder_stays_unfilled_and_a_pending_one_is_dropped(tmp_path, venue, monkeypatch):
+    run = _db(tmp_path, "off.db")
+
+    async def body():
+        a = await _expired(NAME, "buy", 1000, 500)
+        await store.set_status(a, "expired")
+        await store.set_leftover(a, {"status": "pending", "since": NOW - 1, "qty": 500, "detail": "500 to send"})
+        monkeypatch.delenv(leftovers.SWITCH)
+        assert leftovers.modes() == ()
+        out = await leftovers.step(NOW, _books_fn, _not_halted)          # waiting when it was switched off
+        assert out[0]["action"] == "skipped" and (await _state(a))["status"] == "skipped"
+        b = await _expired(NAME, "buy", 1000, 0)
+        await bot._pass(NOW, _books_fn, _not_halted, record=True)
+        sb = await _state(b)
+        assert sb["status"] == "skipped" and "is off" in sb["detail"]
+        assert not [m for m, _ in venue.calls if m == "private/create_block_rfq"]
+        monkeypatch.setenv(leftovers.SWITCH, "testnet, live")               # live listed: no production desk yet
+        assert leftovers.modes() == ("testnet",)
     run(body)

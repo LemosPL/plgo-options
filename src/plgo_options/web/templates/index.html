@@ -4154,7 +4154,7 @@
         <label title="the final hour; never exceeded">Hard limit (vp)<br><input id="xb-r-hard" type="number" value="0.9" step="0.05" style="width:5rem"></label>
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-r-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
         <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet; live: Deribit production, once Lucas switches it on (asks to confirm, daily caps, position check)">Mode<br><select id="xb-r-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option><option value="live" disabled>Live (production)</option></select></label>
-        <label title="at the deadline, what is unfilled goes out as a Block RFQ; the bot accepts the best quote if it costs at most the hard limit, fee included (testnet only for now)" style="display:flex;gap:.3rem;align-items:center"><input id="xb-r-left" type="checkbox" checked style="width:auto;margin:0"> Rest → Block RFQ</label>
+        <label title="at the deadline, what is unfilled goes out as a Block RFQ; the bot accepts the best quote if it costs at most the hard limit, fee included (testnet only for now)" style="display:flex;gap:.3rem;align-items:center"><input id="xb-r-left" type="checkbox" style="width:auto;margin:0"> Rest → Block RFQ</label>
         <button id="xb-r-reprice" class="btn-secondary" style="width:auto">Re-price</button>
       </div>
       <div id="xb-r-hours-hint" class="xb-dl-hint" style="font-size:.74rem;margin:-.35rem 0 .75rem"></div>
@@ -4221,7 +4221,7 @@
         <label title="max contracts per take; the option then rests 2 minutes">Cap / take<br><input id="xb-n-cap" type="number" value="500" min="1" step="50" style="width:5rem"></label>
         <label title="paper: filled against the book, nothing sent; testnet: the IOC goes to Deribit testnet; live: Deribit production, once Lucas switches it on (asks to confirm, daily caps, position check)">Mode<br><select id="xb-n-mode" class="xb-mode"><option value="paper">Paper</option><option value="testnet">Testnet</option><option value="live" disabled>Live (production)</option></select></label>
         <label>Note<br><input id="xb-n-note" type="text" style="width:12rem"></label>
-        <label title="at the deadline, what is unfilled goes out as a Block RFQ; the bot accepts the best quote if it costs at most the hard limit, fee included (testnet only for now)" style="display:flex;gap:.3rem;align-items:center"><input id="xb-n-left" type="checkbox" checked style="width:auto;margin:0"> Rest → Block RFQ</label>
+        <label title="at the deadline, what is unfilled goes out as a Block RFQ; the bot accepts the best quote if it costs at most the hard limit, fee included (testnet only for now)" style="display:flex;gap:.3rem;align-items:center"><input id="xb-n-left" type="checkbox" style="width:auto;margin:0"> Rest → Block RFQ</label>
         <button id="xb-n-submit" class="btn-primary" style="width:auto">Create</button>
       </div>
       <div id="xb-n-hours-hint" class="xb-dl-hint" style="font-size:.74rem;margin-top:.4rem"></div>
@@ -4721,7 +4721,7 @@
 <script src="/static/risk.js?v=7"></script>
 <script src="/static/forwards.js?v=8"></script>
 <script src="/static/sandbox.js?v=2"></script>
-<script src="/static/execbot.js?v=26"></script>
+<script src="/static/execbot.js?v=27"></script>
 <script src="/static/fwmonitor.js?v=8"></script>
 </body>
 </html>
