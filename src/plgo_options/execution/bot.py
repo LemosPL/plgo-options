@@ -219,6 +219,11 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
                          time_in_force="IOC")
     st = await conn.submit(intent)
     if st.status is OrderStatus.REJECTED:
+        if why := _blocking(o, st.reject_reason or ""):  # retrying cannot help: stop and say so on the page
+            detail = f"{why}; paused, nothing more sent: fix it, then resume (Deribit: {st.reject_reason})"
+            await store.add_tick(o.id, now, "blocked", detail=detail, **ctx)
+            await store.set_status(o.id, store.PAUSED, detail)
+            return {"id": o.id, "action": "blocked", "detail": detail}
         await _tick(o, now, "rejected", record, detail=st.reject_reason or "", **ctx)
         return {"id": o.id, "action": "rejected", "detail": st.reject_reason}
     if not st.fills:  # an IOC that met nothing at our limit on that venue's book: no rest, the next pass decides again
@@ -257,6 +262,18 @@ async def _work(o: ThresholdOrder, priced: tuple | str, now: float, record: bool
     if o.remaining - st.filled_qty < QTY_STEP:
         await store.set_status(o.id, "filled")
     return {"id": o.id, "action": "take", "qty": st.filled_qty, "cost": d.est_cost}
+
+
+def _blocking(o: ThresholdOrder, reason: str) -> str | None:
+    """A rejection no retry will get past, in words for the page; None for one the next pass may clear (a
+    price that moved, a book that changed). On 23 Nov 2026 testnet orders were refused ~240 times an hour each
+    for three hours, the account out of margin (not_enough_funds), one on a strike testnet does not list."""
+    r = reason.lower()
+    if "not_enough_funds" in r or "not enough funds" in r:
+        return f"not enough margin on the {o.mode} account: free some (close or shrink a position) or top it up"
+    if "instrument not found" in r:
+        return f"{o.instrument} is not listed on {o.mode}"
+    return None
 
 
 async def _busy(now: float) -> bool:

@@ -635,6 +635,7 @@ class _FakeVenue:
     def __init__(self):
         self.ok, self.sent, self.fill = True, [], None
         self.pos, self.hide = 0.0, False       # the account's position; hide: a fill the account never shows
+        self.reject = None                     # a rejection reason, as Deribit gives it
 
     async def healthy(self):
         return self.ok
@@ -651,6 +652,8 @@ class _FakeVenue:
         fills = [] if self.fill is None else [Fill(intent.intent_id, "ord1", intent.instrument, intent.side,
                                                    self.fill, intent.limit_price, 0.0003, False, f"T{len(self.sent)}",
                                                    int(intent.intent_id.split("-")[1]) / 1000 + 1)]  # a second after sending
+        if self.reject:
+            return OrderState(f"rejected-{intent.intent_id}", intent, OrderStatus.REJECTED, reject_reason=self.reject)
         return OrderState("ord1", intent, OrderStatus.FILLED if fills else OrderStatus.CANCELLED, fills)
 
 
@@ -909,4 +912,37 @@ def test_the_cost_table_prices_what_an_expired_order_left_at_its_last_priced_tic
         assert legs[a]["left_qty"] == 200 and legs[a]["left_usd"] == 200 * 6.0 and legs[a]["left_vega"] == 200 * 5.0
         assert "left_qty" not in legs[b]
         assert legs[c]["left_qty"] == 5 and legs[c]["left_usd"] is None    # never priced: shown, not counted
+    run(body)
+
+
+def test_a_rejection_no_retry_gets_past_pauses_the_order_and_says_why(tmp_path, monkeypatch):
+    run = _db(tmp_path, "blocked.db")
+    venue = _FakeVenue()
+    monkeypatch.setitem(bot.CONNECTORS, "testnet", lambda: venue)
+
+    async def books(expiries, instruments):
+        return {EXPIRY: _books(-3.0)}               # cheap: the bot takes
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order(NAME, "buy", 50, NOW + 12 * H, 0.5, 0.7, 0.9, 25, mode="testnet", now=NOW)
+        venue.reject = "price_too_high"                                 # a price that moved: the next pass tries again
+        assert (await bot.run_tick(NOW + 60, books, off))["orders"][0]["action"] == "rejected"
+        assert (await store.get_order(oid))["status"] == "working"
+        venue.reject = "not_enough_funds"
+        out = await bot.run_tick(NOW + 90, books, off)
+        assert out["orders"][0]["action"] == "blocked" and "not enough margin" in out["orders"][0]["detail"]
+        o = await store.get_order(oid)
+        assert o["status"] == "paused" and "not enough margin on the testnet account" in o["note"]
+        (row,) = [r for r in await store.list_orders() if r["id"] == oid]
+        assert row["last_action"] == "blocked" and "not_enough_funds" in row["last_detail"]
+        n = len(venue.sent)
+        await bot.run_tick(NOW + 120, books, off)
+        assert len(venue.sent) == n                                     # paused: nothing more sent
+        venue.reject = "Invalid params: {'reason': 'instrument not found', 'param': 'instrument_name'}"
+        await store.set_status(oid, store.WORKING)                      # resumed
+        out = await bot.run_tick(NOW + 150, books, off)
+        assert out["orders"][0]["action"] == "blocked" and "is not listed on testnet" in out["orders"][0]["detail"]
     run(body)

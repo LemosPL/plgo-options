@@ -2,7 +2,7 @@
 // every 5 seconds, crossing only when the book is cheap against the smoothing spline.
 // Optimizer v2's "Send to execution" lands here through window.execbotReceive.
 (function () {
-  const ACTION = { cooldown: "resting", no_book: "no book", no_fill: "no fill", connector_down: "connector down" };
+  const ACTION = { cooldown: "resting", no_book: "no book", no_fill: "no fill", connector_down: "connector down", blocked: "blocked" };
   "use strict";
 
   const $ = (id) => document.getElementById(id);
@@ -106,8 +106,15 @@
         <td>${usd(avg)}</td><td title="best cost at the touch vs the threshold, last tick">${now}</td>
         <td style="text-align:left" title="${esc(o.last_detail || "")}">${esc(ACTION[o.last_action] || o.last_action || "—")}</td>
         <td>${open ? left(o.deadline_ts) : when(o.finished_ts)}</td>
-        <td style="color:${stColor}">${esc(o.status)}${leftoverTag(o)}</td><td style="white-space:nowrap">${acts}</td></tr>`;
+        <td style="color:${stColor}">${esc(o.status)}${leftoverTag(o)}${blockedTag(o)}</td><td style="white-space:nowrap">${acts}</td></tr>`;
     }).join("");
+  }
+
+  // paused by the bot on a rejection no retry gets past (not enough margin, an unlisted instrument): why, under the status
+  function blockedTag(o) {
+    if (o.status !== "paused" || o.last_action !== "blocked") return "";
+    return `<div style="font-size:.7rem;color:var(--red);max-width:22rem;white-space:normal">${esc((o.last_detail || "").split("; paused")[0])}`
+      + ` <span style="color:var(--muted)">(paused: fix, then resume)</span></div>`;
   }
 
   // ── cost per leg ──────────────────────────────────────────────
