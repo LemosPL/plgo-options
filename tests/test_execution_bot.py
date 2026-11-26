@@ -241,7 +241,8 @@ def test_optimizer_legs_kept_named_netted_and_skipped_with_reasons():
         {"counterparty": "Deribit", "opt": "P", "strike": 1800, "expiry": "2026-12-25", "qty": 10, "side": "Buy"},
         {"counterparty": "Deribit", "opt": "P", "strike": 1800, "expiry": "2026-12-25", "qty": 10, "side": "Sell"},
         {"counterparty": "Flowdesk", "opt": "C", "strike": 3000, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
-        {"counterparty": "Deribit", "opt": "", "strike": 0, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
+        {"counterparty": "Deribit", "opt": "F", "strike": 1700.63, "instrument": "ETH-PERPETUAL", "qty": 34,
+         "side": "Buy"},
         {"counterparty": "Deribit", "opt": "C", "strike": 2512.5, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
     ]
     legs, skipped = deribit_legs(trades)
@@ -249,7 +250,8 @@ def test_optimizer_legs_kept_named_netted_and_skipped_with_reasons():
         ("ETH-25DEC26-2500-C", "buy", 200), ("ETH-26MAR27-2000-P", "sell", 50)]
     reasons = sorted(s["reason"] for s in skipped)
     assert reasons == ["booked with Flowdesk, not Deribit", "nets to zero",
-                       "no Deribit expiry code or whole strike", "not an option leg"]
+                       "no Deribit expiry code or whole strike", "the bot works options only: put this hedge on by hand"]
+    assert any(x["trade"] == "Buy 34 ETH-PERPETUAL @ Deribit" for x in skipped)
 
 
 def test_preview_prices_listed_legs_and_drops_the_rest(monkeypatch):

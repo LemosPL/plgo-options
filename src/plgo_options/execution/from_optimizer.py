@@ -58,7 +58,9 @@ def deribit_legs(trades: list[dict], asset: str = "ETH") -> tuple[list[dict], li
             continue
         opt = str(t.get("opt") or "").upper()
         if opt not in ("C", "P"):
-            skipped.append({"trade": label, "reason": "not an option leg"})
+            what = str(t.get("instrument") or "").strip() or f"{opt or '?'} {t.get('strike', '')}".strip()
+            skipped.append({"trade": f"{t.get('side', '')} {abs(float(t.get('qty') or 0)):g} {what} @ {cpty}",
+                            "reason": "the bot works options only: put this hedge on by hand"})
             continue
         code = expiry_code(t)
         strike = float(t.get("strike") or 0)
