@@ -245,13 +245,14 @@ def test_optimizer_legs_kept_named_netted_and_skipped_with_reasons():
          "side": "Buy"},
         {"counterparty": "Deribit", "opt": "C", "strike": 2512.5, "expiry": "2026-12-25", "qty": 5, "side": "Buy"},
     ]
+    trades.append({"counterparty": "Deribit", "opt": "F", "instrument": "ETH-25DEC26", "qty": 3, "side": "Buy"})
     legs, skipped = deribit_legs(trades)
     assert [(x["instrument"], x["side"], x["qty"]) for x in legs] == [
-        ("ETH-25DEC26-2500-C", "buy", 200), ("ETH-26MAR27-2000-P", "sell", 50)]
+        ("ETH-25DEC26-2500-C", "buy", 200), ("ETH-26MAR27-2000-P", "sell", 50), ("ETH-PERPETUAL", "buy", 34)]
+    assert legs[-1]["kind"] == "perp" and legs[-1]["sources"] == ["Buy 34 ETH-PERPETUAL @ Deribit"]
     reasons = sorted(s["reason"] for s in skipped)
     assert reasons == ["booked with Flowdesk, not Deribit", "nets to zero",
-                       "no Deribit expiry code or whole strike", "the bot works options only: put this hedge on by hand"]
-    assert any(x["trade"] == "Buy 34 ETH-PERPETUAL @ Deribit" for x in skipped)
+                       "no Deribit expiry code or whole strike", "not an option or the perp: put it on by hand"]
 
 
 def test_preview_prices_listed_legs_and_drops_the_rest(monkeypatch):
@@ -948,3 +949,113 @@ def test_a_rejection_no_retry_gets_past_pauses_the_order_and_says_why(tmp_path, 
         out = await bot.run_tick(NOW + 150, books, off)
         assert out["orders"][0]["action"] == "blocked" and "is not listed on testnet" in out["orders"][0]["detail"]
     run(body)
+
+
+PERP_BOOK = {"best_bid_price": 2299.9, "best_ask_price": 2300.1, "best_bid_amount": 1e6, "best_ask_amount": 1e6,
+             "mark_price": 2300.0, "index_price": 2290.0}
+
+
+def test_a_perp_hedge_keeps_pace_with_its_options_and_stops_at_their_share(tmp_path, monkeypatch):
+    run = _db(tmp_path, "perp.db")
+
+    async def listed(name):
+        return name == NAME
+    monkeypatch.setattr(routes, "_listed", listed)
+    req = Request({"type": "http", "session": {}, "headers": []})
+    shift = {"v": -3.0}
+
+    async def books(expiries, instruments):
+        assert "PERPETUAL" not in expiries and "ETH-PERPETUAL" not in instruments
+        return {EXPIRY: _books(shift["v"])}
+
+    async def perp_book():
+        return PERP_BOOK
+
+    async def off():
+        return False
+
+    async def body():
+        mk = lambda inst, side, qty: routes.OrderCreate(instrument=inst, side=side, qty=qty, hours=2, cap=25)  # noqa: E731
+        r = await routes.create_batch(routes.Batch(orders=[mk("ETH-PERPETUAL", "sell", 10), mk(NAME, "buy", 100)]), req)
+        assert r["refused"] == [] and len(r["created"]) == 2
+        opt, hedge = r["created"]                                       # the options first, the hedge after them
+        h = await store.get_order(hedge)
+        assert h["hedge_of"] == f"[{opt}]" and h["deadline_ts"] > (await store.get_order(opt))["deadline_ts"]
+        now = h["created_ts"]
+        out = await bot.run_tick(now + 60, books, off, perp_book)       # 25 of 100 options: a quarter of the hedge
+        acts = {x["id"]: x for x in out["orders"]}
+        assert acts[opt]["action"] == "take" and acts[hedge]["action"] == "take"
+        d = await store.order_detail(hedge)
+        assert d["order"]["filled"] == pytest.approx(2.5, abs=0.01)
+        (f,) = d["fills"]
+        assert f["price_usd"] == 2299.9 and f["mid_usd"] == 2300.0       # a sell hits the bid
+        assert f["cost_usd"] == pytest.approx(0.1 + 0.0005 * 2299.9, abs=1e-6)   # per ETH: half the spread and the fee
+        out = await bot.run_tick(now + 120, books, off, perp_book)       # the options rest: so does the hedge
+        assert {x["id"]: x["action"] for x in out["orders"]}[hedge] == "wait"
+        assert (await store.markout_rows(0)) and all(r["instrument"] != "ETH-PERPETUAL" for r in await store.markout_rows(0))
+        assert [g["instrument"] for g in await store.leg_costs()] == [NAME]   # the option cost table only
+        assert (await store.day_totals("paper", 0))[0] == 25
+        shift["v"] = 6.0                                                 # dear: the options stop filling
+        await bot.run_tick(now + 2 * H + 1, books, off, perp_book)      # the options' deadline: they expire
+        assert (await store.get_order(opt))["status"] == "expired"
+        out = await bot.run_tick(now + 2 * H + 6, books, off, perp_book)
+        h = await store.get_order(hedge)
+        assert h["status"] == "expired" and "25% filled" in h["note"] and h["filled"] == pytest.approx(2.5, abs=0.01)
+    run(body)
+
+
+def test_a_perp_hedge_alone_goes_at_once_and_on_testnet_in_usd_with_the_position_check(tmp_path, monkeypatch):
+    run = _db(tmp_path, "perp2.db")
+    venue = _FakeVenue()
+    monkeypatch.setitem(bot.CONNECTORS, "testnet", lambda: venue)
+
+    async def perp_book():
+        return PERP_BOOK
+
+    async def books(expiries, instruments):
+        raise AssertionError("no option to price")
+
+    async def off():
+        return False
+
+    async def body():
+        oid = await store.create_order("ETH-PERPETUAL", "buy", 10, NOW + 2 * H, 0, 0, 0, 10, mode="testnet", now=NOW,
+                                       hedge_of=[])
+        venue.fill = 23001.0                                            # USD, as Deribit sizes the perp
+        from plgo_options.execution.models import Position
+
+        async def positions():
+            return [Position("ETH-PERPETUAL", venue.pos, 0.0)] if venue.pos else []
+        venue.positions = positions
+        orig = venue.submit
+
+        async def submit(intent):
+            st = await orig(intent)
+            st.fills = [type(x)(**{**x.__dict__, "price": 2300.1}) for x in st.fills]
+            return st
+        venue.submit = submit
+        out = await bot.run_tick(NOW + 60, books, off, perp_book)
+        assert out["orders"][0]["action"] == "take"
+        (i,) = venue.sent
+        assert i.instrument == "ETH-PERPETUAL" and i.order_type == "market" and i.time_in_force == "IOC"
+        assert i.qty == 23000 and i.max_slippage_bps == 10                # 10 ETH at the $2,300 mid
+        o = await store.get_order(oid)
+        assert o["filled"] == pytest.approx(23001 / 2300.1) and o["status"] == "filled"
+        assert await store.halts() == {}                                # the account moved by what was filled
+    run(body)
+
+
+def test_preview_lists_the_perp_hedge_priced_on_its_book(monkeypatch):
+    from plgo_options.execution import from_optimizer
+
+    async def perp_book():
+        return PERP_BOOK
+
+    async def listed(_):
+        return set()
+    trades = [{"counterparty": "Deribit", "opt": "F", "instrument": "ETH-PERPETUAL", "qty": 34, "side": "Buy"}]
+    out = asyncio.run(from_optimizer.preview(trades, listed_fn=listed, perp_fn=perp_book))
+    (leg,) = out["legs"]
+    assert leg["kind"] == "perp" and leg["fair_usd"] == 2300.0 and leg["notional_usd"] == 78200
+    assert leg["best_cost_bps"] == pytest.approx(1e4 * (0.1 + 0.0005 * 2300.1) / 2300, abs=0.05)
+    assert "all at once" in leg["note"]

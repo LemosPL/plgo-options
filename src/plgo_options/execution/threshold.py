@@ -62,6 +62,11 @@ class ThresholdOrder:
     mode: str = "paper"
     status: str = "working"
     leftover_rfq: bool = False  # at the deadline, the remainder goes out as a Block RFQ (leftovers.py)
+    hedge_of: tuple[int, ...] = ()  # a perp hedge: the option orders whose fills it keeps pace with (perp.py)
+
+    @property
+    def is_perp(self) -> bool:
+        return self.instrument.endswith("-PERPETUAL")
 
     @property
     def expiry(self) -> str:

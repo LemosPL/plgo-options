@@ -71,6 +71,9 @@ def split(trades: list[dict], asset: str = "ETH") -> tuple[list[list[dict]], lis
         if legs:
             boxes.append(legs)
     legs, sk = deribit_legs(rest, asset)
+    for x in [x for x in legs if x.get("kind") == "perp"]:  # a Block RFQ carries options (and its own hedge leg)
+        legs.remove(x)
+        sk.append({"trade": " + ".join(x["sources"]), "reason": "the perp is not in a Block RFQ: send it to the bot"})
     return boxes, legs, skipped + sk
 
 

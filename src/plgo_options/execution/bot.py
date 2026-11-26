@@ -20,6 +20,9 @@ Without the feed (it failed to start, or dropped), a pass reads the worked optio
 books over HTTP and the summary's prices for the rest, which have no sizes, so the
 spline falls back to spread-only weights.
 
+A perp hedge sent with the options (perp.py) is worked after them on each pass, keeping pace
+with their fills.
+
 After a fill the bot keeps coming back, working orders or not, until its markouts are taken
 (markouts.py: the market 5 s to 1 h after each fill, recorded at the start of each pass).
 
@@ -54,7 +57,7 @@ from plgo_options.market_data.deribit_quotes import QuoteFeed
 from plgo_options.pricing.exchange_quotes import deribit_option_fee_usd
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, spline_fair, spline_smile
 
-from . import leftovers, markouts, rails, store
+from . import leftovers, markouts, perp, rails, store
 from .models import BookDepth, BookTop, OrderIntent, OrderStatus
 from .deribit import ConnectorError, testnet_connector
 from .paper import PaperConnector, deribit_option_fee
@@ -286,7 +289,7 @@ async def _busy(now: float) -> bool:
 async def _expiries(now: float) -> list[str]:
     """The expiries the quote feed covers: the working orders' and those of fills awaiting markouts."""
     due = await store.due_markouts(now + SPAN + PERIOD, markouts.HORIZONS, markouts.LATE)
-    return sorted({o.expiry for o in await store.working_orders()} | {d["instrument"].split("-")[1] for d in due})
+    return sorted({o.expiry for o in await store.working_orders() if not o.is_perp} | {d["instrument"].split("-")[1] for d in due})
 
 
 def _hms(ts: float) -> str:
@@ -294,7 +297,7 @@ def _hms(ts: float) -> str:
 
 
 async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bool]],
-                record: bool) -> dict[str, Any]:
+                record: bool, perp_fn: perp.PerpFn = perp.production_book) -> dict[str, Any]:
     """One pass over the working orders; the caller holds the lease."""
     out: dict[str, Any] = {"ts": now, "orders": []}
     try:
@@ -323,6 +326,23 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
         out["halted"] = True
         out["orders"] += [{"id": o.id, "action": "halted"} for o in live]
         return out
+    hedges = [o for o in live if o.is_perp]
+    live = [o for o in live if not o.is_perp]
+    try:
+        await _options(now, live, books_fn, record, out)
+    finally:  # the hedges after the options, so they see this pass's fills
+        for o in hedges:
+            try:
+                r = await perp.work(o, now, record, perp_fn, CONNECTORS, _tick, _blocking)
+            except Exception as ex:
+                await store.add_tick(o.id, now, "error", detail=f"{type(ex).__name__}: {ex}")
+                r = {"id": o.id, "action": "error", "detail": str(ex)}
+            out["orders"].append(r)
+    return out
+
+
+async def _options(now: float, live: list[ThresholdOrder], books_fn: BooksFn, record: bool,
+                   out: dict[str, Any]) -> None:
     rested = await store.last_fill_ts([o.instrument for o in live])
     active = []
     for o in live:
@@ -334,7 +354,7 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
         else:
             active.append(o)
     if not active:
-        return out
+        return
     by_exp: dict[str, list[ThresholdOrder]] = defaultdict(list)
     for o in active:
         by_exp[o.expiry].append(o)
@@ -346,7 +366,7 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
         for o in active:
             await _tick(o, now, "no_book", record, detail=detail)
             out["orders"].append({"id": o.id, "action": "no_book", "detail": detail})
-        return out
+        return
     out["books_secs"] = round(time.time() - t0, 2)
     for e, orders in by_exp.items():
         try:
@@ -366,11 +386,11 @@ async def _pass(now: float, books_fn: BooksFn, halted: Callable[[], Awaitable[bo
             if r["action"] == "take" and r["qty"] > 0:
                 rested[o.instrument] = now
             out["orders"].append(r)
-    return out
 
 
 async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
-                   halted: Callable[[], Awaitable[bool]] = kill_switch_on) -> dict[str, Any]:
+                   halted: Callable[[], Awaitable[bool]] = kill_switch_on,
+                   perp_fn: perp.PerpFn = perp.production_book) -> dict[str, Any]:
     """A single pass under the lease, everything recorded."""
     now = now or time.time()
     if not await _busy(now):  # idle: write nothing (on Cloud Run the DB sits on GCS FUSE)
@@ -379,7 +399,7 @@ async def run_tick(now: float | None = None, books_fn: BooksFn = _books,
         return {"ts": now, "skipped": "another tick is running"}
     out: dict[str, Any] = {"ts": now, "orders": []}
     try:
-        out = await _pass(now, books_fn, halted, record=True)
+        out = await _pass(now, books_fn, halted, record=True, perp_fn=perp_fn)
         return out
     finally:
         await store.release_lock(LOCK, {"ts": now, "passes": 1, "n": len(out["orders"]),
@@ -390,7 +410,8 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
                      period: float = PERIOD, span: float = SPAN, clock: Callable[[], float] = time.time,
                      sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
                      feed_fn: Callable[[], QuoteFeed] = QuoteFeed,
-                     names_fn: Callable[[list[str]], Awaitable[list[str]]] = _names) -> dict[str, Any]:
+                     names_fn: Callable[[list[str]], Awaitable[list[str]]] = _names,
+                     perp_fn: perp.PerpFn = perp.production_book) -> dict[str, Any]:
     """What one scheduler call does: a pass every ``period`` seconds for ``span``
     seconds under one lease, stopping early when no order is left working. Unless
     ``books_fn`` is given, the passes read a quote feed held for the call over every
@@ -414,7 +435,7 @@ async def run_minute(books_fn: BooksFn | None = None, halted: Callable[[], Await
             books_fn = functools.partial(_books, feed=feed)
         while True:
             try:
-                last = await _pass(clock(), books_fn, halted, record=passes == 0)
+                last = await _pass(clock(), books_fn, halted, record=passes == 0, perp_fn=perp_fn)
             except Exception as ex:  # one failed pass must not cost the rest of the minute
                 last = {"orders": [], "error": f"{type(ex).__name__}: {ex}"}
             if last.get("error"):

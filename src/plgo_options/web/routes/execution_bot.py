@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 
 from plgo_options.agents.store import kill_switch_on
 from plgo_options.config import SIGNALS_TOKEN
-from plgo_options.execution import bot, from_optimizer, leftovers, markouts, rails, rfq, rfq_desk
+from plgo_options.execution import bot, from_optimizer, leftovers, markouts, perp, rails, rfq, rfq_desk
 from plgo_options.execution.deribit import ConnectorError, testnet_configured
 from plgo_options.execution import store
 from plgo_options.market_data.smile_recorder import RateLimited
@@ -55,9 +55,9 @@ def _require_token(token: str | None) -> None:
 
 
 class OrderCreate(BaseModel):
-    instrument: str = Field(description="Deribit option, e.g. ETH-25DEC26-2500-C")
+    instrument: str = Field(description="Deribit option, e.g. ETH-25DEC26-2500-C, or ETH-PERPETUAL (the hedge)")
     side: Literal["buy", "sell"]
-    qty: float = Field(gt=0, description="contracts (ETH)")
+    qty: float = Field(gt=0, description="contracts (ETH); the perp in ETH too")
     hours: float = Field(gt=1, le=7 * 24, description="deadline, hours from now (more than the final hour)")
     start_vp: float = Field(0.5, ge=0, description="threshold at the start, vol points")
     end_vp: float = Field(0.7, ge=0, description="threshold one hour before the deadline, vol points")
@@ -141,6 +141,10 @@ async def _check(req: OrderCreate, now: float) -> str | None:
     """Why the order cannot be created, or None."""
     if req.mode == "testnet" and not testnet_configured():
         return "no testnet key on this server: set DERIBIT_TESTNET_CLIENT_ID and DERIBIT_TESTNET_CLIENT_SECRET"
+    if req.instrument == perp.INSTRUMENT:  # the hedge: no option checks, no contract cap
+        if req.mode != "paper" and not req.confirmed:
+            return rails.check_create(req.mode, 0, False)
+        return rails.live_blocker() if req.mode == "live" else None
     if err := rails.check_create(req.mode, req.qty, req.confirmed):
         return err
     if not INSTRUMENT.fullmatch(req.instrument):
@@ -156,7 +160,10 @@ async def _check(req: OrderCreate, now: float) -> str | None:
     return None
 
 
-async def _create(req: OrderCreate, by: str, now: float) -> int:
+async def _create(req: OrderCreate, by: str, now: float, hedge_of: list[int] | None = None) -> int:
+    if req.instrument == perp.INSTRUMENT:  # keeps pace with its options, a little past their deadline (perp.py)
+        return await store.create_order(req.instrument, req.side, req.qty, now + req.hours * 3600 + perp.GRACE,
+                                        0, 0, 0, req.qty, req.mode, by, req.note, now, hedge_of=hedge_of or [])
     return await store.create_order(req.instrument, req.side, req.qty, now + req.hours * 3600, req.start_vp,
                                     req.end_vp, req.hard_vp, req.cap, req.mode, by, req.note, now,
                                     leftover_rfq=req.leftover_rfq)
@@ -177,14 +184,15 @@ class Batch(BaseModel):
 
 @router.post("/orders/batch")
 async def create_batch(req: Batch, request: Request):
-    """Every valid order is created; the others come back with their reason."""
+    """Every valid order is created; the others come back with their reason. A perp hedge in the batch
+    is created last, keeping pace with the option orders created with it (perp.py)."""
     now, by = time.time(), (current_user(request) or {}).get("email", "")
     created, refused = [], []
-    for o in req.orders:
+    for o in sorted(req.orders, key=lambda o: o.instrument == perp.INSTRUMENT):
         if err := await _check(o, now):
             refused.append({"instrument": o.instrument, "reason": err})
         else:
-            created.append(await _create(o, by, now))
+            created.append(await _create(o, by, now, hedge_of=list(created)))
     return {"created": created, "refused": refused}
 
 

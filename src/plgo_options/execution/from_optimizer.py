@@ -6,6 +6,9 @@ instrument (an unwind and a new leg can cancel out) and rounds to whole
 contracts. Everything dropped comes back with the reason, so the page can show
 what will not be executed and why.
 
+The solution's perp trades with Deribit net into one ETH-PERPETUAL leg (qty in ETH, kind "perp"), which
+the bot works alongside the options, keeping pace with their fills (perp.py).
+
 ``preview`` adds what the bot would see right now: whether the instrument is
 listed, the spline's fair value (every strike in the fit), the best cost at the touch
 in USD and vol points, and the starting threshold.
@@ -23,6 +26,7 @@ import httpx
 
 from plgo_options.pricing.smile_fit import fit_error, otm_quotes, parse_exp, spline_fair, spline_smile
 
+from . import perp
 from .models import BookDepth
 from .threshold import MAX_FIT_ERROR, ThresholdOrder, decide
 
@@ -49,6 +53,7 @@ def deribit_legs(trades: list[dict], asset: str = "ETH") -> tuple[list[dict], li
     of the solution's trades netted into it)."""
     net: dict[str, dict] = {}
     skipped = []
+    hedge: dict | None = None
     for t in trades:
         label = f"{t.get('side', '')} {abs(float(t.get('qty') or 0)):g} {t.get('opt', '')} {t.get('strike', '')} " \
                 f"{expiry_code(t) or t.get('expiry', '')} @ {t.get('counterparty') or '—'}".strip()
@@ -58,9 +63,17 @@ def deribit_legs(trades: list[dict], asset: str = "ETH") -> tuple[list[dict], li
             continue
         opt = str(t.get("opt") or "").upper()
         if opt not in ("C", "P"):
-            what = str(t.get("instrument") or "").strip() or f"{opt or '?'} {t.get('strike', '')}".strip()
-            skipped.append({"trade": f"{t.get('side', '')} {abs(float(t.get('qty') or 0)):g} {what} @ {cpty}",
-                            "reason": "the bot works options only: put this hedge on by hand"})
+            what = str(t.get("instrument") or "").strip() or (f"{asset}-PERPETUAL" if opt == "F"   # the optimizer's perp
+                                                               else f"{opt or '?'} {t.get('strike', '')}".strip())
+            label = f"{t.get('side', '')} {abs(float(t.get('qty') or 0)):g} {what} @ {cpty}"
+            if what.upper() != f"{asset}-PERPETUAL":
+                skipped.append({"trade": label, "reason": "not an option or the perp: put it on by hand"})
+                continue
+            qty = float(t.get("qty") or 0)
+            side = str(t.get("side") or "").lower()
+            hedge = hedge or {"instrument": f"{asset}-PERPETUAL", "signed": 0.0, "sources": []}
+            hedge["signed"] += abs(qty) * (-1 if side.startswith("s") or (not side and qty < 0) else 1)
+            hedge["sources"].append(label)
             continue
         code = expiry_code(t)
         strike = float(t.get("strike") or 0)
@@ -83,6 +96,13 @@ def deribit_legs(trades: list[dict], asset: str = "ETH") -> tuple[list[dict], li
             continue
         legs.append({"instrument": leg["instrument"], "side": "buy" if leg["signed"] > 0 else "sell", "qty": q,
                      "sources": leg["sources"]})
+    if hedge:
+        q = round(abs(hedge["signed"]), 2)
+        if q < 0.01:
+            skipped.append({"trade": " + ".join(hedge["sources"]), "reason": "the perp trades net to zero"})
+        else:
+            legs.append({"instrument": hedge["instrument"], "side": "buy" if hedge["signed"] > 0 else "sell", "qty": q,
+                         "sources": hedge["sources"], "kind": "perp"})
     return legs, skipped
 
 
@@ -94,10 +114,13 @@ async def _listed(asset: str) -> set[str]:
 
 
 async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5, hours: float = 12.0,
-                  listed_fn=_listed, books_fn=None) -> dict[str, Any]:
+                  listed_fn=_listed, books_fn=None, perp_fn=None) -> dict[str, Any]:
     """deribit_legs plus, per leg, what the bot would see now. The books are read as the bot reads
     them (``preview_books``): one book summary for the smile, the legs' own books for their sizes."""
     legs, skipped = deribit_legs(trades, asset)
+    hedges = [x for x in legs if x.get("kind") == "perp"]
+    perp_fn = perp_fn or perp.production_book
+    legs = [x for x in legs if x.get("kind") != "perp"]
     now = time.time()
     names = await listed_fn(asset) if legs else set()
     ok = []
@@ -123,7 +146,29 @@ async def preview(trades: list[dict], asset: str = "ETH", start_vp: float = 0.5,
     for leg in ok:
         if leg["instrument"].split("-")[1] in {w["expiry"] for w in warnings}:
             leg["note"] = "spline off its quotes: the bot waits" + (f"; {leg['note']}" if leg.get("note") else "")
-    return {"legs": ok, "skipped": skipped, "asof": now, "warnings": warnings}
+    for h in hedges:
+        h.update(await _perp_now(h, perp_fn, bool(ok)))
+    return {"legs": ok + hedges, "skipped": skipped, "asof": now, "warnings": warnings}
+
+
+async def _perp_now(leg: dict, perp_fn, with_options: bool) -> dict:
+    """The perp leg as the bot would see it now: mid, the touch's cost and size, in USD."""
+    pace = ("keeps pace with the option orders' fills" if with_options
+            else "no option order with it: sent all at once")
+    try:
+        b = await perp_fn()
+    except (httpx.HTTPError, KeyError):
+        return {"note": f"perp hedge, {pace}; no book now"}
+    bid, ask = b.get("best_bid_price"), b.get("best_ask_price")
+    if not bid or not ask:
+        return {"note": f"perp hedge, {pace}; no two-sided book now"}
+    mid = (bid + ask) / 2
+    touch = ask if leg["side"] == "buy" else bid
+    size = b.get("best_ask_amount" if leg["side"] == "buy" else "best_bid_amount") or 0
+    cost = abs(touch - mid) + perp.FEE_RATE * touch
+    return {"fair_usd": round(mid, 2), "notional_usd": round(leg["qty"] * mid), "best_cost_usd": round(cost, 2),
+            "best_cost_bps": round(1e4 * cost / mid, 1), "now_qty": round(min(leg["qty"], size / mid), 2),
+            "note": f"perp hedge, {pace}"}
 
 
 async def preview_books(expiries: list[str], instruments: list[str]) -> dict[str, list[dict]]:

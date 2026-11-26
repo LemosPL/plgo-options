@@ -9,6 +9,10 @@
                   mid, vol, vega), then 5 s to 1 h after it, as the bot saw them (markouts.py)
     exec_lock     a lease so two scheduler calls never work the same orders at once
 
+A perp hedge (ETH-PERPETUAL, qty in ETH) lists in ``hedge_of`` the option orders created with it, whose
+fills it keeps pace with (perp.py); its fills are in ETH too, priced in USD, and stay out of the option
+cost table, the markouts and the daily option caps.
+
 An order with ``leftover_rfq`` set sends what is unfilled at its deadline as a Block RFQ (leftovers.py);
 ``leftover_json`` follows it: {status: pending | sent | filled | lapsed | skipped, detail, rfq, ...}.
 """
@@ -87,6 +91,7 @@ SCHEMA = [
 ]
 
 WORKING, PAUSED = "working", "paused"
+PERP_LIKE = "%-PERPETUAL"
 FINISHED = ("filled", "expired", "cancelled")
 
 
@@ -110,6 +115,9 @@ async def init_exec_tables() -> None:
         await db.execute("ALTER TABLE exec_orders ADD COLUMN leftover_rfq INTEGER NOT NULL DEFAULT 0")
     if "leftover_json" not in have:
         await db.execute("ALTER TABLE exec_orders ADD COLUMN leftover_json TEXT")
+    # the perp hedge of a batch of option orders (26 Nov 2026)
+    if "hedge_of" not in have:
+        await db.execute("ALTER TABLE exec_orders ADD COLUMN hedge_of TEXT")
     await db.commit()
 
 
@@ -117,19 +125,20 @@ def _order(r: Any) -> ThresholdOrder:
     return ThresholdOrder(id=r["id"], instrument=r["instrument"], side=r["side"], qty=r["qty"],
                           filled=r["filled"], created_ts=r["created_ts"], deadline_ts=r["deadline_ts"],
                           start_vp=r["start_vp"], end_vp=r["end_vp"], hard_vp=r["hard_vp"], cap=r["cap"],
-                          mode=r["mode"], status=r["status"], leftover_rfq=bool(r["leftover_rfq"]))
+                          mode=r["mode"], status=r["status"], leftover_rfq=bool(r["leftover_rfq"]),
+                          hedge_of=tuple(json.loads(r["hedge_of"])) if r["hedge_of"] else ())
 
 
 async def create_order(instrument: str, side: str, qty: float, deadline_ts: float, start_vp: float,
                        end_vp: float, hard_vp: float, cap: float, mode: str = "paper",
                        created_by: str = "", note: str = "", now: float | None = None,
-                       leftover_rfq: bool = False) -> int:
+                       leftover_rfq: bool = False, hedge_of: list[int] | None = None) -> int:
     db = await get_db()
     cur = await db.execute(
         "INSERT INTO exec_orders (created_ts, created_by, instrument, side, qty, deadline_ts, start_vp,"
-        " end_vp, hard_vp, cap, mode, note, leftover_rfq) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " end_vp, hard_vp, cap, mode, note, leftover_rfq, hedge_of) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (now or time.time(), created_by, instrument, side, qty, deadline_ts, start_vp, end_vp, hard_vp,
-         cap, mode, note, int(leftover_rfq)))
+         cap, mode, note, int(leftover_rfq), json.dumps(list(hedge_of)) if hedge_of is not None else None))
     await db.commit()
     return cur.lastrowid
 
@@ -160,6 +169,14 @@ async def get_order(oid: int) -> dict[str, Any] | None:
     cur = await db.execute("SELECT * FROM exec_orders WHERE id = ?", (oid,))
     r = await cur.fetchone()
     return dict(r) if r else None
+
+
+async def orders_by_id(ids: list[int] | tuple[int, ...]) -> list[dict[str, Any]]:
+    if not ids:
+        return []
+    db = await get_db()
+    cur = await db.execute(f"SELECT * FROM exec_orders WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))
+    return [dict(r) for r in await cur.fetchall()]
 
 
 async def list_orders(limit: int = 100) -> list[dict[str, Any]]:
@@ -242,7 +259,9 @@ async def leg_costs(limit: int = 50) -> list[dict[str, Any]]:
         " LEFT JOIN exec_ticks t ON t.order_id = f.order_id AND t.ts = f.ts"
         # a testnet fill lands after its tick (the exchange's time): its own markout row has the vega it was priced at
         " LEFT JOIN exec_markouts m ON m.fill_id = f.id AND m.horizon = 0"
-        " WHERE o.id IN (SELECT order_id FROM exec_fills GROUP BY order_id ORDER BY MAX(ts) DESC LIMIT ?)",
+        f" WHERE o.instrument NOT LIKE '{PERP_LIKE}' AND o.id IN (SELECT f2.order_id FROM exec_fills f2"
+        f" JOIN exec_orders o2 ON o2.id = f2.order_id WHERE o2.instrument NOT LIKE '{PERP_LIKE}'"
+        " GROUP BY f2.order_id ORDER BY MAX(f2.ts) DESC LIMIT ?)",
         (limit,))
     legs: dict[int, dict[str, Any]] = {}
     for r in await cur.fetchall():
@@ -395,10 +414,12 @@ async def last_run(name: str) -> dict[str, Any]:
 
 
 async def day_totals(mode: str, since: float) -> tuple[float, float]:
-    """(contracts, premium USD) filled in ``mode`` since ``since``: every fill, bot and Block RFQ."""
+    """(contracts, premium USD) of options filled in ``mode`` since ``since``: every fill, bot and Block RFQ;
+    the perp hedge's are not option contracts or premium."""
     db = await get_db()
-    cur = await db.execute("SELECT COALESCE(SUM(qty), 0) AS q, COALESCE(SUM(qty * price_usd), 0) AS p"
-                           " FROM exec_fills WHERE mode = ? AND ts >= ?", (mode, since))
+    cur = await db.execute("SELECT COALESCE(SUM(f.qty), 0) AS q, COALESCE(SUM(f.qty * f.price_usd), 0) AS p"
+                           " FROM exec_fills f JOIN exec_orders o ON o.id = f.order_id"
+                           f" WHERE f.mode = ? AND f.ts >= ? AND o.instrument NOT LIKE '{PERP_LIKE}'", (mode, since))
     r = await cur.fetchone()
     return float(r["q"]), float(r["p"])
 

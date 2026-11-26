@@ -117,7 +117,7 @@
       return `<tr data-id="${o.id}" style="cursor:pointer${o.id === selected ? ";background:var(--hover-bg)" : ""}">
         <td>${o.id}</td><td style="text-align:left">${esc(o.instrument)}</td>
         <td style="text-align:left">${o.side === "buy" ? "Buy" : "Sell"}</td>
-        <td>${fmt(o.filled)} / ${fmt(o.qty)}
+        <td>${o.instrument.endsWith("-PERPETUAL") ? `${fmt(o.filled, 2)} / ${fmt(o.qty, 2)} ETH` : `${fmt(o.filled)} / ${fmt(o.qty)}`}
           <div style="height:4px;background:var(--border);border-radius:2px;margin-top:3px">
           <div style="height:4px;width:${pct}%;background:var(--accent);border-radius:2px"></div></div></td>
         <td>${usd(avg)}</td><td title="best cost at the touch vs the threshold, last tick">${now}</td>
@@ -224,7 +224,7 @@
     const d = await api("GET", `/api/execution-bot/orders/${selected}`);
     const o = d.order, t = d.ticks, f = d.fills;
     $("xb-detail").style.display = "";
-    $("xb-detail-title").textContent = `#${o.id} · ${o.side === "buy" ? "Buy" : "Sell"} ${fmt(o.qty)} ${o.instrument}`;
+    $("xb-detail-title").textContent = `#${o.id} · ${o.side === "buy" ? "Buy" : "Sell"} ${fmt(o.qty, o.instrument.endsWith("-PERPETUAL") ? 2 : 0)} ${o.instrument}`;
     const vegaAt = (ts) => { let v = null; for (const x of t) { if (x.ts <= ts && x.vega) v = x.vega; } return v; };
     const avg = o.filled ? o.cost_usd / o.filled : null;
     const vegaAvg = f.length ? f.reduce((s, x) => s + x.qty * (vegaAt(x.ts) || 0), 0) / o.filled : null;
@@ -238,8 +238,18 @@
     const vegaMark = qm ? fm.reduce((s, x) => s + x.qty * (vegaAt(x.ts) || 0), 0) / qm : null;
     const card = (label, value, sub) => `<div class="collat-metric"><div class="collat-metric-label">${label}</div>
       <div class="collat-metric-value">${value}</div><div class="collat-metric-sub">${sub}</div></div>`;
-    $("xb-detail-cards").innerHTML =
-      card("Filled", `${fmt(o.filled)} / ${fmt(o.qty)}`, `${f.length} fill(s)`)
+    const isPerp = o.instrument.endsWith("-PERPETUAL");
+    let hedgeOf = [];
+    try { hedgeOf = o.hedge_of ? JSON.parse(o.hedge_of) : []; } catch (e) { hedgeOf = []; }
+    const bps = (usdPerEth) => px ? fmt(1e4 * usdPerEth / px, 1) + " bps" : "—";
+    $("xb-detail-cards").innerHTML = isPerp
+      ? card("Filled", `${fmt(o.filled, 2)} / ${fmt(o.qty, 2)} ETH`, `${f.length} fill(s)`)
+        + card("Avg cost vs mid", usd(avg), avg == null ? "per ETH, fee included" : `${bps(avg)} per ETH, fee included`)
+        + card("Total cost", usd(o.cost_usd, 0), `of which fees ${usd(o.fees_usd, 0)}`)
+        + card("Avg price", usd(px), "USD per ETH")
+        + card("Keeps pace with", hedgeOf.length ? hedgeOf.map((i) => "#" + i).join(", ") : "—",
+          hedgeOf.length ? "their share filled, contracts over contracts" : "sent alone: all at once")
+      : card("Filled", `${fmt(o.filled)} / ${fmt(o.qty)}`, `${f.length} fill(s)`)
       + card("Avg cost vs spline", usd(avg), vegaAvg ? `${fmt(avg / vegaAvg, 2)} vol pts, fee included` : "fee included")
       + card("Avg cost vs Deribit mark", usd(avgMark), avgMark == null ? "no fill with a mark yet"
           : `${vegaMark ? fmt(avgMark / vegaMark, 2) + " vol pts, " : ""}fee included${qm < o.filled ? ` · ${fmt(qm)} of ${fmt(o.filled)} filled` : ""}`)
@@ -309,7 +319,7 @@
   function confirmVenue(orders, mode) {
     if (mode === "paper") return true;
     const st = lastStatus || {}, cp = st.caps || {}, td = (st.today || {})[mode] || {};
-    const over = orders.filter((o) => o.qty > cp.order_contracts);
+    const over = orders.filter((o) => !o.instrument.endsWith("-PERPETUAL") && o.qty > cp.order_contracts);
     const lines = orders.slice(0, 12).map((o) => `  ${o.side} ${o.qty} ${o.instrument}`).join("\n") + (orders.length > 12 ? `\n  ... and ${orders.length - 12} more` : "");
     const ok = confirm(`Send ${orders.length} order(s) to Deribit ${mode === "live" ? "PRODUCTION (real money)" : "testnet"}?\n\n${lines}\n\n`
       + `Today in ${mode}: ${fmt(td.contracts || 0)} of ${fmt(cp.day_contracts)} contracts, $${fmt(td.premium_usd || 0)} of $${fmt(cp.day_premium_usd)} premium.`
@@ -342,10 +352,10 @@
         <td><input type="checkbox" class="xb-r-pick" data-i="${i}" ${l.note && l.note.startsWith("outside") ? "" : "checked"}></td>
         <td style="text-align:left" title="${esc(l.sources.join("\n"))}">${esc(l.instrument)}</td>
         <td style="text-align:left">${l.side === "buy" ? "Buy" : "Sell"}</td>
-        <td><input type="number" class="xb-r-qty" data-i="${i}" value="${l.qty}" min="1" step="1" style="width:6rem"></td>
+        <td><input type="number" class="xb-r-qty" data-i="${i}" value="${l.qty}" ${l.kind === "perp" ? 'min="0.01" step="0.01"' : 'min="1" step="1"'} style="width:6rem">${l.kind === "perp" ? ` <span style="color:var(--muted)">ETH${l.notional_usd ? ` · ${usd(l.notional_usd, 0)}` : ""}</span>` : ""}</td>
         <td>${usd(l.fair_usd)}</td><td>${l.iv != null ? fmt(l.iv, 1) + "%" : "—"}</td>
-        <td>${usd(l.best_cost_usd)} <span style="color:var(--muted)">(${fmt(l.best_cost_vp, 2)} vp)</span></td>
-        <td>${l.now_qty ? fmt(l.now_qty) : "—"}</td>
+        <td>${usd(l.best_cost_usd)} <span style="color:var(--muted)">(${l.kind === "perp" ? fmt(l.best_cost_bps, 1) + " bps" : fmt(l.best_cost_vp, 2) + " vp"})</span></td>
+        <td>${l.now_qty ? fmt(l.now_qty, l.kind === "perp" ? 2 : 0) : "—"}</td>
         <td style="text-align:left;color:var(--muted)">${esc(l.note || "")}</td></tr>`).join("")
       : `<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:1rem">No trade in this solution can go to Deribit.</td></tr>`;
     $("xb-review-skipped").innerHTML = skipped.length
@@ -589,7 +599,7 @@
   function restButton(orders) {
     const since = Date.now() / 1000 - 24 * 3600;
     const auto = (o) => ["pending", "sent", "filled"].includes(leftover(o)?.status);   // the bot has it, or did it
-    rests = orders.filter((o) => o.status === "expired" && o.via !== "rfq" && o.qty - o.filled >= 1 && (o.finished_ts || 0) >= since && !auto(o));
+    rests = orders.filter((o) => o.status === "expired" && o.via !== "rfq" && !o.instrument.endsWith("-PERPETUAL") && o.qty - o.filled >= 1 && (o.finished_ts || 0) >= since && !auto(o));
     const b = $("xb-rest-rfq");
     if (!b) return;
     b.style.display = rests.length ? "" : "none";
