@@ -8,6 +8,10 @@
     daily caps         per mode, since 00:00 UTC: at most MAX_DAY_CONTRACTS contracts and
                        MAX_DAY_PREMIUM_USD of premium filled (every fill of the mode, Block RFQ legs
                        included); a take that would pass either is cut down to what is left, or not sent
+    margin check       a testnet or live batch is created only if the account's available funds cover the
+                       initial margin of its orders and of what the mode's open orders still have to fill
+                       (margin_check), up to MARGIN_USE of them; all or nothing, so a hedged batch is never
+                       half created
     position check     before each IOC the bot reads the account's position in the option, after a fill
                        it reads it again: if it did not move by what was filled, the mode is halted
                        (nothing more sent in it) until someone clears the halt on the page
@@ -26,7 +30,7 @@ from typing import Any
 from plgo_options import config
 
 from . import store
-from .deribit import ConnectorError, deribit_keys, get_connector
+from .deribit import ConnectorError, DeribitError, deribit_keys, get_connector, testnet_connector
 from .threshold import QTY_STEP
 
 VENUE_MODES = ("testnet", "live")
@@ -128,3 +132,87 @@ async def reconcile(conn: Any, instrument: str, before: float, change: float, tr
         return f"could not read the {instrument} position after the fill: {err}"
     return (f"{instrument} position {before:g} -> {after:g} after a fill of {change:+g}: "
             f"expected {before + change:g}")
+
+
+PERP = "ETH-PERPETUAL"
+PACE = 0.2   # seconds between the margin check's reads
+
+
+def margin_use() -> float:
+    """The share of the available funds a batch, with the open orders, may need (EXEC_MARGIN_USE)."""
+    return _num("EXEC_MARGIN_USE", 0.9)
+
+
+def venue(mode: str) -> Any:
+    return testnet_connector() if mode == "testnet" else live_connector()
+
+
+async def margin_check(mode: str, orders: list[dict[str, Any]], open_orders: list[dict[str, Any]],
+                       conn: Any = None) -> dict[str, Any]:
+    """Whether the account can margin ``orders`` (instrument, side, qty; the perp's qty in ETH) on top of what
+    ``open_orders`` still have to fill (instrument, side, qty, filled).
+
+    Under standard margin, each order's initial margin from Deribit (get_margins, at the mark), the part
+    that closes a position we hold counted as free; summed, so a conservative figure. Under portfolio
+    margin, Deribit's simulation of the account with them all (simulate_portfolio), the sum if it fails.
+    {"ok", "need", "available", "limit", "model", "method", "unlisted": [instruments the venue does not
+    list, left out], "detail"}; amounts in ETH."""
+    conn = conn or venue(mode)
+
+    async def paced(call, *a):   # a batch is a dozen private reads: keep under Deribit's rate limit
+        for i in range(3):
+            try:
+                return await call(*a)
+            except DeribitError as ex:
+                if ex.code != 10028 or i == 2:
+                    raise
+                await SLEEP(1.0 + i)
+            finally:
+                await SLEEP(PACE)
+
+    acct = await conn.margin_state()
+    avail = float(acct.get("available_funds") or 0.0)
+    model = str(acct.get("margin_model") or "")
+    held = {p.instrument: p.size for p in await conn.positions()}
+    legs = [(o, o["qty"]) for o in orders] + [(o, o["qty"] - o.get("filled", 0.0)) for o in open_orders]
+    need, unlisted, sim, marks = 0.0, [], {}, {}
+    for o, qty in legs:
+        name = o["instrument"]
+        if qty <= 0 or name in unlisted:
+            continue
+        try:
+            if name not in marks:
+                marks[name] = (await paced(conn.book, name)).mark
+        except (ConnectorError, DeribitError) as ex:
+            if "not found" in str(ex).lower() or "not open" in str(ex).lower():
+                unlisted.append(name)
+                continue
+            raise
+        mark = marks[name]
+        if not mark:
+            raise ConnectorError(f"{name}: no mark price on {mode} to margin the order at")
+        amount = round(qty * mark) if name == PERP else qty      # Deribit sizes the perp in USD
+        signed = amount if o["side"] == "buy" else -amount
+        pos = held.get(name, 0.0)
+        closes = min(abs(signed), abs(pos)) if pos * signed < 0 else 0.0
+        held[name] = pos + signed
+        sim[name] = sim.get(name, 0.0) + signed
+        opens = abs(signed) - closes
+        if opens >= (1 if name == PERP else QTY_STEP):
+            need += await paced(conn.order_margin, name, o["side"], opens, mark)
+    method = "sum of each order's margin"
+    if "pm" in model.split("_")[-1] and sim:
+        try:
+            r = await conn.simulate_margin({k: v for k, v in sim.items() if v})
+            need = max(0.0, float(r["projected_initial_margin"]) - float(acct.get("initial_margin") or 0.0))
+            method = "Deribit's portfolio margin simulation"
+        except (ConnectorError, DeribitError, KeyError, TypeError, ValueError):
+            pass   # the sum: more than portfolio margin would ask, never less
+    limit = margin_use() * avail
+    ok = need <= limit
+    n_open = len([x for x in open_orders if x["qty"] > x.get("filled", 0.0)])
+    detail = (f"needs ~{need:,.1f} ETH of initial margin ({method}"
+              + (f", {n_open} open {mode} order(s) included" if n_open else "")
+              + f"); the {mode} account has {avail:,.1f} ETH available, {margin_use():.0%} usable: {limit:,.1f}")
+    return {"ok": ok, "need": need, "available": avail, "limit": limit, "model": model, "method": method,
+            "unlisted": unlisted, "detail": detail}

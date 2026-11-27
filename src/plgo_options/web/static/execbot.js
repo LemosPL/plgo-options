@@ -545,6 +545,7 @@
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
       const refused = r.refused.map((x) => `${x.instrument}: ${x.reason}`).join("; ");
+      if (r.error) { status(r.error, true); $("xb-rfq-left").disabled = false; return; }
       status(`${r.created.length} leftover ${p.mode} order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
       await load();
     } catch (e) {
@@ -569,6 +570,11 @@
     try {
       const r = await api("POST", "/api/execution-bot/orders/batch", { orders });
       const refused = r.refused.map((x) => `${x.instrument}: ${x.reason}`).join("; ");
+      if (r.error) {   // the account cannot margin the batch: nothing created, the review stays to shrink it
+        status(r.error + (refused ? ` Also refused: ${refused}` : ""), true);
+        $("xb-r-create").disabled = false;
+        return;
+      }
       status(`${r.created.length} ${p.mode} order(s) created.` + (refused ? ` Refused: ${refused}` : ""), !!refused);
       review = null;
       $("xb-review").style.display = "none";

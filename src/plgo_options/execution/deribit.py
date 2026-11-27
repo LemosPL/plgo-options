@@ -276,6 +276,21 @@ class DeribitConnector:
                             maintenance_margin=float(raw["maintenance_margin"]),
                             available_funds=float(raw["available_funds"]))
 
+    async def margin_state(self) -> dict[str, Any]:
+        """The account's margin model (e.g. segregated_sm, cross_pm) and funds, in its currency."""
+        raw = await self._rpc("private/get_account_summary", {"currency": self.currency, "extended": True})
+        return {k: raw.get(k) for k in ("margin_model", "available_funds", "initial_margin", "margin_balance", "equity")}
+
+    async def order_margin(self, instrument: str, side: str, amount: float, price: float) -> float:
+        """Deribit's initial margin for one order (private/get_margins), in the account's currency."""
+        raw = await self._rpc("private/get_margins", {"instrument_name": instrument, "amount": amount, "price": price})
+        return float(raw["buy" if side == "buy" else "sell"])
+
+    async def simulate_margin(self, positions: dict[str, float]) -> dict[str, Any]:
+        """Portfolio margin with ``positions`` added (private/simulate_portfolio): projected_initial_margin etc."""
+        return await self._rpc("private/simulate_portfolio", {"currency": self.currency, "add_positions": True,
+                                                              "simulated_positions": positions})
+
     async def healthy(self) -> bool:
         """False unless a private round trip works right now and nothing is in doubt."""
         if self._clock() < self._down_until:

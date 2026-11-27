@@ -169,11 +169,34 @@ async def _create(req: OrderCreate, by: str, now: float, hedge_of: list[int] | N
                                     leftover_rfq=req.leftover_rfq)
 
 
+async def _margin(orders: list[OrderCreate]) -> tuple[list[OrderCreate], list[dict], str | None]:
+    """(the orders the venue lists, the ones it does not with their reason, why none can go or None): the
+    margin check of rails.margin_check for a testnet or live batch, all of one mode; paper passes."""
+    mode = orders[0].mode if orders else "paper"
+    if mode == "paper":
+        return orders, [], None
+    open_ = [o for o in await store.list_orders(1000) if o["mode"] == mode and o["status"] in (store.WORKING, store.PAUSED)]
+    try:
+        m = await rails.margin_check(mode, [o.model_dump() for o in orders], open_)
+    except ConnectorError as e:
+        return [], [], f"could not check the {mode} account's margin, nothing created: {e}"
+    keep = [o for o in orders if o.instrument not in m["unlisted"]]
+    refused = [{"instrument": o.instrument, "reason": f"{o.instrument} is not listed on {mode}"}
+               for o in orders if o.instrument in m["unlisted"]]
+    if not m["ok"]:
+        return [], refused, (f"not enough margin, nothing created: the batch {m['detail']}. "
+                             f"Shrink it, or free margin (close or reduce a position, cancel an open order)")
+    return keep, refused, None
+
+
 @router.post("/orders")
 async def create(req: OrderCreate, request: Request):
     now = time.time()
     if err := await _check(req, now):
         raise HTTPException(400, err)
+    ok, refused, err = await _margin([req])
+    if err or refused:
+        raise HTTPException(409, err or refused[0]["reason"])
     oid = await _create(req, (current_user(request) or {}).get("email", ""), now)
     return {"id": oid, "order": await store.get_order(oid)}
 
@@ -185,14 +208,23 @@ class Batch(BaseModel):
 @router.post("/orders/batch")
 async def create_batch(req: Batch, request: Request):
     """Every valid order is created; the others come back with their reason. A perp hedge in the batch
-    is created last, keeping pace with the option orders created with it (perp.py)."""
+    is created last, keeping pace with the option orders created with it (perp.py). A testnet or live
+    batch the account cannot margin is created not at all (rails.margin_check): ``error`` says why."""
     now, by = time.time(), (current_user(request) or {}).get("email", "")
-    created, refused = [], []
+    created, refused, valid = [], [], []
     for o in sorted(req.orders, key=lambda o: o.instrument == perp.INSTRUMENT):
         if err := await _check(o, now):
             refused.append({"instrument": o.instrument, "reason": err})
         else:
-            created.append(await _create(o, by, now, hedge_of=list(created)))
+            valid.append(o)
+    if len({o.mode for o in valid}) > 1:
+        raise HTTPException(400, "one mode per batch")
+    valid, unlisted, err = await _margin(valid)
+    refused += unlisted
+    if err:
+        return {"created": [], "refused": refused, "error": err, "margin": err}
+    for o in valid:
+        created.append(await _create(o, by, now, hedge_of=list(created)))
     return {"created": created, "refused": refused}
 
 

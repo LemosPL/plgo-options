@@ -709,6 +709,7 @@ def test_testnet_orders_need_a_testnet_key_and_production_stays_refused(tmp_path
         with pytest.raises(HTTPException, match="no testnet key"):
             await routes.create(mk("testnet"), req)
         monkeypatch.setattr(routes, "testnet_configured", lambda: True)
+        _margin_venue(monkeypatch)
         with pytest.raises(HTTPException, match="confirm it first"):
             await routes.create(mk("testnet", confirmed=False), req)
         monkeypatch.setenv("EXEC_MAX_ORDER_CONTRACTS", "250")   # not whatever the local .env says
@@ -1059,3 +1060,83 @@ def test_preview_lists_the_perp_hedge_priced_on_its_book(monkeypatch):
     assert leg["kind"] == "perp" and leg["fair_usd"] == 2300.0 and leg["notional_usd"] == 78200
     assert leg["best_cost_bps"] == pytest.approx(1e4 * (0.1 + 0.0005 * 2300.1) / 2300, abs=0.05)
     assert "all at once" in leg["note"]
+
+
+class _MarginVenue:
+    """The account the margin check reads: funds, positions, marks, and Deribit's margin per order."""
+
+    def __init__(self, available=100.0, model="segregated_sm", held=None, unlisted=()):
+        self.available, self.model, self.held, self.unlisted = available, model, held or {}, set(unlisted)
+        self.asked, self.simulated = [], None
+
+    async def margin_state(self):
+        return {"margin_model": self.model, "available_funds": self.available, "initial_margin": 5.0}
+
+    async def positions(self):
+        from plgo_options.execution.models import Position
+        return [Position(k, v, 0.0) for k, v in self.held.items()]
+
+    async def book(self, name):
+        from plgo_options.execution.deribit import DeribitError
+        if name in self.unlisted:
+            raise DeribitError(-32602, "Invalid params: instrument not found")
+        return BookTop(name, None, None, mark=2000.0 if name == "ETH-PERPETUAL" else 0.05)
+
+    async def order_margin(self, name, side, amount, price):
+        self.asked.append((name, side, amount))
+        return 0.00001 * amount if name == "ETH-PERPETUAL" else (0.05 if side == "buy" else 0.2) * amount
+
+    async def simulate_margin(self, positions):
+        self.simulated = positions
+        return {"projected_initial_margin": 25.0}
+
+
+def _margin_venue(monkeypatch, **kw) -> _MarginVenue:
+    from plgo_options.execution import rails
+    v = _MarginVenue(**kw)
+    monkeypatch.setattr(rails, "venue", lambda mode: v)
+    monkeypatch.setattr(rails, "PACE", 0.0)
+    return v
+
+
+def test_a_venue_batch_the_account_cannot_margin_is_not_created_at_all(tmp_path, monkeypatch):
+    run = _db(tmp_path, "margin.db")
+
+    async def listed(_):
+        return True
+    monkeypatch.setattr(routes, "_listed", listed)
+    monkeypatch.setattr(routes, "testnet_configured", lambda: True)
+    monkeypatch.setenv("EXEC_MAX_ORDER_CONTRACTS", "1000")
+    monkeypatch.setenv("EXEC_MARGIN_USE", "0.9")
+    req = Request({"type": "http", "session": {}, "headers": []})
+    put = "ETH-25DEC26-2000-P"
+    mk = lambda inst, side, qty, mode="testnet": routes.OrderCreate(instrument=inst, side=side, qty=qty, hours=6,  # noqa: E731
+                                                                    mode=mode, confirmed=True)
+
+    async def body():
+        v = _margin_venue(monkeypatch, available=90.0)
+        # sell 400 puts at 0.2 ETH each = 80 ETH, buy 100 calls at 0.05 = 5, the perp ~0.7: 85.7 > 90% of 90
+        r = await routes.create_batch(routes.Batch(orders=[mk(put, "sell", 400), mk(NAME, "buy", 100),
+                                                           mk("ETH-PERPETUAL", "buy", 34)]), req)
+        assert r["created"] == [] and "not enough margin" in r["error"] and "85.7 ETH" in r["error"]
+        assert ("ETH-PERPETUAL", "buy", 68000) in v.asked                       # the perp in USD, at the mark
+        assert await store.list_orders() == []
+        # the account holds 300 short calls: buying 100 back closes, free; 350 puts = 70 + 0.7 <= 90
+        v = _margin_venue(monkeypatch, available=100.0, held={NAME: -300.0}, unlisted={"ETH-25DEC26-1670-P"})
+        r = await routes.create_batch(routes.Batch(orders=[mk(put, "sell", 350), mk(NAME, "buy", 100),
+                                                           mk("ETH-25DEC26-1670-P", "sell", 10),
+                                                           mk("ETH-PERPETUAL", "buy", 34)]), req)
+        assert len(r["created"]) == 3 and "error" not in r
+        assert r["refused"] == [{"instrument": "ETH-25DEC26-1670-P", "reason": "ETH-25DEC26-1670-P is not listed on testnet"}]
+        assert (NAME, "buy", 100) not in v.asked
+        # the open orders' remainders count too: 350 more puts no longer fit
+        v = _margin_venue(monkeypatch, available=100.0)
+        with pytest.raises(HTTPException, match="not enough margin.*3 open testnet order"):
+            await routes.create(mk(put, "sell", 100), req)
+        # paper is never checked
+        assert (await routes.create(mk(put, "sell", 5000, mode="paper"), req))["order"]["mode"] == "paper"
+        # portfolio margin: Deribit's simulation of the whole account, here 25 - 5 = 20 ETH
+        v = _margin_venue(monkeypatch, available=30.0, model="cross_pm")
+        r = await routes.create_batch(routes.Batch(orders=[mk(put, "buy", 10)]), req)
+        assert len(r["created"]) == 1 and v.simulated[put] == -340    # the open orders in it too
+    run(body)
